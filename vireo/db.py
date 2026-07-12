@@ -703,6 +703,24 @@ class Database:
                 PRIMARY KEY (workspace_id, folder_id)
             );
 
+            CREATE TABLE IF NOT EXISTS local_workspaces (
+                workspace_id INTEGER PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+                state        TEXT NOT NULL,
+                created_at   REAL,
+                activated_at REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS local_workspace_folders (
+                workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                folder_id       INTEGER NOT NULL,
+                source_path     TEXT NOT NULL,
+                local_path      TEXT NOT NULL,
+                original_status TEXT NOT NULL DEFAULT 'ok',
+                is_root         INTEGER NOT NULL DEFAULT 0,
+                root_index      INTEGER,
+                PRIMARY KEY (workspace_id, folder_id)
+            );
+
             CREATE TABLE IF NOT EXISTS collections (
                 id          INTEGER PRIMARY KEY,
                 name        TEXT,

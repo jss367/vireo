@@ -9773,8 +9773,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Prevent deleting the active workspace
         if ws_id == db._active_workspace_id:
             return json_error("Cannot delete the active workspace. Switch first.")
-        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        if has_local_workspace(vireo_dir, ws_id):
+        if has_local_workspace(db, ws_id):
             return json_error(
                 "Cannot delete a workspace with local work. Switch to it and sync or discard the local copy first."
             )
@@ -10029,6 +10028,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             lambda: app._job_runner,
             db_path,
             os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            invalidate_missing_originals=lambda ws_id: _invalidate_missing_originals_cache(
+                workspace_ids=[ws_id]
+            ),
         )
     )
 

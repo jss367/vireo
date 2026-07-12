@@ -221,6 +221,8 @@ def test_sync_detects_source_change_with_preserved_size_and_mtime(local_workspac
     source_file = env["child"] / "bird.jpg"
     original_stat = source_file.stat()
     stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    (local_child / "bird.jpg").write_bytes(b"locally edited")
     source_file.write_bytes(b"BIRD-EXTERNAL")
     os.utime(source_file, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
 
@@ -228,6 +230,45 @@ def test_sync_detects_source_change_with_preserved_size_and_mtime(local_workspac
         sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
 
     assert str(source_file) in exc_info.value.paths
+
+
+def test_sync_preserves_source_edit_to_locally_unchanged_file(local_workspace_env):
+    # A file the user never touched locally is never published, so an
+    # outside edit to it must survive the sync instead of raising a conflict.
+    env = local_workspace_env
+    source_file = env["child"] / "bird.jpg"
+    original_stat = source_file.stat()
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    (local_child / "bird.xmp").write_text("edited metadata", encoding="utf-8")
+    source_file.write_bytes(b"BIRD-EXTERNAL")
+    os.utime(source_file, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert source_file.read_bytes() == b"BIRD-EXTERNAL"
+    assert (env["child"] / "bird.xmp").read_text(encoding="utf-8") == "edited metadata"
+
+
+def test_sync_hashes_only_at_risk_files(local_workspace_env, monkeypatch):
+    # Conflict verification must be proportional to the change set: an
+    # untouched file is never read from the (slow) source during sync.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    (local_child / "bird.xmp").write_text("edited metadata", encoding="utf-8")
+
+    hashed = []
+    real_sha256 = local_workspace._sha256
+
+    def counting_sha256(path, cancel_check=None):
+        hashed.append(path)
+        return real_sha256(path, cancel_check)
+
+    monkeypatch.setattr(local_workspace, "_sha256", counting_sha256)
+    sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert hashed == [str(env["child"] / "bird.xmp")]
 
 
 def test_sync_refuses_missing_managed_local_root(local_workspace_env):
@@ -371,6 +412,192 @@ def test_discard_restores_catalog_without_changing_source(local_workspace_env):
     assert result == {"ok": True, "discarded": True}
     assert (env["child"] / "bird.jpg").read_bytes() == b"bird-original"
     assert _folder_path(env["db"], env["child_id"]) == str(env["child"])
+
+
+def test_sync_rejects_deletions_beyond_confirmed_count(local_workspace_env):
+    # The deletion confirmation is bound to the count the user saw; more
+    # deletions appearing afterwards must re-prompt, never silently delete.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    os.unlink(local_root / "2026" / "bird.xmp")
+    os.unlink(local_root / "root.jpg")
+
+    with pytest.raises(LocalWorkspaceError, match="confirm again"):
+        sync_back(
+            env["db"],
+            env["workspace_id"],
+            str(env["vireo_dir"]),
+            allow_deletions=True,
+            confirmed_deletions=1,
+        )
+    assert (env["child"] / "bird.xmp").exists()
+    assert (env["source"] / "root.jpg").exists()
+
+    sync_back(
+        env["db"],
+        env["workspace_id"],
+        str(env["vireo_dir"]),
+        allow_deletions=True,
+        confirmed_deletions=2,
+    )
+    assert not (env["child"] / "bird.xmp").exists()
+    assert not (env["source"] / "root.jpg").exists()
+
+
+def test_restore_merges_rows_created_at_source_paths_while_staged(local_workspace_env):
+    # An import (or raw scan) can re-create a folder row at the original NAS
+    # path while the workspace is staged. Restore must merge it into the
+    # staged row instead of wedging both sync and discard.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    (env["child"] / "imported.jpg").write_bytes(b"imported")
+    interloper_id = env["db"].add_folder(str(env["child"]), name="2026")
+    assert interloper_id != env["child_id"]
+    env["db"].add_photo(interloper_id, "imported.jpg", ".jpg", 8, 0.0)
+
+    discard_local(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    rows = env["db"].conn.execute("SELECT id FROM folders WHERE path=?", (str(env["child"]),)).fetchall()
+    assert [row["id"] for row in rows] == [env["child_id"]]
+    photo = env["db"].conn.execute(
+        "SELECT folder_id FROM photos WHERE filename='imported.jpg'"
+    ).fetchone()
+    assert photo["folder_id"] == env["child_id"]
+
+
+def test_discard_from_interrupted_sync_requires_acknowledgement(local_workspace_env, monkeypatch):
+    # An interrupted sync must not be a dead end: discard stays available
+    # behind an explicit acknowledgement that unpublished changes are lost.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    (local_child / "bird.jpg").write_bytes(b"edited-published")
+    (local_child / "bird.xmp").write_text("edited-unpublished", encoding="utf-8")
+
+    real_publish = local_workspace._atomic_publish
+    published = {"count": 0}
+
+    def crashing_publish(local_path, remote_path):
+        real_publish(local_path, remote_path)
+        published["count"] += 1
+        if published["count"] == 1:
+            raise RuntimeError("simulated crash after first source publish")
+
+    monkeypatch.setattr(local_workspace, "_atomic_publish", crashing_publish)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    with pytest.raises(LocalWorkspaceError, match="Finish the sync-back"):
+        discard_local(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    result = discard_local(
+        env["db"], env["workspace_id"], str(env["vireo_dir"]), acknowledge_published=True
+    )
+    assert result == {"ok": True, "discarded": True}
+    assert _folder_path(env["db"], env["child_id"]) == str(env["child"])
+    # The published edit stays on the source; the unpublished one is gone.
+    assert (env["child"] / "bird.jpg").read_bytes() == b"edited-published"
+    assert (env["child"] / "bird.xmp").read_text(encoding="utf-8") == "original metadata"
+    assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
+
+
+def test_sync_refuses_source_file_blocking_new_local_directory(local_workspace_env):
+    # A file created on the source where local work created a directory must
+    # surface as a conflict before the sync starts publishing, so the
+    # workspace never enters an unfinishable 'syncing' state.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    (local_child / "newdir").mkdir()
+    (local_child / "newdir" / "a.jpg").write_bytes(b"a")
+    (env["child"] / "newdir").write_bytes(b"i am a file")
+
+    with pytest.raises(LocalWorkspaceConflict) as exc_info:
+        sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert str(env["child"] / "newdir") in exc_info.value.paths
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "active"
+
+
+def test_local_file_to_directory_replacement_syncs(local_workspace_env):
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    os.unlink(local_root / "root.jpg")
+    (local_root / "root.jpg").mkdir()
+    (local_root / "root.jpg" / "inner.jpg").write_bytes(b"inner")
+
+    sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]), allow_deletions=True)
+
+    assert (env["source"] / "root.jpg").is_dir()
+    assert (env["source"] / "root.jpg" / "inner.jpg").read_bytes() == b"inner"
+
+
+def test_local_directory_to_file_replacement_syncs(local_workspace_env):
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    shutil.rmtree(local_root / "2026")
+    (local_root / "2026").write_bytes(b"now a file")
+
+    sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]), allow_deletions=True)
+
+    assert (env["source"] / "2026").is_file()
+    assert (env["source"] / "2026").read_bytes() == b"now a file"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs unavailable on this platform")
+def test_special_file_degrades_status_and_blocks_sync_but_not_discard(local_workspace_env):
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    os.mkfifo(local_root / "pipe")
+
+    current = status(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    assert current["state"] == "active"
+    assert "Unsupported special file" in current["changes_error"]
+    assert current["sync_available"] is False
+
+    with pytest.raises(LocalWorkspaceError, match="Unsupported special file"):
+        sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    discard_local(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_escaping_symlink_degrades_status_instead_of_failing(local_workspace_env):
+    # The Workspace page must keep rendering (and keep Discard reachable)
+    # when the local tree contains something sync would refuse.
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    os.symlink(local_root / "root.jpg", local_root / "absolute-link.jpg")
+
+    current = status(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    assert current["state"] == "active"
+    assert "Symlink" in current["changes_error"]
+
+    discard_local(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
+
+
+def test_stage_cancel_via_begin_commit_cleans_up(local_workspace_env):
+    # A cancellation that lands right before activation aborts cleanly:
+    # the catalog is untouched and the partial copy is removed.
+    env = local_workspace_env
+    with pytest.raises(local_workspace.LocalWorkspaceCancelled):
+        stage_workspace(
+            env["db"],
+            env["workspace_id"],
+            str(env["vireo_dir"]),
+            begin_commit=lambda: False,
+        )
+
+    assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
+    assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "remote"
 
 
 def test_stage_rejects_folders_shared_with_another_workspace(local_workspace_env):
@@ -526,6 +753,10 @@ def test_work_locally_http_job_flow(tmp_path, monkeypatch):
             second.join(timeout=5)
             assert sorted(code for code, _body in responses) == [202, 409]
             job_id = next(body["job_id"] for code, body in responses if code == 202)
+            # A fresh status read while the job runs must report the live
+            # job, so other tabs render progress instead of recovery UI.
+            during = client.get("/api/workspaces/active/local-workspace").get_json()
+            assert during["job"] == {"id": job_id, "type": "work-locally-stage"}
             allow_job.set()
             assert wait_for_job_via_client(client, job_id)["status"] == "completed"
 
@@ -561,4 +792,49 @@ def test_work_locally_http_job_flow(tmp_path, monkeypatch):
     final_db = Database(db_path)
     assert _folder_path(final_db, folder_id) == str(source)
     assert final_db._active_workspace_id == workspace_id
+    final_db.close()
+
+
+def test_discard_http_flow_guards_stale_page_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    folder_id = db.add_folder(str(source), name="photos")
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        response = client.post("/api/workspaces/active/local-workspace/stage", json={})
+        assert response.status_code == 202
+        assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
+
+        # A stale page that rendered 'Clean Up Incomplete Copy' before the
+        # stage finished must not discard the now-healthy workspace.
+        stale = client.post(
+            "/api/workspaces/active/local-workspace/discard",
+            json={"confirm": True, "expected_state": "staging"},
+        )
+        assert stale.status_code == 409
+        assert "changed since this page loaded" in stale.get_json()["error"]
+
+        response = client.post(
+            "/api/workspaces/active/local-workspace/discard",
+            json={"confirm": True, "expected_state": "active"},
+        )
+        assert response.status_code == 202
+        assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
+        assert client.get("/api/workspaces/active/local-workspace").get_json()["state"] == "remote"
+
+    final_db = Database(db_path)
+    assert _folder_path(final_db, folder_id) == str(source)
     final_db.close()

@@ -4,6 +4,18 @@ The catalog continues to be the path source of truth.  Once staging has
 finished successfully, folder paths belonging exclusively to the workspace are
 rebased to a managed local tree.  Sync-back publishes only local changes, then
 restores the original catalog paths and removes the managed copy.
+
+Lifecycle state and the folder path mapping live in SQLite
+(``local_workspaces`` / ``local_workspace_folders``) so every state
+transition commits in the same transaction as the catalog path updates it
+describes — there is no window where the catalog and the recorded state can
+disagree.  The JSON manifest beside the copied files is a pure file
+inventory (the staged baseline used for change detection and conflict
+checks), never a state store.
+
+States: ``staging`` (copy in progress or interrupted; catalog untouched),
+``active`` (catalog rebased to the local tree), ``syncing`` (a sync-back
+began publishing to the source and did not finish).
 """
 
 from __future__ import annotations
@@ -19,9 +31,22 @@ import time
 from contextlib import suppress
 from pathlib import Path
 
-MANIFEST_VERSION = 1
+from config import _replace_with_windows_retry
+
+MANIFEST_VERSION = 2
 LOCAL_RESERVE_BYTES = 1024**3
-_LOCK = threading.RLock()
+
+# Serializes stage/sync/discard per workspace. A short global guard covers
+# stage's cross-workspace overlap validation so two concurrent stages cannot
+# both pass the guards before either records its claim.
+_LOCKS: dict[int, threading.RLock] = {}
+_LOCKS_GUARD = threading.Lock()
+_STAGE_GUARD = threading.Lock()
+
+
+def _workspace_lock(workspace_id: int) -> threading.RLock:
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(int(workspace_id), threading.RLock())
 
 
 class LocalWorkspaceError(RuntimeError):
@@ -51,8 +76,31 @@ def manifest_path(vireo_dir: str, workspace_id: int) -> Path:
     return workspace_dir(vireo_dir, workspace_id) / "manifest.json"
 
 
-def has_local_workspace(vireo_dir: str, workspace_id: int) -> bool:
-    return manifest_path(vireo_dir, workspace_id).is_file()
+def local_state(db, workspace_id: int) -> dict | None:
+    """Return the workspace's local-workspace state row, or None."""
+    row = db.conn.execute(
+        "SELECT workspace_id, state, created_at, activated_at FROM local_workspaces WHERE workspace_id=?",
+        (workspace_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def has_local_workspace(db, workspace_id: int) -> bool:
+    return local_state(db, workspace_id) is not None
+
+
+def _db_mappings(db, workspace_id: int) -> list[dict]:
+    rows = db.conn.execute(
+        """SELECT folder_id, source_path, local_path, original_status, is_root, root_index
+           FROM local_workspace_folders WHERE workspace_id=?
+           ORDER BY is_root DESC, root_index, folder_id""",
+        (workspace_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _db_roots(db, workspace_id: int) -> list[dict]:
+    return [m for m in _db_mappings(db, workspace_id) if m["is_root"]]
 
 
 def _write_manifest(path: Path, data: dict) -> None:
@@ -62,7 +110,9 @@ def _write_manifest(path: Path, data: dict) -> None:
         json.dump(data, handle, indent=2, sort_keys=True)
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    # Windows AV/indexers can hold the destination open transiently; use the
+    # same retry-aware replace as config writes.
+    _replace_with_windows_retry(str(tmp), str(path))
 
 
 def _load_manifest(vireo_dir: str, workspace_id: int) -> dict | None:
@@ -97,7 +147,7 @@ def _physical_is_within(path: str, root: str) -> bool:
         resolved_path = os.path.normcase(os.path.realpath(path))
         resolved_root = os.path.normcase(os.path.realpath(root))
         return os.path.commonpath([resolved_path, resolved_root]) == resolved_root
-    except ValueError:
+    except (ValueError, OSError):
         return False
 
 
@@ -147,37 +197,63 @@ def _raise_walk_error(error: OSError) -> None:
 
 
 def _walk_entries(root: str):
-    """Yield relative paths for regular files and symlinks without following links."""
+    """Yield ``(rel, full, lstat)`` for every entry under root.
+
+    Directories are included (so callers can recreate structure, including
+    empty directories); directory symlinks are yielded as link entries and
+    not descended into. Each entry is stat'ed exactly once here — callers
+    classify via the yielded stat instead of re-statting.
+    """
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=_raise_walk_error):
-        for dirname in list(dirnames):
+        rel_dir = _relative(dirpath, root)
+        if rel_dir:
+            yield rel_dir, dirpath, os.lstat(dirpath)
+        kept = []
+        for dirname in dirnames:
             full = os.path.join(dirpath, dirname)
-            if os.path.islink(full):
-                dirnames.remove(dirname)
-                yield _relative(full, root), full
+            st = os.lstat(full)
+            if stat.S_ISLNK(st.st_mode):
+                yield _relative(full, root), full, st
+            else:
+                kept.append(dirname)
+        dirnames[:] = kept
         for filename in filenames:
             full = os.path.join(dirpath, filename)
-            yield _relative(full, root), full
+            yield rel_dir and os.path.join(rel_dir, filename) or filename, full, os.lstat(full)
 
 
-def _preflight_sources(roots: list[dict], local_base: Path) -> tuple[int, int]:
+def _collect_source_entries(roots: list[dict], local_base: Path) -> tuple[dict[int, list], int, int]:
+    """Walk every source root once; validate entries and total up the copy.
+
+    Returns (entries per root index, total_files, total_bytes). The entry
+    lists are reused by the copy loop so staging enumerates the (slow)
+    source storage exactly once.
+    """
+    per_root: dict[int, list] = {}
     total_bytes = 0
     total_files = 0
-    for root in roots:
+    for index, root in enumerate(roots):
         source = root["source_path"]
         if not os.path.isdir(source):
             raise LocalWorkspaceError(f"Workspace folder is unavailable: {source}")
-        for _rel, full in _walk_entries(source):
-            mode = os.lstat(full).st_mode
+        entries = []
+        for rel, full, st in _walk_entries(source):
+            mode = st.st_mode
             if stat.S_ISREG(mode):
-                total_bytes += os.lstat(full).st_size
+                total_bytes += st.st_size
+                total_files += 1
             elif stat.S_ISLNK(mode):
                 if not _symlink_stays_within(full, source):
                     raise LocalWorkspaceError(
                         f"Symlink escapes or uses an absolute target and cannot be staged: {full}"
                     )
+                total_files += 1
+            elif stat.S_ISDIR(mode):
+                pass
             else:
                 raise LocalWorkspaceError(f"Unsupported special file in workspace: {full}")
-            total_files += 1
+            entries.append((rel, full, st))
+        per_root[index] = entries
 
     local_base.parent.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(local_base.parent).free
@@ -187,7 +263,7 @@ def _preflight_sources(roots: list[dict], local_base: Path) -> tuple[int, int]:
             f"Not enough local space: need {required:,} bytes including safety reserve, "
             f"but only {free:,} bytes are free"
         )
-    return total_files, total_bytes
+    return per_root, total_files, total_bytes
 
 
 def _copy_regular_with_hash(source: str, destination: str, cancel_check=None) -> dict:
@@ -210,8 +286,9 @@ def _copy_regular_with_hash(source: str, destination: str, cancel_check=None) ->
                         break
                     dst.write(chunk)
                     digest.update(chunk)
-                dst.flush()
-                os.fsync(dst.fileno())
+            # No per-file fsync: until the activation transaction commits, a
+            # crash resolves to state 'staging' and the whole tree is
+            # discarded and re-staged, so individual durability buys nothing.
             shutil.copystat(source, tmp, follow_symlinks=False)
             after = os.stat(source, follow_symlinks=False)
             if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
@@ -233,8 +310,11 @@ def _copy_regular_with_hash(source: str, destination: str, cancel_check=None) ->
     raise AssertionError("copy retry loop exhausted")
 
 
-def _copy_entry(source: str, destination: str, cancel_check=None) -> dict:
-    mode = os.lstat(source).st_mode
+def _copy_entry(source: str, destination: str, st, cancel_check=None) -> dict | None:
+    mode = st.st_mode
+    if stat.S_ISDIR(mode):
+        os.makedirs(destination, exist_ok=True)
+        return None
     if stat.S_ISLNK(mode):
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         target = os.readlink(source)
@@ -247,35 +327,15 @@ def _copy_entry(source: str, destination: str, cancel_check=None) -> dict:
     return _copy_regular_with_hash(source, destination, cancel_check)
 
 
-def _copy_directory_structure(source_root: str, local_root: str) -> None:
-    """Create real source directories locally, including empty directories."""
-    for dirpath, dirnames, _filenames in os.walk(source_root, followlinks=False, onerror=_raise_walk_error):
-        rel_dir = _relative(dirpath, source_root)
-        local_dir = os.path.join(local_root, rel_dir)
-        os.makedirs(local_dir, exist_ok=True)
-        # Directory symlinks are manifest entries, not real directories.
-        dirnames[:] = [name for name in dirnames if not os.path.islink(os.path.join(dirpath, name))]
+def _other_local_source_roots(db, workspace_id: int) -> list[str]:
+    rows = db.conn.execute(
+        "SELECT source_path FROM local_workspace_folders WHERE workspace_id != ? AND is_root = 1",
+        (workspace_id,),
+    ).fetchall()
+    return [row["source_path"] for row in rows]
 
 
-def _other_manifest_source_roots(vireo_dir: str, workspace_id: int) -> list[str]:
-    roots = []
-    manifests_dir = Path(vireo_dir) / "local-workspaces"
-    if not manifests_dir.is_dir():
-        return roots
-    for child in manifests_dir.iterdir():
-        try:
-            other_workspace_id = int(child.name)
-        except ValueError:
-            continue
-        if other_workspace_id == workspace_id:
-            continue
-        manifest = _load_manifest(vireo_dir, other_workspace_id)
-        if manifest:
-            roots.extend(root["source_path"] for root in manifest.get("roots", []))
-    return roots
-
-
-def _root_records(db, workspace_id: int, local_base: Path, vireo_dir: str) -> tuple[list[dict], list[dict]]:
+def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], list[dict]]:
     roots = [dict(row) for row in db.get_workspace_folder_roots(workspace_id)]
     folders = [dict(row) for row in db.get_workspace_folders(workspace_id)]
     if not roots:
@@ -308,7 +368,9 @@ def _root_records(db, workspace_id: int, local_base: Path, vireo_dir: str) -> tu
     # without having materialized the exact workspace_folders row yet. Since
     # folders.path is global, rebasing that covered folder would still break
     # the other workspace. Check path coverage in both directions as well as
-    # the exact-ID links above.
+    # the exact-ID links above. Another active local workspace's catalog rows
+    # point at its managed copy, so its claim on the original source roots
+    # comes from local_workspace_folders.
     other_roots = db.conn.execute(
         """SELECT f.path
            FROM workspace_folders wf
@@ -317,7 +379,7 @@ def _root_records(db, workspace_id: int, local_base: Path, vireo_dir: str) -> tu
         (workspace_id,),
     ).fetchall()
     other_root_paths = {row["path"] for row in other_roots}
-    other_root_paths.update(_other_manifest_source_roots(vireo_dir, workspace_id))
+    other_root_paths.update(_other_local_source_roots(db, workspace_id))
     for folder in folders:
         for other_root_path in other_root_paths:
             if _is_within(folder["path"], other_root_path) or _is_within(other_root_path, folder["path"]):
@@ -365,39 +427,83 @@ def _root_records(db, workspace_id: int, local_base: Path, vireo_dir: str) -> tu
     return root_records, folder_records
 
 
-def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, cancel_check=None) -> dict:
-    """Copy a workspace locally and atomically rebase its catalog paths."""
-    with _LOCK:
-        if _load_manifest(vireo_dir, workspace_id):
-            raise LocalWorkspaceError("This workspace is already staged locally")
+def _delete_state_rows(db, workspace_id: int) -> None:
+    db.conn.execute("DELETE FROM local_workspace_folders WHERE workspace_id=?", (workspace_id,))
+    db.conn.execute("DELETE FROM local_workspaces WHERE workspace_id=?", (workspace_id,))
 
+
+def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, cancel_check=None, begin_commit=None) -> dict:
+    """Copy a workspace locally and atomically rebase its catalog paths."""
+    with _workspace_lock(workspace_id):
         base = workspace_dir(vireo_dir, workspace_id)
-        roots, folders = _root_records(db, workspace_id, base / "files", vireo_dir)
-        total_files, total_bytes = _preflight_sources(roots, base)
-        manifest = {
-            "version": MANIFEST_VERSION,
-            "workspace_id": workspace_id,
-            "state": "staging",
-            "created_at": time.time(),
-            "total_files": total_files,
-            "total_bytes": total_bytes,
-            "roots": roots,
-            "folders": folders,
-            "files": [],
-        }
-        _write_manifest(manifest_path(vireo_dir, workspace_id), manifest)
+        with _STAGE_GUARD:
+            if local_state(db, workspace_id):
+                raise LocalWorkspaceError("This workspace is already staged locally")
+            # A leftover tree without a state row is debris from a crash
+            # after a completed restore; staging owns this directory.
+            if base.exists():
+                shutil.rmtree(base, ignore_errors=True)
+
+            roots, folders = _root_records(db, workspace_id, base / "files")
+
+            # Record the claim (state + folder mapping) before any copying so
+            # concurrent stages and the delete-workspace guard see it, and a
+            # crash during the copy resolves to a cleanable 'staging' row.
+            db.conn.execute("BEGIN IMMEDIATE")
+            try:
+                db.conn.execute(
+                    "INSERT INTO local_workspaces (workspace_id, state, created_at) VALUES (?, 'staging', ?)",
+                    (workspace_id, time.time()),
+                )
+                root_ids = {root["folder_id"]: index for index, root in enumerate(roots)}
+                for folder in folders:
+                    db.conn.execute(
+                        """INSERT INTO local_workspace_folders
+                           (workspace_id, folder_id, source_path, local_path, original_status, is_root, root_index)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            workspace_id,
+                            folder["folder_id"],
+                            folder["source_path"],
+                            folder["local_path"],
+                            folder["status"],
+                            1 if folder["folder_id"] in root_ids else 0,
+                            root_ids.get(folder["folder_id"]),
+                        ),
+                    )
+                db.conn.commit()
+            except BaseException:
+                db.conn.rollback()
+                raise
 
         copied = 0
         copied_bytes = 0
         try:
+            # The (slow) source enumeration happens outside the global stage
+            # guard so a large workspace doesn't block other stages; a
+            # failure here resolves through the 'staging' cleanup below.
+            entries_per_root, total_files, total_bytes = _collect_source_entries(roots, base)
+            manifest = {
+                "version": MANIFEST_VERSION,
+                "workspace_id": workspace_id,
+                "created_at": time.time(),
+                "total_files": total_files,
+                "total_bytes": total_bytes,
+                "roots": [
+                    {"folder_id": r["folder_id"], "source_path": r["source_path"], "local_path": r["local_path"]}
+                    for r in roots
+                ],
+                "files": [],
+            }
             for root_index, root in enumerate(roots):
                 os.makedirs(root["local_path"], exist_ok=True)
-                _copy_directory_structure(root["source_path"], root["local_path"])
-                for rel, source in _walk_entries(root["source_path"]):
+                for rel, source, st in entries_per_root[root_index]:
                     if cancel_check and cancel_check():
                         raise LocalWorkspaceCancelled("Local workspace transfer cancelled")
                     destination = os.path.join(root["local_path"], rel)
-                    record = _copy_entry(source, destination, cancel_check)
+                    record = _copy_entry(source, destination, st, cancel_check)
+                    if record is None:
+                        continue
                     record.update({"root": root_index, "path": rel})
                     manifest["files"].append(record)
                     copied += 1
@@ -407,11 +513,12 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
 
             if cancel_check and cancel_check():
                 raise LocalWorkspaceCancelled("Local workspace transfer cancelled")
+            # From here on the catalog rebase may commit; the caller must stop
+            # honoring cancellation or the job would report 'cancelled' for a
+            # stage that actually activated.
+            if begin_commit and not begin_commit():
+                raise LocalWorkspaceCancelled("Local workspace transfer cancelled")
 
-            # Persist the recovery boundary before changing catalog paths. If
-            # Vireo exits from this point onward, Discard can safely detect
-            # and reverse whichever path updates committed.
-            manifest["state"] = "activating"
             _write_manifest(manifest_path(vireo_dir, workspace_id), manifest)
             db.conn.execute("BEGIN IMMEDIATE")
             try:
@@ -422,15 +529,16 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
                     )
                     if db.conn.execute("SELECT changes()").fetchone()[0] != 1:
                         raise LocalWorkspaceError(f"Catalog folder changed while staging: {folder['source_path']}")
+                db.conn.execute(
+                    "UPDATE local_workspaces SET state='active', activated_at=? WHERE workspace_id=?",
+                    (time.time(), workspace_id),
+                )
                 db.conn.commit()
             except BaseException:
                 db.conn.rollback()
                 raise
             db.invalidate_new_images_cache_for_workspace(workspace_id)
 
-            manifest["state"] = "active"
-            manifest["activated_at"] = time.time()
-            _write_manifest(manifest_path(vireo_dir, workspace_id), manifest)
             return {
                 "ok": True,
                 "files": total_files,
@@ -438,151 +546,172 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
                 "local_path": str(base / "files"),
             }
         except BaseException:
-            # A staging manifest is safe to remove because catalog paths have
-            # not yet changed. Activating/active manifests are recovery data.
-            current = _load_manifest(vireo_dir, workspace_id)
+            # The catalog only changes in the activation transaction; if the
+            # state row still says 'staging', nothing was rebased and the
+            # partial copy is safe to remove.
+            current = local_state(db, workspace_id)
             if current and current.get("state") == "staging":
                 shutil.rmtree(base, ignore_errors=True)
+                _delete_state_rows(db, workspace_id)
+                db.conn.commit()
             raise
 
 
-def _entry_state(path: str, *, hash_file=False, cancel_check=None) -> dict | None:
-    try:
-        mode = os.lstat(path).st_mode
-    except FileNotFoundError:
-        return None
+def _entry_type(st) -> str:
+    mode = st.st_mode
     if stat.S_ISLNK(mode):
-        return {"type": "symlink", "target": os.readlink(path)}
-    if not stat.S_ISREG(mode):
-        return {"type": "special"}
-    info = os.stat(path, follow_symlinks=False)
-    result = {"type": "file", "size": info.st_size, "mtime_ns": info.st_mtime_ns}
-    if hash_file:
-        result["sha256"] = _sha256(path, cancel_check)
-    return result
+        return "symlink"
+    if stat.S_ISREG(mode):
+        return "file"
+    if stat.S_ISDIR(mode):
+        return "dir"
+    return "special"
 
 
-def _same_as_baseline(path: str, baseline: dict, cancel_check=None, *, force_hash: bool = False) -> bool:
-    current = _entry_state(path)
-    if current is None or current.get("type") != baseline.get("type"):
+def _same_metadata(full: str, st, baseline: dict) -> bool:
+    """Size + mtime_ns comparison against the staged baseline.
+
+    Staging preserves the source mtime on the local copy (copystat), so an
+    untouched local file matches its baseline exactly; any real edit writes a
+    new mtime. This is the rsync trade: an edit that deliberately restores
+    both size and nanosecond mtime would be missed.
+    """
+    kind = _entry_type(st)
+    if kind != baseline.get("type"):
         return False
-    if current["type"] == "symlink":
-        return current.get("target") == baseline.get("target")
-    if current.get("size") != baseline.get("size"):
-        return False
-    if not force_hash and current.get("mtime_ns") == baseline.get("mtime_ns"):
-        return True
-    return _sha256(path, cancel_check) == baseline.get("sha256")
-
-
-def _same_metadata(path: str, baseline: dict) -> bool:
-    """Cheap status-page comparison; sync-back performs content hashing."""
-    current = _entry_state(path)
-    if current is None or current.get("type") != baseline.get("type"):
-        return False
-    if current["type"] == "symlink":
-        return current.get("target") == baseline.get("target")
-    return current.get("size") == baseline.get("size") and current.get("mtime_ns") == baseline.get("mtime_ns")
+    if kind == "symlink":
+        return os.readlink(full) == baseline.get("target")
+    return st.st_size == baseline.get("size") and st.st_mtime_ns == baseline.get("mtime_ns")
 
 
 def _same_content(first: str, second: str, cancel_check=None) -> bool:
-    first_state = _entry_state(first)
-    second_state = _entry_state(second)
-    if first_state is None or second_state is None:
-        return first_state is None and second_state is None
-    if first_state.get("type") != second_state.get("type"):
+    try:
+        first_st = os.lstat(first)
+    except FileNotFoundError:
+        first_st = None
+    try:
+        second_st = os.lstat(second)
+    except FileNotFoundError:
+        second_st = None
+    if first_st is None or second_st is None:
+        return first_st is None and second_st is None
+    first_kind, second_kind = _entry_type(first_st), _entry_type(second_st)
+    if first_kind != second_kind:
         return False
-    if first_state["type"] == "symlink":
-        return first_state.get("target") == second_state.get("target")
-    if first_state["type"] != "file" or first_state.get("size") != second_state.get("size"):
+    if first_kind == "symlink":
+        return os.readlink(first) == os.readlink(second)
+    if first_kind != "file" or first_st.st_size != second_st.st_size:
         return False
     return _sha256(first, cancel_check) == _sha256(second, cancel_check)
 
 
 def _manifest_maps(manifest: dict) -> tuple[dict, dict]:
+    """Return (baseline entries, current local entries with stats)."""
     baseline = {(item["root"], item["path"]): item for item in manifest["files"]}
     local = {}
     for root_index, root in enumerate(manifest["roots"]):
         if not os.path.isdir(root["local_path"]):
             continue
-        for rel, full in _walk_entries(root["local_path"]):
-            if os.path.islink(full) and not _symlink_stays_within(full, root["local_path"]):
+        for rel, full, st in _walk_entries(root["local_path"]):
+            kind = _entry_type(st)
+            if kind == "dir":
+                continue
+            if kind == "special":
+                raise LocalWorkspaceError(f"Unsupported special file in the managed local workspace: {full}")
+            if kind == "symlink" and not _symlink_stays_within(full, root["local_path"]):
                 raise LocalWorkspaceError(
                     f"Symlink escapes or uses an absolute target in the managed local workspace: {full}"
                 )
-            local[(root_index, rel)] = full
+            local[(root_index, rel)] = (full, st)
     return baseline, local
+
+
+def _local_changes(manifest: dict) -> tuple[dict, dict, list, list]:
+    """Return (baseline, local, changed keys, deleted keys) by metadata."""
+    baseline, local = _manifest_maps(manifest)
+    deleted = sorted(set(baseline) - set(local))
+    changed = []
+    for key, (full, st) in sorted(local.items()):
+        original = baseline.get(key)
+        if original is None or not _same_metadata(full, st, original):
+            changed.append(key)
+    return baseline, local, changed, deleted
 
 
 def status(db, workspace_id: int, vireo_dir: str) -> dict:
     """Return lightweight local-workspace state and local change counts."""
-    manifest = _load_manifest(vireo_dir, workspace_id)
-    if not manifest:
+    state_row = local_state(db, workspace_id)
+    if not state_row:
         return {"state": "remote", "workspace_id": workspace_id}
+
+    roots = _db_roots(db, workspace_id)
     result = {
-        "state": manifest.get("state", "unknown"),
+        "state": state_row["state"],
         "workspace_id": workspace_id,
-        "created_at": manifest.get("created_at"),
+        "created_at": state_row.get("created_at"),
         "local_path": str(workspace_dir(vireo_dir, workspace_id) / "files"),
-        "source_paths": [root["source_path"] for root in manifest.get("roots", [])],
-        "total_files": manifest.get("total_files", 0),
-        "total_bytes": manifest.get("total_bytes", 0),
+        "source_paths": [root["source_path"] for root in roots],
     }
-    if result["state"] == "activating":
-        result["state"] = "recovery"
-        return result
-    if result["state"] == "syncing":
-        # A prior sync-back was interrupted after publishing at least one
-        # source file. Discard would silently leave those edits behind, so
-        # surface a recovery state that only sync-back can clear.
-        result["state"] = "recovery"
-        result["recovery_kind"] = "sync"
-        return result
-    if result["state"] != "active":
+
+    manifest = None
+    manifest_error = None
+    try:
+        manifest = _load_manifest(vireo_dir, workspace_id)
+    except LocalWorkspaceError as exc:
+        manifest_error = str(exc)
+
+    if manifest:
+        result["total_files"] = manifest.get("total_files", 0)
+        result["total_bytes"] = manifest.get("total_bytes", 0)
+
+    if result["state"] == "staging":
+        # Either a copy job is currently running (the caller reports the live
+        # job alongside this payload) or the copy was interrupted and needs
+        # cleanup. The catalog has not been touched either way.
         return result
 
-    missing_local_roots = [root["local_path"] for root in manifest["roots"] if not os.path.isdir(root["local_path"])]
+    if result["state"] == "syncing":
+        # A sync-back was interrupted after publishing at least one source
+        # file. Finishing the sync preserves those edits; discard requires an
+        # explicit acknowledgement that unpublished local changes are lost.
+        result["state"] = "recovery"
+        result["recovery_kind"] = "sync"
+        result.update(_change_summary(manifest, manifest_error))
+        return result
+
+    missing_local_roots = [root["local_path"] for root in roots if not os.path.isdir(root["local_path"])]
     if missing_local_roots:
         result["state"] = "recovery"
         result["missing_local_paths"] = missing_local_roots
         return result
 
-    baseline, local = _manifest_maps(manifest)
-    created = 0
-    modified = 0
-    deleted = 0
-    for key, item in baseline.items():
-        path = local.get(key)
-        if path is None:
-            deleted += 1
-        elif not _same_metadata(path, item):
-            modified += 1
-    created = len(set(local) - set(baseline))
-    result["changes"] = {"created": created, "modified": modified, "deleted": deleted}
-    result["source_available"] = all(os.path.isdir(root["source_path"]) for root in manifest["roots"])
+    result.update(_change_summary(manifest, manifest_error))
+    result["source_available"] = all(os.path.isdir(root["source_path"]) for root in roots)
     return result
 
 
-def _preflight_restore_paths(db, manifest: dict) -> list[tuple[int, str, str, str]]:
-    """Map all catalog folders under local roots back to source locations."""
-    mappings = []
-    rows = db.conn.execute("SELECT id, path, status FROM folders").fetchall()
-    original_statuses = {folder["folder_id"]: folder.get("status", "ok") for folder in manifest.get("folders", [])}
-    own_ids = set()
-    for row in rows:
-        matches = [root for root in manifest["roots"] if _is_within(row["path"], root["local_path"])]
-        if not matches:
-            continue
-        root = max(matches, key=lambda item: len(_norm(item["local_path"])))
-        target = os.path.normpath(os.path.join(root["source_path"], _relative(row["path"], root["local_path"])))
-        mappings.append((row["id"], row["path"], target, original_statuses.get(row["id"], row["status"])))
-        own_ids.add(row["id"])
+def _change_summary(manifest: dict | None, manifest_error: str | None) -> dict:
+    """Compute change counts, degrading to an explanation instead of failing.
 
-    for folder_id, _old, target, _status in mappings:
-        conflict = db.conn.execute("SELECT id FROM folders WHERE path=? AND id != ?", (target, folder_id)).fetchone()
-        if conflict and conflict["id"] not in own_ids:
-            raise LocalWorkspaceError(f"Cannot restore catalog path because it is already tracked: {target}")
-    return mappings
+    The Workspace page must keep rendering (and keep Discard reachable) even
+    when the local tree contains something sync would refuse — an escaping
+    symlink, a special file, or a missing/corrupt manifest.
+    """
+    if manifest is None:
+        return {
+            "changes_error": manifest_error or "The staged file inventory is missing; sync is unavailable but Discard still restores the catalog.",
+            "sync_available": False,
+        }
+    try:
+        _baseline, _local, changed, deleted = _local_changes(manifest)
+    except LocalWorkspaceError as exc:
+        return {"changes_error": str(exc), "sync_available": False}
+    created = sum(1 for key in changed if key not in _baseline)
+    modified = len(changed) - created
+    return {
+        "changes": {"created": created, "modified": modified, "deleted": len(deleted)},
+        "sync_available": True,
+    }
 
 
 def _atomic_publish(local_path: str, remote_path: str) -> None:
@@ -615,25 +744,150 @@ def _atomic_publish(local_path: str, remote_path: str) -> None:
         raise
 
 
+def _prepare_publish_target(remote_path: str) -> None:
+    """Clear an empty directory tree occupying a publish target.
+
+    A local edit can replace a tracked directory with a file of the same
+    name; its baseline files appear in the deleted set (removed before
+    publishes run), leaving empty directories behind. Anything non-empty
+    means the source gained files we never confirmed against — refuse.
+    """
+    if not os.path.isdir(remote_path) or os.path.islink(remote_path):
+        return
+    for dirpath, _dirnames, filenames in os.walk(remote_path, topdown=False):
+        if filenames:
+            raise LocalWorkspaceConflict([os.path.join(dirpath, filenames[0])])
+        os.rmdir(dirpath)
+
+
+def _ancestor_conflicts(publish_keys, manifest: dict, deleted_set: set) -> list[str]:
+    """Source paths where a non-directory blocks a new local subtree.
+
+    Publishing ``a/b/c`` needs every ancestor of ``c`` to be a directory on
+    the source; a file sitting at ``a/b`` would make the publish fail after
+    the sync already began. Ancestors that the deletion pass is about to
+    remove (a local file→directory replacement) are not conflicts.
+    """
+    conflicts = []
+    checked = set()
+    for root_index, rel in publish_keys:
+        source_root = manifest["roots"][root_index]["source_path"]
+        parent = os.path.dirname(os.path.join(source_root, rel))
+        while _is_within(parent, source_root) and _norm(parent) != _norm(source_root):
+            if parent in checked:
+                break
+            checked.add(parent)
+            if (
+                os.path.lexists(parent)
+                and not os.path.isdir(parent)
+                and (root_index, _relative(parent, source_root)) not in deleted_set
+            ):
+                conflicts.append(parent)
+            parent = os.path.dirname(parent)
+    return conflicts
+
+
+def _restore_catalog(db, workspace_id: int) -> None:
+    """Atomically restore catalog paths from the recorded mapping.
+
+    Runs as one transaction: merge any rows that re-tracked a source path
+    while the workspace was staged (self-healing instead of refusing), rename
+    the mapped rows back through unique temp paths (swaps/nesting can never
+    trip the folders.path UNIQUE constraint midway), rebase any stray rows
+    created under the managed local tree during the session, then drop the
+    local-workspace state in the same commit.
+    """
+    mappings = _db_mappings(db, workspace_id)
+    mapped_ids = {m["folder_id"] for m in mappings}
+    local_roots = [m for m in mappings if m["is_root"]]
+
+    db.conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Self-heal: another row occupying a restore target (e.g. an import
+        # or scan re-created the source path while staged) is merged into
+        # the staged row instead of wedging both sync and discard.
+        for mapping in mappings:
+            conflict = db.conn.execute(
+                "SELECT id FROM folders WHERE path=? AND id != ?",
+                (mapping["source_path"], mapping["folder_id"]),
+            ).fetchone()
+            if conflict and conflict["id"] not in mapped_ids:
+                db._merge_into_existing(conflict["id"], mapping["folder_id"], mapping["source_path"])
+
+        for mapping in mappings:
+            db.conn.execute(
+                "UPDATE folders SET path=? WHERE id=?",
+                (f"__vireo_local_restore__/{workspace_id}/{mapping['folder_id']}", mapping["folder_id"]),
+            )
+        for mapping in mappings:
+            db.conn.execute(
+                "UPDATE folders SET path=?, status=? WHERE id=?",
+                (mapping["source_path"], mapping["original_status"], mapping["folder_id"]),
+            )
+
+        # Stray rows created under the managed local tree mid-session (e.g. a
+        # scan of the local copy materialized a subfolder) rebase to the
+        # matching source location; a row already there absorbs them.
+        relinked = list(mapped_ids)
+        rows = db.conn.execute("SELECT id, path, status FROM folders").fetchall()
+        for row in rows:
+            if row["id"] in mapped_ids:
+                continue
+            matches = [root for root in local_roots if _is_within(row["path"], root["local_path"])]
+            if not matches:
+                continue
+            root = max(matches, key=lambda item: len(_norm(item["local_path"])))
+            target = os.path.normpath(
+                os.path.join(root["source_path"], _relative(row["path"], root["local_path"]))
+            )
+            existing = db.conn.execute(
+                "SELECT id FROM folders WHERE path=? AND id != ?", (target, row["id"])
+            ).fetchone()
+            if existing:
+                db._merge_into_existing(row["id"], existing["id"], target)
+            else:
+                db.conn.execute("UPDATE folders SET path=? WHERE id=?", (target, row["id"]))
+                relinked.append(row["id"])
+
+        db._relink_parents_by_path(relinked)
+        _delete_state_rows(db, workspace_id)
+        db.conn.commit()
+    except BaseException:
+        db.conn.rollback()
+        raise
+    db.invalidate_new_images_cache_for_workspace(workspace_id)
+
+
 def sync_back(
     db,
     workspace_id: int,
     vireo_dir: str,
     *,
     allow_deletions: bool = False,
+    confirmed_deletions: int | None = None,
     progress=None,
     cancel_check=None,
     begin_commit=None,
 ) -> dict:
     """Publish local changes, restore source paths, and remove the local copy."""
-    with _LOCK:
-        manifest = _load_manifest(vireo_dir, workspace_id)
-        if not manifest or manifest.get("state") not in {"active", "syncing"}:
+    with _workspace_lock(workspace_id):
+        state_row = local_state(db, workspace_id)
+        if not state_row or state_row["state"] not in {"active", "syncing"}:
             raise LocalWorkspaceError("This workspace is not working locally")
+        resuming = state_row["state"] == "syncing"
         # A resumed sync inherits the deletion confirmation from the original
         # attempt: entering "syncing" required deletions to be confirmed then.
-        if manifest.get("state") == "syncing":
+        if resuming:
             allow_deletions = True
+            confirmed_deletions = None
+
+        manifest = _load_manifest(vireo_dir, workspace_id)
+        if manifest is None:
+            raise LocalWorkspaceError(
+                "The staged file inventory is missing, so local changes cannot be verified. "
+                "Discard restores the catalog without touching source files."
+            )
+
         for root in manifest["roots"]:
             if not os.path.isdir(root["source_path"]):
                 raise LocalWorkspaceError(f"Source storage is unavailable: {root['source_path']}")
@@ -643,64 +897,81 @@ def sync_back(
                     "Restore it or discard the local workspace; source files were not changed."
                 )
 
-        restore_mappings = _preflight_restore_paths(db, manifest)
-        baseline, local = _manifest_maps(manifest)
-        deleted = sorted(set(baseline) - set(local))
+        baseline, local, changed, deleted = _local_changes(manifest)
         if deleted and not allow_deletions:
             raise LocalWorkspaceError(f"Local work deleted {len(deleted)} file(s); confirm deletions before syncing")
+        if not resuming and confirmed_deletions is not None and len(deleted) > confirmed_deletions:
+            raise LocalWorkspaceError(
+                f"Local deletions changed since you confirmed: {len(deleted)} file(s) would now be "
+                "deleted from the source. Review and confirm again."
+            )
 
+        # Conflict scan. Only paths sync would write or delete can clobber
+        # anything, so only those are verified — by full content hash, since
+        # a source edit can preserve size and mtime. Unchanged local files
+        # are never published, so a source-side edit to them simply survives.
         conflicts = []
-        for key, original in baseline.items():
+        at_risk = [key for key in changed if key in baseline] + list(deleted)
+        for key in at_risk:
             root_index, rel = key
+            original = baseline[key]
             remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
-            if _same_as_baseline(remote_path, original, cancel_check, force_hash=True):
+            remote_matches, remote_sha = _source_state(remote_path, original, cancel_check)
+            if remote_matches:
                 continue
-            local_path = local.get(key)
+            entry = local.get(key)
+            local_path = entry[0] if entry else None
             # A prior interrupted sync may already have published this exact
             # result. Treat it as resumable, not as an outside conflict.
             if local_path is None and not os.path.lexists(remote_path):
                 continue
-            if local_path and os.path.lexists(remote_path) and _same_content(local_path, remote_path, cancel_check):
+            if local_path and _matches_remote(local_path, remote_path, remote_sha, cancel_check):
                 continue
             conflicts.append(remote_path)
 
-        for key in set(local) - set(baseline):
+        deleted_set = set(deleted)
+        for key in changed:
+            if key in baseline:
+                continue
             root_index, rel = key
             remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
-            if os.path.lexists(remote_path) and not _same_content(local[key], remote_path, cancel_check):
+            if not os.path.lexists(remote_path):
+                continue
+            if os.path.isdir(remote_path) and not os.path.islink(remote_path):
+                # A local edit replaced this directory with a file. That is
+                # only safe if the deletions about to run empty the source
+                # directory completely; anything else there is outside work.
+                conflicts.extend(
+                    full
+                    for entry_rel, full, st in _walk_entries(remote_path)
+                    if not stat.S_ISDIR(st.st_mode)
+                    and (root_index, os.path.join(rel, entry_rel)) not in deleted_set
+                )
+            elif not _same_content(local[key][0], remote_path, cancel_check):
                 conflicts.append(remote_path)
 
+        conflicts.extend(_ancestor_conflicts(changed, manifest, deleted_set))
         if conflicts:
             raise LocalWorkspaceConflict(sorted(set(conflicts)))
-
-        changed = []
-        for key, local_path in local.items():
-            original = baseline.get(key)
-            if original is None or not _same_as_baseline(local_path, original, force_hash=True):
-                changed.append((key, local_path))
 
         if cancel_check and cancel_check():
             raise LocalWorkspaceCancelled("Local workspace sync cancelled")
         if begin_commit and not begin_commit():
             raise LocalWorkspaceCancelled("Local workspace sync cancelled")
 
-        # Persist a recovery boundary before the first source mutation. If
-        # Vireo exits between here and the catalog restore below, Discard
-        # would silently strip the managed copy without undoing already-
-        # published edits; status() surfaces this state as recovery-sync so
-        # only sync_back can clear it.
-        if manifest.get("state") != "syncing":
-            manifest["state"] = "syncing"
-            _write_manifest(manifest_path(vireo_dir, workspace_id), manifest)
+        # Persist the recovery boundary before the first source mutation, so
+        # an interruption is recognized as a partially-published sync.
+        if not resuming:
+            db.conn.execute(
+                "UPDATE local_workspaces SET state='syncing' WHERE workspace_id=?", (workspace_id,)
+            )
+            db.conn.commit()
 
         total = len(changed) + len(deleted)
         done = 0
-        for (root_index, rel), local_path in changed:
-            remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
-            _atomic_publish(local_path, remote_path)
-            done += 1
-            if progress:
-                progress(done, total, rel)
+        # Deletions first: a local rename of a directory to a file (or vice
+        # versa) needs the old source entries gone before publishes create
+        # their replacements.
         for root_index, rel in deleted:
             remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
             with suppress(FileNotFoundError):
@@ -708,28 +979,16 @@ def sync_back(
             done += 1
             if progress:
                 progress(done, total, rel)
+        for key in changed:
+            root_index, rel = key
+            remote_path = os.path.join(manifest["roots"][root_index]["source_path"], rel)
+            _prepare_publish_target(remote_path)
+            _atomic_publish(local[key][0], remote_path)
+            done += 1
+            if progress:
+                progress(done, total, rel)
 
-        # Use temporary unique paths so swaps/nesting can never trip the
-        # folders.path UNIQUE constraint midway through restoration.
-        db.conn.execute("BEGIN IMMEDIATE")
-        try:
-            for folder_id, _old, _target, _status in restore_mappings:
-                db.conn.execute(
-                    "UPDATE folders SET path=? WHERE id=?",
-                    (f"__vireo_local_restore__/{workspace_id}/{folder_id}", folder_id),
-                )
-            for folder_id, _old, target, folder_status in restore_mappings:
-                db.conn.execute(
-                    "UPDATE folders SET path=?, status=? WHERE id=?",
-                    (target, folder_status, folder_id),
-                )
-            db._relink_parents_by_path([item[0] for item in restore_mappings])
-            db.conn.commit()
-        except BaseException:
-            db.conn.rollback()
-            raise
-        db.invalidate_new_images_cache_for_workspace(workspace_id)
-
+        _restore_catalog(db, workspace_id)
         shutil.rmtree(workspace_dir(vireo_dir, workspace_id), ignore_errors=True)
         return {
             "ok": True,
@@ -739,41 +998,62 @@ def sync_back(
         }
 
 
-def discard_local(db, workspace_id: int, vireo_dir: str) -> dict:
+def _source_state(remote_path: str, baseline: dict, cancel_check=None) -> tuple[bool, str | None]:
+    """Compare a source entry against the staged baseline by content.
+
+    Returns (matches, remote sha256 or None). The hash is computed at most
+    once and handed back so callers never re-read the remote file.
+    """
+    try:
+        st = os.lstat(remote_path)
+    except FileNotFoundError:
+        return False, None
+    kind = _entry_type(st)
+    if kind != baseline.get("type"):
+        return False, None
+    if kind == "symlink":
+        return os.readlink(remote_path) == baseline.get("target"), None
+    if st.st_size != baseline.get("size"):
+        return False, None
+    remote_sha = _sha256(remote_path, cancel_check)
+    return remote_sha == baseline.get("sha256"), remote_sha
+
+
+def _matches_remote(local_path: str, remote_path: str, remote_sha: str | None, cancel_check=None) -> bool:
+    """Check whether the local entry equals the source entry, reusing the
+    remote hash computed by the conflict scan when available."""
+    if remote_sha is None:
+        return _same_content(local_path, remote_path, cancel_check)
+    try:
+        st = os.lstat(local_path)
+    except FileNotFoundError:
+        return False
+    if _entry_type(st) != "file":
+        return False
+    return _sha256(local_path, cancel_check) == remote_sha
+
+
+def discard_local(db, workspace_id: int, vireo_dir: str, *, acknowledge_published: bool = False) -> dict:
     """Restore catalog paths and remove local changes without touching source files."""
-    with _LOCK:
-        manifest = _load_manifest(vireo_dir, workspace_id)
-        if not manifest:
+    with _workspace_lock(workspace_id):
+        state_row = local_state(db, workspace_id)
+        if not state_row:
             raise LocalWorkspaceError("This workspace is not working locally")
-        if manifest.get("state") == "staging":
+        state = state_row["state"]
+        if state == "staging":
             shutil.rmtree(workspace_dir(vireo_dir, workspace_id), ignore_errors=True)
+            _delete_state_rows(db, workspace_id)
+            db.conn.commit()
             return {"ok": True, "discarded": True}
-        if manifest.get("state") == "syncing":
+        if state == "syncing" and not acknowledge_published:
             raise LocalWorkspaceError(
                 "A sync-back was interrupted after some files were already published to the source. "
-                "Finish the sync-back to preserve those edits; discard cannot undo published changes."
+                "Finish the sync-back to preserve those edits, or discard again acknowledging that "
+                "unpublished local changes will be lost."
             )
-        if manifest.get("state") not in {"active", "activating"}:
+        if state not in {"active", "syncing"}:
             raise LocalWorkspaceError("Local workspace is not in a recoverable state")
 
-        mappings = _preflight_restore_paths(db, manifest)
-        db.conn.execute("BEGIN IMMEDIATE")
-        try:
-            for folder_id, _old, _target, _status in mappings:
-                db.conn.execute(
-                    "UPDATE folders SET path=? WHERE id=?",
-                    (f"__vireo_local_discard__/{workspace_id}/{folder_id}", folder_id),
-                )
-            for folder_id, _old, target, folder_status in mappings:
-                db.conn.execute(
-                    "UPDATE folders SET path=?, status=? WHERE id=?",
-                    (target, folder_status, folder_id),
-                )
-            db._relink_parents_by_path([item[0] for item in mappings])
-            db.conn.commit()
-        except BaseException:
-            db.conn.rollback()
-            raise
-        db.invalidate_new_images_cache_for_workspace(workspace_id)
+        _restore_catalog(db, workspace_id)
         shutil.rmtree(workspace_dir(vireo_dir, workspace_id), ignore_errors=True)
         return {"ok": True, "discarded": True}

@@ -15,9 +15,18 @@ from services.local_workspace import (
 )
 
 
-def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vireo_dir):
+def create_local_workspace_blueprint(
+    get_db, json_error, get_runner, db_path, vireo_dir, invalidate_missing_originals=None
+):
     blueprint = Blueprint("local_workspace", __name__)
     transition_lock = threading.RLock()
+
+    def _invalidate_caches(workspace_id):
+        # Stage/sync/discard rewrite folders.path for the whole workspace;
+        # the Missing Originals payload caches absolute paths and must not
+        # survive a rebase (the service invalidates the new-images cache).
+        if invalidate_missing_originals:
+            invalidate_missing_originals(workspace_id)
 
     def _active_context():
         db = get_db()
@@ -31,6 +40,9 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
             if job.get("workspace_id") == workspace_id and job.get("status") in {"queued", "running"}:
                 return job
         return None
+
+    def _busy_error(busy, action):
+        return json_error(f"Wait for the {busy['type']} job to finish before {action}", 409)
 
     def _start_job_exclusive(workspace_id, job_type, work, validate):
         """Atomically validate workspace state and register its job."""
@@ -54,9 +66,16 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
         if error:
             return error
         try:
-            return jsonify(status(db, workspace_id, vireo_dir))
+            payload = status(db, workspace_id, vireo_dir)
         except LocalWorkspaceError as exc:
             return json_error(str(exc), 409)
+        # Live-job awareness: a fresh page load (or second tab) must see a
+        # running transfer as in-progress work, never as an interrupted
+        # state needing recovery.
+        busy = _busy_job(workspace_id)
+        if busy:
+            payload["job"] = {"id": busy["id"], "type": busy["type"]}
+        return jsonify(payload)
 
     @blueprint.post("/api/workspaces/active/local-workspace/stage")
     def stage_local_workspace():
@@ -97,12 +116,28 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
                     )
                     runner.push_event(job["id"], "progress", dict(job["progress"]))
 
+                def begin_commit():
+                    # The catalog rebase is about to run; a cancel landing
+                    # after this point must not mark the job cancelled while
+                    # the workspace actually activated.
+                    if not runner.begin_uncancellable(job["id"]):
+                        return False
+                    runner.update_step(
+                        job["id"],
+                        "stage",
+                        status="completed",
+                        summary="Workspace copied locally",
+                    )
+                    runner.update_step(job["id"], "activate", status="running")
+                    return True
+
                 result = stage_workspace(
                     thread_db,
                     workspace_id,
                     vireo_dir,
                     progress=report,
                     cancel_check=lambda: runner.is_cancelled(job["id"]),
+                    begin_commit=begin_commit,
                 )
                 runner.update_step(
                     job["id"],
@@ -116,6 +151,7 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
                     status="completed",
                     summary="Workspace is using local files",
                 )
+                _invalidate_caches(workspace_id)
                 return result
             finally:
                 thread_db.close()
@@ -136,10 +172,7 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
             validate_stage,
         )
         if busy:
-            return json_error(
-                f"Wait for the {busy['type']} job to finish before working locally",
-                409,
-            )
+            return _busy_error(busy, "working locally")
         if validation_error is not None:
             return validation_error
         return jsonify({"job_id": job_id}), 202
@@ -151,6 +184,12 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
             return error
         body = request.get_json(silent=True) or {}
         allow_deletions = body.get("confirm_deletions") is True
+        confirmed_deletions = body.get("confirmed_deletion_count")
+        if confirmed_deletions is not None:
+            try:
+                confirmed_deletions = int(confirmed_deletions)
+            except (TypeError, ValueError):
+                return json_error("confirmed_deletion_count must be a number", 400)
 
         runner = get_runner()
 
@@ -202,6 +241,7 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
                     workspace_id,
                     vireo_dir,
                     allow_deletions=allow_deletions,
+                    confirmed_deletions=confirmed_deletions,
                     progress=report,
                     cancel_check=lambda: runner.is_cancelled(job["id"]),
                     begin_commit=begin_commit,
@@ -218,6 +258,7 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
                     status="completed",
                     summary="Workspace is using source storage",
                 )
+                _invalidate_caches(workspace_id)
                 return result
             finally:
                 thread_db.close()
@@ -231,8 +272,10 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
             is_sync_recovery = state == "recovery" and current.get("recovery_kind") == "sync"
             if state != "active" and not is_sync_recovery:
                 return json_error("This workspace is not working locally", 409)
+            if current.get("changes_error"):
+                return json_error(current["changes_error"], 409)
             deletion_count = (current.get("changes") or {}).get("deleted", 0)
-            if deletion_count and not allow_deletions:
+            if deletion_count and not allow_deletions and not is_sync_recovery:
                 return json_error(
                     f"Sync would delete {deletion_count} source file(s); confirm deletions first",
                     409,
@@ -246,10 +289,7 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
             validate_sync,
         )
         if busy:
-            return json_error(
-                f"Wait for the {busy['type']} job to finish before syncing back",
-                409,
-            )
+            return _busy_error(busy, "syncing back")
         if validation_error is not None:
             return validation_error
         return jsonify({"job_id": job_id}), 202
@@ -262,16 +302,72 @@ def create_local_workspace_blueprint(get_db, json_error, get_runner, db_path, vi
         body = request.get_json(silent=True) or {}
         if body.get("confirm") is not True:
             return json_error("Confirm that local changes may be discarded", 400)
-        with transition_lock:
-            busy = _busy_job(workspace_id)
-            if busy:
-                return json_error(
-                    f"Wait for the {busy['type']} job to finish before discarding local work",
-                    409,
-                )
+        expected_state = body.get("expected_state")
+        acknowledge_published = body.get("acknowledge_published") is True
+
+        runner = get_runner()
+
+        def work(job):
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
             try:
-                return jsonify(discard_local(db, workspace_id, vireo_dir))
+                runner.set_steps(
+                    job["id"],
+                    [{"id": "discard", "label": "Discard local copy and restore source paths"}],
+                )
+                runner.update_step(job["id"], "discard", status="running")
+                result = discard_local(
+                    thread_db,
+                    workspace_id,
+                    vireo_dir,
+                    acknowledge_published=acknowledge_published,
+                )
+                runner.update_step(
+                    job["id"],
+                    "discard",
+                    status="completed",
+                    summary="Workspace is using source storage",
+                )
+                _invalidate_caches(workspace_id)
+                return result
+            finally:
+                thread_db.close()
+
+        def validate_discard():
+            try:
+                current = status(db, workspace_id, vireo_dir)
             except LocalWorkspaceError as exc:
                 return json_error(str(exc), 409)
+            state = current["state"]
+            if state == "remote":
+                return json_error("This workspace is not working locally", 409)
+            # The client confirms against the state it rendered. A stale
+            # page (e.g. a 'Clean Up Incomplete Copy' button left over from
+            # before a stage finished) must never discard a healthy
+            # workspace it never described to the user.
+            if expected_state is not None and state != expected_state:
+                return json_error(
+                    "The local workspace changed since this page loaded; refresh to see its current state",
+                    409,
+                )
+            if state == "recovery" and current.get("recovery_kind") == "sync" and not acknowledge_published:
+                return json_error(
+                    "A sync-back was interrupted after some files were already published. "
+                    "Finish the sync-back, or acknowledge that unpublished local changes will be lost.",
+                    409,
+                )
+            return None
+
+        job_id, busy, validation_error = _start_job_exclusive(
+            workspace_id,
+            "work-locally-discard",
+            work,
+            validate_discard,
+        )
+        if busy:
+            return _busy_error(busy, "discarding local work")
+        if validation_error is not None:
+            return validation_error
+        return jsonify({"job_id": job_id}), 202
 
     return blueprint
