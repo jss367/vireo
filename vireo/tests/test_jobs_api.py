@@ -3297,7 +3297,7 @@ def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
         assert {"Kenya trip", "Portfolio"} <= names
 
 
-def test_import_tag_does_not_duplicate_normalized_legacy_peer(
+def test_import_tag_reuses_keyword_repaired_from_legacy_peer(
     app_and_db, tmp_path, monkeypatch,
 ):
     import import_job
@@ -3312,6 +3312,15 @@ def test_import_tag_does_not_duplicate_normalized_legacy_peer(
     ).lastrowid
     db.conn.commit()
     db.tag_photo(photo_id, legacy_id)
+    # Simulate the supported upgrade sequence. The normalization repair runs
+    # before requests and merges the legacy spelling into the canonical row;
+    # runtime import code can then rely on the stored-name invariant instead
+    # of repeating normalized peer scans at every call site.
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = 'keyword_names_normalized'"
+    )
+    db.conn.commit()
+    db.normalize_keyword_data()
 
     def imported_result(job, runner, db_path, workspace_id, params):
         return {
@@ -3345,7 +3354,7 @@ def test_import_tag_does_not_duplicate_normalized_legacy_peer(
         "WHERE photo_id = ? AND keyword_id IN (?, ?)",
         (photo_id, clean_id, legacy_id),
     ).fetchall()
-    assert [row["keyword_id"] for row in linked] == [legacy_id]
+    assert [row["keyword_id"] for row in linked] == [clean_id]
 
 
 def test_duplicate_only_import_does_not_tag_existing_photos(
