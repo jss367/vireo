@@ -1064,6 +1064,61 @@ def test_add_keyword_with_type_override(app_and_db):
     assert row["type"] == "individual"
 
 
+def test_add_keyword_noop_when_already_tagged(app_and_db):
+    """POST /api/photos/<id>/keywords must be a no-op when the photo already
+    carries the keyword. Otherwise the route queues a keyword_add pending
+    change and records a keyword_add edit whose undo calls untag_photo —
+    so a repeated/stale Add click would remove the pre-existing tag on
+    undo. Mirrors the batch route's already_tagged precheck.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pid = photos[0]['id']
+
+    # First add: real work — one pending change, one edit.
+    resp = client.post(f'/api/photos/{pid}/keywords', json={"name": "Robin"})
+    assert resp.status_code == 200
+    kid = resp.get_json()["keyword_id"]
+
+    def counts():
+        n_pending = db.conn.execute(
+            "SELECT COUNT(*) AS n FROM pending_changes "
+            "WHERE change_type = 'keyword_add' AND photo_id = ? AND value = ?",
+            (pid, "Robin"),
+        ).fetchone()["n"]
+        n_edits = db.conn.execute(
+            "SELECT COUNT(*) AS n FROM edit_history "
+            "WHERE action_type = 'keyword_add' AND new_value = ?",
+            (str(kid),),
+        ).fetchone()["n"]
+        return n_pending, n_edits
+
+    first_pending, first_edits = counts()
+
+    # Repeat the same add. Must not queue another pending change or record
+    # another edit — the response still succeeds so the client sees no
+    # error.
+    resp = client.post(f'/api/photos/{pid}/keywords', json={"name": "Robin"})
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    assert resp.get_json()["keyword_id"] == kid
+
+    assert counts() == (first_pending, first_edits), (
+        "no-op add must not queue a new pending change or record a new edit"
+    )
+
+    # The photo still carries exactly one row for this keyword — a stale
+    # undo of the (non-)second click can't remove the tag because no new
+    # edit was recorded.
+    n_tags = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id = ?",
+        (pid, kid),
+    ).fetchone()["n"]
+    assert n_tags == 1
+
+
 def test_batch_keyword_with_type_override(app_and_db):
     """POST /api/batch/keyword with type param sets keyword type in DB."""
     app, db = app_and_db
