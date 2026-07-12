@@ -3507,10 +3507,11 @@ def test_import_gps_tagging_stops_when_cancelled_during_resolution(
 
     monkeypatch.setattr(import_job, "run_import_job", imported_result)
     monkeypatch.setattr(Database, "get_photos_by_ids", cancel_during_resolution)
+    quick_look_id = _process_id(db, "Quick look")
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
         "destination": str(tmp_path / "archive"),
-        "after_import": "quick_look",
+        "after_import": quick_look_id,
         "location_from_gps": True,
     })
     assert resp.status_code == 200, resp.get_json()
