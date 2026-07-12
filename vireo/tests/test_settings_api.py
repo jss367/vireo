@@ -591,6 +591,72 @@ def test_import_replaces_global_file(app_and_db):
     assert raw["photos_per_page"] == 100
 
 
+def test_import_translates_legacy_default_strategy(app_and_db):
+    """A backup from before saved_processes existed carried
+    ``pipeline.default_strategy`` (a hardcoded name). Import must translate it
+    to ``pipeline.default_process_id`` — otherwise the legacy key would be
+    preserved as-is (non-schema pass-through) and every after-import default
+    would silently degrade to import-only until the user re-picks a default."""
+    app, db = app_and_db
+    client = app.test_client()
+    identify_id = next(
+        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+    )
+    payload = {"pipeline": {"default_strategy": "identify"}}
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] == identify_id
+    assert "default_strategy" not in raw["pipeline"]
+
+
+def test_import_translates_unknown_legacy_strategy_to_null(app_and_db):
+    """An unrecognized legacy strategy name maps to null (import only), same as
+    the startup migration — never a stale reference."""
+    app, _ = app_and_db
+    client = app.test_client()
+    payload = {"pipeline": {"default_strategy": "not_a_real_strategy"}}
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] is None
+    assert "default_strategy" not in raw["pipeline"]
+
+
+def test_import_prefers_default_process_id_over_legacy_key(app_and_db):
+    """When a payload carries both the new and legacy keys — e.g. a manually
+    hand-edited backup — the new key wins and the legacy key is dropped, so
+    translation never overwrites a user-specified id."""
+    app, db = app_and_db
+    client = app.test_client()
+    full_id = next(
+        p["id"] for p in db.get_saved_processes() if p["name"] == "Full"
+    )
+    payload = {
+        "pipeline": {
+            "default_strategy": "identify",
+            "default_process_id": full_id,
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] == full_id
+    assert "default_strategy" not in raw["pipeline"]
+
+
 def test_import_rejects_invalid_json(app_and_db):
     app, _ = app_and_db
     client = app.test_client()

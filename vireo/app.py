@@ -11963,6 +11963,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(payload, dict):
             return json_error("payload must be a JSON object", status=400)
 
+        # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
+        # name) to the current ``pipeline.default_process_id`` before schema
+        # validation runs. Startup migration does the same for
+        # ~/.vireo/config.json, but importing an older settings backup would
+        # otherwise write the legacy key through as a non-schema value (the
+        # import endpoints only read ``default_process_id``) and silently fall
+        # back to import-only until a restart. Mirror the migration's mapping
+        # exactly: unknown/removed legacy names -> null (import only). If both
+        # keys are present (e.g. a hand-edited backup), the new key wins and
+        # the legacy key is dropped so it can't reappear on a later export.
+        pipeline_payload = payload.get("pipeline")
+        if (
+            isinstance(pipeline_payload, dict)
+            and "default_strategy" in pipeline_payload
+        ):
+            import process_strategies as ps
+
+            legacy = pipeline_payload.pop("default_strategy")
+            if "default_process_id" not in pipeline_payload:
+                seed_name = (
+                    ps.LEGACY_STRATEGY_NAMES.get(legacy)
+                    if isinstance(legacy, str) else None
+                )
+                translated_pid = None
+                if seed_name is not None:
+                    match = next(
+                        (
+                            p for p in _get_db().get_saved_processes()
+                            if p["name"] == seed_name
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        translated_pid = match["id"]
+                pipeline_payload["default_process_id"] = translated_pid
+
         # Iterate the schema directly rather than relying on flatten() — empty
         # objects at schema leaves (e.g. {"classification_threshold": {}}) flatten
         # to nothing and would otherwise be written as-is, replacing a numeric
