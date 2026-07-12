@@ -105,6 +105,17 @@ def _symlink_stays_within(path: str, root: str) -> bool:
     target = os.readlink(path)
     if os.path.isabs(target):
         return False
+    parent_rel = os.path.relpath(os.path.dirname(path), root)
+    lexical_parts = [] if parent_rel == os.curdir else list(Path(parent_rel).parts)
+    for part in Path(target).parts:
+        if part in {"", os.curdir}:
+            continue
+        if part == os.pardir:
+            if not lexical_parts:
+                return False
+            lexical_parts.pop()
+        else:
+            lexical_parts.append(part)
     resolved = os.path.join(os.path.dirname(path), target)
     return _physical_is_within(resolved, root)
 
@@ -391,6 +402,7 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
             except BaseException:
                 db.conn.rollback()
                 raise
+            db.invalidate_new_images_cache_for_workspace(workspace_id)
 
             manifest["state"] = "active"
             manifest["activated_at"] = time.time()
@@ -670,6 +682,7 @@ def sync_back(
         except BaseException:
             db.conn.rollback()
             raise
+        db.invalidate_new_images_cache_for_workspace(workspace_id)
 
         shutil.rmtree(workspace_dir(vireo_dir, workspace_id), ignore_errors=True)
         return {
@@ -710,5 +723,6 @@ def discard_local(db, workspace_id: int, vireo_dir: str) -> dict:
         except BaseException:
             db.conn.rollback()
             raise
+        db.invalidate_new_images_cache_for_workspace(workspace_id)
         shutil.rmtree(workspace_dir(vireo_dir, workspace_id), ignore_errors=True)
         return {"ok": True, "discarded": True}

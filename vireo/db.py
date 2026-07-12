@@ -46,6 +46,7 @@ class _UpdateKeywordResult(int):
         obj.peer_pre_photos = tuple(peer_pre_photos)
         return obj
 
+
 _SQLITE_PARAM_CHUNK_SIZE = 800
 _MISSING_PHOTOS_PROGRESS_INTERVAL = 200
 
@@ -103,25 +104,27 @@ def _nfc(name: str) -> str:
     return unicodedata.normalize("NFC", name)
 
 
-_TAXON_LOOKUP_TRANSLATION = str.maketrans({
-    "’": "'",
-    "‘": "'",
-    "`": "'",
-    "´": "'",
-    "ʼ": "'",
-    "ʹ": "'",
-    "‛": "'",
-    "“": '"',
-    "”": '"',
-    "„": '"',
-    "‟": '"',
-    "‐": "-",
-    "‑": "-",
-    "‒": "-",
-    "–": "-",
-    "—": "-",
-    "―": "-",
-})
+_TAXON_LOOKUP_TRANSLATION = str.maketrans(
+    {
+        "’": "'",
+        "‘": "'",
+        "`": "'",
+        "´": "'",
+        "ʼ": "'",
+        "ʹ": "'",
+        "‛": "'",
+        "“": '"',
+        "”": '"',
+        "„": '"',
+        "‟": '"',
+        "‐": "-",
+        "‑": "-",
+        "‒": "-",
+        "–": "-",
+        "—": "-",
+        "―": "-",
+    }
+)
 
 
 def _taxon_lookup_variants(name: str) -> list[str]:
@@ -250,7 +253,7 @@ def _subtree_prefix(path: str) -> str:
 def _subtree_relative(child_path: str, root_path: str) -> str:
     root = _path_for_subtree_match(root_path)
     child = _path_for_subtree_match(child_path)
-    return child[len(root):].lstrip("/")
+    return child[len(root) :].lstrip("/")
 
 
 def _join_subtree_path(root_path: str, relative_path: str) -> str:
@@ -286,7 +289,7 @@ def _stored_parent_path(path: str) -> str | None:
 def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
     values = list(values)
     for idx in range(0, len(values), size):
-        yield values[idx:idx + size]
+        yield values[idx : idx + size]
 
 
 # Canonical set of keyword type values stored in keywords.type.
@@ -338,18 +341,48 @@ NO_LOCATION_INFORMATION_RULES = {
     ],
 }
 
-ALL_NAV_IDS = frozenset({
-    "import",
-    "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-    "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
-    "dashboard", "storage", "audit", "move", "compare",
-    "settings", "workspace", "shortcuts",
-    "keywords", "duplicates", "logs",
-})
+ALL_NAV_IDS = frozenset(
+    {
+        "import",
+        "pipeline",
+        "jobs",
+        "pipeline_review",
+        "pipeline_rapid_review",
+        "review",
+        "cull",
+        "misses",
+        "highlights",
+        "life_list",
+        "browse",
+        "edit",
+        "map",
+        "variants",
+        "dashboard",
+        "storage",
+        "audit",
+        "move",
+        "compare",
+        "settings",
+        "workspace",
+        "shortcuts",
+        "keywords",
+        "duplicates",
+        "logs",
+    }
+)
 
 DEFAULT_TABS = [
-    "import", "browse", "pipeline", "pipeline_review",
-    "review", "cull", "jobs", "highlights", "misses", "storage", "settings",
+    "import",
+    "browse",
+    "pipeline",
+    "pipeline_review",
+    "review",
+    "cull",
+    "jobs",
+    "highlights",
+    "misses",
+    "storage",
+    "settings",
 ]
 
 
@@ -371,7 +404,7 @@ def commit_with_retry(conn, max_retries=5, base_delay=0.1):
             msg = str(e).lower()
             if ("locked" not in msg and "busy" not in msg) or attempt == max_retries:
                 raise
-            time.sleep(base_delay * (2 ** attempt))
+            time.sleep(base_delay * (2**attempt))
 
 
 def execute_with_retry(conn, sql, params=(), max_retries=5, base_delay=0.1):
@@ -393,7 +426,7 @@ def execute_with_retry(conn, sql, params=(), max_retries=5, base_delay=0.1):
             msg = str(e).lower()
             if ("locked" not in msg and "busy" not in msg) or attempt == max_retries:
                 raise
-            time.sleep(base_delay * (2 ** attempt))
+            time.sleep(base_delay * (2**attempt))
 
 
 def _inclusive_date_to(date_to):
@@ -417,7 +450,7 @@ def _inclusive_date_to(date_to):
     # Has fractional seconds — pad to 6 digits with '9' for inclusive upper bound
     dot_idx = date_to.rfind(".")
     if dot_idx >= 0:
-        frac = date_to[dot_idx + 1:]
+        frac = date_to[dot_idx + 1 :]
         if len(frac) < 6:
             return date_to + "9" * (6 - len(frac))
     return date_to
@@ -501,11 +534,7 @@ class Database:
             self._create_tables()
         except sqlite3.OperationalError as e:
             msg = str(e).lower()
-            if (
-                msg.startswith("no such column")
-                or msg.startswith("no such table")
-                or "has no column named" in msg
-            ):
+            if msg.startswith("no such column") or msg.startswith("no such table") or "has no column named" in msg:
                 raise IncompatibleDatabaseError(self._db_path, str(e)) from e
             raise
         self.repair_missing_folder_parents()
@@ -1067,8 +1096,7 @@ class Database:
         if "place_id" not in kw_cols:
             cur.execute("ALTER TABLE keywords ADD COLUMN place_id TEXT")
         cur.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_keywords_place_id "
-            "ON keywords(place_id) WHERE place_id IS NOT NULL"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_keywords_place_id ON keywords(place_id) WHERE place_id IS NOT NULL"
         )
         # Migration: folders.parent_id. Truly legacy databases predate the
         # column, and CREATE TABLE IF NOT EXISTS above is a no-op for them —
@@ -1077,10 +1105,7 @@ class Database:
         try:
             self.conn.execute("SELECT parent_id FROM folders LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE folders "
-                "ADD COLUMN parent_id INTEGER REFERENCES folders(id)"
-            )
+            self.conn.execute("ALTER TABLE folders ADD COLUMN parent_id INTEGER REFERENCES folders(id)")
         # Phase 1 storage-philosophy migration: classifier embeddings move
         # from single-slot photos.(embedding, embedding_model) columns into
         # the per-(photo, model, variant) photo_embeddings table. Rows whose
@@ -1126,9 +1151,7 @@ class Database:
         # (and `_get_db()` opens a fresh Database per request).
         current_user_version = self.conn.execute("PRAGMA user_version").fetchone()[0]
         if current_user_version < 1:
-            rows = self.conn.execute(
-                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
-            ).fetchall()
+            rows = self.conn.execute("SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL").fetchall()
             for row in rows:
                 try:
                     tabs = json.loads(row["tabs"])
@@ -1152,9 +1175,7 @@ class Database:
         # Storage tab once. Guard with user_version so a later user unpin
         # stays respected across fresh Database handles.
         if current_user_version < 2:
-            rows = self.conn.execute(
-                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
-            ).fetchall()
+            rows = self.conn.execute("SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL").fetchall()
             for row in rows:
                 try:
                     tabs = json.loads(row["tabs"])
@@ -1200,9 +1221,7 @@ class Database:
         # are left alone — a one-shot migration must not silently re-add a
         # tab a user removed.
         if current_user_version < 4:
-            rows = self.conn.execute(
-                "SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL"
-            ).fetchall()
+            rows = self.conn.execute("SELECT id, tabs FROM workspaces WHERE tabs IS NOT NULL").fetchall()
             for row in rows:
                 try:
                     tabs = json.loads(row["tabs"])
@@ -1234,15 +1253,11 @@ class Database:
         try:
             self.conn.execute("SELECT last_grouped_at FROM workspaces LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE workspaces ADD COLUMN last_grouped_at INTEGER"
-            )
+            self.conn.execute("ALTER TABLE workspaces ADD COLUMN last_grouped_at INTEGER")
         try:
             self.conn.execute("SELECT last_group_fingerprint FROM workspaces LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE workspaces ADD COLUMN last_group_fingerprint TEXT"
-            )
+            self.conn.execute("ALTER TABLE workspaces ADD COLUMN last_group_fingerprint TEXT")
         # Migration: add `pinned_at` for the alphabetical-with-pinned-on-top
         # workspace dropdown. NULL means unpinned; an ISO timestamp marks the
         # workspace as pinned.
@@ -1255,10 +1270,7 @@ class Database:
         try:
             self.conn.execute("SELECT is_root FROM workspace_folders LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE workspace_folders "
-                "ADD COLUMN is_root INTEGER NOT NULL DEFAULT 1"
-            )
+            self.conn.execute("ALTER TABLE workspace_folders ADD COLUMN is_root INTEGER NOT NULL DEFAULT 1")
             self.conn.execute(
                 """UPDATE workspace_folders AS child_wf
                    SET is_root = 0
@@ -1283,21 +1295,15 @@ class Database:
         try:
             self.conn.execute("SELECT working_copy_failed_at FROM photos LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN working_copy_failed_at TEXT"
-            )
+            self.conn.execute("ALTER TABLE photos ADD COLUMN working_copy_failed_at TEXT")
         try:
             self.conn.execute("SELECT working_copy_failed_mtime FROM photos LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN working_copy_failed_mtime REAL"
-            )
+            self.conn.execute("ALTER TABLE photos ADD COLUMN working_copy_failed_mtime REAL")
         try:
             self.conn.execute("SELECT working_copy_failed_source FROM photos LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN working_copy_failed_source TEXT"
-            )
+            self.conn.execute("ALTER TABLE photos ADD COLUMN working_copy_failed_source TEXT")
         # Migration: add eye_kp_fingerprint column. Set to NULL for new
         # photos; populated when the eye-keypoint stage runs. Phase 1 also
         # backfills existing eye-keypoint rows to the current fingerprint
@@ -1305,9 +1311,7 @@ class Database:
         try:
             self.conn.execute("SELECT eye_kp_fingerprint FROM photos LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN eye_kp_fingerprint TEXT"
-            )
+            self.conn.execute("ALTER TABLE photos ADD COLUMN eye_kp_fingerprint TEXT")
         # One-shot backfill: stamp the current EYE_KP_FINGERPRINT_VERSION
         # onto photos that already have eye-keypoint data, so existing
         # users don't see "Outdated" for unchanged data on first upgrade.
@@ -1316,9 +1320,7 @@ class Database:
         # predate that column, in which case there's no eye-keypoint data
         # to backfill anyway and we just record the marker so we don't
         # keep probing.
-        marker = self.conn.execute(
-            "SELECT value FROM db_meta WHERE key='eye_kp_fingerprint_backfill'"
-        ).fetchone()
+        marker = self.conn.execute("SELECT value FROM db_meta WHERE key='eye_kp_fingerprint_backfill'").fetchone()
         if marker is None:
             try:
                 self.conn.execute("SELECT eye_tenengrad FROM photos LIMIT 0")
@@ -1326,27 +1328,21 @@ class Database:
                 pass
             else:
                 from pipeline import EYE_KP_FINGERPRINT_VERSION
+
                 self.conn.execute(
                     "UPDATE photos SET eye_kp_fingerprint = ? "
                     "WHERE eye_tenengrad IS NOT NULL AND eye_kp_fingerprint IS NULL",
                     (EYE_KP_FINGERPRINT_VERSION,),
                 )
-            self.conn.execute(
-                "INSERT INTO db_meta(key, value) VALUES ('eye_kp_fingerprint_backfill', '1')"
-            )
+            self.conn.execute("INSERT INTO db_meta(key, value) VALUES ('eye_kp_fingerprint_backfill', '1')")
         try:
             self.conn.execute("SELECT active_mask_variant FROM photos LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN active_mask_variant TEXT"
-            )
+            self.conn.execute("ALTER TABLE photos ADD COLUMN active_mask_variant TEXT")
         try:
             self.conn.execute("SELECT wildlife_excluded FROM photos LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos "
-                "ADD COLUMN wildlife_excluded INTEGER NOT NULL DEFAULT 0"
-            )
+            self.conn.execute("ALTER TABLE photos ADD COLUMN wildlife_excluded INTEGER NOT NULL DEFAULT 0")
         # Migration: miss-classifier columns. PHOTO_COLS/get_collection_photos
         # and misses.py both reference these; without the fallback ALTER, any
         # DB created before the miss-classifier feature fails every photo-list
@@ -1360,9 +1356,7 @@ class Database:
             try:
                 self.conn.execute(f"SELECT {column} FROM photos LIMIT 0")
             except sqlite3.OperationalError:
-                self.conn.execute(
-                    f"ALTER TABLE photos ADD COLUMN {column} {column_type}"
-                )
+                self.conn.execute(f"ALTER TABLE photos ADD COLUMN {column} {column_type}")
         # Migration: integrity-verification markers. hash_checked_at is when
         # the file's content was last re-hashed against photos.file_hash;
         # hash_status records the verdict ('ok', 'modified', 'corrupt',
@@ -1370,15 +1364,11 @@ class Database:
         try:
             self.conn.execute("SELECT hash_checked_at FROM photos LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN hash_checked_at TEXT"
-            )
+            self.conn.execute("ALTER TABLE photos ADD COLUMN hash_checked_at TEXT")
         try:
             self.conn.execute("SELECT hash_status FROM photos LIMIT 0")
         except sqlite3.OperationalError:
-            self.conn.execute(
-                "ALTER TABLE photos ADD COLUMN hash_status TEXT"
-            )
+            self.conn.execute("ALTER TABLE photos ADD COLUMN hash_status TEXT")
 
         # Backfill pre-existing photos with mask_path set on the photos
         # row but no row in photo_masks. They get migrated to
@@ -1414,22 +1404,25 @@ class Database:
                 "prompt_x, prompt_y, prompt_w, prompt_h, "
                 "subject_size, subject_tenengrad, bg_tenengrad, crop_complete) "
                 "VALUES (?, 'unknown', ?, ?, 'unknown', -1, -1, -1, -1, ?, ?, ?, ?)",
-                (r["id"], r["mask_path"], now,
-                 r["subject_size"], r["subject_tenengrad"],
-                 r["bg_tenengrad"], r["crop_complete"]),
+                (
+                    r["id"],
+                    r["mask_path"],
+                    now,
+                    r["subject_size"],
+                    r["subject_tenengrad"],
+                    r["bg_tenengrad"],
+                    r["crop_complete"],
+                ),
             )
             self.conn.execute(
-                "UPDATE photos SET active_mask_variant='unknown' "
-                "WHERE id=? AND active_mask_variant IS NULL",
+                "UPDATE photos SET active_mask_variant='unknown' WHERE id=? AND active_mask_variant IS NULL",
                 (r["id"],),
             )
         self.conn.commit()
 
     def repair_missing_folder_parents(self):
         """Fill parent_id for legacy folder rows whose parent path is known."""
-        rows = self.conn.execute(
-            "SELECT id, path, parent_id FROM folders"
-        ).fetchall()
+        rows = self.conn.execute("SELECT id, path, parent_id FROM folders").fetchall()
         path_to_id = {r["path"]: r["id"] for r in rows}
         updates = []
         for row in rows:
@@ -1471,14 +1464,13 @@ class Database:
         best-effort result.
         """
         import new_images
+
         cached = self._new_images_cache.get(self._db_path, workspace_id)
         if cached is not None:
             return cached
         generation = self._new_images_cache.get_generation(self._db_path, workspace_id)
         result = new_images.count_new_images_for_workspace(self, workspace_id)
-        self._new_images_cache.set(
-            self._db_path, workspace_id, result, generation=generation
-        )
+        self._new_images_cache.set(self._db_path, workspace_id, result, generation=generation)
         return result
 
     def invalidate_new_images_cache_for_folders(self, folder_ids):
@@ -1493,15 +1485,18 @@ class Database:
         ws_ids = set()
         folder_ids = list(folder_ids)
         for i in range(0, len(folder_ids), CHUNK):
-            chunk = folder_ids[i:i + CHUNK]
+            chunk = folder_ids[i : i + CHUNK]
             placeholders = ",".join("?" * len(chunk))
             rows = self.conn.execute(
-                f"SELECT DISTINCT workspace_id FROM workspace_folders "
-                f"WHERE folder_id IN ({placeholders})",
+                f"SELECT DISTINCT workspace_id FROM workspace_folders WHERE folder_id IN ({placeholders})",
                 tuple(chunk),
             ).fetchall()
             ws_ids.update(r["workspace_id"] for r in rows)
         self._new_images_cache.invalidate_workspaces(self._db_path, ws_ids)
+
+    def invalidate_new_images_cache_for_workspace(self, workspace_id):
+        """Clear path-dependent new-image results for one workspace."""
+        self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def _photo_in_workspace(self, photo_id):
         """Return True if the photo belongs to a folder visible in the active workspace."""
@@ -1516,19 +1511,19 @@ class Database:
     def _verify_photo_in_workspace(self, photo_id):
         """Raise ValueError if the photo is not in the active workspace."""
         if not self._photo_in_workspace(photo_id):
-            raise ValueError(
-                f"Photo {photo_id} does not belong to the active workspace"
-            )
+            raise ValueError(f"Photo {photo_id} does not belong to the active workspace")
 
     def create_workspace(self, name, config_overrides=None, ui_state=None):
         """Create a new workspace. Returns the workspace id."""
         cur = self.conn.execute(
             """INSERT INTO workspaces (name, config_overrides, ui_state, tabs)
                VALUES (?, ?, ?, ?)""",
-            (name,
-             json.dumps(config_overrides) if config_overrides else None,
-             json.dumps(ui_state) if ui_state else None,
-             json.dumps(DEFAULT_TABS)),
+            (
+                name,
+                json.dumps(config_overrides) if config_overrides else None,
+                json.dumps(ui_state) if ui_state else None,
+                json.dumps(DEFAULT_TABS),
+            ),
         )
         self.conn.commit()
         workspace_id = cur.lastrowid
@@ -1541,20 +1536,15 @@ class Database:
 
     def get_workspace(self, workspace_id):
         """Return a single workspace by id, or None."""
-        return self.conn.execute(
-            "SELECT * FROM workspaces WHERE id = ?", (workspace_id,)
-        ).fetchone()
+        return self.conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
 
     def get_workspaces(self):
         """Return all workspaces, pinned first then alphabetical."""
-        return self.conn.execute(
-            "SELECT * FROM workspaces "
-            "ORDER BY (pinned_at IS NULL), LOWER(name)"
-        ).fetchall()
+        return self.conn.execute("SELECT * FROM workspaces ORDER BY (pinned_at IS NULL), LOWER(name)").fetchall()
 
-    def update_workspace(self, workspace_id, name=None, config_overrides=_UNSET,
-                         ui_state=_UNSET, last_opened_at=None,
-                         pinned_at=_UNSET):
+    def update_workspace(
+        self, workspace_id, name=None, config_overrides=_UNSET, ui_state=_UNSET, last_opened_at=None, pinned_at=_UNSET
+    ):
         """Update workspace fields. Only provided args are updated.
 
         For config_overrides and ui_state, pass None to clear the value
@@ -1580,9 +1570,7 @@ class Database:
         if not updates:
             return
         params.append(workspace_id)
-        self.conn.execute(
-            f"UPDATE workspaces SET {', '.join(updates)} WHERE id = ?", params
-        )
+        self.conn.execute(f"UPDATE workspaces SET {', '.join(updates)} WHERE id = ?", params)
         self.conn.commit()
 
     def get_effective_config(self, global_config):
@@ -1601,7 +1589,11 @@ class Database:
         if not ws or not ws["config_overrides"]:
             return global_config
         try:
-            overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            overrides = (
+                json.loads(ws["config_overrides"])
+                if isinstance(ws["config_overrides"], str)
+                else ws["config_overrides"]
+            )
             if not isinstance(overrides, dict):
                 return global_config
             return _deep_merge(global_config, overrides)
@@ -1640,11 +1632,7 @@ class Database:
                 values.append(default)
                 continue
             try:
-                overrides = (
-                    json.loads(overrides_raw)
-                    if isinstance(overrides_raw, str)
-                    else overrides_raw
-                )
+                overrides = json.loads(overrides_raw) if isinstance(overrides_raw, str) else overrides_raw
             except (json.JSONDecodeError, TypeError):
                 values.append(default)
                 continue
@@ -1670,6 +1658,7 @@ class Database:
         like collection filtering and the classify skip-gate.
         """
         import config as cfg
+
         effective = self.get_effective_config(cfg.load())
         raw = effective.get("subject_types", list(SUBJECT_TYPES_DEFAULT))
         if not isinstance(raw, list):
@@ -1714,7 +1703,7 @@ class Database:
         excluded = set()
         chunk_size = self._FILTER_SUBJECT_CHUNK
         for i in range(0, len(photo_ids_list), chunk_size):
-            chunk = photo_ids_list[i:i + chunk_size]
+            chunk = photo_ids_list[i : i + chunk_size]
             pid_placeholders = ",".join("?" * len(chunk))
             rows = self.conn.execute(
                 f"""SELECT DISTINCT pk.photo_id FROM photo_keywords pk
@@ -1751,7 +1740,11 @@ class Database:
         if not ws or not ws["config_overrides"]:
             return None
         try:
-            overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+            overrides = (
+                json.loads(ws["config_overrides"])
+                if isinstance(ws["config_overrides"], str)
+                else ws["config_overrides"]
+            )
             if not isinstance(overrides, dict):
                 return None
             labels = overrides.get("active_labels")
@@ -1812,8 +1805,7 @@ class Database:
         mismatch as "Outdated" so the user knows a regroup is pending.
         """
         self.conn.execute(
-            "UPDATE workspaces SET last_grouped_at = ?, last_group_fingerprint = ? "
-            "WHERE id = ?",
+            "UPDATE workspaces SET last_grouped_at = ?, last_group_fingerprint = ? WHERE id = ?",
             (when_ts, fingerprint, workspace_id),
         )
         self.conn.commit()
@@ -1824,7 +1816,11 @@ class Database:
         overrides = {}
         if ws and ws["config_overrides"]:
             try:
-                overrides = json.loads(ws["config_overrides"]) if isinstance(ws["config_overrides"], str) else ws["config_overrides"]
+                overrides = (
+                    json.loads(ws["config_overrides"])
+                    if isinstance(ws["config_overrides"], str)
+                    else ws["config_overrides"]
+                )
             except (json.JSONDecodeError, TypeError):
                 overrides = {}
             if not isinstance(overrides, dict):
@@ -1849,9 +1845,7 @@ class Database:
         even though their paths clearly live below a parent. Path-prefix
         matching keeps recursive workspace roots working for those rows too.
         """
-        row = self.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (folder_id,)
-        ).fetchone()
+        row = self.conn.execute("SELECT path FROM folders WHERE id = ?", (folder_id,)).fetchone()
         if row is None or not row["path"]:
             return [folder_id]
         root_path = _path_for_subtree_match(row["path"])
@@ -1866,8 +1860,7 @@ class Database:
         ids.update(r["id"] for r in rows)
         return list(ids)
 
-    def _add_workspace_folder_no_commit(
-            self, workspace_id, folder_id, *, is_root=True):
+    def _add_workspace_folder_no_commit(self, workspace_id, folder_id, *, is_root=True):
         """Link a folder + descendants to a workspace WITHOUT committing.
 
         Same body as ``add_workspace_folder`` minus the ``commit()`` and cache
@@ -1896,8 +1889,7 @@ class Database:
 
     def add_workspace_folder(self, workspace_id, folder_id, *, is_root=True):
         """Link a folder and its known descendants to a workspace."""
-        self._add_workspace_folder_no_commit(
-            workspace_id, folder_id, is_root=is_root)
+        self._add_workspace_folder_no_commit(workspace_id, folder_id, is_root=is_root)
         self.conn.commit()
         # The folder's untracked files now count toward this workspace's
         # new-images backlog. Drop any stale cached payload so the next read
@@ -2083,34 +2075,24 @@ class Database:
         source_folder_ids = {f["id"] for f in source_folders}
         for fid in folder_ids:
             if fid not in source_folder_ids:
-                raise ValueError(
-                    f"Folder {fid} does not belong to source workspace {source_ws_id}"
-                )
+                raise ValueError(f"Folder {fid} does not belong to source workspace {source_ws_id}")
 
         if not folder_ids:
-                return {
-                    "folders_moved": 0,
-                    "pending_changes_moved": 0,
-                    "photo_preferences_moved": 0,
-                    "species_highlights_moved": 0,
-                }
+            return {
+                "folders_moved": 0,
+                "pending_changes_moved": 0,
+                "photo_preferences_moved": 0,
+                "species_highlights_moved": 0,
+            }
 
         selected_folder_ids = set(folder_ids)
         source_folder_paths = {
-            folder["id"]: _path_for_subtree_match(folder["path"])
-            for folder in source_folders
-            if folder["path"]
+            folder["id"]: _path_for_subtree_match(folder["path"]) for folder in source_folders if folder["path"]
         }
-        remaining_source_paths = [
-            path
-            for fid, path in source_folder_paths.items()
-            if fid not in selected_folder_ids
-        ]
+        remaining_source_paths = [path for fid, path in source_folder_paths.items() if fid not in selected_folder_ids]
         for fid in selected_folder_ids:
             selected_path = source_folder_paths.get(fid)
-            if selected_path and any(
-                selected_path.startswith(path + "/") for path in remaining_source_paths
-            ):
+            if selected_path and any(selected_path.startswith(path + "/") for path in remaining_source_paths):
                 raise ValueError(
                     "Cannot move a folder that is covered by another source "
                     "workspace folder; move the covering folder or remove it first"
@@ -2232,12 +2214,18 @@ class Database:
                 for src_row in src_highlights:
                     by_species.setdefault(src_row["species"], []).append(src_row)
                 for sp, sp_rows in by_species.items():
-                    next_rank = int(self.conn.execute(
-                        """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                    next_rank = (
+                        int(
+                            self.conn.execute(
+                                """SELECT COALESCE(MAX(rank), 0) AS max_rank
                            FROM species_highlights
                            WHERE workspace_id = ? AND species = ?""",
-                        (target_ws_id, sp),
-                    ).fetchone()["max_rank"] or 0) + 1
+                                (target_ws_id, sp),
+                            ).fetchone()["max_rank"]
+                            or 0
+                        )
+                        + 1
+                    )
                     for src_row in sp_rows:
                         cur = self.conn.execute(
                             """INSERT OR IGNORE INTO species_highlights
@@ -2295,9 +2283,7 @@ class Database:
 
         # Folders changed membership for BOTH workspaces, so each workspace's
         # new-images backlog needs to be recomputed on the next read.
-        self._new_images_cache.invalidate_workspaces(
-            self._db_path, [source_ws_id, target_ws_id]
-        )
+        self._new_images_cache.invalidate_workspaces(self._db_path, [source_ws_id, target_ws_id])
 
         return {
             "folders_moved": len(folder_ids),
@@ -2308,9 +2294,7 @@ class Database:
 
     def ensure_default_workspace(self):
         """Create the Default workspace if it doesn't exist. Returns its id."""
-        row = self.conn.execute(
-            "SELECT id FROM workspaces WHERE name = 'Default'"
-        ).fetchone()
+        row = self.conn.execute("SELECT id FROM workspaces WHERE name = 'Default'").fetchone()
         if row:
             return row[0]
         return self.create_workspace("Default")
@@ -2335,9 +2319,7 @@ class Database:
         # Warm-path short-circuit: if any genre row already exists, the
         # database has already been seeded — nothing to do. Cheap (single
         # SELECT 1 LIMIT 1).
-        existing = self.conn.execute(
-            "SELECT 1 FROM keywords WHERE type = 'genre' LIMIT 1"
-        ).fetchone()
+        existing = self.conn.execute("SELECT 1 FROM keywords WHERE type = 'genre' LIMIT 1").fetchone()
         if existing:
             return
         # Cold / upgrade path: promote any same-name top-level 'general'
@@ -2420,12 +2402,18 @@ class Database:
             ).fetchone()
             if existing:
                 continue
-            next_rank = int(self.conn.execute(
-                """SELECT COALESCE(MAX(rank), 0) AS max_rank
+            next_rank = (
+                int(
+                    self.conn.execute(
+                        """SELECT COALESCE(MAX(rank), 0) AS max_rank
                    FROM species_highlights
                    WHERE workspace_id = ? AND species = ?""",
-                (ws, sp),
-            ).fetchone()["max_rank"] or 0) + 1
+                        (ws, sp),
+                    ).fetchone()["max_rank"]
+                    or 0
+                )
+                + 1
+            )
             self.conn.execute(
                 """INSERT INTO species_highlights
                        (workspace_id, species, photo_id, rank,
@@ -2441,8 +2429,7 @@ class Database:
 
     def _next_species_representative_order(self):
         row = self.conn.execute(
-            "SELECT COALESCE(MAX(selected_order), 0) + 1 AS next_order "
-            "FROM species_representatives"
+            "SELECT COALESCE(MAX(selected_order), 0) + 1 AS next_order FROM species_representatives"
         ).fetchone()
         return int(row["next_order"] or 1)
 
@@ -2532,8 +2519,7 @@ class Database:
 
     # -- Folders --
 
-    def add_folder(self, path, name=None, parent_id=None, *,
-                   workspace_root=True, link_to_workspace=True):
+    def add_folder(self, path, name=None, parent_id=None, *, workspace_root=True, link_to_workspace=True):
         """Insert a folder. Automatically links it to the active workspace.
 
         ``workspace_root`` controls whether that automatic link is a
@@ -2558,15 +2544,9 @@ class Database:
         if cur.rowcount > 0:
             folder_id = cur.lastrowid
         else:
-            row = self.conn.execute(
-                "SELECT id, parent_id FROM folders WHERE path = ?", (path,)
-            ).fetchone()
+            row = self.conn.execute("SELECT id, parent_id FROM folders WHERE path = ?", (path,)).fetchone()
             folder_id = row["id"]
-            if (
-                parent_id is not None
-                and row["parent_id"] is None
-                and folder_id != parent_id
-            ):
+            if parent_id is not None and row["parent_id"] is None and folder_id != parent_id:
                 self.conn.execute(
                     "UPDATE folders SET parent_id = ? WHERE id = ?",
                     (parent_id, folder_id),
@@ -2667,8 +2647,7 @@ class Database:
         ``workspace_folders``.
         """
         return self.conn.execute(
-            "SELECT id, path, name, parent_id, status, photo_count "
-            "FROM folders WHERE id = ?",
+            "SELECT id, path, name, parent_id, status, photo_count FROM folders WHERE id = ?",
             (folder_id,),
         ).fetchone()
 
@@ -2714,19 +2693,15 @@ class Database:
         archive can honestly be called intact.
         """
         self.conn.execute(
-            "INSERT OR REPLACE INTO audit_runs "
-            "(workspace_id, check_name, ran_at, problem_count) "
-            "VALUES (?, ?, ?, ?)",
-            (self._ws_id(), check_name, datetime.now().isoformat(),
-             int(problem_count)),
+            "INSERT OR REPLACE INTO audit_runs (workspace_id, check_name, ran_at, problem_count) VALUES (?, ?, ?, ?)",
+            (self._ws_id(), check_name, datetime.now().isoformat(), int(problem_count)),
         )
         self.conn.commit()
 
     def get_audit_runs(self):
         """Return {check_name: {ran_at, problem_count}} for this workspace."""
         rows = self.conn.execute(
-            "SELECT check_name, ran_at, problem_count FROM audit_runs "
-            "WHERE workspace_id = ?",
+            "SELECT check_name, ran_at, problem_count FROM audit_runs WHERE workspace_id = ?",
             (self._ws_id(),),
         ).fetchall()
         return {
@@ -2798,8 +2773,7 @@ class Database:
             "flagged": row["flagged"] or 0,
         }
 
-    def update_photo_hash_check(self, photo_id, status, file_hash=None,
-                                commit=True, clear_file_hash=False):
+    def update_photo_hash_check(self, photo_id, status, file_hash=None, commit=True, clear_file_hash=False):
         """Record a hash-verification verdict for one photo.
 
         When ``file_hash`` is given the stored baseline is replaced too
@@ -2810,26 +2784,21 @@ class Database:
         duplicate of every other empty placeholder).
         """
         if clear_file_hash and file_hash is not None:
-            raise ValueError(
-                "clear_file_hash and file_hash are mutually exclusive"
-            )
+            raise ValueError("clear_file_hash and file_hash are mutually exclusive")
         now = datetime.now().isoformat()
         if clear_file_hash:
             self.conn.execute(
-                "UPDATE photos SET hash_status = ?, hash_checked_at = ?, "
-                "file_hash = NULL WHERE id = ?",
+                "UPDATE photos SET hash_status = ?, hash_checked_at = ?, file_hash = NULL WHERE id = ?",
                 (status, now, photo_id),
             )
         elif file_hash is not None:
             self.conn.execute(
-                "UPDATE photos SET hash_status = ?, hash_checked_at = ?, "
-                "file_hash = ? WHERE id = ?",
+                "UPDATE photos SET hash_status = ?, hash_checked_at = ?, file_hash = ? WHERE id = ?",
                 (status, now, file_hash, photo_id),
             )
         else:
             self.conn.execute(
-                "UPDATE photos SET hash_status = ?, hash_checked_at = ? "
-                "WHERE id = ?",
+                "UPDATE photos SET hash_status = ?, hash_checked_at = ? WHERE id = ?",
                 (status, now, photo_id),
             )
         if commit:
@@ -2891,6 +2860,7 @@ class Database:
         ``cancel_callback`` is optional. When supplied, it is polled between
         filesystem operations and may abort the scan by returning true.
         """
+
         def check_cancelled():
             if cancel_callback is not None and cancel_callback():
                 raise MissingPhotosCancelled("missing photos scan cancelled")
@@ -2915,18 +2885,13 @@ class Database:
                 # overflow SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds)
                 # in a single IN(...) clause. Stage the ids in a
                 # connection-local temp table and join through that instead.
-                self.conn.execute(
-                    "CREATE TEMP TABLE IF NOT EXISTS missing_subtree_ids "
-                    "(id INTEGER PRIMARY KEY)"
-                )
+                self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS missing_subtree_ids (id INTEGER PRIMARY KEY)")
                 self.conn.execute("DELETE FROM missing_subtree_ids")
                 self.conn.executemany(
                     "INSERT OR IGNORE INTO missing_subtree_ids (id) VALUES (?)",
                     [(i,) for i in subtree_ids],
                 )
-                subtree_clause = (
-                    " AND f.id IN (SELECT id FROM missing_subtree_ids)"
-                )
+                subtree_clause = " AND f.id IN (SELECT id FROM missing_subtree_ids)"
         check_cancelled()
         rows = self.conn.execute(
             f"""SELECT p.id, p.filename, p.extension, p.file_size,
@@ -2960,13 +2925,15 @@ class Database:
             if progress_callback is None or not progress_callback_enabled:
                 return
             try:
-                progress_callback({
-                    "folders_checked": folders_checked,
-                    "photos_considered": photos_considered,
-                    "missing_found": len(missing),
-                    "total_photos": len(rows),
-                    "current_folder": current_folder,
-                })
+                progress_callback(
+                    {
+                        "folders_checked": folders_checked,
+                        "photos_considered": photos_considered,
+                        "missing_found": len(missing),
+                        "total_photos": len(rows),
+                        "current_folder": current_folder,
+                    }
+                )
             except Exception:
                 progress_callback_enabled = False
                 log.exception("Missing photos progress callback failed")
@@ -3067,9 +3034,7 @@ class Database:
         already be committed to the rows so ancestor lookup sees them.
         """
         for fid in folder_ids:
-            row = self.conn.execute(
-                "SELECT path FROM folders WHERE id = ?", (fid,)
-            ).fetchone()
+            row = self.conn.execute("SELECT path FROM folders WHERE id = ?", (fid,)).fetchone()
             if row is None:
                 continue
             self.conn.execute(
@@ -3095,9 +3060,7 @@ class Database:
         ).fetchone()
         if conflict:
             # Only merge if source folder is missing; for ok folders, reject
-            source_row = self.conn.execute(
-                "SELECT status, path FROM folders WHERE id = ?", (folder_id,)
-            ).fetchone()
+            source_row = self.conn.execute("SELECT status, path FROM folders WHERE id = ?", (folder_id,)).fetchone()
             if source_row and source_row["status"] == "missing":
                 # Revalidate: if original path came back, refresh status instead
                 if os.path.isdir(source_row["path"]):
@@ -3106,17 +3069,11 @@ class Database:
                         (folder_id,),
                     )
                     self.conn.commit()
-                    raise ValueError(
-                        f"Path is already tracked as folder {conflict['id']}"
-                    )
+                    raise ValueError(f"Path is already tracked as folder {conflict['id']}")
                 return self._merge_into_existing(folder_id, conflict["id"], new_path)
-            raise ValueError(
-                f"Path is already tracked as folder {conflict['id']}"
-            )
+            raise ValueError(f"Path is already tracked as folder {conflict['id']}")
 
-        old_row = self.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (folder_id,)
-        ).fetchone()
+        old_row = self.conn.execute("SELECT path FROM folders WHERE id = ?", (folder_id,)).fetchone()
         old_path = old_row["path"] if old_row else ""
 
         self.conn.execute(
@@ -3171,9 +3128,7 @@ class Database:
 
         Returns list of child folder dicts that were also relocated (same as relocate_folder).
         """
-        old_row = self.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (source_folder_id,)
-        ).fetchone()
+        old_row = self.conn.execute("SELECT path FROM folders WHERE id = ?", (source_folder_id,)).fetchone()
         old_path = old_row["path"] if old_row else ""
 
         # Get photos from the missing folder
@@ -3240,9 +3195,7 @@ class Database:
             "DELETE FROM workspace_folders WHERE folder_id = ?",
             (source_folder_id,),
         )
-        self.conn.execute(
-            "DELETE FROM folders WHERE id = ?", (source_folder_id,)
-        )
+        self.conn.execute("DELETE FROM folders WHERE id = ?", (source_folder_id,))
 
         # Ensure target folder is marked ok and recompute its photo count
         self.conn.execute(
@@ -3292,6 +3245,7 @@ class Database:
     def create_move_rule(self, name, destination, criteria):
         """Create a saved move rule. Returns the rule id."""
         import json as _json
+
         cur = self.conn.execute(
             "INSERT INTO move_rules (name, destination, criteria) VALUES (?, ?, ?)",
             (name, destination, _json.dumps(criteria)),
@@ -3301,19 +3255,16 @@ class Database:
 
     def get_move_rule(self, rule_id):
         """Return a single move rule by id."""
-        return self.conn.execute(
-            "SELECT * FROM move_rules WHERE id = ?", (rule_id,)
-        ).fetchone()
+        return self.conn.execute("SELECT * FROM move_rules WHERE id = ?", (rule_id,)).fetchone()
 
     def list_move_rules(self):
         """Return all saved move rules ordered by name."""
-        return self.conn.execute(
-            "SELECT * FROM move_rules ORDER BY name"
-        ).fetchall()
+        return self.conn.execute("SELECT * FROM move_rules ORDER BY name").fetchall()
 
     def update_move_rule(self, rule_id, name=_UNSET, destination=_UNSET, criteria=_UNSET):
         """Update fields on a move rule."""
         import json as _json
+
         sets, params = [], []
         if name is not _UNSET:
             sets.append("name = ?")
@@ -3360,27 +3311,19 @@ class Database:
         Unlike relocate_folder (which only updates missing children),
         this updates ALL child folders regardless of status.
         """
-        old_row = self.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (folder_id,)
-        ).fetchone()
+        old_row = self.conn.execute("SELECT path FROM folders WHERE id = ?", (folder_id,)).fetchone()
         if not old_row:
             return
         old_path = old_row["path"]
-        self.conn.execute(
-            "UPDATE folders SET path = ? WHERE id = ?", (new_path, folder_id)
-        )
+        self.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (new_path, folder_id))
         children = self.conn.execute(
             """SELECT id, path FROM folders
                WHERE substr(REPLACE(path, '\\', '/'), 1, ?) = ?""",
             (len(_subtree_prefix(old_path)), _subtree_prefix(old_path)),
         ).fetchall()
         for child in children:
-            child_new = _join_subtree_path(
-                new_path, _subtree_relative(child["path"], old_path)
-            )
-            self.conn.execute(
-                "UPDATE folders SET path = ? WHERE id = ?", (child_new, child["id"])
-            )
+            child_new = _join_subtree_path(new_path, _subtree_relative(child["path"], old_path))
+            self.conn.execute("UPDATE folders SET path = ? WHERE id = ?", (child_new, child["id"]))
         self.conn.commit()
 
     def _active_ws_root_ancestor_exists(self, workspace_id, path):
@@ -3455,12 +3398,9 @@ class Database:
         for row in rows:
             current = _path_for_subtree_match(row["path"])
             current_prefix = current + "/"
-            if (current != target
-                    and not current.startswith(target_prefix)
-                    and not target.startswith(current_prefix)):
+            if current != target and not current.startswith(target_prefix) and not target.startswith(current_prefix):
                 continue
-            if any(current == root or current.startswith(root + "/")
-                   for root in roots):
+            if any(current == root or current.startswith(root + "/") for root in roots):
                 continue
             prune_ids.append(row["folder_id"])
 
@@ -3473,8 +3413,7 @@ class Database:
             )
         if prune_ids:
             self.conn.commit()
-            self._new_images_cache.invalidate_workspaces(
-                self._db_path, [workspace_id])
+            self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def merge_staged_tree_into_archive(self, staged_root_id, archive_path):
         """Fold a staged folder subtree into an existing tracked archive.
@@ -3521,13 +3460,15 @@ class Database:
           preview / working-copy files can't be inherited by a later import
           that reuses one of the freed SQLite rowids.
         """
-        staged_root = self.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (staged_root_id,)
-        ).fetchone()
+        staged_root = self.conn.execute("SELECT path FROM folders WHERE id = ?", (staged_root_id,)).fetchone()
         if not staged_root:
-            return {"new_photos": 0, "new_folders": 0,
-                    "merged_folders": 0, "already_present": 0,
-                    "dropped_photo_ids": []}
+            return {
+                "new_photos": 0,
+                "new_folders": 0,
+                "merged_folders": 0,
+                "already_present": 0,
+                "dropped_photo_ids": [],
+            }
         staged_root_path = staged_root["path"]
         ws = self._ws_id()
 
@@ -3561,13 +3502,10 @@ class Database:
         # silently rely on ``add_workspace_folder``'s no-op-on-existing-row
         # behavior to preserve the root flag. Making the "already root" case
         # an explicit skip keeps the merge safe if that invariant ever changes.
-        archive_row = self.conn.execute(
-            "SELECT id, status FROM folders WHERE path = ?", (archive_path,)
-        ).fetchone()
+        archive_row = self.conn.execute("SELECT id, status FROM folders WHERE path = ?", (archive_path,)).fetchone()
         if archive_row:
             existing_link = self.conn.execute(
-                "SELECT is_root FROM workspace_folders "
-                "WHERE workspace_id = ? AND folder_id = ?",
+                "SELECT is_root FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
                 (ws, archive_row["id"]),
             ).fetchone()
             if existing_link is None or existing_link["is_root"] == 0:
@@ -3579,13 +3517,10 @@ class Database:
                 # ``/Photos/USA``). In that shape, do not link the broad base
                 # at all: even a non-root link materializes every descendant
                 # and would make archive siblings part of workspace queries.
-                has_root_ancestor = self._active_ws_root_ancestor_exists(
-                    ws, archive_path)
-                has_root_descendant = self._active_ws_root_descendant_exists(
-                    ws, archive_path)
+                has_root_ancestor = self._active_ws_root_ancestor_exists(ws, archive_path)
+                has_root_descendant = self._active_ws_root_descendant_exists(ws, archive_path)
                 if has_root_descendant and not has_root_ancestor:
-                    self._prune_ws_nonroot_links_outside_roots(
-                        ws, archive_path)
+                    self._prune_ws_nonroot_links_outside_roots(ws, archive_path)
                     self._materialize_workspace_descendants(ws)
                 else:
                     self.add_workspace_folder(
@@ -3626,13 +3561,10 @@ class Database:
             # non-root descendant under this new root.
             probe = os.path.dirname(archive_path)
             while probe and probe != os.path.dirname(probe):
-                ancestor_row = self.conn.execute(
-                    "SELECT id FROM folders WHERE path = ?", (probe,)
-                ).fetchone()
+                ancestor_row = self.conn.execute("SELECT id FROM folders WHERE path = ?", (probe,)).fetchone()
                 if ancestor_row is not None:
                     if not self._active_ws_root_descendant_exists(ws, probe):
-                        self.add_workspace_folder(
-                            ws, ancestor_row["id"], is_root=True)
+                        self.add_workspace_folder(ws, ancestor_row["id"], is_root=True)
                     else:
                         # Descendant-root guard fires: the workspace is
                         # scoped narrower than this ancestor, so rooting
@@ -3648,8 +3580,7 @@ class Database:
                         # cleanup the ``existing_link is None or
                         # is_root == 0`` branch above already performs
                         # via ``_prune_ws_nonroot_links_outside_roots``.
-                        self._prune_ws_nonroot_links_outside_roots(
-                            ws, probe)
+                        self._prune_ws_nonroot_links_outside_roots(ws, probe)
                     break
                 probe = os.path.dirname(probe)
 
@@ -3687,9 +3618,7 @@ class Database:
         probe = os.path.dirname(archive_path)
         anchor_found = False
         while probe and probe != os.path.dirname(probe):
-            row = self.conn.execute(
-                "SELECT id FROM folders WHERE path = ?", (probe,)
-            ).fetchone()
+            row = self.conn.execute("SELECT id FROM folders WHERE path = ?", (probe,)).fetchone()
             if row is not None:
                 anchor_found = True
                 break
@@ -3698,11 +3627,8 @@ class Database:
         if anchor_found:
             for mid_path in reversed(missing_intermediates):
                 mid_parent = os.path.dirname(mid_path)
-                parent_row = self.conn.execute(
-                    "SELECT id FROM folders WHERE path = ?", (mid_parent,)
-                ).fetchone()
-                parent_id_for_mid = (
-                    parent_row["id"] if parent_row else None)
+                parent_row = self.conn.execute("SELECT id FROM folders WHERE path = ?", (mid_parent,)).fetchone()
+                parent_id_for_mid = parent_row["id"] if parent_row else None
                 name = os.path.basename(mid_path) or mid_path
                 # Two concurrent local-processing jobs targeting siblings
                 # inside the same tracked archive (e.g. ``/Photos/2026/A`` and
@@ -3719,19 +3645,15 @@ class Database:
                 # ancestor parent). ``cur.lastrowid`` is 0 on an ignored
                 # insert, so read the id back via ``WHERE path = ?``.
                 cur = self.conn.execute(
-                    "INSERT OR IGNORE INTO folders (path, name, parent_id) "
-                    "VALUES (?, ?, ?)",
+                    "INSERT OR IGNORE INTO folders (path, name, parent_id) VALUES (?, ?, ?)",
                     (mid_path, name, parent_id_for_mid),
                 )
                 if cur.rowcount:
                     mid_id = cur.lastrowid
                 else:
-                    mid_id = self.conn.execute(
-                        "SELECT id FROM folders WHERE path = ?", (mid_path,)
-                    ).fetchone()["id"]
+                    mid_id = self.conn.execute("SELECT id FROM folders WHERE path = ?", (mid_path,)).fetchone()["id"]
                 if self._active_ws_root_ancestor_exists(ws, mid_path):
-                    self.add_workspace_folder(
-                        ws, mid_id, is_root=False)
+                    self.add_workspace_folder(ws, mid_id, is_root=False)
 
         # Snapshot staged folders root-first (shallowest path first) so a
         # parent's target row exists before its children are processed.
@@ -3743,9 +3665,7 @@ class Database:
             (staged_root_path, len(prefix), prefix),
         ).fetchall()
 
-        counts = {"new_photos": 0, "new_folders": 0,
-                  "merged_folders": 0, "already_present": 0,
-                  "dropped_photo_ids": []}
+        counts = {"new_photos": 0, "new_folders": 0, "merged_folders": 0, "already_present": 0, "dropped_photo_ids": []}
         # Staged folders that fold into an existing target row are deleted only
         # after every staged folder has been processed. Deleting eagerly would
         # hit a FK violation when a not-yet-reparented staged child still points
@@ -3773,13 +3693,9 @@ class Database:
             for sf in staged_folders:
                 rel = _subtree_relative(sf["path"], staged_root_path)
                 target_path = _join_subtree_path(archive_path, rel)
-                target = self.conn.execute(
-                    "SELECT id FROM folders WHERE path = ?", (target_path,)
-                ).fetchone()
+                target = self.conn.execute("SELECT id FROM folders WHERE path = ?", (target_path,)).fetchone()
                 parent_path = os.path.dirname(target_path)
-                parent_row = self.conn.execute(
-                    "SELECT id FROM folders WHERE path = ?", (parent_path,)
-                ).fetchone()
+                parent_row = self.conn.execute("SELECT id FROM folders WHERE path = ?", (parent_path,)).fetchone()
                 parent_id = parent_row["id"] if parent_row else None
 
                 # Defensive: a non-root staged folder whose target-parent row is
@@ -3787,16 +3703,16 @@ class Database:
                 # The scanner normally materializes every intermediate, so this
                 # is an unenforced invariant — log it, and fall back to the last
                 # processed target-parent id when we have one.
-                if (parent_id is None
-                        and target_path != archive_path
-                        and parent_path and parent_path != target_path):
+                if parent_id is None and target_path != archive_path and parent_path and parent_path != target_path:
                     fallback = last_target_parent.get(parent_path)
                     if fallback is not None:
                         log.warning(
                             "merge_staged_tree_into_archive: no folder row "
                             "for target parent %r of %r; falling back to "
                             "id %s",
-                            parent_path, target_path, fallback,
+                            parent_path,
+                            target_path,
+                            fallback,
                         )
                         parent_id = fallback
                     else:
@@ -3804,16 +3720,15 @@ class Database:
                             "merge_staged_tree_into_archive: no folder row "
                             "for target parent %r of %r; leaving parent_id "
                             "NULL",
-                            parent_path, target_path,
+                            parent_path,
+                            target_path,
                         )
 
                 if target is None:
-                    target_in_workspace = self._active_ws_root_ancestor_exists(
-                        ws, target_path)
+                    target_in_workspace = self._active_ws_root_ancestor_exists(ws, target_path)
                     # New folder under the archive: repoint + reparent + link.
                     self.conn.execute(
-                        "UPDATE folders SET path = ?, parent_id = ? "
-                        "WHERE id = ?",
+                        "UPDATE folders SET path = ?, parent_id = ? WHERE id = ?",
                         (target_path, parent_id, sf["id"]),
                     )
                     # Use the non-committing variant so the folder path/parent_
@@ -3823,8 +3738,7 @@ class Database:
                     # rollback (below) could no longer undo if a later staged
                     # folder raised.
                     if target_in_workspace:
-                        self._add_workspace_folder_no_commit(
-                            ws, sf["id"], is_root=False)
+                        self._add_workspace_folder_no_commit(ws, sf["id"], is_root=False)
                         # The staging scan registers each photo-bearing leaf as
                         # its own workspace ROOT (scanner restrict_dirs =>
                         # is_root=1). Once that leaf is folded under the existing
@@ -3835,14 +3749,12 @@ class Database:
                         # add_workspace_folder's INSERT OR IGNORE can't downgrade
                         # an existing is_root=1 row, so demote it explicitly here.
                         self.conn.execute(
-                            "UPDATE workspace_folders SET is_root = 0 "
-                            "WHERE workspace_id = ? AND folder_id = ?",
+                            "UPDATE workspace_folders SET is_root = 0 WHERE workspace_id = ? AND folder_id = ?",
                             (ws, sf["id"]),
                         )
                     else:
                         self.conn.execute(
-                            "DELETE FROM workspace_folders "
-                            "WHERE workspace_id = ? AND folder_id = ?",
+                            "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
                             (ws, sf["id"]),
                         )
                     # Every staged photo in a brand-new folder is newly
@@ -3869,15 +3781,15 @@ class Database:
                     # alone. Runs inside the outer try/except so a later
                     # exception still rolls this back.
                     self.conn.execute(
-                        "UPDATE folders SET status = 'ok' "
-                        "WHERE id = ? AND status = 'missing'",
+                        "UPDATE folders SET status = 'ok' WHERE id = ? AND status = 'missing'",
                         (target["id"],),
                     )
-                    staged_photos = list(self.conn.execute(
-                        "SELECT id, filename, file_hash, file_size "
-                        "FROM photos WHERE folder_id = ?",
-                        (sf["id"],),
-                    ))
+                    staged_photos = list(
+                        self.conn.execute(
+                            "SELECT id, filename, file_hash, file_size FROM photos WHERE folder_id = ?",
+                            (sf["id"],),
+                        )
+                    )
                     # Detect collisions against the ACTUAL target volume's case
                     # rules — not SQLite's default case-sensitive TEXT compare.
                     # On a case-insensitive volume (default macOS APFS, Windows
@@ -3895,14 +3807,12 @@ class Database:
                     # ancestor, so a fresh subfolder inherits its mount's
                     # behavior.
                     from move import _case_insensitive_root
-                    target_folds_case = (
-                        _case_insensitive_root(target_path) is not None)
-                    normalize = (str.casefold if target_folds_case
-                                 else (lambda s: s))
+
+                    target_folds_case = _case_insensitive_root(target_path) is not None
+                    normalize = str.casefold if target_folds_case else (lambda s: s)
                     existing_by_key = {}
                     for row in self.conn.execute(
-                        "SELECT id, filename, file_hash, file_size "
-                        "FROM photos WHERE folder_id = ?",
+                        "SELECT id, filename, file_hash, file_size FROM photos WHERE folder_id = ?",
                         (target["id"],),
                     ):
                         # First writer wins on the (unlikely) chance two
@@ -3910,9 +3820,12 @@ class Database:
                         # from a pre-fix catalog.
                         existing_by_key.setdefault(
                             normalize(row["filename"]),
-                            {"id": row["id"], "filename": row["filename"],
-                             "file_hash": row["file_hash"],
-                             "file_size": row["file_size"]},
+                            {
+                                "id": row["id"],
+                                "filename": row["filename"],
+                                "file_hash": row["file_hash"],
+                                "file_size": row["file_size"],
+                            },
                         )
 
                     # A filename-collision alone is NOT enough to drop the
@@ -3984,26 +3897,22 @@ class Database:
                         pid = staged["id"]
                         staged_norm = normalize(staged["filename"])
                         collision = existing_by_key.get(staged_norm)
-                        intra_staged_collision = (
-                            staged_norm in staged_normalized_claimed)
+                        intra_staged_collision = staged_norm in staged_normalized_claimed
                         # The archived filename may differ in case from the
                         # staged one; probe for the ACTUAL archived name so
                         # the on-disk existence check matches on
                         # case-sensitive volumes too (where any case-alias
                         # check is pointless anyway).
-                        target_filename = (collision["filename"]
-                                           if collision else None)
+                        target_filename = collision["filename"] if collision else None
                         target_disk_path = (
-                            _join_subtree_path(target_path, target_filename)
-                            if target_filename is not None else None)
+                            _join_subtree_path(target_path, target_filename) if target_filename is not None else None
+                        )
                         # A missing file on disk is definitely phantom
                         # (rsync would have written the staged bytes if
                         # this ever ran in production; the code path
                         # tolerates the isolated-unit-test case where no
                         # rsync happened).
-                        target_on_disk = (
-                            target_disk_path is not None
-                            and os.path.exists(target_disk_path))
+                        target_on_disk = target_disk_path is not None and os.path.exists(target_disk_path)
                         real_collision = False
                         if collision is not None and target_on_disk:
                             staged_hash = staged["file_hash"]
@@ -4015,7 +3924,7 @@ class Database:
                                 # disk (real collision). Mismatch → rsync
                                 # replaced a missing file with fresh
                                 # bytes; the target row is stale.
-                                real_collision = (staged_hash == target_hash)
+                                real_collision = staged_hash == target_hash
                             # else: at least one recorded hash is missing.
                             # Leave ``real_collision`` False so the
                             # phantom-replacement branch below runs — see
@@ -4036,12 +3945,8 @@ class Database:
                             # rsync ``--ignore-existing`` skipped this
                             # file), so treating it as ``already_present``
                             # is correct.
-                            self.conn.execute(
-                                "DELETE FROM photo_keywords "
-                                "WHERE photo_id = ?",
-                                (pid,))
-                            self.conn.execute(
-                                "DELETE FROM photos WHERE id = ?", (pid,))
+                            self.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (pid,))
+                            self.conn.execute("DELETE FROM photos WHERE id = ?", (pid,))
                             counts["already_present"] += 1
                             # The staged photo id is now free. Thumbnails,
                             # previews, working copies, and offline cache files
@@ -4070,20 +3975,14 @@ class Database:
                                 # the SQL ``filename = ?`` lookup used earlier
                                 # would miss the stale row and leave both
                                 # intact.
-                                self.conn.execute(
-                                    "DELETE FROM photo_keywords "
-                                    "WHERE photo_id = ?", (collision["id"],))
-                                self.conn.execute(
-                                    "DELETE FROM photos WHERE id = ?",
-                                    (collision["id"],))
+                                self.conn.execute("DELETE FROM photo_keywords WHERE photo_id = ?", (collision["id"],))
+                                self.conn.execute("DELETE FROM photos WHERE id = ?", (collision["id"],))
                                 # The phantom target-row id is likewise freed —
                                 # its cache files can be reused for a new
                                 # photo. Report it up for cleanup too.
-                                counts["dropped_photo_ids"].append(
-                                    collision["id"])
+                                counts["dropped_photo_ids"].append(collision["id"])
                             self.conn.execute(
-                                "UPDATE photos SET folder_id = ? "
-                                "WHERE id = ?",
+                                "UPDATE photos SET folder_id = ? WHERE id = ?",
                                 (target["id"], pid),
                             )
                             # A photo moved into a pre-existing archive folder
@@ -4107,9 +4006,7 @@ class Database:
             # ``workspace_folders.folder_id`` has no ON DELETE CASCADE, so
             # the folder delete would hit a FK violation.
             for fid in reversed(to_delete):
-                self.conn.execute(
-                    "DELETE FROM workspace_folders WHERE folder_id = ?",
-                    (fid,))
+                self.conn.execute("DELETE FROM workspace_folders WHERE folder_id = ?", (fid,))
                 self.conn.execute("DELETE FROM folders WHERE id = ?", (fid,))
 
             self.conn.commit()
@@ -4149,8 +4046,10 @@ class Database:
         """
         conditions = ["wf.workspace_id = ?"]
         params = [self._ws_id()]
-        joins = ["JOIN workspace_folders wf ON wf.folder_id = p.folder_id",
-                 "JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"]
+        joins = [
+            "JOIN workspace_folders wf ON wf.folder_id = p.folder_id",
+            "JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')",
+        ]
 
         if "rating_min" in criteria:
             conditions.append("p.rating >= ?")
@@ -4173,9 +4072,8 @@ class Database:
             # predictions sit on below-threshold detections must NOT count
             # as "has predictions".
             import config as cfg
-            move_min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2
-            )
+
+            move_min_conf = self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
             if criteria["has_predictions"]:
                 conditions.append(
                     "EXISTS (SELECT 1 FROM predictions pr "
@@ -4222,18 +4120,12 @@ class Database:
         linked = set()
         for chunk in _chunks(folder_ids):
             placeholders = ",".join("?" for _ in chunk)
-            sql = (
-                f"SELECT DISTINCT folder_id FROM workspace_folders "
-                f"WHERE folder_id IN ({placeholders})"
-            )
+            sql = f"SELECT DISTINCT folder_id FROM workspace_folders WHERE folder_id IN ({placeholders})"
             params = list(chunk)
             if active_ws is not None:
                 sql += " AND workspace_id != ?"
                 params.append(active_ws)
-            linked.update(
-                row["folder_id"]
-                for row in self.conn.execute(sql, params).fetchall()
-            )
+            linked.update(row["folder_id"] for row in self.conn.execute(sql, params).fetchall())
         return linked
 
     def delete_folder(self, folder_id):
@@ -4317,9 +4209,7 @@ class Database:
             ).fetchall():
                 path = _path_for_subtree_match(row["path"] or "")
                 depth_by_id[row["id"]] = path.count("/")
-        ordered_delete_ids = sorted(
-            delete_ids, key=lambda fid: depth_by_id.get(fid, 0), reverse=True
-        )
+        ordered_delete_ids = sorted(delete_ids, key=lambda fid: depth_by_id.get(fid, 0), reverse=True)
 
         photo_ids = []
         for chunk in _chunks(ordered_delete_ids):
@@ -4349,8 +4239,7 @@ class Database:
             for chunk in _chunks(kept_head_ids):
                 placeholders = ",".join("?" for _ in chunk)
                 self.conn.execute(
-                    f"UPDATE folders SET parent_id = NULL "
-                    f"WHERE id IN ({placeholders})",
+                    f"UPDATE folders SET parent_id = NULL WHERE id IN ({placeholders})",
                     chunk,
                 )
             # Kept subtrees disappear from this workspace's view: drop the
@@ -4360,8 +4249,7 @@ class Database:
                 for chunk in _chunks(kept_subtree_ids):
                     placeholders = ",".join("?" for _ in chunk)
                     self.conn.execute(
-                        f"DELETE FROM workspace_folders WHERE workspace_id = ? "
-                        f"AND folder_id IN ({placeholders})",
+                        f"DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id IN ({placeholders})",
                         [active_ws] + chunk,
                     )
             for chunk in _chunks(ordered_delete_ids):
@@ -4388,9 +4276,7 @@ class Database:
         # in the active workspace (foreign links protect from deletion), so
         # invalidating it post-commit covers every affected workspace.
         if active_ws is not None:
-            self._new_images_cache.invalidate_workspaces(
-                self._db_path, [active_ws]
-            )
+            self._new_images_cache.invalidate_workspaces(self._db_path, [active_ws])
 
         return {"deleted_photos": len(deleted_ids), "files": files}
 
@@ -4473,7 +4359,9 @@ class Database:
                 return self.apply_duplicate_resolution([r["id"] for r in dup_rows])
         except sqlite3.Error as e:
             logging.getLogger(__name__).warning(
-                "Duplicate auto-resolve failed for hash %s: %s", file_hash, e,
+                "Duplicate auto-resolve failed for hash %s: %s",
+                file_hash,
+                e,
             )
         return None
 
@@ -4569,14 +4457,16 @@ class Database:
         rows = []
         for chunk in _chunks(list(dict.fromkeys(photo_ids))):
             placeholders = ",".join("?" * len(chunk))
-            rows.extend(self.conn.execute(
-                f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.flag,
+            rows.extend(
+                self.conn.execute(
+                    f"""SELECT p.id, p.filename, p.file_mtime, p.rating, p.flag,
                            f.path AS folder_path
                     FROM photos p
                     LEFT JOIN folders f ON f.id = p.folder_id
                     WHERE p.id IN ({placeholders}) AND (p.flag IS NULL OR p.flag != 'rejected')""",
-                list(chunk),
-            ).fetchall())
+                    list(chunk),
+                ).fetchall()
+            )
         if len(rows) < 2:
             return {"winner_id": None, "loser_ids": [], "rejected": 0}
 
@@ -4615,9 +4505,7 @@ class Database:
         from duplicates import PhotoMetadata, merge_metadata
 
         def _meta(photo_id):
-            r = self.conn.execute(
-                "SELECT rating FROM photos WHERE id = ?", (photo_id,)
-            ).fetchone()
+            r = self.conn.execute("SELECT rating FROM photos WHERE id = ?", (photo_id,)).fetchone()
             kw_rows = self.conn.execute(
                 "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
                 (photo_id,),
@@ -4647,8 +4535,7 @@ class Database:
                 )
             for kw_id in merge.keyword_ids_to_add:
                 self.conn.execute(
-                    "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) "
-                    "VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
                     (winner_id, kw_id),
                 )
             # TODO: pending-edit copy for duplicate merge — see plan Task 7.
@@ -4721,38 +4608,36 @@ class Database:
                 skipped.append({"file_hash": file_hash, "reason": "no candidates"})
                 continue
             if len(rows) < 2:
-                skipped.append({
-                    "file_hash": file_hash,
-                    "reason": "fewer than 2 candidates",
-                })
+                skipped.append(
+                    {
+                        "file_hash": file_hash,
+                        "reason": "fewer than 2 candidates",
+                    }
+                )
                 continue
-            in_folder = [
-                r for r in rows
-                if os.path.normpath(r["folder_path"] or "") == keep_folder_norm
-            ]
+            in_folder = [r for r in rows if os.path.normpath(r["folder_path"] or "") == keep_folder_norm]
             if not in_folder:
-                skipped.append({
-                    "file_hash": file_hash,
-                    "reason": "no candidate in keep_folder",
-                })
+                skipped.append(
+                    {
+                        "file_hash": file_hash,
+                        "reason": "no candidate in keep_folder",
+                    }
+                )
                 continue
             # Existence-check the keep_folder candidate(s) before promoting.
             # If the row's file has been deleted externally but a sibling in
             # another folder still exists, force-picking the missing row as
             # winner would reject the surviving copy — and chained delete
             # would then trash it. Skip the hash instead.
-            in_folder_paths = [
-                (r, os.path.join(r["folder_path"] or "", r["filename"] or ""))
-                for r in in_folder
-            ]
-            present_in_folder = [
-                (r, p) for (r, p) in in_folder_paths if os.path.exists(p)
-            ]
+            in_folder_paths = [(r, os.path.join(r["folder_path"] or "", r["filename"] or "")) for r in in_folder]
+            present_in_folder = [(r, p) for (r, p) in in_folder_paths if os.path.exists(p)]
             if not present_in_folder:
-                skipped.append({
-                    "file_hash": file_hash,
-                    "reason": "keep_folder candidate missing on disk",
-                })
+                skipped.append(
+                    {
+                        "file_hash": file_hash,
+                        "reason": "keep_folder candidate missing on disk",
+                    }
+                )
                 continue
             if len(present_in_folder) == 1:
                 winner_id = present_in_folder[0][0]["id"]
@@ -4763,7 +4648,8 @@ class Database:
                 # Rule 0 is a no-op here.
                 cands = [
                     DupCandidate(
-                        id=r["id"], path=p,
+                        id=r["id"],
+                        path=p,
                         mtime=r["file_mtime"] or 0.0,
                         exists=True,
                     )
@@ -4772,11 +4658,13 @@ class Database:
                 winner_id, _ = resolve_duplicates(cands)
             loser_ids = [r["id"] for r in rows if r["id"] != winner_id]
             self._apply_winner_loser_merge(winner_id, loser_ids)
-            resolved.append({
-                "file_hash": file_hash,
-                "winner_id": winner_id,
-                "loser_ids": loser_ids,
-            })
+            resolved.append(
+                {
+                    "file_hash": file_hash,
+                    "winner_id": winner_id,
+                    "loser_ids": loser_ids,
+                }
+            )
 
         return {"resolved": resolved, "skipped": skipped}
 
@@ -4790,8 +4678,7 @@ class Database:
         """
         with self.conn:
             cur = self.conn.execute(
-                "UPDATE photos SET flag = 'none' "
-                "WHERE file_hash = ? AND flag = 'rejected'",
+                "UPDATE photos SET flag = 'none' WHERE file_hash = ? AND flag = 'rejected'",
                 (file_hash,),
             )
             return cur.rowcount
@@ -4830,9 +4717,7 @@ class Database:
                         WHERE workspace_id = ?)""",
                 (photo_id, self._ws_id()),
             ).fetchone()
-        return self.conn.execute(
-            f"SELECT {self.PHOTO_DETAIL_COLS} FROM photos WHERE id = ?", (photo_id,)
-        ).fetchone()
+        return self.conn.execute(f"SELECT {self.PHOTO_DETAIL_COLS} FROM photos WHERE id = ?", (photo_id,)).fetchone()
 
     def get_photos_by_ids(self, photo_ids):
         """Return photos for a list of IDs.
@@ -4964,10 +4849,7 @@ class Database:
     ]
 
     def _coverage_select_fragment(self):
-        parts = [
-            f"SUM(CASE WHEN {pred} THEN 1 ELSE 0 END) AS {key}"
-            for key, pred in self._COVERAGE_PHOTO_COLUMNS
-        ]
+        parts = [f"SUM(CASE WHEN {pred} THEN 1 ELSE 0 END) AS {key}" for key, pred in self._COVERAGE_PHOTO_COLUMNS]
         return ",\n                ".join(parts)
 
     def get_coverage_stats(self):
@@ -4981,9 +4863,8 @@ class Database:
         """
         ws = self._ws_id()
         import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+
+        min_conf = self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
         photo_row = self.conn.execute(
             f"""SELECT
                 COUNT(*) AS total,
@@ -4994,18 +4875,22 @@ class Database:
             WHERE wf.workspace_id = ?""",
             (ws,),
         ).fetchone()
-        detected = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
+        detected = (
+            self.conn.execute(
+                """SELECT COUNT(DISTINCT d.photo_id)
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?""",
-            (ws, min_conf),
-        ).fetchone()[0] or 0
-        classified = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
+                (ws, min_conf),
+            ).fetchone()[0]
+            or 0
+        )
+        classified = (
+            self.conn.execute(
+                """SELECT COUNT(DISTINCT d.photo_id)
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
@@ -5013,8 +4898,10 @@ class Database:
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
                  AND d.detector_confidence >= ?""",
-            (ws, min_conf),
-        ).fetchone()[0] or 0
+                (ws, min_conf),
+            ).fetchone()[0]
+            or 0
+        )
         result = {"total": photo_row["total"] or 0}
         for key, _ in self._COVERAGE_PHOTO_COLUMNS:
             result[key] = photo_row[key] or 0
@@ -5034,9 +4921,8 @@ class Database:
         """
         ws = self._ws_id()
         import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+
+        min_conf = self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
         photo_rows = self.conn.execute(
             f"""SELECT
                 f.id AS folder_id,
@@ -5111,16 +4997,14 @@ class Database:
             return {}
         by_dir = {}
         for p in paths:
-            by_dir.setdefault(os.path.dirname(p), {}).setdefault(
-                os.path.basename(p), []
-            ).append(p)
+            by_dir.setdefault(os.path.dirname(p), {}).setdefault(os.path.basename(p), []).append(p)
 
         out = {}
         BATCH = 800  # leave headroom under SQLite's default 999-param cap
         for dir_path, originals_by_name in by_dir.items():
             fnames = list(originals_by_name)
             for i in range(0, len(fnames), BATCH):
-                chunk = fnames[i:i + BATCH]
+                chunk = fnames[i : i + BATCH]
                 placeholders = ",".join("?" for _ in chunk)
                 rows = self.conn.execute(
                     f"""SELECT p.id, p.filename
@@ -5161,7 +5045,7 @@ class Database:
         BATCH = 800
         linked = set()
         for i in range(0, len(unique), BATCH):
-            chunk = unique[i:i + BATCH]
+            chunk = unique[i : i + BATCH]
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
                 f"""SELECT f.path
@@ -5198,9 +5082,7 @@ class Database:
         if len(ids) <= _SQLITE_PARAM_CHUNK_SIZE:
             placeholders = ",".join("?" for _ in ids)
             return f" AND {table_alias}.id IN ({placeholders})", ids
-        self.conn.execute(
-            "CREATE TEMP TABLE IF NOT EXISTS scope_ids (id INTEGER PRIMARY KEY)"
-        )
+        self.conn.execute("CREATE TEMP TABLE IF NOT EXISTS scope_ids (id INTEGER PRIMARY KEY)")
         self.conn.execute("DELETE FROM scope_ids")
         self.conn.executemany(
             "INSERT OR IGNORE INTO scope_ids (id) VALUES (?)",
@@ -5220,8 +5102,10 @@ class Database:
         ws = self._ws_id()
         if min_conf is None:
             import config as cfg
+
             min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
+                "detector_confidence",
+                0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
         row = self.conn.execute(
@@ -5251,8 +5135,10 @@ class Database:
         ws = self._ws_id()
         if min_conf is None:
             import config as cfg
+
             min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
+                "detector_confidence",
+                0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
         row = self.conn.execute(
@@ -5281,8 +5167,11 @@ class Database:
         }
 
     def count_classify_pending_pairs(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, min_conf=None,
+        self,
+        classifier_model,
+        labels_fingerprint,
+        photo_ids=None,
+        min_conf=None,
     ):
         """Count detections in scope that lack a classifier_runs row for
         (classifier_model, labels_fingerprint).
@@ -5294,8 +5183,10 @@ class Database:
         ws = self._ws_id()
         if min_conf is None:
             import config as cfg
+
             min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
+                "detector_confidence",
+                0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
         row = self.conn.execute(
@@ -5316,8 +5207,11 @@ class Database:
         return row["pending"] or 0
 
     def count_primary_classify_pending_pairs(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, min_conf=None,
+        self,
+        classifier_model,
+        labels_fingerprint,
+        photo_ids=None,
+        min_conf=None,
     ):
         """Count primary detections lacking a classifier run for (model, fp).
 
@@ -5327,8 +5221,10 @@ class Database:
         ws = self._ws_id()
         if min_conf is None:
             import config as cfg
+
             min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
+                "detector_confidence",
+                0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
         row = self.conn.execute(
@@ -5358,8 +5254,11 @@ class Database:
         return row["pending"] or 0
 
     def count_classify_stale(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, min_conf=None,
+        self,
+        classifier_model,
+        labels_fingerprint,
+        photo_ids=None,
+        min_conf=None,
     ):
         """Count detections in scope that have a stale classifier_runs row
         for ``classifier_model`` (some non-current fingerprint) AND no row
@@ -5374,8 +5273,10 @@ class Database:
         ws = self._ws_id()
         if min_conf is None:
             import config as cfg
+
             min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
+                "detector_confidence",
+                0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
         row = self.conn.execute(
@@ -5398,21 +5299,25 @@ class Database:
                        AND cr_cur.classifier_model = ?
                        AND cr_cur.labels_fingerprint = ?
                  ){scope_sql}""",
-            (ws, min_conf, classifier_model, labels_fingerprint,
-             classifier_model, labels_fingerprint, *scope_params),
+            (ws, min_conf, classifier_model, labels_fingerprint, classifier_model, labels_fingerprint, *scope_params),
         ).fetchone()
         return row["n"] or 0
 
     def count_primary_classify_stale(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, min_conf=None,
+        self,
+        classifier_model,
+        labels_fingerprint,
+        photo_ids=None,
+        min_conf=None,
     ):
         """Count stale classifier runs on primary detections only."""
         ws = self._ws_id()
         if min_conf is None:
             import config as cfg
+
             min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
+                "detector_confidence",
+                0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
         row = self.conn.execute(
@@ -5444,13 +5349,14 @@ class Database:
                          AND cr_cur.classifier_model = ?
                          AND cr_cur.labels_fingerprint = ?
                    )""",
-            (ws, min_conf, *scope_params, classifier_model, labels_fingerprint,
-             classifier_model, labels_fingerprint),
+            (ws, min_conf, *scope_params, classifier_model, labels_fingerprint, classifier_model, labels_fingerprint),
         ).fetchone()
         return row["n"] or 0
 
     def count_full_image_fallback_photos(
-        self, photo_ids=None, detector_model="megadetector-v6",
+        self,
+        photo_ids=None,
+        detector_model="megadetector-v6",
     ):
         """Count photos eligible for full-image fallback classification.
 
@@ -5480,8 +5386,11 @@ class Database:
         return row["n"] or 0
 
     def count_full_image_classify_pending_pairs(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, detector_model="megadetector-v6",
+        self,
+        classifier_model,
+        labels_fingerprint,
+        photo_ids=None,
+        detector_model="megadetector-v6",
     ):
         """Count fallback photos lacking a classifier run for (model, fp)."""
         ws = self._ws_id()
@@ -5518,15 +5427,21 @@ class Database:
                  WHERE f.detection_id IS NULL
                     OR cr.detection_id IS NULL""",
             (
-                ws, detector_model, *scope_params,
-                classifier_model, labels_fingerprint,
+                ws,
+                detector_model,
+                *scope_params,
+                classifier_model,
+                labels_fingerprint,
             ),
         ).fetchone()
         return row["pending"] or 0
 
     def count_full_image_classify_stale(
-        self, classifier_model, labels_fingerprint,
-        photo_ids=None, detector_model="megadetector-v6",
+        self,
+        classifier_model,
+        labels_fingerprint,
+        photo_ids=None,
+        detector_model="megadetector-v6",
     ):
         """Count fallback anchors with stale runs and no current run."""
         ws = self._ws_id()
@@ -5569,15 +5484,18 @@ class Database:
                             AND cr_cur.labels_fingerprint = ?
                        )""",
             (
-                ws, detector_model, *scope_params,
-                classifier_model, labels_fingerprint,
-                classifier_model, labels_fingerprint,
+                ws,
+                detector_model,
+                *scope_params,
+                classifier_model,
+                labels_fingerprint,
+                classifier_model,
+                labels_fingerprint,
             ),
         ).fetchone()
         return row["n"] or 0
 
-    def get_classification_inventory(self, workspace_id, min_conf=None,
-                                     median_sample_per_pair=2000):
+    def get_classification_inventory(self, workspace_id, min_conf=None, median_sample_per_pair=2000):
         """Per-(model × fingerprint) coverage stats for ``workspace_id``.
 
         Returns::
@@ -5605,11 +5523,13 @@ class Database:
         """
         if min_conf is None:
             import config as cfg
+
             saved_active = self._active_workspace_id
             try:
                 self._active_workspace_id = workspace_id
                 min_conf = self.get_effective_config(cfg.load()).get(
-                    "detector_confidence", 0.2,
+                    "detector_confidence",
+                    0.2,
                 )
             finally:
                 self._active_workspace_id = saved_active
@@ -5660,31 +5580,32 @@ class Database:
                GROUP BY pr.classifier_model, pr.labels_fingerprint""",
             (workspace_id, min_conf),
         ).fetchall()
-        pred_counts = {
-            (r["classifier_model"], r["labels_fingerprint"]): r["n"]
-            for r in pred_count_rows
-        }
+        pred_counts = {(r["classifier_model"], r["labels_fingerprint"]): r["n"] for r in pred_count_rows}
 
         # Median top-1 confidence per pair, via a sampled top-1-per-detection set.
         # Bounded by median_sample_per_pair to keep total work small.
         medians = self._sampled_top1_medians(
-            workspace_id, min_conf, median_sample_per_pair,
+            workspace_id,
+            min_conf,
+            median_sample_per_pair,
         )
 
         pairs = []
         for r in pair_rows:
             key = (r["classifier_model"], r["labels_fingerprint"])
             med, sample_size = medians.get(key, (None, 0))
-            pairs.append({
-                "classifier_model": r["classifier_model"],
-                "labels_fingerprint": r["labels_fingerprint"],
-                "classified_dets": r["classified_dets"] or 0,
-                "photos_covered": r["photos_covered"] or 0,
-                "last_run": r["last_run"],
-                "predictions_count": pred_counts.get(key, 0),
-                "median_top1_conf": med,
-                "median_sample_size": sample_size,
-            })
+            pairs.append(
+                {
+                    "classifier_model": r["classifier_model"],
+                    "labels_fingerprint": r["labels_fingerprint"],
+                    "classified_dets": r["classified_dets"] or 0,
+                    "photos_covered": r["photos_covered"] or 0,
+                    "last_run": r["last_run"],
+                    "predictions_count": pred_counts.get(key, 0),
+                    "median_top1_conf": med,
+                    "median_sample_size": sample_size,
+                }
+            )
 
         total_pred_rows = sum(pred_counts.values())
 
@@ -5764,8 +5685,7 @@ class Database:
             out[key] = (float(med), n)
         return out
 
-    def count_photos_pending_masks(self, photo_ids=None, min_conf=None,
-                                   sam2_variant=None):
+    def count_photos_pending_masks(self, photo_ids=None, min_conf=None, sam2_variant=None):
         """Return (pending, eligible) for the extract-masks stage.
 
         eligible = photos in scope with at least one real detection above the
@@ -5781,8 +5701,10 @@ class Database:
         ws = self._ws_id()
         if min_conf is None:
             import config as cfg
+
             min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
+                "detector_confidence",
+                0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
         if sam2_variant:
@@ -5925,8 +5847,7 @@ class Database:
             "pending": row["pending"] or 0,
         }
 
-    def count_extract_stale(self, sam2_variant, photo_ids=None,
-                             detector_confidence=None):
+    def count_extract_stale(self, sam2_variant, photo_ids=None, detector_confidence=None):
         """Count photos in scope that "look done" (``photos.mask_path``
         is set) but whose ``photo_masks`` row for ``sam2_variant`` has a
         stored prompt that no longer matches the photo's primary
@@ -5957,10 +5878,12 @@ class Database:
         total work.
         """
         import config as cfg
+
         ws = self._ws_id()
         if detector_confidence is None:
             detector_confidence = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
+                "detector_confidence",
+                0.2,
             )
         scope_sql, scope_params = self._scope_clause(photo_ids)
         row = self.conn.execute(
@@ -5996,8 +5919,7 @@ class Database:
                        AND d.box_w = pm.prompt_w
                        AND d.box_h = pm.prompt_h
                  ){scope_sql}""",
-            (ws, sam2_variant, detector_confidence, detector_confidence,
-             *scope_params),
+            (ws, sam2_variant, detector_confidence, detector_confidence, *scope_params),
         ).fetchone()
         return row["n"] or 0
 
@@ -6012,9 +5934,11 @@ class Database:
         eligible photos" from "all eligible photos already processed".
         """
         import config as cfg
+
         ws = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2,
+            "detector_confidence",
+            0.2,
         )
         scope_sql, scope_params = self._scope_clause(photo_ids)
         row = self.conn.execute(
@@ -6045,9 +5969,11 @@ class Database:
         """
         import config as cfg
         from pipeline import EYE_KP_FINGERPRINT_VERSION
+
         ws = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2,
+            "detector_confidence",
+            0.2,
         )
         scope_sql, scope_params = self._scope_clause(photo_ids)
         row = self.conn.execute(
@@ -6092,9 +6018,11 @@ class Database:
         it stays quiet when it could have surfaced.
         """
         import config as cfg
+
         ws = self._ws_id()
         min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2,
+            "detector_confidence",
+            0.2,
         )
         scope_sql, scope_params = self._scope_clause(photo_ids)
         # Window function pins the same per-photo prediction the stage
@@ -6153,9 +6081,8 @@ class Database:
         # detector_confidence to keep classified_count / prediction_status /
         # detected_count in sync as the threshold moves.
         import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+
+        min_conf = self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
 
         # The four pure-metadata aggregates below (top_keywords,
         # photos_by_month, rating_dist, flag_dist) intentionally don't filter
@@ -6324,13 +6251,14 @@ class Database:
     ):
         """Return daily photo counts for a given year, scoped to active workspace."""
         ws = self._ws_id()
-        conditions = ["wf.workspace_id = ?", "p.timestamp IS NOT NULL",
-                      "substr(p.timestamp, 1, 4) = ?"]
+        conditions = ["wf.workspace_id = ?", "p.timestamp IS NOT NULL", "substr(p.timestamp, 1, 4) = ?"]
         join_params = []
         where_params = [ws, str(year)]
 
-        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
+        join_clause = (
+            "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+            "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
+        )
 
         if folder_id is not None:
             subtree = self.get_folder_subtree_ids(folder_id)
@@ -6427,8 +6355,10 @@ class Database:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
 
-        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
+        join_clause = (
+            "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+            "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
+        )
         if keyword is not None:
             kw_clause, kw_params = _keyword_token_clause(
                 keyword,
@@ -6514,8 +6444,10 @@ class Database:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
 
-        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
+        join_clause = (
+            "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+            "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
+        )
         if keyword is not None:
             kw_clause, kw_params = _keyword_token_clause(
                 keyword,
@@ -6590,8 +6522,10 @@ class Database:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
 
-        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
+        join_clause = (
+            "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+            "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
+        )
         if keyword is not None:
             kw_clause, kw_params = _keyword_token_clause(
                 keyword,
@@ -6669,15 +6603,14 @@ class Database:
                 # Use alias "p" to match the alias expected by _build_collection_query;
                 # the subquery is wrapped in parentheses so "p" is scoped to it and
                 # does not conflict with the outer query's "p" alias.
-                coll_subquery = (
-                    f"SELECT DISTINCT p.id FROM photos p "
-                    f"{coll_folder_join} {coll_join_clause} {coll_where}"
-                )
+                coll_subquery = f"SELECT DISTINCT p.id FROM photos p {coll_folder_join} {coll_join_clause} {coll_where}"
                 conditions.append(f"p.id IN ({coll_subquery})")
                 where_params.extend(coll_params)
 
-        join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
-                       "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
+        join_clause = (
+            "JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
+            "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
+        )
         if keyword is not None:
             kw_clause, kw_params = _keyword_token_clause(
                 keyword,
@@ -6719,9 +6652,8 @@ class Database:
         # predictions are global; workspace scoping comes from the outer
         # join_clause and the detector_confidence read-time threshold.
         import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+
+        min_conf = self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
         classified = self.conn.execute(
             f"""SELECT COUNT(DISTINCT p.id) FROM photos p
                 {join_clause}
@@ -6789,7 +6721,9 @@ class Database:
             "classified": classified,
             "unclassified": filtered_total - classified,
             "top_species": [{"species": r["species"], "count": r["count"]} for r in top_species],
-            "folder_counts": [{"folder_id": r["folder_id"], "name": r["name"], "count": r["count"]} for r in folder_counts],
+            "folder_counts": [
+                {"folder_id": r["folder_id"], "name": r["name"], "count": r["count"]} for r in folder_counts
+            ],
         }
 
     def get_geolocated_photos(
@@ -7113,9 +7047,7 @@ class Database:
                 lists, or from undo/redo where the edit history is already
                 workspace-scoped.
         """
-        self._photo_review_repository().set_rating(
-            photo_id, rating, verify_workspace=verify_workspace
-        )
+        self._photo_review_repository().set_rating(photo_id, rating, verify_workspace=verify_workspace)
 
     def batch_update_photo_rating(self, photo_ids, rating, verify_workspace=True):
         """Set rating for multiple photos in a single transaction.
@@ -7124,9 +7056,7 @@ class Database:
             verify_workspace: when True, raises ValueError if any photo is
                 not in the active workspace.
         """
-        self._photo_review_repository().set_ratings(
-            photo_ids, rating, verify_workspace=verify_workspace
-        )
+        self._photo_review_repository().set_ratings(photo_ids, rating, verify_workspace=verify_workspace)
 
     def update_photo_flag(self, photo_id, flag, verify_workspace=True):
         """Set photo flag ('none', 'flagged', 'rejected').
@@ -7135,9 +7065,7 @@ class Database:
             verify_workspace: when True (the default), raises ValueError if
                 the photo is not in the active workspace's folders.
         """
-        self._photo_review_repository().set_flag(
-            photo_id, flag, verify_workspace=verify_workspace
-        )
+        self._photo_review_repository().set_flag(photo_id, flag, verify_workspace=verify_workspace)
 
     def update_photo_wildlife_excluded(self, photo_id, excluded, verify_workspace=True):
         """Set whether a photo is excluded from wildlife detection/classification."""
@@ -7156,9 +7084,7 @@ class Database:
             verify_workspace: when True, raises ValueError if any photo is
                 not in the active workspace.
         """
-        self._photo_review_repository().set_flags(
-            photo_ids, flag, verify_workspace=verify_workspace
-        )
+        self._photo_review_repository().set_flags(photo_ids, flag, verify_workspace=verify_workspace)
 
     def _photo_review_repository(self):
         from repositories.photo_review import PhotoReviewRepository
@@ -7216,6 +7142,7 @@ class Database:
             return None
         try:
             from image_edits import copy_recipe
+
             return copy_recipe(row["recipe_json"])
         except Exception:
             log.warning("Invalid stored edit recipe for photo %s", photo_id, exc_info=True)
@@ -7227,11 +7154,11 @@ class Database:
             return {}
         out = {}
         from image_edits import copy_recipe
+
         for chunk in _chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
-                f"SELECT photo_id, recipe_json FROM photo_edit_recipes "
-                f"WHERE photo_id IN ({placeholders})",
+                f"SELECT photo_id, recipe_json FROM photo_edit_recipes WHERE photo_id IN ({placeholders})",
                 list(chunk),
             ).fetchall()
             for row in rows:
@@ -7240,7 +7167,8 @@ class Database:
                 except Exception:
                     log.warning(
                         "Invalid stored edit recipe for photo %s",
-                        row["photo_id"], exc_info=True,
+                        row["photo_id"],
+                        exc_info=True,
                     )
                     continue
                 if recipe:
@@ -7256,6 +7184,7 @@ class Database:
         if verify_workspace:
             self._verify_photo_in_workspace(photo_id)
         from image_edits import copy_recipe, recipe_to_json
+
         recipe_json = recipe_to_json(recipe)
         if recipe_json is None:
             self.conn.execute(
@@ -7298,9 +7227,7 @@ class Database:
         """
         from image_edits import copy_recipe
 
-        rows = self.conn.execute(
-            "SELECT id, name, recipe_json, updated_at FROM edit_presets"
-        ).fetchall()
+        rows = self.conn.execute("SELECT id, name, recipe_json, updated_at FROM edit_presets").fetchall()
         out = []
         for row in rows:
             try:
@@ -7308,15 +7235,19 @@ class Database:
             except Exception:
                 log.warning(
                     "Invalid stored edit preset %s (%r)",
-                    row["id"], row["name"], exc_info=True,
+                    row["id"],
+                    row["name"],
+                    exc_info=True,
                 )
                 continue
-            out.append({
-                "id": row["id"],
-                "name": row["name"],
-                "recipe": recipe,
-                "updated_at": row["updated_at"],
-            })
+            out.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "recipe": recipe,
+                    "updated_at": row["updated_at"],
+                }
+            )
         out.sort(key=lambda p: p["name"].casefold())
         return out
 
@@ -7340,18 +7271,13 @@ class Database:
             raise ValueError("preset name must not be blank")
         name = name.strip()
         if len(name) > self.EDIT_PRESET_NAME_MAX:
-            raise ValueError(
-                f"preset name must be {self.EDIT_PRESET_NAME_MAX} "
-                "characters or fewer"
-            )
+            raise ValueError(f"preset name must be {self.EDIT_PRESET_NAME_MAX} characters or fewer")
 
         if isinstance(recipe, str):
             recipe = normalize_recipe(recipe) or {}
         if not isinstance(recipe, dict):
             raise RecipeError("recipe must be an object")
-        normalized = normalize_recipe(
-            {"adjustments": recipe.get("adjustments") or {}}
-        )
+        normalized = normalize_recipe({"adjustments": recipe.get("adjustments") or {}})
         if not (normalized or {}).get("adjustments"):
             raise ValueError("preset must include at least one adjustment")
         recipe_json = recipe_to_json(normalized)
@@ -7366,8 +7292,7 @@ class Database:
         )
         self.conn.commit()
         row = self.conn.execute(
-            "SELECT id, name, recipe_json, updated_at FROM edit_presets "
-            "WHERE name = ?",
+            "SELECT id, name, recipe_json, updated_at FROM edit_presets WHERE name = ?",
             (name,),
         ).fetchone()
         return {
@@ -7379,9 +7304,7 @@ class Database:
 
     def delete_edit_preset(self, preset_id):
         """Delete an edit preset. Returns True if a row was removed."""
-        cur = self.conn.execute(
-            "DELETE FROM edit_presets WHERE id = ?", (preset_id,)
-        )
+        cur = self.conn.execute("DELETE FROM edit_presets WHERE id = ?", (preset_id,))
         self.conn.commit()
         return cur.rowcount > 0
 
@@ -7397,6 +7320,7 @@ class Database:
             return
         try:
             from pipeline import prune_results
+
             prune_results(
                 os.path.dirname(self._db_path),
                 self._active_workspace_id,
@@ -7431,12 +7355,14 @@ class Database:
         rows = []
         for chunk in _chunks(list(dict.fromkeys(photo_ids))):
             placeholders = ",".join("?" for _ in chunk)
-            rows.extend(self.conn.execute(
-                f"SELECT p.id, p.filename, p.companion_path, p.folder_id, f.path AS folder_path "
-                f"FROM photos p JOIN folders f ON p.folder_id = f.id "
-                f"WHERE p.id IN ({placeholders})",
-                list(chunk),
-            ).fetchall())
+            rows.extend(
+                self.conn.execute(
+                    f"SELECT p.id, p.filename, p.companion_path, p.folder_id, f.path AS folder_path "
+                    f"FROM photos p JOIN folders f ON p.folder_id = f.id "
+                    f"WHERE p.id IN ({placeholders})",
+                    list(chunk),
+                ).fetchall()
+            )
 
         if not rows:
             return {"deleted": 0, "ids": [], "files": []}
@@ -7456,12 +7382,14 @@ class Database:
                 rows = list(rows)
                 for chunk in _chunks(dict.fromkeys(companion_ids)):
                     comp_ph = ",".join("?" for _ in chunk)
-                    rows.extend(self.conn.execute(
-                        f"SELECT p.id, p.filename, p.companion_path, p.folder_id, f.path AS folder_path "
-                        f"FROM photos p JOIN folders f ON p.folder_id = f.id "
-                        f"WHERE p.id IN ({comp_ph})",
-                        list(chunk),
-                    ).fetchall())
+                    rows.extend(
+                        self.conn.execute(
+                            f"SELECT p.id, p.filename, p.companion_path, p.folder_id, f.path AS folder_path "
+                            f"FROM photos p JOIN folders f ON p.folder_id = f.id "
+                            f"WHERE p.id IN ({comp_ph})",
+                            list(chunk),
+                        ).fetchall()
+                    )
 
         all_ids = list({row["id"] for row in rows})
 
@@ -7507,11 +7435,13 @@ class Database:
 
             # Clean collection rules
             import json as _json
+
             collections = self.conn.execute(
                 "SELECT id, rules FROM collections WHERE workspace_id = ?",
                 (self._ws_id(),),
             ).fetchall()
             deleted_set = set(all_ids)
+
             def _remove_deleted_photo_ids(node):
                 if isinstance(node, list):
                     changed_any = False
@@ -7580,9 +7510,9 @@ class Database:
     def preview_cache_insert(self, photo_id, size, bytes_):
         """Insert or replace a preview_cache entry. last_access_at = now()."""
         import time
+
         self.conn.execute(
-            "INSERT OR REPLACE INTO preview_cache "
-            "(photo_id, size, bytes, last_access_at) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO preview_cache (photo_id, size, bytes, last_access_at) VALUES (?, ?, ?, ?)",
             (photo_id, size, bytes_, time.time()),
         )
         self.conn.commit()
@@ -7590,6 +7520,7 @@ class Database:
     def preview_cache_touch(self, photo_id, size):
         """Update last_access_at for an existing entry. No-op if missing."""
         import time
+
         self.conn.execute(
             "UPDATE preview_cache SET last_access_at=? WHERE photo_id=? AND size=?",
             (time.time(), photo_id, size),
@@ -7606,23 +7537,19 @@ class Database:
 
     def preview_cache_total_bytes(self):
         """Return total bytes tracked in preview_cache."""
-        row = self.conn.execute(
-            "SELECT COALESCE(SUM(bytes), 0) AS total FROM preview_cache"
-        ).fetchone()
+        row = self.conn.execute("SELECT COALESCE(SUM(bytes), 0) AS total FROM preview_cache").fetchone()
         return row["total"]
 
     def preview_cache_oldest_first(self):
         """Return all rows ordered by last_access_at ascending (oldest first)."""
         return self.conn.execute(
-            "SELECT photo_id, size, bytes, last_access_at FROM preview_cache "
-            "ORDER BY last_access_at ASC"
+            "SELECT photo_id, size, bytes, last_access_at FROM preview_cache ORDER BY last_access_at ASC"
         ).fetchall()
 
     def preview_cache_get(self, photo_id, size):
         """Return the row for (photo_id, size), or None."""
         return self.conn.execute(
-            "SELECT photo_id, size, bytes, last_access_at FROM preview_cache "
-            "WHERE photo_id=? AND size=?",
+            "SELECT photo_id, size, bytes, last_access_at FROM preview_cache WHERE photo_id=? AND size=?",
             (photo_id, size),
         ).fetchone()
 
@@ -7681,16 +7608,13 @@ class Database:
 
     def offline_original_total_bytes(self):
         row = self.conn.execute(
-            "SELECT COALESCE(SUM(bytes), 0) AS total FROM offline_originals "
-            "WHERE status='cached'"
+            "SELECT COALESCE(SUM(bytes), 0) AS total FROM offline_originals WHERE status='cached'"
         ).fetchone()
         return row["total"]
 
     def update_photo_sharpness(self, photo_id, sharpness):
         """Set photo sharpness score."""
-        self.conn.execute(
-            "UPDATE photos SET sharpness = ? WHERE id = ?", (sharpness, photo_id)
-        )
+        self.conn.execute("UPDATE photos SET sharpness = ? WHERE id = ?", (sharpness, photo_id))
         commit_with_retry(self.conn)
 
     def update_photo_quality(
@@ -7747,16 +7671,20 @@ class Database:
             (photo_id, variant),
         ).fetchone()
         if row is None:
-            raise ValueError(
-                f"No photo_masks row for photo {photo_id} variant {variant!r}"
-            )
+            raise ValueError(f"No photo_masks row for photo {photo_id} variant {variant!r}")
         self.conn.execute(
             "UPDATE photos SET mask_path=?, active_mask_variant=?, "
             "subject_size=?, subject_tenengrad=?, bg_tenengrad=?, "
             "crop_complete=? WHERE id=?",
-            (row["path"], variant, row["subject_size"],
-             row["subject_tenengrad"], row["bg_tenengrad"],
-             row["crop_complete"], photo_id),
+            (
+                row["path"],
+                variant,
+                row["subject_size"],
+                row["subject_tenengrad"],
+                row["bg_tenengrad"],
+                row["crop_complete"],
+                photo_id,
+            ),
         )
         if _commit:
             commit_with_retry(self.conn)
@@ -7796,11 +7724,11 @@ class Database:
         except OSError:
             log.warning("Failed to resolve mask path %s", path)
             return
-        if not (abs_path == masks_dir
-                or abs_path.startswith(masks_dir + os.sep)):
+        if not (abs_path == masks_dir or abs_path.startswith(masks_dir + os.sep)):
             log.warning(
                 "Refusing to remove mask file %s outside masks dir %s",
-                path, masks_dir,
+                path,
+                masks_dir,
             )
             return
         try:
@@ -7819,11 +7747,11 @@ class Database:
         ).fetchone()[0]
         if active_count > 0:
             raise ValueError(
-                f"Variant {variant!r} is active for {active_count} photo(s); "
-                "switch active variant before deleting"
+                f"Variant {variant!r} is active for {active_count} photo(s); switch active variant before deleting"
             )
         rows = self.conn.execute(
-            "SELECT path FROM photo_masks WHERE variant=?", (variant,),
+            "SELECT path FROM photo_masks WHERE variant=?",
+            (variant,),
         ).fetchall()
         for r in rows:
             self._safe_remove_mask_file(r["path"])
@@ -7983,10 +7911,7 @@ class Database:
             (ws,),
         ).fetchall()
         return [
-            {"variant": r["variant"],
-             "count": r["count"] or 0,
-             "active_count": r["active_count"] or 0}
-            for r in rows
+            {"variant": r["variant"], "count": r["count"] or 0, "active_count": r["active_count"] or 0} for r in rows
         ]
 
     def sam_variant_rerun_warning(
@@ -8009,8 +7934,10 @@ class Database:
             return None
         if min_conf is None:
             import config as cfg
+
             min_conf = self.get_effective_config(cfg.load()).get(
-                "detector_confidence", 0.2,
+                "detector_confidence",
+                0.2,
             )
 
         ws = self._ws_id()
@@ -8055,15 +7982,11 @@ class Database:
             return None
 
         alternates = [
-            (variant, count, count / target_count)
-            for variant, count in counts.items()
-            if variant != sam2_variant
+            (variant, count, count / target_count) for variant, count in counts.items() if variant != sam2_variant
         ]
         if not alternates:
             return None
-        alt_variant, alt_count, alt_ratio = max(
-            alternates, key=lambda item: (item[2], item[1], item[0])
-        )
+        alt_variant, alt_count, alt_ratio = max(alternates, key=lambda item: (item[2], item[1], item[0]))
         if alt_ratio < alternate_min_ratio:
             return None
 
@@ -8105,7 +8028,8 @@ class Database:
         out = []
         for r in rows:
             paths = self.conn.execute(
-                "SELECT path FROM photo_masks WHERE variant=?", (r["variant"],),
+                "SELECT path FROM photo_masks WHERE variant=?",
+                (r["variant"],),
             ).fetchall()
             total = 0
             for pr in paths:
@@ -8114,19 +8038,30 @@ class Database:
                         total += os.path.getsize(pr["path"])
                 except OSError:
                     pass
-            out.append({
-                "variant": r["variant"],
-                "count": r["count"],
-                "active_count": r["active_count"],
-                "bytes": total,
-            })
+            out.append(
+                {
+                    "variant": r["variant"],
+                    "count": r["count"],
+                    "active_count": r["active_count"],
+                    "bytes": total,
+                }
+            )
         return out
 
     def upsert_photo_mask(
-        self, photo_id, variant, path,
-        detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-        subject_size=None, subject_tenengrad=None,
-        bg_tenengrad=None, crop_complete=None,
+        self,
+        photo_id,
+        variant,
+        path,
+        detector_model,
+        prompt_x,
+        prompt_y,
+        prompt_w,
+        prompt_h,
+        subject_size=None,
+        subject_tenengrad=None,
+        bg_tenengrad=None,
+        crop_complete=None,
     ):
         """Insert or replace a mask row for (photo_id, variant)."""
         self.conn.execute(
@@ -8150,9 +8085,21 @@ class Database:
                 bg_tenengrad=excluded.bg_tenengrad,
                 crop_complete=excluded.crop_complete
             """,
-            (photo_id, variant, path, int(time.time()),
-             detector_model, prompt_x, prompt_y, prompt_w, prompt_h,
-             subject_size, subject_tenengrad, bg_tenengrad, crop_complete),
+            (
+                photo_id,
+                variant,
+                path,
+                int(time.time()),
+                detector_model,
+                prompt_x,
+                prompt_y,
+                prompt_w,
+                prompt_h,
+                subject_size,
+                subject_tenengrad,
+                bg_tenengrad,
+                crop_complete,
+            ),
         )
         commit_with_retry(self.conn)
 
@@ -8202,9 +8149,7 @@ class Database:
             return
         set_clause = ", ".join(f"{k}=?" for k in updates)
         values = list(updates.values()) + [photo_id]
-        self.conn.execute(
-            f"UPDATE photos SET {set_clause} WHERE id=?", values
-        )
+        self.conn.execute(f"UPDATE photos SET {set_clause} WHERE id=?", values)
         commit_with_retry(self.conn)
 
     def get_photos_missing_masks(self, folder_ids=None):
@@ -8221,10 +8166,9 @@ class Database:
             list of dicts with id, folder_id, filename, detection_box (JSON string), detection_conf
         """
         import config as cfg
+
         ws_id = self._ws_id()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        min_conf = self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
         if folder_ids:
             # Detections are global post-refactor, so folder filtering alone
             # leaks photos from folders that belong to other workspaces if
@@ -8262,22 +8206,29 @@ class Database:
 
         # Deduplicate to one row per photo (primary detection = highest confidence)
         import json as _json
+
         seen = set()
         result = []
         for r in rows:
             if r["id"] in seen:
                 continue
             seen.add(r["id"])
-            result.append({
-                "id": r["id"],
-                "folder_id": r["folder_id"],
-                "filename": r["filename"],
-                "detection_box": _json.dumps({
-                    "x": r["box_x"], "y": r["box_y"],
-                    "w": r["box_w"], "h": r["box_h"],
-                }),
-                "detection_conf": r["detector_confidence"],
-            })
+            result.append(
+                {
+                    "id": r["id"],
+                    "folder_id": r["folder_id"],
+                    "filename": r["filename"],
+                    "detection_box": _json.dumps(
+                        {
+                            "x": r["box_x"],
+                            "y": r["box_y"],
+                            "w": r["box_w"],
+                            "h": r["box_h"],
+                        }
+                    ),
+                    "detection_conf": r["detector_confidence"],
+                }
+            )
         return result
 
     def list_photos_for_eye_keypoint_stage(self, photo_ids=None):
@@ -8310,10 +8261,9 @@ class Database:
         """
         import config as cfg
         from pipeline import EYE_KP_FINGERPRINT_VERSION
+
         ws_id = self._ws_id()
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+        min_conf = self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
         if photo_ids is not None:
             photo_ids = list(photo_ids)
             if not photo_ids:
@@ -8364,26 +8314,31 @@ class Database:
             if r["id"] in seen:
                 continue
             seen.add(r["id"])
-            result.append({
-                "id": r["id"],
-                "folder_id": r["folder_id"],
-                "filename": r["filename"],
-                "width": r["width"],
-                "height": r["height"],
-                "mask_path": r["mask_path"],
-                "box_x": r["box_x"],
-                "box_y": r["box_y"],
-                "box_w": r["box_w"],
-                "box_h": r["box_h"],
-                "species_conf": r["species_conf"],
-                "taxonomy_class": r["taxonomy_class"],
-                "scientific_name": r["scientific_name"],
-                "species": r["species"],
-            })
+            result.append(
+                {
+                    "id": r["id"],
+                    "folder_id": r["folder_id"],
+                    "filename": r["filename"],
+                    "width": r["width"],
+                    "height": r["height"],
+                    "mask_path": r["mask_path"],
+                    "box_x": r["box_x"],
+                    "box_y": r["box_y"],
+                    "box_w": r["box_w"],
+                    "box_h": r["box_h"],
+                    "species_conf": r["species_conf"],
+                    "taxonomy_class": r["taxonomy_class"],
+                    "scientific_name": r["scientific_name"],
+                    "species": r["species"],
+                }
+            )
         return result
 
     def update_photo_embeddings(
-        self, photo_id, dino_subject_embedding=None, dino_global_embedding=None,
+        self,
+        photo_id,
+        dino_subject_embedding=None,
+        dino_global_embedding=None,
         variant=None,
     ):
         """Store DINOv2 embedding BLOBs for a photo.
@@ -8398,8 +8353,7 @@ class Database:
                 feeding mismatched-dim vectors to cosine similarity.
         """
         self.conn.execute(
-            "UPDATE photos SET dino_subject_embedding=?, dino_global_embedding=?, "
-            "dino_embedding_variant=? WHERE id=?",
+            "UPDATE photos SET dino_subject_embedding=?, dino_global_embedding=?, dino_embedding_variant=? WHERE id=?",
             (dino_subject_embedding, dino_global_embedding, variant, photo_id),
         )
         commit_with_retry(self.conn)
@@ -8415,9 +8369,7 @@ class Database:
             'upper' if most are ALL CAPS
             None if not enough data to determine
         """
-        rows = self.conn.execute(
-            "SELECT name FROM keywords WHERE is_species = 1"
-        ).fetchall()
+        rows = self.conn.execute("SELECT name FROM keywords WHERE is_species = 1").fetchall()
         if len(rows) < 3:
             return None
 
@@ -8506,11 +8458,9 @@ class Database:
             raise ValueError("keyword name is empty after normalization")
         # Reconcile is_species and kw_type to keep the legacy column coherent
         # with the type enum.
-        if is_species and kw_type is not None and kw_type != 'taxonomy':
-            raise ValueError(
-                f"is_species=True requires kw_type='taxonomy', got {kw_type!r}"
-            )
-        if kw_type == 'taxonomy':
+        if is_species and kw_type is not None and kw_type != "taxonomy":
+            raise ValueError(f"is_species=True requires kw_type='taxonomy', got {kw_type!r}")
+        if kw_type == "taxonomy":
             is_species = True
         # Symmetric reconciliation: callers like the prediction-accept and
         # pipeline-apply flows pass is_species=True with no kw_type. Treat
@@ -8522,7 +8472,7 @@ class Database:
         # caller would get back a non-taxonomy id — silently mis-tagging
         # the accepted species.
         if is_species and kw_type is None:
-            kw_type = 'taxonomy'
+            kw_type = "taxonomy"
         # Case-insensitive lookup with type-aware matching:
         #
         # When kw_type is supplied, only same-type or 'general' rows are
@@ -8610,7 +8560,7 @@ class Database:
                     f"ORDER BY (type = ?) DESC, id ASC LIMIT 1",
                     (name, *parent_args, kw_type, kw_type),
                 ).fetchone()
-        elif kw_type and kw_type != 'general' and existing["type"] == 'general':
+        elif kw_type and kw_type != "general" and existing["type"] == "general":
             # The fast exact-match query returned a 'general' row, but the
             # caller preferred a specific higher-priority type (e.g.
             # 'taxonomy' via is_species=True). A distinct legacy row whose
@@ -8633,11 +8583,7 @@ class Database:
             ).fetchone()
             if preferred is not None:
                 existing = preferred
-        elif (
-            kw_type is None
-            and not is_species
-            and existing["type"] != 'taxonomy'
-        ):
+        elif kw_type is None and not is_species and existing["type"] != "taxonomy":
             # Untyped path: the fast exact-match query above orders by the
             # taxonomy > genre > individual > location > general priority
             # among rows whose stored spelling matches under COLLATE NOCASE,
@@ -8651,11 +8597,11 @@ class Database:
             # normalized peers at this slot; only pays for the extra query
             # when the exact match wasn't already top priority.
             priority_map = {
-                'taxonomy': 0,
-                'genre': 1,
-                'individual': 2,
-                'location': 3,
-                'general': 4,
+                "taxonomy": 0,
+                "genre": 1,
+                "individual": 2,
+                "location": 3,
+                "general": 4,
             }
             current_priority = priority_map.get(existing["type"], 4)
             higher_peer = self.conn.execute(
@@ -8696,12 +8642,12 @@ class Database:
             # Upgrade an existing 'general' row to the explicitly requested type.
             # Without this, callers like the "Not Wildlife" button would hit the
             # case-insensitive fast path and silently get back a wrong-typed row.
-            if kw_type and kw_type != 'general':
+            if kw_type and kw_type != "general":
                 self.conn.execute(
                     "UPDATE keywords SET type = ? WHERE id = ? AND type = 'general'",
                     (kw_type, existing["id"]),
                 )
-                if kw_type == 'taxonomy':
+                if kw_type == "taxonomy":
                     # Gate on type='taxonomy' so a preserved deliberate type
                     # (e.g. 'individual') doesn't get is_species=1 stamped on
                     # it when the type update above was a no-op. Otherwise
@@ -8709,8 +8655,7 @@ class Database:
                     # subject filters with `OR is_species=1` would treat that
                     # non-taxonomy row as a species.
                     self.conn.execute(
-                        "UPDATE keywords SET is_species = 1 "
-                        "WHERE id = ? AND type = 'taxonomy'",
+                        "UPDATE keywords SET is_species = 1 WHERE id = ? AND type = 'taxonomy'",
                         (existing["id"],),
                     )
                 if _commit:
@@ -8732,13 +8677,13 @@ class Database:
         taxon_id = None
         if kw_type is None:
             # Auto-detect taxonomy type from taxa table
-            kw_type = 'general'
+            kw_type = "general"
             if is_species:
-                kw_type = 'taxonomy'
+                kw_type = "taxonomy"
             else:
                 taxon_id = self._lookup_taxon_id_for_keyword(name)
                 if taxon_id:
-                    kw_type = 'taxonomy'
+                    kw_type = "taxonomy"
 
         cur = self.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) VALUES (?, ?, ?, ?, ?)",
@@ -8749,7 +8694,12 @@ class Database:
         return cur.lastrowid
 
     def _upsert_one_keyword(
-        self, name, parent_id, place_id=None, latitude=None, longitude=None,
+        self,
+        name,
+        parent_id,
+        place_id=None,
+        latitude=None,
+        longitude=None,
     ):
         """Insert-or-fetch a single ``type='location'`` keyword row.
 
@@ -8789,7 +8739,8 @@ class Database:
             )
             try:
                 cur = self.conn.execute(
-                    insert_sql, (name, parent_id, place_id, latitude, longitude),
+                    insert_sql,
+                    (name, parent_id, place_id, latitude, longitude),
                 )
                 return cur.fetchone()["id"]
             except sqlite3.IntegrityError:
@@ -8824,9 +8775,7 @@ class Database:
             ).fetchone()
         else:
             existing = self.conn.execute(
-                "SELECT id FROM keywords "
-                "WHERE name = ? AND parent_id = ? "
-                "  AND type = 'location' AND place_id IS NULL",
+                "SELECT id FROM keywords WHERE name = ? AND parent_id = ?   AND type = 'location' AND place_id IS NULL",
                 (name, parent_id),
             ).fetchone()
         if existing:
@@ -8845,14 +8794,12 @@ class Database:
             # SELECT didn't see. Find out what's actually there.
             if parent_id is None:
                 clash = self.conn.execute(
-                    "SELECT id, type, place_id FROM keywords "
-                    "WHERE name = ? AND parent_id IS NULL",
+                    "SELECT id, type, place_id FROM keywords WHERE name = ? AND parent_id IS NULL",
                     (name,),
                 ).fetchone()
             else:
                 clash = self.conn.execute(
-                    "SELECT id, type, place_id FROM keywords "
-                    "WHERE name = ? AND parent_id = ?",
+                    "SELECT id, type, place_id FROM keywords WHERE name = ? AND parent_id = ?",
                     (name, parent_id),
                 ).fetchone()
             if clash is None:
@@ -8874,11 +8821,7 @@ class Database:
         types = component.get("types") if isinstance(component, dict) else []
         if not isinstance(types, list):
             return None
-        ranks = [
-            _LOCATION_COMPONENT_RANKS[t]
-            for t in types
-            if isinstance(t, str) and t in _LOCATION_COMPONENT_RANKS
-        ]
+        ranks = [_LOCATION_COMPONENT_RANKS[t] for t in types if isinstance(t, str) and t in _LOCATION_COMPONENT_RANKS]
         if not ranks:
             return None
         return min(ranks)
@@ -8893,11 +8836,7 @@ class Database:
         component type so postal-code placement in Google's response cannot
         become the root of the hierarchy.
         """
-        leaf_type_set = (
-            {t for t in (leaf_types or []) if isinstance(t, str)}
-            if isinstance(leaf_types, list)
-            else set()
-        )
+        leaf_type_set = {t for t in (leaf_types or []) if isinstance(t, str)} if isinstance(leaf_types, list) else set()
         candidates = []
         seen = set()
         leaf_norm = leaf_name.strip().casefold() if isinstance(leaf_name, str) else ""
@@ -8916,12 +8855,10 @@ class Database:
         leaf_component = None
         if leaf_norm and leaf_type_set:
             leaf_matches = [
-                item for item in candidates
+                item
+                for item in candidates
                 if item[2].casefold() == leaf_norm
-                and any(
-                    t in leaf_type_set and t in _LOCATION_COMPONENT_RANKS
-                    for t in item[3]
-                )
+                and any(t in leaf_type_set and t in _LOCATION_COMPONENT_RANKS for t in item[3])
             ]
             if leaf_matches:
                 # If a leaf has the same text as multiple admin levels
@@ -9019,15 +8956,13 @@ class Database:
         :meth:`clear_photo_location` could not clean up.
         """
         row = self.conn.execute(
-            "SELECT type FROM keywords WHERE id = ?", (leaf_keyword_id,),
+            "SELECT type FROM keywords WHERE id = ?",
+            (leaf_keyword_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"keyword id {leaf_keyword_id} does not exist")
         if row["type"] != "location":
-            raise ValueError(
-                f"keyword {leaf_keyword_id} has type={row['type']!r}, "
-                f"not 'location'"
-            )
+            raise ValueError(f"keyword {leaf_keyword_id} has type={row['type']!r}, not 'location'")
         with self.conn:
             self.conn.execute(
                 "DELETE FROM photo_keywords WHERE photo_id = ? "
@@ -9035,8 +8970,7 @@ class Database:
                 (photo_id,),
             )
             self.conn.execute(
-                "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) "
-                "VALUES (?, ?)",
+                "INSERT OR IGNORE INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
                 (photo_id, leaf_keyword_id),
             )
 
@@ -9093,7 +9027,8 @@ class Database:
             raise ValueError("link_keyword_to_place requires details['place_id']")
 
         row = self.conn.execute(
-            "SELECT type FROM keywords WHERE id = ?", (keyword_id,),
+            "SELECT type FROM keywords WHERE id = ?",
+            (keyword_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"keyword id {keyword_id} does not exist")
@@ -9103,9 +9038,7 @@ class Database:
         # set_photo_location rejects it and the place is effectively unusable
         # until the row is manually cleaned up.
         if row["type"] != "location":
-            raise ValueError(
-                f"keyword id {keyword_id} is type '{row['type']}', not 'location'"
-            )
+            raise ValueError(f"keyword id {keyword_id} is type '{row['type']}', not 'location'")
 
         place_id = details["place_id"]
         new_name = details.get("name", "")
@@ -9157,7 +9090,8 @@ class Database:
                 #       (or NULL) place_id → name-collision case.
                 # Disambiguate by checking which.
                 canonical = self.conn.execute(
-                    "SELECT id FROM keywords WHERE place_id = ?", (place_id,),
+                    "SELECT id FROM keywords WHERE place_id = ?",
+                    (place_id,),
                 ).fetchone()
                 if canonical is not None and canonical["id"] != keyword_id:
                     # Case (a): merge.
@@ -9187,8 +9121,7 @@ class Database:
                             disambiguated = f"{child['name']} (id-{child['id']})"
                             try:
                                 self.conn.execute(
-                                    "UPDATE keywords SET parent_id = ?, name = ? "
-                                    "WHERE id = ?",
+                                    "UPDATE keywords SET parent_id = ?, name = ? WHERE id = ?",
                                     (canonical_id, disambiguated, child["id"]),
                                 )
                             except sqlite3.IntegrityError as inner_err:
@@ -9210,7 +9143,8 @@ class Database:
                     )
                     # Delete the now-empty old keyword row.
                     self.conn.execute(
-                        "DELETE FROM keywords WHERE id = ?", (keyword_id,),
+                        "DELETE FROM keywords WHERE id = ?",
+                        (keyword_id,),
                     )
                     return {"keyword_id": canonical_id, "merged": True}
 
@@ -9220,14 +9154,12 @@ class Database:
                 # Same approach as _upsert_one_keyword's leaf-collision path.
                 if parent_id is None:
                     name_clash = self.conn.execute(
-                        "SELECT id FROM keywords "
-                        "WHERE name = ? AND parent_id IS NULL AND id != ?",
+                        "SELECT id FROM keywords WHERE name = ? AND parent_id IS NULL AND id != ?",
                         (new_name, keyword_id),
                     ).fetchone()
                 else:
                     name_clash = self.conn.execute(
-                        "SELECT id FROM keywords "
-                        "WHERE name = ? AND parent_id = ? AND id != ?",
+                        "SELECT id FROM keywords WHERE name = ? AND parent_id = ? AND id != ?",
                         (new_name, parent_id, keyword_id),
                     ).fetchone()
                 if name_clash is None:
@@ -9268,8 +9200,7 @@ class Database:
         """
         lat_grid, lng_grid = self._reverse_geocode_grid(lat, lng)
         row = self.conn.execute(
-            "SELECT place_id, response FROM place_reverse_geocode_cache "
-            "WHERE lat_grid = ? AND lng_grid = ?",
+            "SELECT place_id, response FROM place_reverse_geocode_cache WHERE lat_grid = ? AND lng_grid = ?",
             (lat_grid, lng_grid),
         ).fetchone()
         if row is None:
@@ -9368,10 +9299,7 @@ class Database:
                 if not key:
                     continue
                 grouped.setdefault((key, row["parent_id"], row["type"]), []).append(row)
-            dupes = [
-                group for group in grouped.values()
-                if len({row["id"] for row in group}) > 1
-            ]
+            dupes = [group for group in grouped.values() if len({row["id"] for row in group}) > 1]
             if not dupes:
                 break
 
@@ -9398,7 +9326,8 @@ class Database:
                 # non-existent FK target.
                 placeholders = ",".join("?" * len(all_ids))
                 alive = {
-                    row["id"] for row in self.conn.execute(
+                    row["id"]
+                    for row in self.conn.execute(
                         f"SELECT id FROM keywords WHERE id IN ({placeholders})",
                         all_ids,
                     )
@@ -9426,9 +9355,7 @@ class Database:
         never touched, leaving its curation queries dangling against a
         canonical name it doesn't have tagged.
         """
-        row = self.conn.execute(
-            "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
-        ).fetchone()
+        row = self.conn.execute("SELECT name FROM keywords WHERE id = ?", (keyword_id,)).fetchone()
         if row is None:
             return
         old_name = row["name"]
@@ -9448,17 +9375,13 @@ class Database:
                WHERE pk.keyword_id = ?""",
             (keyword_id,),
         ).fetchall()
-        photo_workspace_pairs = [
-            (r["photo_id"], r["workspace_id"]) for r in tag_rows
-        ]
+        photo_workspace_pairs = [(r["photo_id"], r["workspace_id"]) for r in tag_rows]
         affected_photo_ids = sorted({r["photo_id"] for r in tag_rows})
         # A same-name row in a different dedupe boundary can still occupy the
         # table-level UNIQUE(name, parent_id) slot. In that case the links
         # still merge correctly; keep the stored spelling unchanged.
         try:
-            self.conn.execute(
-                "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
-            )
+            self.conn.execute("UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id))
         except sqlite3.IntegrityError:
             return
         # Retarget pending keyword_add/keyword_remove rows queued under the
@@ -9519,12 +9442,16 @@ class Database:
         # separate representatives rename isn't needed here.
         if photo_workspace_pairs:
             self.rename_species_highlights_species(
-                old_name, cleaned,
-                photo_workspace_pairs=photo_workspace_pairs, _commit=False,
+                old_name,
+                cleaned,
+                photo_workspace_pairs=photo_workspace_pairs,
+                _commit=False,
             )
             self.rename_photo_preferences_species(
-                old_name, cleaned,
-                photo_workspace_pairs=photo_workspace_pairs, _commit=False,
+                old_name,
+                cleaned,
+                photo_workspace_pairs=photo_workspace_pairs,
+                _commit=False,
             )
 
     def _merge_keyword_into(self, src_id, dst_id):
@@ -9559,8 +9486,7 @@ class Database:
         """
         merged = 1
         src = self.conn.execute(
-            "SELECT name, is_species, latitude, longitude, taxon_id, type "
-            "FROM keywords WHERE id = ?",
+            "SELECT name, is_species, latitude, longitude, taxon_id, type FROM keywords WHERE id = ?",
             (src_id,),
         ).fetchone()
         dst = self.conn.execute(
@@ -9575,8 +9501,7 @@ class Database:
                        longitude  = COALESCE(longitude, ?),
                        taxon_id   = COALESCE(taxon_id, ?)
                    WHERE id = ?""",
-                (src["is_species"], src["latitude"], src["longitude"],
-                 src["taxon_id"], dst_id),
+                (src["is_species"], src["latitude"], src["longitude"], src["taxon_id"], dst_id),
             )
         # Retarget pending keyword_add/keyword_remove rows queued under the
         # source name onto the destination name so a still-unsynced sidecar
@@ -9604,7 +9529,8 @@ class Database:
             dst_name = dst["name"]
             if src_name and dst_name and src_name != dst_name:
                 affected_pcx = [
-                    r["photo_id"] for r in self.conn.execute(
+                    r["photo_id"]
+                    for r in self.conn.execute(
                         "SELECT DISTINCT photo_id FROM photo_keywords WHERE keyword_id IN (?, ?)",
                         (src_id, dst_id),
                     ).fetchall()
@@ -9656,8 +9582,10 @@ class Database:
                 # exist under ``src_name`` so this is safe to run
                 # unconditionally within the species-merge branch.
                 is_species_merge = (
-                    src["is_species"] == 1 or src["type"] == "taxonomy"
-                    or dst["is_species"] == 1 or dst["type"] == "taxonomy"
+                    src["is_species"] == 1
+                    or src["type"] == "taxonomy"
+                    or dst["is_species"] == 1
+                    or dst["type"] == "taxonomy"
                 )
                 if is_species_merge:
                     tag_rows = self.conn.execute(
@@ -9668,17 +9596,17 @@ class Database:
                            WHERE pk.keyword_id IN (?, ?)""",
                         (src_id, dst_id),
                     ).fetchall()
-                    photo_workspace_pairs = [
-                        (r["photo_id"], r["workspace_id"]) for r in tag_rows
-                    ]
+                    photo_workspace_pairs = [(r["photo_id"], r["workspace_id"]) for r in tag_rows]
                     if photo_workspace_pairs:
                         self.rename_species_highlights_species(
-                            src_name, dst_name,
+                            src_name,
+                            dst_name,
                             photo_workspace_pairs=photo_workspace_pairs,
                             _commit=False,
                         )
                         self.rename_photo_preferences_species(
-                            src_name, dst_name,
+                            src_name,
+                            dst_name,
                             photo_workspace_pairs=photo_workspace_pairs,
                             _commit=False,
                         )
@@ -9691,9 +9619,7 @@ class Database:
         self.conn.execute("DELETE FROM photo_keywords WHERE keyword_id = ?", (src_id,))
         # Reparent children onto the destination before deleting, or the
         # keywords.parent_id FK aborts the merge mid-way.
-        children = self.conn.execute(
-            "SELECT id, name, type FROM keywords WHERE parent_id = ?", (src_id,)
-        ).fetchall()
+        children = self.conn.execute("SELECT id, name, type FROM keywords WHERE parent_id = ?", (src_id,)).fetchall()
         for child in children:
             try:
                 self.conn.execute(
@@ -9806,16 +9732,13 @@ class Database:
 
     def get_meta(self, key):
         """Return the db_meta value for `key`, or None if unset."""
-        row = self.conn.execute(
-            "SELECT value FROM db_meta WHERE key = ?", (key,)
-        ).fetchone()
+        row = self.conn.execute("SELECT value FROM db_meta WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else None
 
     def set_meta(self, key, value, _commit=True):
         """Upsert a db_meta row."""
         self.conn.execute(
-            "INSERT INTO db_meta (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO db_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, str(value)),
         )
         if _commit:
@@ -10129,8 +10052,7 @@ class Database:
         """Return {id,name,common_name,rank} for the default explorer root class,
         or None when the reference taxonomy has not been downloaded."""
         row = self.conn.execute(
-            "SELECT id, name, common_name, rank FROM taxa"
-            " WHERE name = ? AND rank = ? LIMIT 1",
+            "SELECT id, name, common_name, rank FROM taxa WHERE name = ? AND rank = ? LIMIT 1",
             (name, rank),
         ).fetchone()
         return dict(row) if row else None
@@ -10190,8 +10112,10 @@ class Database:
         # ranks (see vireo/taxonomy.py MAJOR_RANK_LEVELS), giving a real
         # class->species depth of ~4. Raise the cap if intermediate ranks are
         # ever kept.
-        return [dict(r) for r in self.conn.execute(
-            """WITH RECURSIVE subtree(id, name, common_name, rank, parent_id, depth) AS (
+        return [
+            dict(r)
+            for r in self.conn.execute(
+                """WITH RECURSIVE subtree(id, name, common_name, rank, parent_id, depth) AS (
                    SELECT id, name, common_name, rank, parent_id, 0
                    FROM taxa WHERE id = ?
                    UNION ALL
@@ -10200,8 +10124,9 @@ class Database:
                    WHERE s.depth < ?
                )
                SELECT id, name, common_name, rank, parent_id FROM subtree""",
-            (root_id, max_depth),
-        ).fetchall()]
+                (root_id, max_depth),
+            ).fetchall()
+        ]
 
     def get_classes_for_taxa(self, taxon_ids):
         """Distinct class-rank ancestors of the given taxa, for the explorer's
@@ -10232,8 +10157,7 @@ class Database:
             for r in rows:
                 if r["id"] not in seen:
                     seen[r["id"]] = dict(r)
-        return sorted(seen.values(),
-                      key=lambda r: r["common_name"] or r["name"])
+        return sorted(seen.values(), key=lambda r: r["common_name"] or r["name"])
 
     def get_life_list_best_photo_by_taxon(self, taxon_ids):
         """Map taxon_id -> {id, filename} of a representative (highest quality_score,
@@ -10390,9 +10314,7 @@ class Database:
         """Return {species: main_photo_id} for compatibility callers."""
         return {
             species: photo_ids[0]
-            for species, photo_ids in self.get_species_representative_lists(
-                eligible_only=eligible_only
-            ).items()
+            for species, photo_ids in self.get_species_representative_lists(eligible_only=eligible_only).items()
             if photo_ids
         }
 
@@ -10409,7 +10331,10 @@ class Database:
         )
 
     def _restore_species_representative(
-        self, species, photo_id, selected_order=None,
+        self,
+        species,
+        photo_id,
+        selected_order=None,
     ):
         """Restore a global species_representatives row on undo.
 
@@ -10463,9 +10388,7 @@ class Database:
         A compatibility ``photo_preferences`` row is kept for older callers
         that still expect one main representative in the active workspace.
         """
-        self.set_photo_preference(
-            "species_representative", species, photo_id, _commit=_commit
-        )
+        self.set_photo_preference("species_representative", species, photo_id, _commit=_commit)
 
     def clear_photo_preference(self, purpose, species, _commit=True):
         """Clear the preferred photo for a species/purpose in this workspace."""
@@ -10689,19 +10612,19 @@ class Database:
         return True
 
     def rename_photo_preferences_species(
-        self, old_species, new_species, photo_workspace_pairs=None, _commit=True,
+        self,
+        old_species,
+        new_species,
+        photo_workspace_pairs=None,
+        _commit=True,
     ):
         """Rename stored representative-photo preferences across workspaces."""
         if not old_species or not new_species or old_species == new_species:
             return 0
         global_photo_ids = None
         if photo_workspace_pairs is not None:
-            global_photo_ids = sorted({
-                photo_id for photo_id, _workspace_id in photo_workspace_pairs
-            })
-        self.rename_species_representatives_species(
-            old_species, new_species, photo_ids=global_photo_ids, _commit=False
-        )
+            global_photo_ids = sorted({photo_id for photo_id, _workspace_id in photo_workspace_pairs})
+        self.rename_species_representatives_species(old_species, new_species, photo_ids=global_photo_ids, _commit=False)
         if photo_workspace_pairs is not None:
             moved = 0
             seen = set()
@@ -10753,7 +10676,11 @@ class Database:
         return cur.rowcount
 
     def rename_species_representatives_species(
-        self, old_species, new_species, photo_ids=None, _commit=True,
+        self,
+        old_species,
+        new_species,
+        photo_ids=None,
+        _commit=True,
     ):
         """Rename global representative rows for a species.
 
@@ -10811,7 +10738,11 @@ class Database:
         return moved
 
     def rename_species_highlights_species(
-        self, old_species, new_species, photo_workspace_pairs=None, _commit=True,
+        self,
+        old_species,
+        new_species,
+        photo_workspace_pairs=None,
+        _commit=True,
     ):
         """Rename ordered species-highlight rows to a new species bucket.
 
@@ -10848,7 +10779,8 @@ class Database:
             workspace_scopes = list(by_ws.items())
         else:
             workspace_ids = [
-                r["workspace_id"] for r in self.conn.execute(
+                r["workspace_id"]
+                for r in self.conn.execute(
                     """SELECT DISTINCT workspace_id
                        FROM species_highlights
                        WHERE species = ?""",
@@ -10877,32 +10809,39 @@ class Database:
                 raw_rows = []
                 for chunk in _chunks(photo_ids):
                     placeholders = ",".join("?" for _ in chunk)
-                    raw_rows.extend(self.conn.execute(
-                        f"""SELECT photo_id, rank, created_at
+                    raw_rows.extend(
+                        self.conn.execute(
+                            f"""SELECT photo_id, rank, created_at
                             FROM species_highlights
                             WHERE workspace_id = ? AND species = ?
                               AND photo_id IN ({placeholders})""",
-                        (workspace_id, old_species, *chunk),
-                    ).fetchall())
-                raw_rows.sort(
-                    key=lambda r: (r["rank"], r["created_at"], r["photo_id"])
-                )
+                            (workspace_id, old_species, *chunk),
+                        ).fetchall()
+                    )
+                raw_rows.sort(key=lambda r: (r["rank"], r["created_at"], r["photo_id"]))
                 src_rows = raw_rows
             if not src_rows:
                 continue
             existing = {
-                r["photo_id"] for r in self.conn.execute(
+                r["photo_id"]
+                for r in self.conn.execute(
                     """SELECT photo_id FROM species_highlights
                        WHERE workspace_id = ? AND species = ?""",
                     (workspace_id, new_species),
                 ).fetchall()
             }
-            next_rank = int(self.conn.execute(
-                """SELECT COALESCE(MAX(rank), 0) AS max_rank
+            next_rank = (
+                int(
+                    self.conn.execute(
+                        """SELECT COALESCE(MAX(rank), 0) AS max_rank
                    FROM species_highlights
                    WHERE workspace_id = ? AND species = ?""",
-                (workspace_id, new_species),
-            ).fetchone()["max_rank"] or 0) + 1
+                        (workspace_id, new_species),
+                    ).fetchone()["max_rank"]
+                    or 0
+                )
+                + 1
+            )
             for r in src_rows:
                 pid = r["photo_id"]
                 self.conn.execute(
@@ -10980,8 +10919,8 @@ class Database:
         'location', 'individual') are preserved. Explicit type/taxon_id
         kwargs always win over auto-detection.
         """
-        if 'type' in kwargs:
-            kt = kwargs['type']
+        if "type" in kwargs:
+            kt = kwargs["type"]
             # Guard the membership test against non-hashable JSON values —
             # api_update_keyword passes the request body through, and
             # `x in frozenset` raises TypeError on unhashable input. Treat
@@ -10989,7 +10928,7 @@ class Database:
             # existing catch yields the documented 400).
             if not isinstance(kt, str) or kt not in KEYWORD_TYPES:
                 raise ValueError(f"Invalid keyword type: {kt!r}")
-        allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
+        allowed = {"type", "taxon_id", "latitude", "longitude", "name"}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return keyword_id
@@ -11002,9 +10941,9 @@ class Database:
         # value like `'`) would store the raw text and queue that raw
         # rename to sidecars, bypassing both the duplicate-prevention
         # contract and the empty-name rejection enforced in add_keyword.
-        if 'name' in updates:
-            updates['name'] = normalize_keyword_display(updates['name'])
-            if not updates['name']:
+        if "name" in updates:
+            updates["name"] = normalize_keyword_display(updates["name"])
+            if not updates["name"]:
                 raise ValueError("keyword name is empty after normalization")
 
         # On a rename/retype, resolve the effective (name, type) and, if
@@ -11019,7 +10958,7 @@ class Database:
         # clean `general apapane` to `taxonomy` while a legacy quoted
         # `‘apapane` taxonomy peer exists would leave two normalized-equal
         # taxonomy rows (NULL parents bypass UNIQUE(name, parent_id)).
-        if 'name' in updates or 'type' in updates:
+        if "name" in updates or "type" in updates:
             current = self.conn.execute(
                 "SELECT name, type, taxon_id, parent_id FROM keywords WHERE id = ?",
                 (keyword_id,),
@@ -11035,19 +10974,16 @@ class Database:
                 # stays False in that case so the auto-retype block below
                 # doesn't rewrite the stored spelling as a side effect of
                 # a type-only change.
-                if 'name' in updates:
-                    new_name = updates['name']
+                if "name" in updates:
+                    new_name = updates["name"]
                     name_changed = new_name != current["name"]
                 else:
-                    new_name = normalize_keyword_display(current['name'])
+                    new_name = normalize_keyword_display(current["name"])
                     name_changed = False
                 # Resolve taxon match lazily. Only rename actually needs it
                 # (both for auto-promotion below and for effective_type when
                 # no explicit type is passed).
-                taxon_id = (
-                    self._lookup_taxon_id_for_keyword(new_name)
-                    if name_changed else None
-                )
+                taxon_id = self._lookup_taxon_id_for_keyword(new_name) if name_changed else None
                 # Peer lookup must use the EFFECTIVE type, not the pre-update
                 # row type. Ways the effective type can diverge from cur_type
                 # inside this same call:
@@ -11070,9 +11006,9 @@ class Database:
                 #      taxonomy `apapane` peer is missed and the UPDATE
                 #      leaves two taxonomy rows that normalize to the same
                 #      key at the same slot.
-                effective_type = updates.get('type', cur_type)
-                if 'type' not in updates and cur_type == 'general' and taxon_id:
-                    effective_type = 'taxonomy'
+                effective_type = updates.get("type", cur_type)
+                if "type" not in updates and cur_type == "general" and taxon_id:
+                    effective_type = "taxonomy"
                 type_changed = effective_type != cur_type
                 if name_changed or type_changed:
                     # Merge a rename/retype whose effective (name, type) already
@@ -11139,9 +11075,7 @@ class Database:
                             "SELECT name FROM keywords WHERE id = ?",
                             (peer["id"],),
                         ).fetchone()
-                        peer_pre_name = (
-                            peer_pre_row["name"] if peer_pre_row else None
-                        )
+                        peer_pre_name = peer_pre_row["name"] if peer_pre_row else None
                         peer_pre_tag_rows = self.conn.execute(
                             """SELECT DISTINCT pk.photo_id, wf.workspace_id
                                FROM photo_keywords pk
@@ -11151,10 +11085,7 @@ class Database:
                                WHERE pk.keyword_id = ?""",
                             (peer["id"],),
                         ).fetchall()
-                        peer_pre_photos = tuple(
-                            (r["photo_id"], r["workspace_id"])
-                            for r in peer_pre_tag_rows
-                        )
+                        peer_pre_photos = tuple((r["photo_id"], r["workspace_id"]) for r in peer_pre_tag_rows)
                         # Canonicalize the peer's stored spelling when it is
                         # an upgraded legacy row that still carries an edge
                         # quote (e.g. taxonomy `‘apapane`) and the edited row
@@ -11220,11 +11151,11 @@ class Database:
                 # above (only when name_changed) so the peer lookup could
                 # compute the effective type; reuse it here.
                 if name_changed:
-                    if cur_type == 'general':
+                    if cur_type == "general":
                         # Only promote to taxonomy if a match exists;
                         # otherwise leave type/taxon_id alone.
                         if taxon_id:
-                            updates.setdefault('type', 'taxonomy')
+                            updates.setdefault("type", "taxonomy")
                             # Gate taxon_id on the EFFECTIVE type so an
                             # explicit non-taxonomy type kwarg (e.g.
                             # type='location') doesn't end up with a
@@ -11232,17 +11163,16 @@ class Database:
                             # for the auto-promoted case: type='taxonomy'
                             # backed by a matched taxon implies
                             # is_species=1.
-                            if updates.get('type') == 'taxonomy':
-                                updates.setdefault('taxon_id', taxon_id)
-                                updates['is_species'] = 1
-                    elif (cur_type == 'taxonomy' and taxon_id
-                          and updates.get('type', 'taxonomy') == 'taxonomy'):
+                            if updates.get("type") == "taxonomy":
+                                updates.setdefault("taxon_id", taxon_id)
+                                updates["is_species"] = 1
+                    elif cur_type == "taxonomy" and taxon_id and updates.get("type", "taxonomy") == "taxonomy":
                         # Already taxonomy: refresh taxon_id only if the new
                         # name matches a (possibly different) taxon AND the
                         # effective type stays 'taxonomy' (caller may demote
                         # to 'location' etc.). If no match, leave the
                         # existing link in place.
-                        updates.setdefault('taxon_id', taxon_id)
+                        updates.setdefault("taxon_id", taxon_id)
                     # Other manual types ('location', 'people', etc.) are
                     # preserved — user intent wins.
 
@@ -11430,8 +11360,7 @@ class Database:
                                  group_id    = COALESCE(excluded.group_id,   group_id),
                                  vote_count  = COALESCE(excluded.vote_count, vote_count),
                                  total_votes = COALESCE(excluded.total_votes,total_votes)""",
-                (pred_id, ws_id, status, individual, group_id,
-                 vote_count, total_votes),
+                (pred_id, ws_id, status, individual, group_id, vote_count, total_votes),
             )
         self.conn.commit()
 
@@ -11493,8 +11422,7 @@ class Database:
             )
         commit_with_retry(self.conn)
 
-    def clear_predictions(self, model=None, collection_photo_ids=None,
-                          labels_fingerprint=None, clear_run_keys=True):
+    def clear_predictions(self, model=None, collection_photo_ids=None, labels_fingerprint=None, clear_run_keys=True):
         """Clear predictions, optionally filtered by model, photo set, and fingerprint.
 
         The ``predictions`` table is now global (no workspace_id).  This
@@ -11670,8 +11598,9 @@ class Database:
                 conditions.append(f"d.photo_id IN ({placeholders})")
                 params.extend(chunk)
             where = "WHERE " + " AND ".join(conditions)
-            rows.extend(self.conn.execute(
-                f"""SELECT pr.*,
+            rows.extend(
+                self.conn.execute(
+                    f"""SELECT pr.*,
                            pr.classifier_model AS model,
                            COALESCE(pr_rev.status, 'pending') AS status,
                            pr_rev.individual AS individual,
@@ -11688,13 +11617,12 @@ class Database:
                     LEFT JOIN prediction_review pr_rev
                       ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                     {where} ORDER BY pr.confidence DESC""",
-                params,
-            ).fetchall())
+                    params,
+                ).fetchall()
+            )
         if len(id_chunks) > 1:
             # Match SQL "ORDER BY pr.confidence DESC" (NULLs sort last).
-            rows.sort(
-                key=lambda r: (r["confidence"] is None, -(r["confidence"] or 0))
-            )
+            rows.sort(key=lambda r: (r["confidence"] is None, -(r["confidence"] or 0)))
         return rows
 
     def update_prediction_status(self, prediction_id, status, _commit=True):
@@ -11766,13 +11694,14 @@ class Database:
         # column. Alternatives are scoped per-workspace through
         # prediction_review.
         det_keys = {
-            (r['detection_id'], r.get('model'), r.get('labels_fingerprint'))
-            for r in rows if r.get('detection_id') is not None
+            (r["detection_id"], r.get("model"), r.get("labels_fingerprint"))
+            for r in rows
+            if r.get("detection_id") is not None
         }
         alts_by_key = {k: [] for k in det_keys}
         det_ids = list({did for did, _, _ in det_keys})
         if det_ids:
-            placeholders = ','.join('?' * len(det_ids))
+            placeholders = ",".join("?" * len(det_ids))
             alt_rows = self.conn.execute(
                 f"""SELECT pr.detection_id,
                            pr.classifier_model AS model,
@@ -11787,15 +11716,12 @@ class Database:
                 [ws, *det_ids],
             ).fetchall()
             for a in alt_rows:
-                key = (a['detection_id'], a['model'], a['labels_fingerprint'])
+                key = (a["detection_id"], a["model"], a["labels_fingerprint"])
                 if key in alts_by_key:
-                    alts_by_key[key].append(
-                        {'species': a['species'], 'confidence': a['confidence']}
-                    )
+                    alts_by_key[key].append({"species": a["species"], "confidence": a["confidence"]})
         for r in rows:
-            r['alternatives'] = alts_by_key.get(
-                (r.get('detection_id'), r.get('model'),
-                 r.get('labels_fingerprint')),
+            r["alternatives"] = alts_by_key.get(
+                (r.get("detection_id"), r.get("model"), r.get("labels_fingerprint")),
                 [],
             )
         return rows
@@ -11967,17 +11893,15 @@ class Database:
             (self._ws_id(), photo_id, model, labels_fingerprint),
         ).fetchone()
 
-    def get_photo_embedding(self, photo_id, model, variant=''):
+    def get_photo_embedding(self, photo_id, model, variant=""):
         """Return the embedding blob for (photo_id, model, variant), or None."""
         row = self.conn.execute(
-            "SELECT embedding FROM photo_embeddings "
-            "WHERE photo_id = ? AND model = ? AND variant = ?",
+            "SELECT embedding FROM photo_embeddings WHERE photo_id = ? AND model = ? AND variant = ?",
             (photo_id, model, variant),
         ).fetchone()
         return row["embedding"] if row else None
 
-    def upsert_photo_embedding(self, photo_id, model, embedding_bytes,
-                               variant='', verify_workspace=False):
+    def upsert_photo_embedding(self, photo_id, model, embedding_bytes, variant="", verify_workspace=False):
         """Store an embedding blob for (photo_id, model, variant).
 
         Replaces any existing row with the same primary key. ``model`` is
@@ -12002,7 +11926,7 @@ class Database:
         )
         self.conn.commit()
 
-    def get_photos_with_embedding(self, model, variant='', photo_ids=None):
+    def get_photos_with_embedding(self, model, variant="", photo_ids=None):
         """Return (photo_id, embedding_blob) pairs in the active workspace
         with a stored embedding for ``(model, variant)``.
 
@@ -12027,8 +11951,7 @@ class Database:
         rows = self.conn.execute(sql, params).fetchall()
         return [(row["photo_id"], row["embedding"]) for row in rows]
 
-    def clear_prediction_group_info(self, detection_id, model,
-                                    labels_fingerprint=None):
+    def clear_prediction_group_info(self, detection_id, model, labels_fingerprint=None):
         """Drop stale group metadata from the cached prediction's review row.
 
         Used when a cached prediction that previously belonged to a
@@ -12078,9 +12001,9 @@ class Database:
         )
         commit_with_retry(self.conn)
 
-    def update_prediction_group_info(self, detection_id, model, group_id,
-                                     vote_count, total_votes, individual,
-                                     labels_fingerprint=None):
+    def update_prediction_group_info(
+        self, detection_id, model, group_id, vote_count, total_votes, individual, labels_fingerprint=None
+    ):
         """Upsert group info for the primary prediction of
         (detection, classifier_model, labels_fingerprint) in the active
         workspace's ``prediction_review``.
@@ -12141,7 +12064,8 @@ class Database:
     def is_keyword_species(self, keyword_id):
         """Return True if the keyword is marked as a species."""
         row = self.conn.execute(
-            "SELECT is_species FROM keywords WHERE id = ?", (keyword_id,),
+            "SELECT is_species FROM keywords WHERE id = ?",
+            (keyword_id,),
         ).fetchone()
         return bool(row["is_species"]) if row else False
 
@@ -12210,8 +12134,7 @@ class Database:
                      AND pr.labels_fingerprint = ?
                      AND pr.id != ?
                      AND COALESCE(pr_rev.status, 'pending') IN ('pending', 'alternative')""",
-                (ws, pred["detection_id"], pred["model"],
-                 pred["labels_fingerprint"], prediction_id),
+                (ws, pred["detection_id"], pred["model"], pred["labels_fingerprint"], prediction_id),
             ).fetchall()
             for s in sibs:
                 self.conn.execute(
@@ -12247,9 +12170,7 @@ class Database:
             # longer cancel and XMP sync writes the stray-quote label. Mirrors
             # the same re-read pattern in api_add_keyword and the highlights
             # relabel route.
-            stored = self.conn.execute(
-                "SELECT name FROM keywords WHERE id = ?", (kid,)
-            ).fetchone()
+            stored = self.conn.execute("SELECT name FROM keywords WHERE id = ?", (kid,)).fetchone()
             if stored and stored["name"]:
                 species = stored["name"]
             # list of {"photo_id", "prediction_id", "old_species"}
@@ -12260,7 +12181,8 @@ class Database:
                 old_species = []
                 if replace_species:
                     old_species = [
-                        row["name"] for row in self.conn.execute(
+                        row["name"]
+                        for row in self.conn.execute(
                             """SELECT k.name
                                FROM photo_keywords pk
                                JOIN keywords k ON k.id = pk.keyword_id
@@ -12289,11 +12211,16 @@ class Database:
                         if old_name.lower() == new_species_lower:
                             continue
                         cancelled = self.remove_pending_changes(
-                            photo_id, "keyword_add", old_name, _commit=False,
+                            photo_id,
+                            "keyword_add",
+                            old_name,
+                            _commit=False,
                         )
                         if cancelled == 0:
                             self.queue_change(
-                                photo_id, "keyword_remove", old_name,
+                                photo_id,
+                                "keyword_remove",
+                                old_name,
                                 _commit=False,
                             )
                     # Migrate curated species state (representatives and
@@ -12306,20 +12233,26 @@ class Database:
                     # migration in api_highlights_relabel.
                     for old_name in old_species:
                         self.rename_species_highlights_species(
-                            old_name, species, [(photo_id, ws)],
+                            old_name,
+                            species,
+                            [(photo_id, ws)],
                             _commit=False,
                         )
                         self.rename_photo_preferences_species(
-                            old_name, species, [(photo_id, ws)],
+                            old_name,
+                            species,
+                            [(photo_id, ws)],
                             _commit=False,
                         )
                 self.tag_photo(photo_id, kid, _commit=False)
                 self.queue_change(photo_id, "keyword_add", species, _commit=False)
-                affected.append({
-                    "photo_id": photo_id,
-                    "prediction_id": this_pred_id,
-                    "old_species": old_species,
-                })
+                affected.append(
+                    {
+                        "photo_id": photo_id,
+                        "prediction_id": this_pred_id,
+                        "old_species": old_species,
+                    }
+                )
 
             # If grouped, accept all predictions in the group (in this workspace).
             if pred["group_id"]:
@@ -12336,17 +12269,11 @@ class Database:
                     (ws, ws, pred["group_id"], pred["model"]),
                 ).fetchall()
                 for gp in group_preds:
-                    if (
-                        limited_photo_ids is not None
-                        and gp["photo_id"] not in limited_photo_ids
-                    ):
+                    if limited_photo_ids is not None and gp["photo_id"] not in limited_photo_ids:
                         continue
                     _accept_for_photo(gp["photo_id"], gp["id"])
             else:
-                if (
-                    limited_photo_ids is not None
-                    and pred["photo_id"] not in limited_photo_ids
-                ):
+                if limited_photo_ids is not None and pred["photo_id"] not in limited_photo_ids:
                     if _commit:
                         self.conn.commit()
                     return {"species": species, "keyword_id": kid, "affected": []}
@@ -12390,8 +12317,7 @@ class Database:
                       COUNT(DISTINCT detector_model) AS model_count
                FROM detector_runs"""
         ).fetchone()
-        return {"photo_count": r["photo_count"] or 0,
-                "model_count": r["model_count"] or 0}
+        return {"photo_count": r["photo_count"] or 0, "model_count": r["model_count"] or 0}
 
     def get_detector_run_photo_ids(self, detector_model):
         """Return the set of photo_ids with a consistent cached detector run.
@@ -12418,8 +12344,7 @@ class Database:
         ).fetchall()
         return {r["photo_id"] for r in rows}
 
-    def record_classifier_run(self, detection_id, classifier_model,
-                               labels_fingerprint, prediction_count):
+    def record_classifier_run(self, detection_id, classifier_model, labels_fingerprint, prediction_count):
         self.conn.execute(
             """INSERT INTO classifier_runs
                  (detection_id, classifier_model, labels_fingerprint, prediction_count)
@@ -12462,15 +12387,17 @@ class Database:
         if not photo_ids:
             return 0
         import config as cfg
+
         min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2,
+            "detector_confidence",
+            0.2,
         )
         # Chunk to stay under SQLITE_MAX_VARIABLE_NUMBER (default 999).
         # Match the 500-element chunks used elsewhere in this file.
         CHUNK = 500
         matched = set()
         for i in range(0, len(photo_ids), CHUNK):
-            chunk = photo_ids[i:i + CHUNK]
+            chunk = photo_ids[i : i + CHUNK]
             placeholders = ",".join("?" * len(chunk))
             rows = self.conn.execute(
                 f"SELECT DISTINCT d.photo_id "
@@ -12524,9 +12451,9 @@ class Database:
         unchanged) so they don't get marked stale.
         """
         import json
+
         rows = self.conn.execute(
-            "SELECT fingerprint, display_name, sources_json, label_count "
-            "FROM labels_fingerprints"
+            "SELECT fingerprint, display_name, sources_json, label_count FROM labels_fingerprints"
         ).fetchall()
         out = []
         for r in rows:
@@ -12534,16 +12461,19 @@ class Database:
                 sources = json.loads(r["sources_json"] or "[]")
             except (TypeError, ValueError):
                 sources = []
-            out.append({
-                "fingerprint": r["fingerprint"],
-                "display_name": r["display_name"],
-                "sources": sources,
-                "label_count": r["label_count"],
-            })
+            out.append(
+                {
+                    "fingerprint": r["fingerprint"],
+                    "display_name": r["display_name"],
+                    "sources": sources,
+                    "label_count": r["label_count"],
+                }
+            )
         return out
 
     def upsert_labels_fingerprint(self, fingerprint, display_name, sources, label_count):
         import json
+
         self.conn.execute(
             """INSERT INTO labels_fingerprints
                  (fingerprint, display_name, sources_json, label_count)
@@ -12564,8 +12494,7 @@ class Database:
         ).fetchone()
         return row["status"] if row else "pending"
 
-    def set_review_status(self, prediction_id, workspace_id, status,
-                           individual=None, group_id=None):
+    def set_review_status(self, prediction_id, workspace_id, status, individual=None, group_id=None):
         self.conn.execute(
             """INSERT INTO prediction_review
                  (prediction_id, workspace_id, status, reviewed_at, individual, group_id)
@@ -12619,7 +12548,8 @@ class Database:
             box = det["box"]
             category = det.get("category", "animal")
             det_id = _detection_id(
-                photo_id, detector_model,
+                photo_id,
+                detector_model,
                 (box["x"], box["y"], box["w"], box["h"]),
                 category,
             )
@@ -12628,12 +12558,8 @@ class Database:
                 unique[det_id] = (det, category, idx)
                 continue
             prev_det, _prev_category, prev_idx = unique[det_id]
-            if (
-                det["confidence"] > prev_det["confidence"]
-                or (
-                    det["confidence"] == prev_det["confidence"]
-                    and idx > prev_idx
-                )
+            if det["confidence"] > prev_det["confidence"] or (
+                det["confidence"] == prev_det["confidence"] and idx > prev_idx
             ):
                 unique[det_id] = (det, category, idx)
 
@@ -12660,9 +12586,7 @@ class Database:
                      box_h = excluded.box_h,
                      detector_confidence = excluded.detector_confidence,
                      category = excluded.category""",
-                (det_id, photo_id, detector_model,
-                 box["x"], box["y"], box["w"], box["h"],
-                 det["confidence"], category),
+                (det_id, photo_id, detector_model, box["x"], box["y"], box["w"], box["h"], det["confidence"], category),
             )
             ids.append(det_id)
 
@@ -12671,10 +12595,13 @@ class Database:
         # because two writers with the same detections compute the same
         # `new_ids` set, so neither deletes the other's rows.
         new_ids = set(ids)
-        existing = [r["id"] for r in self.conn.execute(
-            "SELECT id FROM detections WHERE photo_id = ? AND detector_model = ?",
-            (photo_id, detector_model),
-        ).fetchall()]
+        existing = [
+            r["id"]
+            for r in self.conn.execute(
+                "SELECT id FROM detections WHERE photo_id = ? AND detector_model = ?",
+                (photo_id, detector_model),
+            ).fetchall()
+        ]
         stale = [eid for eid in existing if eid not in new_ids]
         # Chunk to stay under SQLite's compile-time SQLITE_MAX_VARIABLE_NUMBER
         # (defaults to 999 in older builds, 32766 in newer). A single photo
@@ -12682,7 +12609,7 @@ class Database:
         # against future detectors that produce many small boxes.
         CHUNK = 500
         for i in range(0, len(stale), CHUNK):
-            chunk = stale[i:i + CHUNK]
+            chunk = stale[i : i + CHUNK]
             placeholders = ",".join("?" for _ in chunk)
             self.conn.execute(
                 f"DELETE FROM detections WHERE id IN ({placeholders})",
@@ -12741,10 +12668,10 @@ class Database:
         """
         if min_conf is None:
             import config as cfg
+
             effective = self.get_effective_config(cfg.load())
             min_conf = effective.get("detector_confidence", 0.2)
-        q = ("SELECT * FROM detections WHERE photo_id = ? "
-             "AND detector_confidence >= ?")
+        q = "SELECT * FROM detections WHERE photo_id = ? AND detector_confidence >= ?"
         params = [photo_id, min_conf]
         if detector_model is not None:
             q += " AND detector_model = ?"
@@ -12757,8 +12684,7 @@ class Database:
         q += " ORDER BY detector_confidence DESC, id ASC"
         return self.conn.execute(q, params).fetchall()
 
-    def get_detections_for_photos(self, photo_ids, min_conf=None,
-                                  detector_model=None):
+    def get_detections_for_photos(self, photo_ids, min_conf=None, detector_model=None):
         """Return {photo_id: [det_dict, ...]} for a batch of photos.
 
         Each det_dict has keys: x, y, w, h, confidence, category. Lists are
@@ -12777,6 +12703,7 @@ class Database:
             return {}
         if min_conf is None:
             import config as cfg
+
             effective = self.get_effective_config(cfg.load())
             min_conf = effective.get("detector_confidence", 0.2)
         # Dedup-preserving-order: same id appearing in two chunks would
@@ -12799,20 +12726,21 @@ class Database:
             q += " ORDER BY photo_id, detector_confidence DESC"
             rows = self.conn.execute(q, params).fetchall()
             for r in rows:
-                result.setdefault(r["photo_id"], []).append({
-                    "x": r["box_x"],
-                    "y": r["box_y"],
-                    "w": r["box_w"],
-                    "h": r["box_h"],
-                    "confidence": r["detector_confidence"],
-                    "category": r["category"],
-                })
+                result.setdefault(r["photo_id"], []).append(
+                    {
+                        "x": r["box_x"],
+                        "y": r["box_y"],
+                        "w": r["box_w"],
+                        "h": r["box_h"],
+                        "confidence": r["detector_confidence"],
+                        "category": r["category"],
+                    }
+                )
         return result
 
-    def get_predictions_for_detection(self, detection_id,
-                                        min_classifier_conf=None,
-                                        classifier_model=None,
-                                        labels_fingerprint=None):
+    def get_predictions_for_detection(
+        self, detection_id, min_classifier_conf=None, classifier_model=None, labels_fingerprint=None
+    ):
         """Return cached classifier predictions for a single detection.
 
         Reads the global ``predictions`` table. Review status (accepted /
@@ -12830,10 +12758,10 @@ class Database:
         """
         if min_classifier_conf is None:
             import config as cfg
+
             effective = self.get_effective_config(cfg.load())
             min_classifier_conf = effective.get("classifier_confidence", 0.0)
-        q = ("SELECT * FROM predictions WHERE detection_id = ? "
-             "AND confidence >= ?")
+        q = "SELECT * FROM predictions WHERE detection_id = ? AND confidence >= ?"
         params = [detection_id, min_classifier_conf]
         if classifier_model is not None:
             q += " AND classifier_model = ?"
@@ -12859,12 +12787,8 @@ class Database:
         rows for that model.
         """
         if detector_model is None:
-            self.conn.execute(
-                "DELETE FROM detections WHERE photo_id = ?", (photo_id,)
-            )
-            self.conn.execute(
-                "DELETE FROM detector_runs WHERE photo_id = ?", (photo_id,)
-            )
+            self.conn.execute("DELETE FROM detections WHERE photo_id = ?", (photo_id,))
+            self.conn.execute("DELETE FROM detector_runs WHERE photo_id = ?", (photo_id,))
         else:
             self.conn.execute(
                 "DELETE FROM detections WHERE photo_id = ? AND detector_model = ?",
@@ -12896,14 +12820,12 @@ class Database:
         """
         ws_id = self._ws_id()
         if category is None:
-            where = (
-                "p.miss_no_subject=1 OR p.miss_clipped=1 OR p.miss_oof=1"
-            )
+            where = "p.miss_no_subject=1 OR p.miss_clipped=1 OR p.miss_oof=1"
         else:
             col = {
                 "no_subject": "miss_no_subject",
-                "clipped":    "miss_clipped",
-                "oof":        "miss_oof",
+                "clipped": "miss_clipped",
+                "oof": "miss_oof",
             }[category]
             where = f"p.{col}=1"
 
@@ -12934,9 +12856,8 @@ class Database:
         import json as _json
 
         import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
-        )
+
+        min_conf = self.get_effective_config(cfg.load()).get("detector_confidence", 0.2)
         photo_ids = [p["id"] for p in photos]
         # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
         # A workspace with thousands of flagged misses would otherwise raise
@@ -12944,7 +12865,7 @@ class Database:
         CHUNK = 500
         primary = {}
         for i in range(0, len(photo_ids), CHUNK):
-            chunk = photo_ids[i:i + CHUNK]
+            chunk = photo_ids[i : i + CHUNK]
             placeholders = ",".join("?" * len(chunk))
             det_rows = self.conn.execute(
                 f"SELECT photo_id, box_x, box_y, box_w, box_h, "
@@ -12959,10 +12880,14 @@ class Database:
         for p in photos:
             d = primary.get(p["id"])
             if d is not None:
-                p["detection_box"] = _json.dumps({
-                    "x": d["box_x"], "y": d["box_y"],
-                    "w": d["box_w"], "h": d["box_h"],
-                })
+                p["detection_box"] = _json.dumps(
+                    {
+                        "x": d["box_x"],
+                        "y": d["box_y"],
+                        "w": d["box_w"],
+                        "h": d["box_h"],
+                    }
+                )
                 p["detection_conf"] = d["detector_confidence"]
             else:
                 p["detection_box"] = None
@@ -12978,12 +12903,10 @@ class Database:
         self._verify_photo_in_workspace(photo_id)
         col = {
             "no_subject": "miss_no_subject",
-            "clipped":    "miss_clipped",
-            "oof":        "miss_oof",
+            "clipped": "miss_clipped",
+            "oof": "miss_oof",
         }[category]
-        self.conn.execute(
-            f"UPDATE photos SET {col}=0 WHERE id=?", (photo_id,)
-        )
+        self.conn.execute(f"UPDATE photos SET {col}=0 WHERE id=?", (photo_id,))
         self.conn.commit()
 
     def bulk_reject_miss_category(self, category, since=None):
@@ -13005,8 +12928,8 @@ class Database:
         """
         col = {
             "no_subject": "miss_no_subject",
-            "clipped":    "miss_clipped",
-            "oof":        "miss_oof",
+            "clipped": "miss_clipped",
+            "oof": "miss_oof",
         }[category]
         params = [self._ws_id()]
         since_clause = ""
@@ -13027,17 +12950,14 @@ class Database:
         # string instead of the original NULL, leaving rows in a
         # non-canonical state that bypasses code paths expecting
         # none/flagged/rejected (or NULL).
-        affected = [
-            {"photo_id": r["id"], "old_value": r["flag"]}
-            for r in rows
-        ]
+        affected = [{"photo_id": r["id"], "old_value": r["flag"]} for r in rows]
         if not affected:
             return []
         ids = [a["photo_id"] for a in affected]
         # Chunk to stay under SQLite's SQLITE_MAX_VARIABLE_NUMBER (default 999).
         _CHUNK = 500
         for i in range(0, len(ids), _CHUNK):
-            chunk = ids[i:i + _CHUNK]
+            chunk = ids[i : i + _CHUNK]
             placeholders = ",".join("?" * len(chunk))
             self.conn.execute(
                 f"UPDATE photos SET flag='rejected' WHERE id IN ({placeholders})",
@@ -13070,8 +12990,7 @@ class Database:
             chunk = ids[i : i + _CHUNK]
             placeholders = ",".join("?" * len(chunk))
             rows = self.conn.execute(
-                f"SELECT id, photo_id FROM detections "
-                f"WHERE photo_id IN ({placeholders})",
+                f"SELECT id, photo_id FROM detections WHERE photo_id IN ({placeholders})",
                 tuple(chunk),
             ).fetchall()
             for row in rows:
@@ -13198,9 +13117,7 @@ class Database:
         try:
             import config as cfg
 
-            enabled = bool(
-                self.get_effective_config(cfg.load()).get("sync_flags_to_xmp", False)
-            )
+            enabled = bool(self.get_effective_config(cfg.load()).get("sync_flags_to_xmp", False))
         except Exception:
             log.warning("Failed to read sync_flags_to_xmp config", exc_info=True)
             enabled = False
@@ -13209,9 +13126,7 @@ class Database:
                 self.conn.commit()
             return None
 
-        token = self.queue_change(
-            photo_id, "flag", flag, workspace_id=ws_id, _commit=False
-        )
+        token = self.queue_change(photo_id, "flag", flag, workspace_id=ws_id, _commit=False)
         if _commit:
             self.conn.commit()
         return token
@@ -13241,7 +13156,7 @@ class Database:
         for item in items:
             self.conn.execute(
                 "INSERT INTO edit_history_items (edit_id, photo_id, old_value, new_value) VALUES (?, ?, ?, ?)",
-                (edit_id, item['photo_id'], item['old_value'], item['new_value']),
+                (edit_id, item["photo_id"], item["old_value"], item["new_value"]),
             )
         if _commit:
             self.conn.commit()
@@ -13264,17 +13179,21 @@ class Database:
 
     # Action types that appear in history but cannot be reversed
     _NON_UNDOABLE = (
-        'prediction_reject', 'discard',
+        "prediction_reject",
+        "discard",
         # Location edits (set/clear/link) are auditable but not undoable
         # in v1 — _apply_undo has no handlers for them, so including them
         # would silently advance the undo cursor without reverting state.
         # Adding undo support is a follow-up if it becomes important.
-        'location_set', 'location_clear', 'location_link',
+        "location_set",
+        "location_clear",
+        "location_link",
         # Compare-page review actions are auditable but not undoable in v1
         # for the same reason: _apply_undo/_apply_redo have no handlers, so
         # leaving them undoable would mark the entry undone without
         # restoring the prediction status or the replaced species keywords.
-        'prediction_reviewed', 'prediction_replace_species',
+        "prediction_reviewed",
+        "prediction_replace_species",
     )
 
     def undo_last_edit(self):
@@ -13294,12 +13213,12 @@ class Database:
         entry = dict(entry)
         items = self.conn.execute(
             "SELECT * FROM edit_history_items WHERE edit_id = ?",
-            (entry['id'],),
+            (entry["id"],),
         ).fetchall()
 
         self._apply_undo(entry, items)
 
-        self.conn.execute("UPDATE edit_history SET undone = 1 WHERE id = ?", (entry['id'],))
+        self.conn.execute("UPDATE edit_history SET undone = 1 WHERE id = ?", (entry["id"],))
         self.conn.commit()
         return entry
 
@@ -13319,52 +13238,49 @@ class Database:
         entry = dict(entry)
         items = self.conn.execute(
             "SELECT * FROM edit_history_items WHERE edit_id = ?",
-            (entry['id'],),
+            (entry["id"],),
         ).fetchall()
 
         self._apply_redo(entry, items)
 
-        self.conn.execute("UPDATE edit_history SET undone = 0 WHERE id = ?", (entry['id'],))
+        self.conn.execute("UPDATE edit_history SET undone = 0 WHERE id = ?", (entry["id"],))
         self.conn.commit()
         return entry
 
     def _apply_undo(self, entry, items):
         """Reverse the effects of an edit entry."""
         for item in items:
-            old_val = item['old_value']
-            pid = item['photo_id']
-            if entry['action_type'] == 'rating':
+            old_val = item["old_value"]
+            pid = item["photo_id"]
+            if entry["action_type"] == "rating":
                 # Edit history is already workspace-scoped; skip re-verification
                 self.update_photo_rating(pid, int(old_val), verify_workspace=False)
-                if old_val != entry['new_value']:
-                    self.remove_pending_changes(pid, 'rating', entry['new_value'])
-                    self.queue_change(pid, 'rating', old_val)
-            elif entry['action_type'] == 'flag':
+                if old_val != entry["new_value"]:
+                    self.remove_pending_changes(pid, "rating", entry["new_value"])
+                    self.queue_change(pid, "rating", old_val)
+            elif entry["action_type"] == "flag":
                 self.update_photo_flag(pid, old_val, verify_workspace=False)
                 self.queue_flag_change_if_enabled(pid, old_val)
-            elif entry['action_type'] == 'wildlife_excluded':
-                self.update_photo_wildlife_excluded(
-                    pid, old_val == "1", verify_workspace=False
-                )
-            elif entry['action_type'] == 'color_label':
+            elif entry["action_type"] == "wildlife_excluded":
+                self.update_photo_wildlife_excluded(pid, old_val == "1", verify_workspace=False)
+            elif entry["action_type"] == "color_label":
                 if old_val:
                     self.set_color_label(pid, old_val)
                 else:
                     self.remove_color_label(pid)
-            elif entry['action_type'] == 'edit_recipe':
+            elif entry["action_type"] == "edit_recipe":
                 self.set_photo_edit_recipe(
                     pid,
                     old_val if old_val else None,
                     verify_workspace=False,
                 )
-            elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
+            elif entry["action_type"] in ("keyword_add", "prediction_accept"):
                 old_meta = self._edit_old_value_meta(old_val)
-                self.untag_photo(pid, int(entry['new_value']))
-                kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
-                                       (int(entry['new_value']),)).fetchone()
+                self.untag_photo(pid, int(entry["new_value"]))
+                kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?", (int(entry["new_value"]),)).fetchone()
                 if kw:
-                    self.remove_pending_changes(pid, 'keyword_add', kw['name'])
-                if entry['action_type'] == 'keyword_add':
+                    self.remove_pending_changes(pid, "keyword_add", kw["name"])
+                if entry["action_type"] == "keyword_add":
                     self._restore_edit_prediction_status(old_meta)
                     # Predicted-only relabels (no prior species tag)
                     # record their action as `keyword_add` but still
@@ -13374,10 +13290,12 @@ class Database:
                     # `species_replace` undo path.
                     if kw:
                         self._restore_relabel_curation(
-                            entry['workspace_id'], pid, kw['name'],
-                            old_meta.get('curation'),
+                            entry["workspace_id"],
+                            pid,
+                            kw["name"],
+                            old_meta.get("curation"),
                         )
-                if entry['action_type'] == 'prediction_accept' and old_val:
+                if entry["action_type"] == "prediction_accept" and old_val:
                     pred_id = self._edit_prediction_id(old_meta, old_val)
                     if pred_id is None:
                         continue
@@ -13403,8 +13321,7 @@ class Database:
                                  AND classifier_model = ?
                                  AND labels_fingerprint = ?
                                ORDER BY confidence DESC""",
-                            (pred_row["detection_id"], pred_row["model"],
-                             pred_row["labels_fingerprint"]),
+                            (pred_row["detection_id"], pred_row["model"], pred_row["labels_fingerprint"]),
                         ).fetchall()
                         # Flip any accepted/rejected review rows in this
                         # workspace back to 'alternative' — scoped to the
@@ -13421,8 +13338,7 @@ class Database:
                                       AND classifier_model = ?
                                       AND labels_fingerprint = ?
                                  )""",
-                            (ws, pred_row["detection_id"], pred_row["model"],
-                             pred_row["labels_fingerprint"]),
+                            (ws, pred_row["detection_id"], pred_row["model"], pred_row["labels_fingerprint"]),
                         )
                         # Promote highest-confidence sibling back to 'pending'
                         # in this workspace.
@@ -13438,8 +13354,8 @@ class Database:
                                 (top_id, ws),
                             )
                         self.conn.commit()
-            elif entry['action_type'] == 'keyword_remove':
-                kid = int(entry['new_value'])
+            elif entry["action_type"] == "keyword_remove":
+                kid = int(entry["new_value"])
                 self.tag_photo(pid, kid)
                 kw = self.conn.execute(
                     "SELECT name, parent_id, type FROM keywords WHERE id = ?",
@@ -13459,10 +13375,10 @@ class Database:
                     # out of the sidecar. Also handles the plain
                     # per-photo remove path, where the peer list is empty
                     # and only the representative name is cancelled.
-                    names_to_cancel = [kw['name']]
-                    norm = normalize_keyword_display(kw['name'])
+                    names_to_cancel = [kw["name"]]
+                    norm = normalize_keyword_display(kw["name"])
                     if norm:
-                        if kw['parent_id'] is None:
+                        if kw["parent_id"] is None:
                             peer_rows = self.conn.execute(
                                 """SELECT name FROM keywords
                                    WHERE vireo_normalize_keyword(name) = ?
@@ -13470,7 +13386,7 @@ class Database:
                                      AND parent_id IS NULL
                                      AND type = ?
                                      AND id != ?""",
-                                (norm, kw['type'], kid),
+                                (norm, kw["type"], kid),
                             ).fetchall()
                         else:
                             peer_rows = self.conn.execute(
@@ -13480,16 +13396,14 @@ class Database:
                                      AND parent_id = ?
                                      AND type = ?
                                      AND id != ?""",
-                                (norm, kw['parent_id'], kw['type'], kid),
+                                (norm, kw["parent_id"], kw["type"], kid),
                             ).fetchall()
                         for row in peer_rows:
-                            if row['name'] and row['name'] not in names_to_cancel:
-                                names_to_cancel.append(row['name'])
+                            if row["name"] and row["name"] not in names_to_cancel:
+                                names_to_cancel.append(row["name"])
                     total_cancelled = 0
                     for name in names_to_cancel:
-                        total_cancelled += self.remove_pending_changes(
-                            pid, 'keyword_remove', name
-                        )
+                        total_cancelled += self.remove_pending_changes(pid, "keyword_remove", name)
                     # Symmetric with `_queue_keyword_remove`: the original
                     # remove either queued a `keyword_remove` or, when a
                     # not-yet-synced `keyword_add` was pending, cancelled
@@ -13498,38 +13412,30 @@ class Database:
                     # flow leaves the tag on the photo with no pending
                     # sidecar write, and the restored keyword never syncs.
                     if total_cancelled == 0:
-                        self.queue_change(pid, 'keyword_add', kw['name'])
-            elif entry['action_type'] == 'species_replace':
+                        self.queue_change(pid, "keyword_add", kw["name"])
+            elif entry["action_type"] == "species_replace":
                 # Atomic swap: the edit replaced old_value's species with
                 # new_value's. Undo untags the new species and retags the
                 # old one, symmetrically reversing the pending-change queue.
                 old_meta = self._edit_old_value_meta(old_val)
-                new_kid = int(item['new_value']) if item['new_value'] else None
+                new_kid = int(item["new_value"]) if item["new_value"] else None
                 old_kids = old_meta.get("keyword_ids") or []
                 new_kw_name = None
                 if new_kid:
                     self.untag_photo(pid, new_kid)
-                    new_kw = self.conn.execute(
-                        "SELECT name FROM keywords WHERE id = ?", (new_kid,)
-                    ).fetchone()
+                    new_kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?", (new_kid,)).fetchone()
                     if new_kw:
-                        new_kw_name = new_kw['name']
-                        cancelled = self.remove_pending_changes(
-                            pid, 'keyword_add', new_kw['name']
-                        )
+                        new_kw_name = new_kw["name"]
+                        cancelled = self.remove_pending_changes(pid, "keyword_add", new_kw["name"])
                         if cancelled == 0:
-                            self.queue_change(pid, 'keyword_remove', new_kw['name'])
+                            self.queue_change(pid, "keyword_remove", new_kw["name"])
                 for old_kid in old_kids:
                     self.tag_photo(pid, old_kid)
-                    old_kw = self.conn.execute(
-                        "SELECT name FROM keywords WHERE id = ?", (old_kid,)
-                    ).fetchone()
+                    old_kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?", (old_kid,)).fetchone()
                     if old_kw:
-                        cancelled = self.remove_pending_changes(
-                            pid, 'keyword_remove', old_kw['name']
-                        )
+                        cancelled = self.remove_pending_changes(pid, "keyword_remove", old_kw["name"])
                         if cancelled == 0:
-                            self.queue_change(pid, 'keyword_add', old_kw['name'])
+                            self.queue_change(pid, "keyword_add", old_kw["name"])
                 # Restore any species_highlights / photo_preferences rows the
                 # original relabel migrated to `new_kw_name`. Without this,
                 # the photo is back in its old species bucket but the
@@ -13537,49 +13443,48 @@ class Database:
                 # the new species. See PR #1161.
                 if new_kw_name:
                     self._restore_relabel_curation(
-                        entry['workspace_id'], pid, new_kw_name,
-                        old_meta.get('curation'),
+                        entry["workspace_id"],
+                        pid,
+                        new_kw_name,
+                        old_meta.get("curation"),
                     )
                 self._restore_edit_prediction_status(old_meta)
 
     def _apply_redo(self, entry, items):
         """Re-apply the effects of an undone edit entry."""
         for item in items:
-            new_val = item['new_value']
-            pid = item['photo_id']
-            if entry['action_type'] == 'rating':
+            new_val = item["new_value"]
+            pid = item["photo_id"]
+            if entry["action_type"] == "rating":
                 # Edit history is already workspace-scoped; skip re-verification
                 self.update_photo_rating(pid, int(new_val) if new_val else 0, verify_workspace=False)
-                old_val = item['old_value']
+                old_val = item["old_value"]
                 if old_val != new_val:
-                    self.remove_pending_changes(pid, 'rating', old_val)
-                    self.queue_change(pid, 'rating', new_val)
-            elif entry['action_type'] == 'flag':
+                    self.remove_pending_changes(pid, "rating", old_val)
+                    self.queue_change(pid, "rating", new_val)
+            elif entry["action_type"] == "flag":
                 self.update_photo_flag(pid, new_val, verify_workspace=False)
                 self.queue_flag_change_if_enabled(pid, new_val)
-            elif entry['action_type'] == 'wildlife_excluded':
-                self.update_photo_wildlife_excluded(
-                    pid, new_val == "1", verify_workspace=False
-                )
-            elif entry['action_type'] == 'color_label':
+            elif entry["action_type"] == "wildlife_excluded":
+                self.update_photo_wildlife_excluded(pid, new_val == "1", verify_workspace=False)
+            elif entry["action_type"] == "color_label":
                 if new_val:
                     self.set_color_label(pid, new_val)
                 else:
                     self.remove_color_label(pid)
-            elif entry['action_type'] == 'edit_recipe':
+            elif entry["action_type"] == "edit_recipe":
                 self.set_photo_edit_recipe(
                     pid,
                     new_val if new_val else None,
                     verify_workspace=False,
                 )
-            elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
-                old_meta = self._edit_old_value_meta(item['old_value'])
-                self.tag_photo(pid, int(entry['new_value']))
-                kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
-                                       (int(entry['new_value']),)).fetchone()
+            elif entry["action_type"] in ("keyword_add", "prediction_accept"):
+                old_meta = self._edit_old_value_meta(item["old_value"])
+                self.tag_photo(pid, int(entry["new_value"]))
+                kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?", (int(entry["new_value"]),)).fetchone()
                 if kw:
-                    self.queue_change(pid, 'keyword_add', kw['name'])
-                if entry['action_type'] == 'keyword_add':
+                    self.queue_change(pid, "keyword_add", kw["name"])
+                if entry["action_type"] == "keyword_add":
                     self._reject_edit_prediction(old_meta)
                     # Mirror of the `keyword_add` undo branch: predicted-
                     # only relabels record curation on `keyword_add`, so
@@ -13587,15 +13492,17 @@ class Database:
                     # `species_replace`.
                     if kw:
                         self._reapply_relabel_curation(
-                            entry['workspace_id'], pid, kw['name'],
-                            old_meta.get('curation'),
+                            entry["workspace_id"],
+                            pid,
+                            kw["name"],
+                            old_meta.get("curation"),
                         )
-                if entry['action_type'] == 'prediction_accept' and item['old_value']:
-                    pred_id = self._edit_prediction_id(old_meta, item['old_value'])
+                if entry["action_type"] == "prediction_accept" and item["old_value"]:
+                    pred_id = self._edit_prediction_id(old_meta, item["old_value"])
                     if pred_id is None:
                         continue
                     ws = self._ws_id()
-                    self.update_prediction_status(pred_id, 'accepted')
+                    self.update_prediction_status(pred_id, "accepted")
                     # Re-reject siblings, scoped to the same labels_fingerprint
                     # so the redo matches the original accept's scope and
                     # doesn't touch predictions from other label sets.
@@ -13617,8 +13524,7 @@ class Database:
                                  AND pr.id != ?
                                  AND COALESCE(pr_rev.status, 'pending')
                                      IN ('pending', 'alternative')""",
-                            (ws, pred_row["detection_id"], pred_row["model"],
-                             pred_row["labels_fingerprint"], pred_id),
+                            (ws, pred_row["detection_id"], pred_row["model"], pred_row["labels_fingerprint"], pred_id),
                         ).fetchall()
                         for s in sibs:
                             self.conn.execute(
@@ -13631,57 +13537,52 @@ class Database:
                                 (s["id"], ws),
                             )
                         self.conn.commit()
-            elif entry['action_type'] == 'keyword_remove':
-                self.untag_photo(pid, int(entry['new_value']))
-                kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
-                                       (int(entry['new_value']),)).fetchone()
+            elif entry["action_type"] == "keyword_remove":
+                self.untag_photo(pid, int(entry["new_value"]))
+                kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?", (int(entry["new_value"]),)).fetchone()
                 if kw:
                     # Mirror the undo path: if undo re-queued a
                     # `keyword_add`, redo should cancel it rather than
                     # stack a conflicting `keyword_remove` alongside it.
-                    cancelled = self.remove_pending_changes(
-                        pid, 'keyword_add', kw['name']
-                    )
+                    cancelled = self.remove_pending_changes(pid, "keyword_add", kw["name"])
                     if cancelled == 0:
-                        self.queue_change(pid, 'keyword_remove', kw['name'])
-            elif entry['action_type'] == 'species_replace':
+                        self.queue_change(pid, "keyword_remove", kw["name"])
+            elif entry["action_type"] == "species_replace":
                 # Re-apply the swap: untag old, retag new, mirror pending queue.
-                old_meta = self._edit_old_value_meta(item['old_value'])
+                old_meta = self._edit_old_value_meta(item["old_value"])
                 new_kid = int(new_val) if new_val else None
                 old_kids = old_meta.get("keyword_ids") or []
                 new_kw_name = None
                 for old_kid in old_kids:
                     self.untag_photo(pid, old_kid)
-                    old_kw = self.conn.execute(
-                        "SELECT name FROM keywords WHERE id = ?", (old_kid,)
-                    ).fetchone()
+                    old_kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?", (old_kid,)).fetchone()
                     if old_kw:
-                        cancelled = self.remove_pending_changes(
-                            pid, 'keyword_add', old_kw['name']
-                        )
+                        cancelled = self.remove_pending_changes(pid, "keyword_add", old_kw["name"])
                         if cancelled == 0:
-                            self.queue_change(pid, 'keyword_remove', old_kw['name'])
+                            self.queue_change(pid, "keyword_remove", old_kw["name"])
                 if new_kid:
                     self.tag_photo(pid, new_kid)
-                    new_kw = self.conn.execute(
-                        "SELECT name FROM keywords WHERE id = ?", (new_kid,)
-                    ).fetchone()
+                    new_kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?", (new_kid,)).fetchone()
                     if new_kw:
-                        new_kw_name = new_kw['name']
-                        cancelled = self.remove_pending_changes(
-                            pid, 'keyword_remove', new_kw['name']
-                        )
+                        new_kw_name = new_kw["name"]
+                        cancelled = self.remove_pending_changes(pid, "keyword_remove", new_kw["name"])
                         if cancelled == 0:
-                            self.queue_change(pid, 'keyword_add', new_kw['name'])
+                            self.queue_change(pid, "keyword_add", new_kw["name"])
                 if new_kw_name:
                     self._reapply_relabel_curation(
-                        entry['workspace_id'], pid, new_kw_name,
-                        old_meta.get('curation'),
+                        entry["workspace_id"],
+                        pid,
+                        new_kw_name,
+                        old_meta.get("curation"),
                     )
                 self._reject_edit_prediction(old_meta)
 
     def _restore_relabel_curation(
-        self, workspace_id, photo_id, new_species, curation,
+        self,
+        workspace_id,
+        photo_id,
+        new_species,
+        curation,
     ):
         """Undo the curation migration performed by ``api_highlights_relabel``.
 
@@ -13736,22 +13637,34 @@ class Database:
             if existing:
                 continue
             if target_rank is None:
-                rank = int(self.conn.execute(
-                    """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                rank = (
+                    int(
+                        self.conn.execute(
+                            """SELECT COALESCE(MAX(rank), 0) AS max_rank
                        FROM species_highlights
                        WHERE workspace_id = ? AND species = ?""",
-                    (workspace_id, old_species),
-                ).fetchone()["max_rank"] or 0) + 1
+                            (workspace_id, old_species),
+                        ).fetchone()["max_rank"]
+                        or 0
+                    )
+                    + 1
+                )
             else:
                 try:
                     rank = int(target_rank)
                 except (TypeError, ValueError):
-                    rank = int(self.conn.execute(
-                        """SELECT COALESCE(MAX(rank), 0) AS max_rank
+                    rank = (
+                        int(
+                            self.conn.execute(
+                                """SELECT COALESCE(MAX(rank), 0) AS max_rank
                            FROM species_highlights
                            WHERE workspace_id = ? AND species = ?""",
-                        (workspace_id, old_species),
-                    ).fetchone()["max_rank"] or 0) + 1
+                                (workspace_id, old_species),
+                            ).fetchone()["max_rank"]
+                            or 0
+                        )
+                        + 1
+                    )
             self.conn.execute(
                 """INSERT INTO species_highlights
                        (workspace_id, species, photo_id, rank,
@@ -13811,7 +13724,9 @@ class Database:
                 (workspace_id, purpose, old_species, photo_id),
             )
             self._restore_species_representative(
-                old_species, photo_id, selected_order=rep_selected_order,
+                old_species,
+                photo_id,
+                selected_order=rep_selected_order,
             )
         for rep in rep_prev:
             if not isinstance(rep, dict):
@@ -13834,11 +13749,17 @@ class Database:
                     (new_species, photo_id),
                 )
             self._restore_species_representative(
-                old_species, photo_id, selected_order=rep_selected_order,
+                old_species,
+                photo_id,
+                selected_order=rep_selected_order,
             )
 
     def _reapply_relabel_curation(
-        self, workspace_id, photo_id, new_species, curation,
+        self,
+        workspace_id,
+        photo_id,
+        new_species,
+        curation,
     ):
         """Redo the curation migration reversed by
         :meth:`_restore_relabel_curation`. Moves rows from each recorded
@@ -13877,12 +13798,18 @@ class Database:
             ).fetchone()
             if existing:
                 continue
-            next_rank = int(self.conn.execute(
-                """SELECT COALESCE(MAX(rank), 0) AS max_rank
+            next_rank = (
+                int(
+                    self.conn.execute(
+                        """SELECT COALESCE(MAX(rank), 0) AS max_rank
                    FROM species_highlights
                    WHERE workspace_id = ? AND species = ?""",
-                (workspace_id, new_species),
-            ).fetchone()["max_rank"] or 0) + 1
+                        (workspace_id, new_species),
+                    ).fetchone()["max_rank"]
+                    or 0
+                )
+                + 1
+            )
             self.conn.execute(
                 """INSERT INTO species_highlights
                        (workspace_id, species, photo_id, rank,
@@ -13931,7 +13858,9 @@ class Database:
             # undo/redo round trip can promote a secondary representative
             # above a pre-existing primary for new_species.
             self._restore_species_representative(
-                new_species, photo_id, selected_order=rep_selected_order,
+                new_species,
+                photo_id,
+                selected_order=rep_selected_order,
             )
         for rep in rep_prev:
             if not isinstance(rep, dict):
@@ -13953,7 +13882,9 @@ class Database:
                 (old_species, photo_id),
             )
             self._restore_species_representative(
-                new_species, photo_id, selected_order=rep_selected_order,
+                new_species,
+                photo_id,
+                selected_order=rep_selected_order,
             )
 
     def _edit_old_value_meta(self, old_value):
@@ -14010,7 +13941,8 @@ class Database:
     def _prune_edit_history(self):
         """Delete oldest entries beyond the configured max (excludes undone entries awaiting redo)."""
         import config as cfg
-        max_entries = cfg.get('max_edit_history') or 1000
+
+        max_entries = cfg.get("max_edit_history") or 1000
         self.conn.execute(
             """DELETE FROM edit_history WHERE workspace_id = ? AND undone = 0 AND id NOT IN (
                  SELECT id FROM edit_history WHERE workspace_id = ? AND undone = 0
@@ -14081,9 +14013,7 @@ class Database:
 
         existing = {
             c["name"]
-            for c in self.conn.execute(
-                "SELECT name FROM collections WHERE workspace_id = ?", (ws,)
-            ).fetchall()
+            for c in self.conn.execute("SELECT name FROM collections WHERE workspace_id = ?", (ws,)).fetchall()
         }
         base = f"{row['name']} (copy)"
         new_name = base
@@ -14108,8 +14038,7 @@ class Database:
         ws_id = self._ws_id()
         unique_paths = sorted(set(file_paths or []))
         cur = self.conn.execute(
-            "INSERT INTO new_image_snapshots (workspace_id, created_at, file_count) "
-            "VALUES (?, datetime('now'), ?)",
+            "INSERT INTO new_image_snapshots (workspace_id, created_at, file_count) VALUES (?, datetime('now'), ?)",
             (ws_id, len(unique_paths)),
         )
         snap_id = cur.lastrowid
@@ -14143,8 +14072,7 @@ class Database:
         paths = [
             r["file_path"]
             for r in self.conn.execute(
-                "SELECT file_path FROM new_image_snapshot_files WHERE snapshot_id = ? "
-                "ORDER BY file_path",
+                "SELECT file_path FROM new_image_snapshot_files WHERE snapshot_id = ? ORDER BY file_path",
                 (snapshot_id,),
             ).fetchall()
         ]
@@ -14212,10 +14140,7 @@ class Database:
             field = node.get("field")
             op = node.get("op")
             value = node.get("value")
-            list_allowed = (
-                field == "photo_ids"
-                or (field == "timestamp" and op == "between")
-            )
+            list_allowed = field == "photo_ids" or (field == "timestamp" and op == "between")
             if isinstance(value, list):
                 if not list_allowed:
                     raise ValueError(f"rule field {field!r} does not accept a list value")
@@ -14262,9 +14187,9 @@ class Database:
 
         def _prediction_exists(predicate, predicate_params, review_join=False):
             review = (
-                " LEFT JOIN prediction_review prv "
-                "ON prv.prediction_id = pred.id AND prv.workspace_id = ?"
-                if review_join else ""
+                " LEFT JOIN prediction_review prv ON prv.prediction_id = pred.id AND prv.workspace_id = ?"
+                if review_join
+                else ""
             )
             params = ([self._ws_id()] if review_join else []) + list(predicate_params)
             return (
@@ -14296,20 +14221,12 @@ class Database:
                 # later and repeatedly. Only ints are inlined (injection-safe);
                 # any non-int leftovers (malformed rules, rare) keep the
                 # parameter-binding path so comparison semantics are unchanged.
-                int_ids = [
-                    v for v in ids
-                    if isinstance(v, int) and not isinstance(v, bool)
-                ]
-                other = [
-                    v for v in ids
-                    if not (isinstance(v, int) and not isinstance(v, bool))
-                ]
+                int_ids = [v for v in ids if isinstance(v, int) and not isinstance(v, bool)]
+                other = [v for v in ids if not (isinstance(v, int) and not isinstance(v, bool))]
                 parts = []
                 params = []
                 if int_ids:
-                    parts.append(
-                        "p.id IN (%s)" % ",".join(str(v) for v in int_ids)
-                    )
+                    parts.append("p.id IN (%s)" % ",".join(str(v) for v in int_ids))
                 if other:
                     placeholders = ",".join("?" for _ in other)
                     parts.append(f"p.id IN ({placeholders})")
@@ -14317,9 +14234,14 @@ class Database:
                 if len(parts) == 1:
                     return parts[0], params
                 return "(" + " OR ".join(parts) + ")", params
-            if field in ("rating", "quality_score", "sharpness",
-                         "subject_sharpness", "noise_estimate",
-                         "crop_complete"):
+            if field in (
+                "rating",
+                "quality_score",
+                "sharpness",
+                "subject_sharpness",
+                "noise_estimate",
+                "crop_complete",
+            ):
                 column = "p.subject_tenengrad" if field == "subject_sharpness" else f"p.{field}"
                 return _numeric_condition(column, op, value, allow_null=True)
             if field == "keyword":
@@ -14667,9 +14589,7 @@ class Database:
             if local_taxon_id is None:
                 inat_id = taxon.get("taxon_id")
                 if inat_id is not None:
-                    row = self.conn.execute(
-                        "SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)
-                    ).fetchone()
+                    row = self.conn.execute("SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)).fetchone()
                     if row:
                         local_taxon_id = row["id"]
             # Skip no-op updates so the "updated" count reflects real
@@ -14682,8 +14602,7 @@ class Database:
             if not (is_type_change or is_species_fix or is_taxon_link):
                 continue
             self.conn.execute(
-                "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
-                "taxon_id = COALESCE(taxon_id, ?) WHERE id = ?",
+                "UPDATE keywords SET is_species = 1, type = 'taxonomy', taxon_id = COALESCE(taxon_id, ?) WHERE id = ?",
                 (local_taxon_id, kw["id"]),
             )
             updated += 1
@@ -14701,8 +14620,10 @@ class Database:
         """
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
         existing_names = {
-            row["name"] for row in self.conn.execute(
-                "SELECT name FROM collections WHERE workspace_id = ?", (ws_id,),
+            row["name"]
+            for row in self.conn.execute(
+                "SELECT name FROM collections WHERE workspace_id = ?",
+                (ws_id,),
             ).fetchall()
         }
 
@@ -14767,8 +14688,7 @@ class Database:
         ]
 
         rows = self.conn.execute(
-            "SELECT id, workspace_id, name, rules FROM collections "
-            "WHERE name IN ('Needs Location', 'No Location')"
+            "SELECT id, workspace_id, name, rules FROM collections WHERE name IN ('Needs Location', 'No Location')"
         ).fetchall()
         for row in rows:
             try:
@@ -14869,9 +14789,7 @@ class Database:
             self.conn.commit()
         return updated
 
-    def rewrite_legacy_miss_thresholds_in_workspaces(
-        self, legacy_det, legacy_burst, new_det, new_burst
-    ):
+    def rewrite_legacy_miss_thresholds_in_workspaces(self, legacy_det, legacy_burst, new_det, new_burst):
         """Rewrite the exact legacy miss-threshold default pair in every
         workspace's ``config_overrides``. Customized values are left alone.
 
@@ -14881,8 +14799,7 @@ class Database:
         legacy pair via the settings UI keeps that setting.
         """
         rows = self.conn.execute(
-            "SELECT id, config_overrides FROM workspaces "
-            "WHERE config_overrides IS NOT NULL"
+            "SELECT id, config_overrides FROM workspaces WHERE config_overrides IS NOT NULL"
         ).fetchall()
         updated = 0
         for row in rows:

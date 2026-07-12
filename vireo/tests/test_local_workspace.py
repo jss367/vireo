@@ -153,6 +153,18 @@ def test_stage_rejects_symlink_that_escapes_workspace(local_workspace_env):
     assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_stage_rejects_symlink_that_leaves_and_reenters_root(local_workspace_env):
+    env = local_workspace_env
+    subfolder = env["source"] / "subfolder"
+    subfolder.mkdir()
+    os.symlink("../../photos/root.jpg", subfolder / "reentered.jpg")
+    assert (subfolder / "reentered.jpg").resolve() == (env["source"] / "root.jpg").resolve()
+
+    with pytest.raises(LocalWorkspaceError, match="Symlink escapes or uses"):
+        stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+
 def test_folder_status_survives_stage_and_sync(local_workspace_env):
     env = local_workspace_env
     env["db"].conn.execute("UPDATE folders SET status='partial' WHERE id=?", (env["child_id"],))
@@ -169,6 +181,24 @@ def test_folder_status_survives_stage_and_sync(local_workspace_env):
         env["db"].conn.execute("SELECT status FROM folders WHERE id=?", (env["child_id"],)).fetchone()["status"]
     )
     assert restored_status == "partial"
+
+
+def test_path_rebases_invalidate_new_image_cache(local_workspace_env):
+    env = local_workspace_env
+    cache = env["db"]._new_images_cache
+    db_path = env["db"]._db_path
+    workspace_id = env["workspace_id"]
+    generation = cache.get_generation(db_path, workspace_id)
+
+    stage_workspace(env["db"], workspace_id, str(env["vireo_dir"]))
+    assert cache.get_generation(db_path, workspace_id) == generation + 1
+    discard_local(env["db"], workspace_id, str(env["vireo_dir"]))
+    assert cache.get_generation(db_path, workspace_id) == generation + 2
+
+    stage_workspace(env["db"], workspace_id, str(env["vireo_dir"]))
+    assert cache.get_generation(db_path, workspace_id) == generation + 3
+    sync_back(env["db"], workspace_id, str(env["vireo_dir"]))
+    assert cache.get_generation(db_path, workspace_id) == generation + 4
 
 
 def test_sync_refuses_source_changes_and_preserves_local_workspace(local_workspace_env):
