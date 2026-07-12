@@ -1425,7 +1425,6 @@ async function previewImport() {
     if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
     const data = await resp.json();
     if (importPreviewSignatureChanged(requestSignature)) {
-      summary.textContent = '';
       return;
     }
     const files = data.files || [];
@@ -1475,7 +1474,6 @@ async function previewImport() {
       }
     }
     if (importPreviewSignatureChanged(requestSignature)) {
-      summary.textContent = '';
       return;
     }
     const dupCount = duplicatePaths.length;
@@ -1712,6 +1710,7 @@ function renderModelWarning(res) {
 }
 
 async function initImportPage() {
+  wireDestStructureInvalidation();
   // Native menu deep link: File > Import Folder... routes here as
   // /import?mode=copy&pick=source so it lands in Copy-to-archive with the
   // source picker open, while File > Import Photos... gets the page
@@ -1811,7 +1810,6 @@ async function initImportPage() {
   // dropdown value.
   _afterImportConfigLoaded = cfgOk && overridesOk;
   updateAdvancedImportOptions();
-  wireDestStructureInvalidation();
   loadImportRemoteTargets();
   loadOrphanedStaging();
   updateImportMode();
