@@ -43,3 +43,29 @@ def test_browse_sidebar_resizer_supports_keyboard_controls(live_server, page):
 
     assert abs(sidebar.bounding_box()["width"] - (initial_width + 10)) <= 1
     expect(resizer).to_have_attribute("aria-valuenow", str(round(initial_width + 10)))
+
+
+def test_browse_sidebar_max_width_reserves_room_for_detail_panel(live_server, page):
+    # On a viewport this narrow, the naive `innerWidth - 360` cap would allow
+    # the sidebar to grow to 600px, which — combined with the always-visible
+    # 340px detail panel — would leave under 100px for the photo grid. Assert
+    # the cap actually reserves enough space for the grid.
+    page.set_viewport_size({"width": 1024, "height": 768})
+    page.goto(live_server["url"] + "/browse")
+
+    sidebar = page.locator("#browseSidebar")
+    resizer = page.locator("#browseSidebarResizer")
+    detail_panel = page.locator("#detailPanel")
+    expect(detail_panel).to_be_visible()
+
+    resizer.focus()
+    resizer.press("End")
+
+    sidebar_width = sidebar.bounding_box()["width"]
+    detail_width = detail_panel.bounding_box()["width"]
+    resizer_width = resizer.bounding_box()["width"]
+    remaining = 1024 - sidebar_width - detail_width - resizer_width
+    assert remaining >= 300, (
+        f"Sidebar cap left only {remaining}px for the photo grid "
+        f"(sidebar={sidebar_width}, detail={detail_width}, handle={resizer_width})"
+    )

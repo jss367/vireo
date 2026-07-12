@@ -1975,12 +1975,23 @@ var BROWSE_SIDEBAR_DEFAULT_WIDTH = 260;
 var BROWSE_SIDEBAR_MIN_WIDTH = 200;
 var BROWSE_SIDEBAR_MAX_WIDTH = 600;
 var BROWSE_SIDEBAR_STORAGE_KEY = 'vireo.browse.sidebarWidth';
+// Room the resize cap must leave for the rest of the Browse layout: the
+// always-visible detail panel sibling (340px, fixed), the resize handle
+// itself (7px), and a minimum photo/content column so the grid stays usable.
+var BROWSE_DETAIL_PANEL_WIDTH = 340;
+var BROWSE_SIDEBAR_HANDLE_WIDTH = 7;
+var BROWSE_MIN_CONTENT_WIDTH = 360;
 
 function browseSidebarMaxWidth() {
-  // Keep enough room for the photo area and its controls on narrower windows.
   return Math.max(
     BROWSE_SIDEBAR_MIN_WIDTH,
-    Math.min(BROWSE_SIDEBAR_MAX_WIDTH, window.innerWidth - 360)
+    Math.min(
+      BROWSE_SIDEBAR_MAX_WIDTH,
+      window.innerWidth
+        - BROWSE_DETAIL_PANEL_WIDTH
+        - BROWSE_SIDEBAR_HANDLE_WIDTH
+        - BROWSE_MIN_CONTENT_WIDTH
+    )
   );
 }
 
