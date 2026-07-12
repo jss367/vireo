@@ -9323,7 +9323,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     has_old_species = True
                 for old in old_rows:
                     db.untag_photo(pid, old["id"], _commit=False)
-                    if old["name"].strip().lower() != species.lower():
+                    # Compare by keyword id: SQLite's NOCASE is ASCII-only,
+                    # so `Éclair` and `éclair` live as distinct rows with
+                    # distinct ids, but Python `.lower()` folds them equal.
+                    # A name-based skip would suppress the remove for a
+                    # different SQLite row and leave the old spelling in
+                    # the sidecar after the next XMP sync (add_keyword above
+                    # normalized `species` to the row it will tag, so `kid`
+                    # is authoritative).
+                    if old["id"] != kid:
                         _queue_keyword_remove(
                             pid, old["name"], workspace_id=ws_id, _commit=False,
                         )

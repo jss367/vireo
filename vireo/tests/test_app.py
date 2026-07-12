@@ -9094,6 +9094,83 @@ def test_highlights_relabel_does_not_fold_non_ascii_case_variants(app_and_db):
     assert "Warbler" not in remaining_species
 
 
+def test_highlights_relabel_queues_remove_for_non_ascii_case_variant(app_and_db):
+    """Relabeling a photo from `Éclair` to a distinct SQLite species must
+    queue a `keyword_remove` for the old spelling. SQLite's NOCASE fold
+    is ASCII-only, so `Éclair` and `éclair` live as separate keyword rows
+    with separate ids — but Python `.lower()` folds them equal. A
+    name-based `.lower()` skip on the remove would leave the old spelling
+    in the sidecar even though the tag was flipped in the DB, so the
+    next XMP sync would still export `Éclair`. Comparing by keyword id
+    sidesteps the ASCII/Unicode fold mismatch.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/nonascii-remove', 'nonascii-remove', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    kid_upper = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('Éclair', NULL, 1, 'taxonomy')"
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'nonascii-remove.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, kid_upper)
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "éclair"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    rows = db.conn.execute(
+        "SELECT name FROM keywords WHERE name IN ('Éclair', 'éclair')"
+    ).fetchall()
+    assert {r["name"] for r in rows} == {"Éclair", "éclair"}, (
+        "SQLite NOCASE is ASCII-only, so the two spellings must remain "
+        "as distinct rows"
+    )
+    tagged = db.conn.execute(
+        "SELECT k.name FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ?",
+        (pid,),
+    ).fetchall()
+    tagged_names = {r["name"] for r in tagged}
+    assert "éclair" in tagged_names
+    assert "Éclair" not in tagged_names, (
+        "photo should carry only the new species row, not the old one"
+    )
+    pending = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes "
+        "WHERE workspace_id = ? AND photo_id = ?",
+        (ws_id, pid),
+    ).fetchall()
+    remove_values = {
+        r["value"] for r in pending if r["change_type"] == "keyword_remove"
+    }
+    add_values = {
+        r["value"] for r in pending if r["change_type"] == "keyword_add"
+    }
+    assert "Éclair" in remove_values, (
+        "keyword_remove must be queued for the pre-existing non-ASCII "
+        "case variant; a name-based `.lower()` compare would have folded "
+        "it equal to the new species and skipped the remove, leaving the "
+        "old spelling in the exported XMP"
+    )
+    assert "éclair" in add_values
+
+
 def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
     """Undoing a relabel that moved a secondary representative must
     restore it at its original ``selected_order`` — otherwise
