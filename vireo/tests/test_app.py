@@ -2759,6 +2759,10 @@ def test_pipeline_detach_burst(app_and_db):
     assert len(data["encounters"]) == 2
     assert len(data["encounters"][0]["bursts"]) == 1
     assert data["encounters"][1]["photo_ids"] == [3]
+    assert data["encounters"][0]["species"] == ["Robin", 0.875]
+    assert data["encounters"][1]["species"] == ["Eagle", 0.8]
+    assert data["encounters"][1]["confirmed_species"] is None
+    assert data["encounters"][1]["species_confirmed"] is False
     # Remaining encounter predictions should only reflect photos 1,2
     remaining_species = [sp["species"] for sp in data["encounters"][0]["species_predictions"]]
     assert "Robin" in remaining_species
@@ -2873,6 +2877,216 @@ def test_pipeline_detach_photo(app_and_db):
     # New burst predictions should reflect photo 3
     new_species = [sp["species"] for sp in enc["bursts"][1]["species_predictions"]]
     assert "Eagle" in new_species
+    assert enc["bursts"][1]["species_override"] == {
+        "species": "Eagle",
+        "confirmed": False,
+    }
+
+
+def test_pipeline_detach_photo_confidence_weighted_override(app_and_db):
+    """The derived species_override on a detached single-photo burst uses the
+    same confidence-weighted vote as encounter_species_label — not the
+    prediction count. For a photo whose top-5 is [A .90, B .44, B .44] the
+    override must be A (weight 0.90 > 0.88), even though B appears twice.
+    This is the invariant the client-side detach mirror
+    (candidateSpeciesOverrideFromPhotos in pipeline_review.html) has to
+    match; a divergence would let the local save-cache path persist a
+    different unconfirmed override than the server detach-photo endpoint."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Robin", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 2,
+                "burst_count": 1,
+                "time_range": [None, None],
+                "photo_ids": [1, 2],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg",
+             "species_top5": [["Robin", 0.9, "m1"]]},
+            {"id": 2, "label": "REVIEW", "filename": "b.jpg",
+             "species_top5": [
+                 ["Alpha", 0.90, "m1"],
+                 ["Beta", 0.44, "m1"],
+                 ["Beta", 0.44, "m2"],
+             ]},
+        ],
+        "summary": {"total_photos": 2, "encounter_count": 1, "burst_count": 1,
+                     "keep_count": 1, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-photo",
+                       json={"encounter_index": 0, "burst_index": 0, "photo_id": 2})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    enc = data["encounters"][0]
+    detached = enc["bursts"][1]
+    assert detached["photo_ids"] == [2]
+    assert detached["species_override"] == {"species": "Alpha", "confirmed": False}
+
+
+def test_pipeline_detach_photo_partial_confirm_leaves_override_null(app_and_db):
+    """When the source encounter is in the mixed/partially-confirmed state
+    (species_confirmed=False but confirmed_species set — e.g. some photos
+    confirmed as species A, others still unconfirmed), detaching a photo
+    must NOT stamp the new burst with an unconfirmed classifier-guess
+    override. The confirm endpoint reads species_override.species without
+    checking the confirmed flag, so a guess override there would be picked
+    up as previous_species on the next burst confirm — the code would then
+    try to untag the guess instead of the actual prior species, leaving
+    the photo with both the old and new species keywords. Leaving the
+    override empty makes the confirm endpoint fall back to
+    enc.confirmed_species as previous_species instead.
+    """
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Robin", 0.9],
+                # Partial-confirm state: dominant prior species is known
+                # but not all photos agree, so species_confirmed is False.
+                "confirmed_species": "Robin",
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 1,
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2, 3], "species_predictions": [],
+                     "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg",
+             "species_top5": [["Robin", 0.9, "m1"]]},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg",
+             "species_top5": [["Robin", 0.85, "m1"]]},
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg",
+             "species_top5": [["Eagle", 0.8, "m1"]]},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 1,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0,
+                     "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-photo",
+                       json={"encounter_index": 0, "burst_index": 0,
+                             "photo_id": 3})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    enc = data["encounters"][0]
+    detached = enc["bursts"][1]
+    assert detached["photo_ids"] == [3]
+    # Critically: no unconfirmed "Eagle" guess should be stamped here.
+    # Otherwise the confirm endpoint would treat "Eagle" as previous_species
+    # instead of the real prior confirmed_species "Robin".
+    assert detached["species_override"] is None
+
+
+def test_pipeline_detach_burst_predictionless_does_not_inherit_parent_species(app_and_db):
+    """When the detached burst's photos have no species predictions,
+    ``encounter_species_label`` returns ``(None, 0.0)``. The new encounter
+    must remain unlabeled rather than inheriting the source encounter's
+    label — the parent species almost certainly came from the sibling
+    burst we just left behind, so advertising it as a one-click candidate
+    on the unrelated detached photos would reintroduce the stale-inherited-
+    label bug this change removes. Mirror check for the shrunken source
+    encounter when the only predicted burst is detached away from
+    unclassified siblings.
+    """
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                # Encounter-level label was inherited from burst [1,2] alone;
+                # burst [3] has no predictions of its own.
+                "species": ["Robin", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 2,
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg",
+             "species_top5": [["Robin", 0.9, "m1"]]},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg",
+             "species_top5": [["Robin", 0.85, "m1"]]},
+            # Photo 3 has no predictions — the burst we detach is unclassified.
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg",
+             "species_top5": []},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-burst",
+                       json={"encounter_index": 0, "burst_index": 1})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Sanity: two encounters, detached photo is on the new one.
+    assert len(data["encounters"]) == 2
+    assert data["encounters"][1]["photo_ids"] == [3]
+    # The detached encounter's photos have no predictions of their own,
+    # so its species must be [None, 0.0] — not the parent's Robin label.
+    assert data["encounters"][1]["species"] == [None, 0.0]
+
+    # Now the reverse: detach the only predicted burst and leave an
+    # encounter of unclassified photos behind. The remaining encounter
+    # must not keep the pre-detach Robin label.
+    with open(path, "w") as f:
+        _json.dump(results, f)
+    resp = client.post("/api/pipeline/detach-burst",
+                       json={"encounter_index": 0, "burst_index": 0})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Source encounter now holds only photo 3 (no predictions).
+    assert data["encounters"][0]["photo_ids"] == [3]
+    assert data["encounters"][0]["species"] == [None, 0.0]
+    # And the detached burst (photos 1, 2) keeps its own Robin label.
+    assert data["encounters"][1]["photo_ids"] == [1, 2]
+    assert data["encounters"][1]["species"][0] == "Robin"
 
 
 def test_pipeline_detach_burst_clears_stale_trace(app_and_db):

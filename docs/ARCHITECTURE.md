@@ -34,8 +34,9 @@ that information for interactive use.
 ## Required checks
 
 Pull requests run Python tests and linting, critical Playwright journeys, route
-contract checks, and Rust formatting, linting, and unit tests when applicable.
-Releases continue to run the complete Playwright suite.
+and API-response contract checks, and Rust formatting, linting, and unit tests
+when applicable. Nightly and release workflows run the complete Playwright
+suite before release artifacts are built.
 
 The large-library benchmark enforces these 100,000-photo pull-request budgets:
 

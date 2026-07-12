@@ -751,3 +751,58 @@ def test_sync_to_xmp_normalized_rename_preserves_unrelated_hierarchy(tmp_path):
     # Unrelated hierarchy survives -- was NOT stripped by the paired
     # remove even though `Birds` segment normalizes to the remove key.
     assert 'Animals|Birds|Hawk' in read_hierarchical_keywords(xmp_path)
+
+
+def test_sync_from_xmp_preserves_cross_slot_homonyms(tmp_path):
+    """Cross-slot same-text keywords must both survive a sidecar reconcile.
+
+    A photo can legitimately carry two distinct DB rows sharing the same
+    normalized text in different slots (e.g. a taxonomy ``Robin`` and an
+    individual ``Robin`` — SQLite's UNIQUE(name, parent_id) treats NULL
+    parents as distinct, and the dedup boundary elsewhere in the codebase
+    is (name, parent_id, type)). A single flat ``Robin`` in the sidecar
+    cannot disambiguate between the homonyms, so reconciliation must keep
+    both tags rather than untag one arbitrarily.
+    """
+    from db import Database
+    from sync import sync_from_xmp
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'Robin'})
+
+    # Two top-level rows with the same normalized text but different
+    # types. Insert directly so both rows survive add_keyword's peer
+    # promotion.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, ?)",
+        ('Robin', 'taxonomy'),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, ?)",
+        ('Robin', 'individual'),
+    )
+    db.conn.commit()
+    rows = db.conn.execute(
+        "SELECT id, type FROM keywords WHERE name = 'Robin' "
+        "AND parent_id IS NULL"
+    ).fetchall()
+    kid_by_type = {row['type']: row['id'] for row in rows}
+    assert set(kid_by_type) == {'taxonomy', 'individual'}
+
+    db.tag_photo(pid, kid_by_type['taxonomy'])
+    db.tag_photo(pid, kid_by_type['individual'])
+
+    os.remove(xmp_path)
+    write_sidecar(xmp_path, flat_keywords={'Robin'}, hierarchical_keywords=set())
+
+    sync_from_xmp(db, [pid])
+
+    keywords = db.get_photo_keywords(pid)
+    # Both distinct-slot homonyms must survive; sidecar reconciliation
+    # cannot pick between them.
+    surviving_ids = {kw['id'] for kw in keywords}
+    assert kid_by_type['taxonomy'] in surviving_ids
+    assert kid_by_type['individual'] in surviving_ids

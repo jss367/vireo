@@ -4339,7 +4339,11 @@ function grmRenderKeepingCurrentSelection(items, fallbackId) {
 
   var nextId = grmFallbackSelectionId(items, fallbackId);
   if (nextId != null) {
-    grmSelect(nextId);
+    grmState.selected = nextId;
+    grmState.selectedIds = new Set([nextId]);
+    grmState.selectionAnchor = nextId;
+    renderGroupModal();
+    grmRefreshSelectedLoupe();
     return;
   }
 
@@ -4603,6 +4607,68 @@ function grmSeedFromDbState(dbPhotos, items, selectPhotoId) {
   }
 
   grmRenderKeepingCurrentSelection(items, initSelect);
+  grmUpdateApplyLabel();
+}
+
+function grmSyncSelectionClasses() {
+  var selectedIds = grmState && grmState.selectedIds ? grmState.selectedIds : new Set();
+  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
+    var id = card.getAttribute('data-photo-id');
+    card.classList.toggle(
+      'selected',
+      selectedIds.has(parseInt(id, 10)) || selectedIds.has(id)
+    );
+  });
+}
+
+function grmZonePlaceholder(text) {
+  var span = document.createElement('span');
+  span.style.cssText = 'font-size:12px;color:var(--text-ghost);';
+  span.textContent = text;
+  return span;
+}
+
+function grmSyncZoneCards() {
+  if (!grmState) return;
+  var zones = { picks: [], candidates: [], rejects: [] };
+  var visible = {};
+  _grmVisibleItems().forEach(function(p) {
+    var id = String(p.id);
+    visible[id] = true;
+    if (grmState.picks.has(p.id)) zones.picks.push(id);
+    else if (grmState.rejects.has(p.id)) zones.rejects.push(id);
+    else zones.candidates.push(id);
+  });
+
+  var cardById = {};
+  document.querySelectorAll('#grmOverlay .grm-card[data-photo-id]').forEach(function(card) {
+    var id = card.getAttribute('data-photo-id');
+    if (visible[id]) cardById[id] = card;
+    else card.remove();
+  });
+
+  function syncStrip(stripId, ids, emptyText) {
+    var strip = document.getElementById(stripId);
+    if (!strip) return;
+    Array.from(strip.children).forEach(function(child) {
+      if (!child.classList || !child.classList.contains('grm-card')) child.remove();
+    });
+    ids.forEach(function(id) {
+      var card = cardById[id];
+      if (card) strip.appendChild(card);
+    });
+    if (!ids.length) strip.appendChild(grmZonePlaceholder(emptyText));
+  }
+
+  syncStrip('grmPicks', zones.picks, 'Press ↑ to add picks');
+  syncStrip('grmCandidates', zones.candidates, 'All sorted');
+  syncStrip('grmRejects', zones.rejects, 'Press ↓ to reject');
+
+  document.getElementById('grmCount').textContent =
+    zones.picks.length + ' picks, ' + zones.rejects.length + ' rejects, ' +
+    zones.candidates.length + ' unsorted';
+  grmSyncSelectionClasses();
+  grmRefreshResetAllVisibility();
   grmUpdateApplyLabel();
 }
 
@@ -4987,32 +5053,8 @@ function grmSelect(photoId, mode) {
       grmState.selectionAnchor = photoId;
     }
   }
-  renderGroupModal();
-
-  // Update loupe preview
-  var loupeImg = document.getElementById('grmLoupePhoto');
-  var loupeInfo = document.getElementById('grmLoupeInfo');
-  var detailEl = document.getElementById('grmLoupeDetail');
-
-  if (grmState.selected) {
-    loupeImg.src = grmPhotoUrl(grmState.selected);
-    _grmAfterLoupeSourceChange();
-    var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
-    if (photo) {
-      var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
-      var boxSharp = photo.box_sharpness != null ? ' - box sharpness: ' + Math.round(photo.box_sharpness) : '';
-      loupeInfo.textContent = (photo.filename || '') + ' - sharpness: ' + sharp + boxSharp + ' - move cursor to compare';
-
-      // Render pipeline metadata in detail panel
-      detailEl.innerHTML = buildPipelineMetadataHtml(photo);
-    }
-    grmUpdateResLabel();
-  } else {
-    loupeImg.removeAttribute('src');
-    loupeInfo.textContent = 'Select a photo to preview. Hover to compare sharpness across all frames.';
-    detailEl.innerHTML = '';
-    grmLoupeReset();
-  }
+  grmSyncSelectionClasses();
+  grmRefreshSelectedLoupe();
 }
 
 function grmRefreshSelectedLoupe() {
@@ -5022,8 +5064,11 @@ function grmRefreshSelectedLoupe() {
   if (!loupeImg || !loupeInfo || !detailEl) return;
 
   if (grmState.selected) {
-    loupeImg.src = grmPhotoUrl(grmState.selected);
-    _grmAfterLoupeSourceChange();
+    var nextSrc = grmPhotoUrl(grmState.selected);
+    if (loupeImg.getAttribute('src') !== nextSrc) {
+      loupeImg.src = nextSrc;
+      _grmAfterLoupeSourceChange();
+    }
     var photo = grmState.items.find(function(p) { return p.id === grmState.selected; });
     if (photo) {
       var sharp = photo.subject_tenengrad != null ? Math.round(photo.subject_tenengrad) : '?';
@@ -5146,6 +5191,35 @@ function buildBurstConsensus(photos) {
   // Stable sort by total count desc (insertion order breaks ties, like the server).
   rows.sort(function(a, b) { return b.count - a.count; });
   return rows;
+}
+
+// Client mirror of encounter_species_label() (vireo/encounters.py): pick the
+// species with the highest confidence-weighted sum across all photos' top-5
+// predictions, breaking ties by first-appearance order. Used to persist an
+// unconfirmed species override for a detached single-photo burst so the
+// local save-cache path agrees with the server detach endpoint, which
+// derives the same label via _rebuild_encounter_species_label. Sorting by
+// prediction count (as buildBurstConsensus does for display) can pick a
+// different species when a lower-confidence label repeats across
+// detections/models while a higher-confidence one appears once — e.g.
+// [A .90, B .44, B .44] where the server picks A but a count sort picks B.
+function candidateSpeciesOverrideFromPhotos(photos) {
+  var weights = {};
+  var order = [];
+  (photos || []).forEach(function(p) {
+    ((p && p.species_top5) || []).forEach(function(entry) {
+      var sp = entry[0];
+      var conf = entry[1] || 0;
+      if (!(sp in weights)) { weights[sp] = 0; order.push(sp); }
+      weights[sp] += conf;
+    });
+  });
+  if (order.length === 0) return null;
+  var best = order[0];
+  for (var i = 1; i < order.length; i++) {
+    if (weights[order[i]] > weights[best]) best = order[i];
+  }
+  return { species: best, confirmed: false };
 }
 
 // Build the per-photo + consensus species prediction blocks. The per-photo
@@ -5853,7 +5927,7 @@ function grmMoveUp() {
       grmState.picks.add(photoId);
     }
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveDown() {
@@ -5868,7 +5942,7 @@ function grmMoveDown() {
       grmState.rejects.add(photoId);
     }
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMovePick() {
@@ -5879,7 +5953,7 @@ function grmMovePick() {
     grmState.rejects.delete(photoId);
     grmState.picks.add(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveReject() {
@@ -5890,7 +5964,7 @@ function grmMoveReject() {
     grmState.picks.delete(photoId);
     grmState.rejects.add(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmMoveCandidate() {
@@ -5901,7 +5975,7 @@ function grmMoveCandidate() {
     grmState.picks.delete(photoId);
     grmState.rejects.delete(photoId);
   });
-  renderGroupModal();
+  grmSyncZoneCards();
 }
 
 function grmRemoveFromGroup() {
@@ -5917,8 +5991,8 @@ function grmRemoveFromGroup() {
   grmState.selected = null;
   if (grmState.selectedIds) grmState.selectedIds.clear();
   grmState.selectionAnchor = null;
-  renderGroupModal();
-  document.getElementById('grmLoupeDetail').innerHTML = '';
+  grmSyncZoneCards();
+  grmRefreshSelectedLoupe();
 }
 
 /* --- Keyboard handling --- */
@@ -5973,17 +6047,52 @@ function buildPipelinePhotoContextMenu(photoId) {
   );
 }
 
-/* --- Right-click menu ---
- * Catches contextmenu on photo cards (main grid) and grm-cards (group review
- * modal). Browse opens in a new tab (browser) or navigates in place (Tauri app
- * window) via openInBrowse, so the user reaches the photo either way. */
-document.addEventListener('contextmenu', function(e) {
+function pipelineContextPhotoIdFromEvent(e) {
   var card = e.target.closest('.photo-card[data-photo-id], .grm-card[data-photo-id]');
-  if (!card) return;
-  var pid = parseInt(card.dataset.photoId, 10);
-  if (!pid) return;
+  if (card) {
+    var cardPid = parseInt(card.dataset.photoId, 10);
+    if (cardPid) {
+      return {
+        photoId: cardPid,
+        card: card,
+      };
+    }
+  }
+
+  // The burst-review loupe is an image too, but it is not nested in a
+  // data-photo-id card. Resolve it through the modal's current selection so
+  // the same context menu actions work on the large preview.
+  var loupe = e.target.closest('#grmLoupeImg, #grmLoupePhoto');
+  var overlay = document.getElementById('grmOverlay');
+  if (
+    loupe &&
+    overlay &&
+    overlay.classList.contains('open') &&
+    typeof grmState !== 'undefined' &&
+    grmState &&
+    grmState.selected
+  ) {
+    return {
+      photoId: parseInt(grmState.selected, 10),
+      card: null,
+    };
+  }
+
+  return null;
+}
+
+/* --- Right-click menu ---
+ * Catches contextmenu on photo cards (main grid), grm-cards (group review
+ * modal), and the group-review loupe preview. Browse opens in a new tab
+ * (browser) or navigates in place (Tauri app window) via openInBrowse, so the
+ * user reaches the photo either way. */
+document.addEventListener('contextmenu', function(e) {
+  var target = pipelineContextPhotoIdFromEvent(e);
+  if (!target) return;
+  var pid = target.photoId;
+  var card = target.card;
   e.preventDefault();
-  if (card.classList.contains('grm-card') && typeof grmState !== 'undefined' && grmState) {
+  if (card && card.classList.contains('grm-card') && typeof grmState !== 'undefined' && grmState) {
     var prevSelected = grmState.selected;
     grmState.selected = pid;
     if (!grmState.selectedIds) grmState.selectedIds = new Set();
@@ -5991,7 +6100,7 @@ document.addEventListener('contextmenu', function(e) {
       grmState.selectedIds = new Set([pid]);
     }
     grmState.selectionAnchor = pid;
-    renderGroupModal();
+    grmSyncSelectionClasses();
     // Keep the right-hand loupe in sync with the newly selected card so it
     // doesn't stay on the previous photo if the user dismisses the menu.
     if (prevSelected !== pid && typeof grmRefreshSelectedLoupe === 'function') {
@@ -6191,12 +6300,22 @@ async function grmApply() {
         // single-photo burst must keep it (shallow clone so it doesn't alias the
         // source), or a flags-only apply would silently revert this photo to the
         // encounter species and drop the burst-specific confirmation.
+        var detachedPhotos = photo ? [photo] : [];
+        var detachedConsensus = buildBurstConsensus(detachedPhotos);
+        var sourceOverride = burst && burst.species_override;
+        // Match the server detach-photo elif (vireo/app.py): fall through to
+        // a null override whenever the encounter tracks any confirmed_species,
+        // including the mixed/partial state (species_confirmed=false but
+        // confirmed_species set) where a classifier-guess override would
+        // mask the real prior tag for a later burst-confirm.
         enc.bursts.push({
           photo_ids: [pid],
-          species_predictions: buildBurstConsensus(photo ? [photo] : []),
-          species_override: burst && burst.species_override
-            ? Object.assign({}, burst.species_override)
-            : null,
+          species_predictions: detachedConsensus,
+          species_override: sourceOverride && sourceOverride.confirmed === true
+            ? Object.assign({}, sourceOverride)
+            : (enc.confirmed_species
+              ? null
+              : candidateSpeciesOverrideFromPhotos(detachedPhotos)),
         });
       });
       // Recompute the shortened source burst's consensus from its remaining

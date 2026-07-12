@@ -326,6 +326,12 @@ let browserSelectAnchorPath = '';
 let activeImportMode = 'in_place';
 let importRemoteTargets = [];
 let importRsyncAvailable = false;
+let destStructureSeq = 0;
+// Monotonic sequence for the import preview / duplicate-check flow so a
+// slow older previewImport() response can't overwrite the summary text
+// or trigger a folder-structure render on top of a newer preview's
+// results. Incremented at the top of previewImport().
+let importPreviewSeq = 0;
 
 function selectedImportMode() {
   const checked = document.querySelector('input[name="importMode"]:checked');
@@ -360,6 +366,21 @@ function updateFileTypeControls() {
   const custom = document.getElementById('customFileTypes');
   if (!preset || !custom) return;
   custom.style.display = preset.value === 'custom' ? '' : 'none';
+}
+
+function wireDestStructureInvalidation() {
+  [
+    'chkRecursive', 'fileTypePreset', 'destMode', 'remoteSubpath',
+    'chkSkipDuplicates', 'chkVerifyByHash', 'destInput', 'folderTemplate',
+  ].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', hideDestStructure);
+    el.addEventListener('input', hideDestStructure);
+  });
+  document.querySelectorAll('.file-ext').forEach((el) => {
+    el.addEventListener('change', hideDestStructure);
+  });
 }
 
 function updateWorkspaceMode() {
@@ -520,6 +541,7 @@ function renderSources() {
     btn.onclick = () => {
       sources.splice(i, 1);
       delete sourceCounts[s];
+      hideDestStructure();
       renderSources();
     };
     div.appendChild(span);
@@ -606,6 +628,7 @@ function addSourcePath(path) {
   if (!v) return false;
   if (!sources.includes(v)) {
     sources.push(v);
+    hideDestStructure();
     renderSources();
     refreshSourceCount(v);
     return true;
@@ -645,7 +668,10 @@ async function browseForDestination() {
     const result = await pickDirectory('Select archive folder');
     if (result) {
       const path = Array.isArray(result) ? result[0] : result;
-      if (path) document.getElementById('destInput').value = path;
+      if (path) {
+        document.getElementById('destInput').value = path;
+        hideDestStructure();
+      }
       return;
     }
     if (typeof isTauri === 'function' && isTauri()) return;
@@ -864,6 +890,7 @@ function selectImportBrowserFolder() {
   if (browserMode === 'destination') {
     if (!browserPath) return;
     document.getElementById('destInput').value = browserPath;
+    hideDestStructure();
   } else {
     const paths = browserSelectedPaths.length
       ? browserSelectedPaths
@@ -1215,6 +1242,7 @@ async function deleteStaging(path, btn) {
 
 function useStagingAsImportSource(result) {
   sources = [result.source_root];
+  hideDestStructure();
   renderSources();
   // Staging recovery must copy the temporary staging tree into the archive.
   // In-place would catalog paths that disappear once staging is cleaned,
@@ -1226,11 +1254,13 @@ function useStagingAsImportSource(result) {
   }
   if (result.inferred_destination) {
     document.getElementById('destInput').value = result.inferred_destination;
+    hideDestStructure();
   }
   document.getElementById('sourceCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function hideDestStructure() {
+  destStructureSeq += 1;
   const el = document.getElementById('destStructure');
   if (!el) return;
   el.style.display = 'none';
@@ -1256,6 +1286,35 @@ function resolvedCopyDestination() {
   return importIsAbsolutePath(local) ? local : '';
 }
 
+function destStructureSignature(destination, fileTypes, recursive, excludePaths) {
+  return JSON.stringify({
+    sources: sources.slice(),
+    destination: destination,
+    folder_template: (document.getElementById('folderTemplate').value || '').trim(),
+    file_types: fileTypes,
+    recursive: recursive,
+    skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
+    verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    exclude_paths: (excludePaths || []).slice().sort(),
+  });
+}
+
+function importPreviewSignature() {
+  const copyMode = selectedImportMode() === 'copy';
+  return JSON.stringify({
+    sources: sources.slice(),
+    mode: copyMode ? 'copy' : 'in_place',
+    file_types: copyMode ? selectedFileTypes() : 'both',
+    recursive: document.getElementById('chkRecursive').checked,
+    skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
+    verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+  });
+}
+
+function importPreviewSignatureChanged(signature) {
+  return signature !== importPreviewSignature();
+}
+
 // Preview the destination folder structure (new vs existing folders) and,
 // when the destination sits in a folder Vireo already manages, a callout
 // naming that archive and how many photos it already holds. Best-effort:
@@ -1267,6 +1326,11 @@ async function renderDestStructure(excludePaths) {
   hideDestStructure();
   const destination = resolvedCopyDestination();
   if (!destination) return;
+  const fileTypes = selectedFileTypes();
+  const recursive = document.getElementById('chkRecursive').checked;
+  const requestSeq = destStructureSeq;
+  const requestSignature = destStructureSignature(
+    destination, fileTypes, recursive, excludePaths);
   let data;
   try {
     const resp = await fetch('/api/import/destination-preview', {
@@ -1276,8 +1340,8 @@ async function renderDestStructure(excludePaths) {
         sources: sources,
         destination: destination,
         folder_template: (document.getElementById('folderTemplate').value || '').trim(),
-        file_types: selectedFileTypes(),
-        recursive: document.getElementById('chkRecursive').checked,
+        file_types: fileTypes,
+        recursive: recursive,
         exclude_paths: excludePaths || [],
       }),
     });
@@ -1287,6 +1351,14 @@ async function renderDestStructure(excludePaths) {
     return;  // structure preview is optional; keep the summary intact
   }
   const el = document.getElementById('destStructure');
+  if (
+    requestSeq !== destStructureSeq ||
+    requestSignature !== destStructureSignature(
+      resolvedCopyDestination(), selectedFileTypes(),
+      document.getElementById('chkRecursive').checked, excludePaths)
+  ) {
+    return;
+  }
   const folders = data.folders || [];
   if (!folders.length && !data.managed_archive) return;
 
@@ -1342,6 +1414,9 @@ async function previewImport() {
     showError('Choose at least one file extension.');
     return;
   }
+  importPreviewSeq += 1;
+  const requestSeq = importPreviewSeq;
+  const requestSignature = importPreviewSignature();
   const summary = document.getElementById('previewSummary');
   summary.textContent = 'Discovering files…';
   try {
@@ -1356,6 +1431,14 @@ async function previewImport() {
     });
     if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
     const data = await resp.json();
+    // A newer previewImport() started while this response was in flight —
+    // it owns the summary and any structure preview now, so bail without
+    // touching either. Clearing summary here would erase the newer run's
+    // "Discovering files…" or completed results.
+    if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) {
+      return;
+    }
     const files = data.files || [];
     if (!files.length) { summary.textContent = 'No importable files found.'; return; }
     if (!copyMode) {
@@ -1402,6 +1485,13 @@ async function previewImport() {
         } catch (e) { /* partial frame */ }
       }
     }
+    // Same guard as above for the duplicate-stream leg: a newer
+    // previewImport() may have started while the SSE was draining, and
+    // owns the summary now.
+    if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) {
+      return;
+    }
     const dupCount = duplicatePaths.length;
     summary.textContent = files.length + ' files found · ' + dupCount +
       ' already in your library (will be skipped) · ' +
@@ -1411,6 +1501,9 @@ async function previewImport() {
     // reflect the files that will actually land in the archive.
     await renderDestStructure(duplicatePaths);
   } catch (e) {
+    // Don't let a stale run's error clobber a newer preview's summary
+    // or surface a stale error banner — the newer run owns the UI.
+    if (requestSeq !== importPreviewSeq) return;
     summary.textContent = '';
     showError(String(e.message || e));
   }
@@ -1636,6 +1729,14 @@ function renderModelWarning(res) {
 }
 
 async function initImportPage() {
+  // Install destination-structure invalidation before the first await —
+  // the form controls it listens on are all static template markup, so
+  // they're already in the DOM. Wiring after the /api/volumes,
+  // /api/config, and /api/workspaces/active fetches would leave a gap
+  // where a user can render a preview and then edit the destination,
+  // template, or file-type controls without the rendered structure
+  // being invalidated.
+  wireDestStructureInvalidation();
   // Native menu deep link: File > Import Folder... routes here as
   // /import?mode=copy&pick=source so it lands in Copy-to-archive with the
   // source picker open, while File > Import Photos... gets the page

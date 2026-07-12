@@ -9683,12 +9683,13 @@ class Database:
         """
         merged = 1
         src = self.conn.execute(
-            "SELECT name, is_species, latitude, longitude, taxon_id "
+            "SELECT name, type, is_species, latitude, longitude, taxon_id "
             "FROM keywords WHERE id = ?",
             (src_id,),
         ).fetchone()
         dst = self.conn.execute(
-            "SELECT name FROM keywords WHERE id = ?", (dst_id,),
+            "SELECT name, type, is_species FROM keywords WHERE id = ?",
+            (dst_id,),
         ).fetchone()
         if src is not None:
             self.conn.execute(
@@ -9745,6 +9746,44 @@ class Database:
                               AND photo_id IN ({placeholders})""",
                         [dst_name, src_name, *chunk],
                     )
+                # Retarget species curation rows keyed to the deleted source
+                # name onto the surviving destination name when either row is
+                # a species/taxonomy keyword. The eligible curation queries
+                # compare those strings exact against the surviving
+                # keywords.name, so highlights/representatives keyed to the
+                # source spelling would silently disappear after a merge even
+                # though the tag itself was retained. Mirrors the scoped
+                # rename _normalize_keyword_row_name runs on the survivor;
+                # scoped to (photo, workspace) pairs that carried either row
+                # so an unrelated workspace's same-species curation is not
+                # retargeted onto a name it doesn't have tagged.
+                is_species_merge = (
+                    src["is_species"] == 1 or src["type"] == "taxonomy"
+                    or dst["is_species"] == 1 or dst["type"] == "taxonomy"
+                )
+                if is_species_merge:
+                    tag_rows = self.conn.execute(
+                        """SELECT DISTINCT pk.photo_id, wf.workspace_id
+                           FROM photo_keywords pk
+                           JOIN photos p ON p.id = pk.photo_id
+                           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                           WHERE pk.keyword_id IN (?, ?)""",
+                        (src_id, dst_id),
+                    ).fetchall()
+                    photo_workspace_pairs = [
+                        (r["photo_id"], r["workspace_id"]) for r in tag_rows
+                    ]
+                    if photo_workspace_pairs:
+                        self.rename_species_highlights_species(
+                            src_name, dst_name,
+                            photo_workspace_pairs=photo_workspace_pairs,
+                            _commit=False,
+                        )
+                        self.rename_photo_preferences_species(
+                            src_name, dst_name,
+                            photo_workspace_pairs=photo_workspace_pairs,
+                            _commit=False,
+                        )
         # Move photo associations (ignore if already exists for dst_id),
         # then drop the leftovers.
         self.conn.execute(
