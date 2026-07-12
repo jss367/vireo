@@ -878,3 +878,129 @@ def test_migration_gated_by_db_meta_marker(tmp_path):
         assert names == {"‘elepaio"}
     finally:
         db.close()
+
+
+def test_migration_keeps_plain_general_out_of_taxonomy_fold(tmp_path):
+    """When a taxonomy peer exists alongside a clean general with the
+    same match key, the migration folds species-bearing generals into
+    the taxonomy row (species survivor), but a plain
+    ``type='general', is_species=0`` homonym must stay separate: the
+    taxonomy destination is species-bearing, and merging the plain
+    general would (via _merge_keyword_into's same-boundary is_species
+    CASE, since the taxonomy row already has is_species=1) leave every
+    plain-general photo tagged with a species keyword it never had.
+    Partitioning clean_generals by is_species inside the taxonomy
+    branch of the subgroup construction keeps the plain general in its
+    own subgroup."""
+    db, _ws_id, p1, p2 = _make_db(tmp_path)
+    try:
+        taxonomy_id = _insert_keyword(db, "Robin", "taxonomy", is_species=1)
+        plain_general_id = _insert_keyword(db, "robin", "general")
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, taxonomy_id),
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p2, plain_general_id),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        rows = db.conn.execute(
+            "SELECT id, type, is_species FROM keywords "
+            "WHERE LOWER(name) = 'robin' ORDER BY id"
+        ).fetchall()
+        # Both rows survive with their own type/is_species and their own
+        # photo tag. p2's photo must NOT have been swept onto the
+        # taxonomy row, and the plain general must still read is_species=0.
+        assert [(r["id"], r["type"], r["is_species"]) for r in rows] == [
+            (taxonomy_id, "taxonomy", 1),
+            (plain_general_id, "general", 0),
+        ]
+        tax_tags = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (taxonomy_id,),
+            )
+        }
+        plain_tags = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (plain_general_id,),
+            )
+        }
+        assert tax_tags == {p1}
+        assert plain_tags == {p2}
+    finally:
+        db.close()
+
+
+def test_migration_species_replace_preexisting_survivor_undo_safe(tmp_path):
+    """When a legacy species keyword is merged into a survivor on a
+    photo that already carried the survivor, the retargeted
+    ``species_replace`` edit-history item must not, on undo, remove the
+    pre-existing survivor tag. The migration deletes such items before
+    retargeting so undo iterates 0 items for that photo instead of
+    untagging the survivor the edit never created."""
+    db, ws_id, p1, _p2 = _make_db(tmp_path)
+    try:
+        # Two species keywords at the same match key: SQLite treats NULL
+        # parents as distinct for UNIQUE(name, parent_id), so both can
+        # coexist at the top level. The variant is the src; the clean
+        # spelling wins as survivor.
+        src_id = _insert_keyword(db, "‘Robin", "taxonomy", is_species=1)
+        dst_id = _insert_keyword(db, "Robin", "taxonomy", is_species=1)
+        # p1 already carried the survivor before the merge — the edit
+        # history entry below points at the src, but the retargeted
+        # item.new_value = dst_id would silently untag the survivor on
+        # undo if the migration didn't strip the item first.
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, dst_id),
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, src_id),
+        )
+        db.conn.execute(
+            "INSERT INTO edit_history "
+            "(action_type, description, new_value, workspace_id) "
+            "VALUES ('species_replace', 'x', ?, ?)",
+            (str(src_id), ws_id),
+        )
+        edit_id = db.conn.execute(
+            "SELECT id FROM edit_history WHERE new_value = ? ORDER BY id DESC LIMIT 1",
+            (str(src_id),),
+        ).fetchone()["id"]
+        db.conn.execute(
+            "INSERT INTO edit_history_items "
+            "(edit_id, photo_id, old_value, new_value) "
+            "VALUES (?, ?, '', ?)",
+            (edit_id, p1, str(src_id)),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        # The migration retargets the edit-history entry-level new_value
+        # to the survivor id, so undo would look up dst_id. The
+        # per-photo item pointing at the survivor for a pre-existing tag
+        # must have been dropped so undo doesn't untag it.
+        remaining = db.conn.execute(
+            "SELECT new_value FROM edit_history_items WHERE edit_id = ?",
+            (edit_id,),
+        ).fetchall()
+        assert remaining == []
+        # The survivor tag must still be on the photo.
+        surv_still_tagged = db.conn.execute(
+            "SELECT 1 FROM photo_keywords "
+            "WHERE photo_id = ? AND keyword_id = ?",
+            (p1, dst_id),
+        ).fetchone()
+        assert surv_still_tagged is not None
+    finally:
+        db.close()

@@ -9616,8 +9616,37 @@ class Database:
                         subgroups[0] += plain_variant_generals
                         if species_variant_generals:
                             subgroups[0] += species_variant_generals
+                        # Partition clean_generals by is_species so a clean
+                        # species-bearing general (`type='general',
+                        # is_species=1` on an upgraded DB, kept intentionally
+                        # distinct from a plain homonym) does not collapse
+                        # onto a plain general and either strip its species
+                        # flag or (via _merge_keyword_into's same-type
+                        # is_species CASE) stamp is_species=1 onto the plain
+                        # general and every photo tagged with it. Mirrors the
+                        # split the non-taxonomy branch and the no-peer
+                        # branch below run: each stays as its own subgroup so
+                        # they only collapse among themselves. Species-bearing
+                        # clean generals are NOT folded into the taxonomy peer
+                        # either — treating a legacy `type='general',
+                        # is_species=1` row as identical to a taxonomy peer
+                        # would migrate every general-Robin photo tag onto the
+                        # taxonomy Robin, losing the intentional distinction
+                        # and any curation rows keyed to the general
+                        # spelling.
                         if clean_generals:
-                            subgroups.append(clean_generals)
+                            clean_species = [
+                                r for r in clean_generals
+                                if r["is_species"] == 1
+                            ]
+                            clean_plain = [
+                                r for r in clean_generals
+                                if r["is_species"] != 1
+                            ]
+                            if clean_species:
+                                subgroups.append(clean_species)
+                            if clean_plain:
+                                subgroups.append(clean_plain)
                     else:
                         combined_generals = (
                             plain_variant_generals
@@ -10107,11 +10136,14 @@ class Database:
         #     IGNORE — no-op if dst pre-existed), BUT redo calls
         #     untag_photo(pid, entry.new_value); the retargeted
         #     entry.new_value = dst_id would strip the survivor on redo.
-        # species_replace is not covered here: it operates on
-        # item.new_value directly (per-swap ids) and its
-        # `_edit_old_value_meta` JSON payload carries its own list of
-        # source ids that the JSON rewriter below already dedupes when
-        # dst appears twice.
+        #   * `species_replace`: undo calls untag_photo(pid,
+        #     item.new_value) before restoring the old species (see
+        #     `_apply_undo`); the retargeted item.new_value = dst_id would
+        #     remove the survivor tag the edit never actually created.
+        #     Redo similarly untags item.new_value again. The
+        #     `_edit_old_value_meta` JSON rewriter below still runs for
+        #     these entries so the retag-old-species side stays coherent
+        #     when both endpoints of a swap collided on the survivor.
         preexisting_dst_photos = [
             r["photo_id"] for r in self.conn.execute(
                 "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
@@ -10120,7 +10152,12 @@ class Database:
         ]
         for chunk in _chunks(preexisting_dst_photos):
             ph = ",".join("?" for _ in chunk)
-            # keyword_add + prediction_accept: item.new_value = str(kid).
+            # keyword_add + prediction_accept + species_replace:
+            # item.new_value = str(kid). Deleting a species_replace item
+            # here loses the retag-old-species side of that per-photo swap
+            # on undo/redo, but leaving it retargeted would silently
+            # untag the user's pre-existing survivor — the tradeoff
+            # mirrors the prediction_accept case above.
             self.conn.execute(
                 f"""DELETE FROM edit_history_items
                     WHERE new_value = ?
@@ -10128,7 +10165,10 @@ class Database:
                       AND edit_id IN (
                           SELECT id FROM edit_history
                           WHERE new_value = ?
-                            AND action_type IN ('keyword_add', 'prediction_accept')
+                            AND action_type IN (
+                                'keyword_add', 'prediction_accept',
+                                'species_replace'
+                            )
                       )""",
                 [src_str, *chunk, src_str],
             )
