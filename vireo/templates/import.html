@@ -74,7 +74,11 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .import-preview-meta { padding: 6px; display: flex; flex-direction: column; gap: 2px; min-height: 54px; }
 .import-preview-name { font-size: 11px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .import-preview-dest { font-size: 10px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dest-structure { margin-top: 8px; }
+.dest-structure {
+  width: 100%; margin: 4px 0 8px; padding: 10px;
+  background: var(--bg-tertiary); border: 1px solid var(--border-primary);
+  border-radius: 6px;
+}
 .dest-structure .structure-headline { font-size: 12px; color: var(--text-primary); font-weight: 600; }
 .managed-archive-callout {
   font-size: 12px; color: var(--text-secondary); margin-top: 6px;
@@ -83,7 +87,14 @@ body { display: flex; flex-direction: column; height: 100vh; }
   border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
 }
 .structure-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
-.structure-table td { padding: 3px 8px; border-bottom: 1px solid var(--border-primary); color: var(--text-primary); }
+.structure-table th {
+  padding: 3px 8px; border-bottom: 1px solid var(--border-primary);
+  color: var(--text-secondary); font-weight: 500; text-align: left;
+}
+.structure-table th.num { text-align: right; }
+.structure-table th.tag { text-align: right; }
+.structure-table td { padding: 5px 8px; border-bottom: 1px solid var(--border-primary); color: var(--text-primary); }
+.structure-table td.path { font-family: monospace; overflow-wrap: anywhere; }
 .structure-table td.num { text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .structure-table td.tag { text-align: right; white-space: nowrap; }
 .tag-new { color: var(--success, #2da44e); }
@@ -253,6 +264,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <input type="text" id="folderTemplate" value="%Y/%Y-%m-%d" style="max-width:200px;flex:0 1 auto;">
         <span class="hint">strftime of each photo's capture time, e.g. %Y/%Y-%m-%d</span>
       </div>
+      <div id="destStructure" class="dest-structure" data-testid="resulting-folders" style="display:none;"></div>
       <div class="section-divider">
         <div class="option-stack">
           <label><input type="checkbox" id="chkSkipDuplicates" checked> Skip duplicates</label>
@@ -282,7 +294,6 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <button class="btn btn-primary" id="btnStart" onclick="startImport()">Start import</button>
       </div>
       <div class="preview-summary" id="previewSummary"></div>
-      <div id="destStructure" class="dest-structure" style="display:none;"></div>
       <div id="importPreviewGrid" class="import-preview-grid" style="display:none;"></div>
       <div id="importError"></div>
     </div>
@@ -1583,8 +1594,9 @@ async function renderDestStructure(excludePaths) {
 
   const headline = document.createElement('div');
   headline.className = 'structure-headline';
-  headline.textContent = data.total_photos + ' photos → ' + data.total_folders +
-    ' folder' + (data.total_folders === 1 ? '' : 's') +
+  headline.textContent = 'Resulting folders: ' + data.total_photos +
+    ' file' + (data.total_photos === 1 ? '' : 's') + ' split into ' +
+    data.total_folders + ' folder' + (data.total_folders === 1 ? '' : 's') +
     ' (' + data.new_folders + ' new, ' + data.existing_folders + ' existing)';
   el.appendChild(headline);
 
@@ -1606,13 +1618,28 @@ async function renderDestStructure(excludePaths) {
 
   const table = document.createElement('table');
   table.className = 'structure-table';
+  const header = document.createElement('tr');
+  const folderHeading = document.createElement('th');
+  folderHeading.scope = 'col';
+  folderHeading.textContent = 'Exact folder';
+  const countHeading = document.createElement('th');
+  countHeading.scope = 'col';
+  countHeading.className = 'num';
+  countHeading.textContent = 'Files';
+  const statusHeading = document.createElement('th');
+  statusHeading.scope = 'col';
+  statusHeading.className = 'tag';
+  statusHeading.textContent = 'Status';
+  header.append(folderHeading, countHeading, statusHeading);
+  table.appendChild(header);
   folders.forEach((f) => {
     const tr = document.createElement('tr');
     const name = document.createElement('td');
-    name.textContent = f.path === '.' ? '(archive root)' : f.path;
+    name.className = 'path';
+    name.textContent = f.full_path || (f.path === '.' ? '(archive root)' : f.path);
     const count = document.createElement('td');
     count.className = 'num';
-    count.textContent = f.count + ' photo' + (f.count === 1 ? '' : 's');
+    count.textContent = String(f.count);
     const tag = document.createElement('td');
     tag.className = 'tag ' + (f.exists ? 'tag-existing' : 'tag-new');
     tag.textContent = f.exists ? 'existing' : 'new';
