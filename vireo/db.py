@@ -11495,37 +11495,8 @@ class Database:
             )
         species = self.canonical_species_name(species)
         tax = taxonomy or {}
-        cur = self.conn.execute(
-            """INSERT OR IGNORE INTO predictions
-               (detection_id, classifier_model, labels_fingerprint,
-                species, confidence, category,
-                taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
-                taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                detection_id,
-                model,
-                labels_fingerprint,
-                species,
-                confidence,
-                category,
-                tax.get("kingdom"),
-                tax.get("phylum"),
-                tax.get("class"),
-                tax.get("order"),
-                tax.get("family"),
-                tax.get("genus"),
-                tax.get("scientific_name"),
-            ),
-        )
-        # SQLite's ``cur.lastrowid`` stays at the previous successful insert
-        # even when this INSERT OR IGNORE was skipped by the UNIQUE
-        # collision — relying on it silently upserted prediction_review for
-        # the wrong prediction_id. Use rowcount (0 on IGNORE, 1 on insert)
-        # to decide, then always re-query by the unique key.
-        if cur.rowcount == 1:
-            pred_id = cur.lastrowid
-        else:
+        pred_id = None
+        if species is not None:
             row = self.conn.execute(
                 """SELECT id FROM predictions
                    WHERE detection_id = ? AND classifier_model = ?
@@ -11533,6 +11504,61 @@ class Database:
                 (detection_id, model, labels_fingerprint, species),
             ).fetchone()
             pred_id = row["id"] if row else None
+            if pred_id is None:
+                rows = self.conn.execute(
+                    """SELECT id, species FROM predictions
+                       WHERE detection_id = ? AND classifier_model = ?
+                         AND labels_fingerprint = ? AND species IS NOT NULL
+                       ORDER BY id""",
+                    (detection_id, model, labels_fingerprint),
+                ).fetchall()
+                for row in rows:
+                    if self.canonical_species_name(row["species"]) == species:
+                        self.conn.execute(
+                            "UPDATE predictions SET species = ? WHERE id = ?",
+                            (species, row["id"]),
+                        )
+                        pred_id = row["id"]
+                        break
+        if pred_id is None:
+            cur = self.conn.execute(
+                """INSERT OR IGNORE INTO predictions
+                   (detection_id, classifier_model, labels_fingerprint,
+                    species, confidence, category,
+                    taxonomy_kingdom, taxonomy_phylum, taxonomy_class,
+                    taxonomy_order, taxonomy_family, taxonomy_genus, scientific_name)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    detection_id,
+                    model,
+                    labels_fingerprint,
+                    species,
+                    confidence,
+                    category,
+                    tax.get("kingdom"),
+                    tax.get("phylum"),
+                    tax.get("class"),
+                    tax.get("order"),
+                    tax.get("family"),
+                    tax.get("genus"),
+                    tax.get("scientific_name"),
+                ),
+            )
+            # SQLite's ``cur.lastrowid`` stays at the previous successful insert
+            # even when this INSERT OR IGNORE was skipped by the UNIQUE
+            # collision — relying on it silently upserted prediction_review for
+            # the wrong prediction_id. Use rowcount (0 on IGNORE, 1 on insert)
+            # to decide, then always re-query by the unique key.
+            if cur.rowcount == 1:
+                pred_id = cur.lastrowid
+            else:
+                row = self.conn.execute(
+                    """SELECT id FROM predictions
+                       WHERE detection_id = ? AND classifier_model = ?
+                         AND labels_fingerprint = ? AND species IS ?""",
+                    (detection_id, model, labels_fingerprint, species),
+                ).fetchone()
+                pred_id = row["id"] if row else None
         # Write workspace-scoped review state only when the caller actually
         # supplied something beyond the defaults. Keeping pending rows out of
         # prediction_review is intentional: absence == pending.

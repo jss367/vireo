@@ -15810,6 +15810,52 @@ def test_add_prediction_uses_existing_species_keyword_casing(tmp_path):
     assert pred["species"] == "Common waxbill"
 
 
+def test_add_prediction_reuses_legacy_cased_prediction_review(tmp_path):
+    """Canonicalizing a prediction must preserve legacy-row review state."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    )
+    legacy_id = db.conn.execute(
+        "INSERT INTO predictions "
+        "(detection_id, classifier_model, labels_fingerprint, species, confidence) "
+        "VALUES (?, 'bioclip', 'legacy', 'Common Waxbill', 0.88)",
+        (det_ids[0],),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status) "
+        "VALUES (?, ?, 'rejected')",
+        (legacy_id, db._ws_id()),
+    )
+    db.conn.commit()
+
+    db.add_prediction(det_ids[0], species="Common Waxbill",
+                      confidence=0.9, model="bioclip")
+
+    preds = db.conn.execute(
+        "SELECT id, species FROM predictions ORDER BY id"
+    ).fetchall()
+    assert [(p["id"], p["species"]) for p in preds] == [
+        (legacy_id, "Common waxbill")
+    ]
+    review = db.conn.execute(
+        "SELECT prediction_id, status FROM prediction_review"
+    ).fetchone()
+    assert review["prediction_id"] == legacy_id
+    assert review["status"] == "rejected"
+
+
 def test_sentence_case_preserves_first_word_internal_caps(tmp_path):
     """Sentence-case species names must not mangle the leading eponym."""
     from db import Database
