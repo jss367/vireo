@@ -21004,14 +21004,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # legacy is_species column, and the rest of the app treats
             # (is_species = 1 OR type = 'taxonomy') as species.
             old_kid_row = db.conn.execute(
-                """SELECT id FROM keywords
+                """SELECT id, name FROM keywords
                    WHERE name = ? COLLATE NOCASE
                      AND parent_id IS NULL
                      AND (is_species = 1 OR type = 'taxonomy')""",
                 (previous_species,),
             ).fetchone()
+            # Track the stored keyword row's spelling separately so the
+            # keyword_remove queued below cancels an unsynced keyword_add
+            # written under the DB's canonical case. Cached
+            # confirmed_species can legitimately differ from the stored
+            # row only by case (SQLite NOCASE keeps them together, but
+            # pending_changes.value is exact-match), so queueing the
+            # cache spelling would leave an add(<stored>) alongside a
+            # remove(<cache>) that sync_to_xmp treats as a paired rename
+            # and rewrites the removed spelling back into the sidecar.
+            old_species_stored = previous_species
             if old_kid_row:
                 old_kid = old_kid_row["id"]
+                if old_kid_row["name"]:
+                    old_species_stored = old_kid_row["name"]
 
         # Run all mutations in a single transaction so that a mid-loop failure
         # (SQLite lock, disk error, etc.) can't leave half the photos retagged
@@ -21062,7 +21074,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         continue
                     db.untag_photo(pid, old_kid, _commit=False)
                     _queue_keyword_remove(
-                        pid, previous_species,
+                        pid, old_species_stored,
                         workspace_id=ws_id, _commit=False,
                     )
 

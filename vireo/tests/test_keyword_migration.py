@@ -525,6 +525,34 @@ def test_migration_normalizes_orphan_pending_changes(tmp_path):
         db.close()
 
 
+def test_migration_cancels_opposite_pending_pair_after_normalization(tmp_path):
+    """Opposite-type pending changes that share the same normalized value
+    must cancel each other during the migration — same as the
+    _queue_keyword_add / _queue_keyword_remove cancel semantics at
+    runtime. Without this, a stray-quote keyword_add(`‘Apapane`) plus a
+    clean keyword_remove(`Apapane`) queued before the upgrade would both
+    survive as add+remove(Apapane) after normalization, and sync_to_xmp
+    reads a same-value add/remove pair as a paired rename and rewrites
+    the removed spelling back into the sidecar.
+    """
+    db, ws_id, p1, _p2 = _make_db(tmp_path)
+    try:
+        _insert_pending(db, p1, "keyword_add", "‘Apapane", ws_id)
+        _insert_pending(db, p1, "keyword_remove", "Apapane", ws_id)
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        rows = db.conn.execute(
+            "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+            (p1,),
+        ).fetchall()
+        assert rows == []
+    finally:
+        db.close()
+
+
 def test_migration_normalizes_curation_tables(tmp_path):
     """Curation rows keyed by variant species strings move to the clean
     spelling; a variant row colliding with an existing clean row is

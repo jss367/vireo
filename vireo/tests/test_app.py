@@ -1433,6 +1433,49 @@ def test_encounter_species_replacement_queues_stored_previous_name(app_and_db):
     assert ("keyword_add", "Blue Jay") in values
 
 
+def test_encounter_species_replacement_queues_stored_case_previous_name(app_and_db):
+    """Cache/stored spelling can differ by case only (SQLite NOCASE keeps
+    them together, but pending_changes.value is exact-match). When
+    replacing a species whose cache reads `saffron finch` but the stored
+    keyword row and outstanding pending add are `Saffron Finch`, the
+    remove queued for the old species must use the stored spelling so it
+    cancels the pending add. Queuing the cache spelling would leave both
+    add(`Saffron Finch`) and remove(`saffron finch`) in the pending set;
+    sync_to_xmp then treats them as a paired rename and writes the old
+    species back to the sidecar.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    # Earlier confirm queues keyword_add('Saffron Finch') under the DB's
+    # canonical case.
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Saffron Finch", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_add", "Saffron Finch") in values
+
+    # Cache confirmed_species drifts to a case-variant spelling (upgraded
+    # cache written by a client that normalized case differently).
+    _seed_encounter_cache(app, db, photo_ids, confirmed_species="saffron finch")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    # The stale add must be cancelled by a remove that targets the same
+    # stored spelling — not the lowercase cache value.
+    assert ("keyword_add", "Saffron Finch") not in values
+    assert ("keyword_remove", "saffron finch") not in values
+    assert ("keyword_add", "Blue Jay") in values
+
+
 def test_species_search(app_and_db):
     """GET /api/species/search returns matching species from keywords."""
     app, db = app_and_db

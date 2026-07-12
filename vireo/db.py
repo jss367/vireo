@@ -9685,13 +9685,48 @@ class Database:
         # XMP, so normalize globally (the scoped rewrites above only cover
         # values tied to a surviving keyword row's tags).
         pending_fixed = 0
+        cancelled_pending_ids = set()
         for row in self.conn.execute(
             "SELECT id, photo_id, change_type, value, workspace_id "
             "FROM pending_changes "
             "WHERE change_type IN ('keyword_add', 'keyword_remove')"
         ).fetchall():
+            if row["id"] in cancelled_pending_ids:
+                continue
             clean = normalize_keyword_display(row["value"] or "")
             if clean == (row["value"] or ""):
+                continue
+            # If normalization would surface an opposite-type pending
+            # change at the same (photo, workspace) with the same clean
+            # value, cancel both — mirrors the add/remove cancellation
+            # _queue_keyword_add and _queue_keyword_remove enforce at
+            # runtime. Without this, an unsynced
+            # keyword_add('‘Apapane') alongside a
+            # keyword_remove('Apapane') for the same photo would both
+            # survive as add+remove(Apapane), and sync_to_xmp treats a
+            # same-value add+remove pair as a paired rename and writes
+            # the removed spelling back into the sidecar.
+            opposite = None
+            if clean:
+                opposite_type = (
+                    "keyword_remove" if row["change_type"] == "keyword_add"
+                    else "keyword_add"
+                )
+                opposite = self.conn.execute(
+                    "SELECT id FROM pending_changes "
+                    "WHERE photo_id = ? AND change_type = ? AND value = ? "
+                    "AND COALESCE(workspace_id, -1) = COALESCE(?, -1) "
+                    "AND id != ?",
+                    (row["photo_id"], opposite_type, clean,
+                     row["workspace_id"], row["id"]),
+                ).fetchone()
+            if opposite is not None:
+                self.conn.execute(
+                    "DELETE FROM pending_changes WHERE id IN (?, ?)",
+                    (row["id"], opposite["id"]),
+                )
+                cancelled_pending_ids.add(opposite["id"])
+                pending_fixed += 1
                 continue
             dup = None
             if clean:
