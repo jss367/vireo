@@ -6149,6 +6149,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
                 _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
+        # When update_keyword merged this row into a normalized-equal peer
+        # AND canonicalized the peer's stored spelling (upgraded legacy row
+        # like `‘apapane` rewritten to `apapane`), photos that were already
+        # tagged with the PEER before the merge still have sidecars keyed to
+        # the peer's legacy spelling. _normalize_keyword_row_name retargeted
+        # their pending_changes and species curation, but no new sidecar
+        # remove/add is queued for photos whose XMP was already synced —
+        # the pre_affected block above only covers photos originally tagged
+        # with the source row (keyword_id), and specifically only fires when
+        # the request included a `name` field. A type-only PUT that hits
+        # the merge path (e.g. flipping a clean general `apapane` to
+        # taxonomy while a legacy taxonomy `‘apapane` peer exists) skips
+        # that block entirely, so without this the peer's pre-existing
+        # tagged photos keep exporting the quoted spelling indefinitely.
+        peer_pre_name = getattr(effective_id, "peer_pre_name", None)
+        peer_pre_photos = getattr(effective_id, "peer_pre_photos", ())
+        if peer_pre_name and peer_pre_photos:
+            peer_new_row = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (int(effective_id),)
+            ).fetchone()
+            peer_new_name = peer_new_row["name"] if peer_new_row else None
+            if peer_new_name and peer_new_name != peer_pre_name:
+                for photo_id, workspace_id in peer_pre_photos:
+                    _queue_keyword_remove(
+                        photo_id, peer_pre_name, workspace_id=workspace_id,
+                    )
+                    _queue_keyword_add(
+                        photo_id, peer_new_name, workspace_id=workspace_id,
+                    )
         # Signal the surviving id when update_keyword merged this row into a
         # normalized-equal peer. Without this, the keywords UI keeps mutating
         # the requested keyword_id in place (see keywords.html renameKeyword /

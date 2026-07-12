@@ -3956,6 +3956,143 @@ def test_api_update_keyword_returns_effective_id_and_merged_flag_on_peer_merge(
     assert payload["effective_id"] == plain_id
 
 
+def test_type_only_put_merge_queues_sidecar_rename_for_peer_photos(
+    app_and_db,
+):
+    """Type-only PUT that merges a clean row into a legacy peer must queue
+    keyword_remove(legacy) + keyword_add(canonical) for photos that were
+    ALREADY tagged with the legacy peer, otherwise those sidecars keep
+    exporting the quoted spelling even after the DB row is canonicalized.
+
+    Reproduces the fresh gap after the previous peer-normalization fix
+    (r3565437646). Scenario: an upgraded DB has a clean general keyword
+    ``apapane`` AND a legacy taxonomy peer stored as ``‘apapane`` (edge
+    quote). A photo P is already tagged with the legacy peer, and its
+    sidecar has already been synced under that quoted spelling. The
+    Browse/Keywords UI sends a type dropdown change on the general row —
+    ``PUT /api/keywords/<general_id>`` with ``{"type": "taxonomy"}`` and
+    no ``name`` field.
+
+    ``db.update_keyword`` detects the same-slot taxonomy peer and merges
+    the general row into it, then runs ``_normalize_keyword_row_name`` to
+    rewrite the survivor's DB name from ``‘apapane`` to ``apapane``. That
+    helper retargets ``pending_changes`` and species curation scoped to
+    the peer's tag set — but it does NOT emit new sidecar remove/add rows
+    for photos whose XMP was already synced under the legacy spelling.
+    ``api_update_keyword`` used to only snapshot/queue sidecar work when
+    the request included a ``name``, so the type-only PUT skipped the
+    queue entirely and photos on the peer kept exporting ``‘apapane`` to
+    their sidecars indefinitely.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Clean general keyword — the row the user is about to retype.
+    general_id = db.add_keyword("apapane")
+
+    # Legacy taxonomy peer inserted directly to preserve the edge quote
+    # (add_keyword would normalize it away). is_species=1 mirrors an
+    # upgraded taxonomy row.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("‘apapane",),
+    )
+    db.conn.commit()
+    legacy_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = '‘apapane'"
+    ).fetchone()["id"]
+
+    # Tag photo p1 with the legacy peer — this photo's sidecar has already
+    # been synced under the quoted spelling and needs the remove/add pair.
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, legacy_id)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    # Type-only PUT: no `name` in body. Mirrors the Browse/Keywords type
+    # dropdown flow.
+    resp = client.put(
+        f"/api/keywords/{general_id}", json={"type": "taxonomy"}
+    )
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["merged"] is True
+    assert payload["effective_id"] == legacy_id
+
+    # The merge collapsed general_id into legacy_id AND canonicalized the
+    # survivor's stored name.
+    assert db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (general_id,)
+    ).fetchone() is None
+    survivor = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (legacy_id,)
+    ).fetchone()
+    assert survivor["name"] == "apapane"
+
+    # The regression: photo p1 must have keyword_remove('‘apapane') +
+    # keyword_add('apapane') queued so its sidecar catches up with the
+    # canonicalized DB row. Without the fix, no rows would be queued for
+    # p1 and the sidecar would keep exporting the quoted spelling.
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
+        "ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "‘apapane") in actions
+    assert ("keyword_add", "apapane") in actions
+
+
+def test_type_only_put_merge_skips_queue_when_peer_already_canonical(
+    app_and_db,
+):
+    """When the peer's stored name is already canonical, the survivor
+    keeps its clean spelling and no sidecar remove/add is needed. Verify
+    the new pre-merge peer snapshot doesn't queue phantom rows in that
+    case — otherwise a routine type dropdown change would spam pending
+    ``keyword_remove('apapane')`` + ``keyword_add('apapane')`` pairs that
+    cancel each other but litter the pending panel."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Both rows already have canonical names; only their type differs.
+    general_id = db.add_keyword("apapane")
+    # Force a distinct taxonomy peer with the same clean name via direct
+    # INSERT — add_keyword promotes general → taxonomy in place when a
+    # taxon match exists, and top-level UNIQUE(name, parent_id) allows
+    # coexisting rows with different types under a NULL parent.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("apapane",),
+    )
+    db.conn.commit()
+    taxonomy_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'apapane' AND type = 'taxonomy'"
+    ).fetchone()["id"]
+
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, taxonomy_id)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(
+        f"/api/keywords/{general_id}", json={"type": "taxonomy"}
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["merged"] is True
+
+    # No pending_changes for p1 — the survivor's stored name didn't
+    # change (both rows already canonical), so no sidecar rewrite is
+    # needed and the guard on peer_new_name != peer_pre_name must skip
+    # the queue.
+    remaining = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM pending_changes WHERE photo_id = ?",
+        (p1,),
+    ).fetchone()["c"]
+    assert remaining == 0
+
+
 def test_rename_keyword_merges_into_normalized_peer_child(app_and_db):
     """Same guard for child keywords: without the peer check, two rows under
     the same parent with normalized-equal names would violate

@@ -19,6 +19,33 @@ _UNSET = object()  # sentinel for "not provided" vs explicit None
 
 AUTO_MATCH_REVIEW_MARKER = "__vireo_auto_match__"
 
+
+class _UpdateKeywordResult(int):
+    """int-compatible ``update_keyword`` return that carries pre-merge peer
+    info when a rename/retype merges the row into a normalized-equal peer
+    and canonicalizes the peer's stored spelling.
+
+    ``_normalize_keyword_row_name`` retargets pending_changes and species
+    curation for the survivor, but it does NOT emit new
+    ``keyword_remove`` / ``keyword_add`` rows for photos whose sidecars
+    were already synced under the peer's legacy spelling. Without the
+    pre-merge peer name and tagged (photo, workspace) pairs, the API layer
+    cannot queue those remove/add pairs, so photos originally tagged with
+    the legacy peer keep exporting the quoted spelling to their sidecars
+    even after the DB row is canonicalized.
+
+    Subclassing ``int`` keeps every existing caller/test that treats the
+    return value as a keyword id working unchanged (equality, isinstance,
+    arithmetic, dict/set keys, JSON serialization, sqlite3 param binding),
+    while attaching the extra fields the API layer needs.
+    """
+
+    def __new__(cls, effective_id, peer_pre_name=None, peer_pre_photos=()):
+        obj = super().__new__(cls, effective_id)
+        obj.peer_pre_name = peer_pre_name
+        obj.peer_pre_photos = tuple(peer_pre_photos)
+        return obj
+
 _SQLITE_PARAM_CHUNK_SIZE = 800
 _MISSING_PHOTOS_PROGRESS_INTERVAL = 200
 
@@ -11116,6 +11143,45 @@ class Database:
                             (new_name, parent_id, effective_type, keyword_id),
                         ).fetchone()
                     if peer:
+                        # Snapshot the peer's PRE-MERGE stored name and
+                        # tagged (photo, workspace) pairs BEFORE we touch
+                        # the row. _normalize_keyword_row_name below rewrites
+                        # the peer's DB name from an upgraded legacy spelling
+                        # (e.g. `‘apapane`) to the canonical form (`apapane`)
+                        # and retargets pending_changes / species curation
+                        # scoped to the peer's post-merge tag set, but it
+                        # does NOT emit sidecar remove/add rows for photos
+                        # whose XMP was already synced under the legacy
+                        # spelling — the peer's DB row canonicalizes while
+                        # those sidecars keep exporting the quoted variant
+                        # indefinitely. Returning the pre-snapshot lets
+                        # api_update_keyword queue keyword_remove(legacy) +
+                        # keyword_add(canonical) for exactly those photos.
+                        # Query BEFORE _merge_keyword_into so photos moved
+                        # over from the source row aren't lumped in with
+                        # the peer's pre-existing tags — source photos are
+                        # handled separately by the caller's plain-rename
+                        # snapshot on keyword_id.
+                        peer_pre_row = self.conn.execute(
+                            "SELECT name FROM keywords WHERE id = ?",
+                            (peer["id"],),
+                        ).fetchone()
+                        peer_pre_name = (
+                            peer_pre_row["name"] if peer_pre_row else None
+                        )
+                        peer_pre_tag_rows = self.conn.execute(
+                            """SELECT DISTINCT pk.photo_id, wf.workspace_id
+                               FROM photo_keywords pk
+                               JOIN photos p ON p.id = pk.photo_id
+                               JOIN workspace_folders wf
+                                 ON wf.folder_id = p.folder_id
+                               WHERE pk.keyword_id = ?""",
+                            (peer["id"],),
+                        ).fetchall()
+                        peer_pre_photos = tuple(
+                            (r["photo_id"], r["workspace_id"])
+                            for r in peer_pre_tag_rows
+                        )
                         # Canonicalize the peer's stored spelling when it is
                         # an upgraded legacy row that still carries an edge
                         # quote (e.g. taxonomy `‘apapane`) and the edited row
@@ -11144,7 +11210,11 @@ class Database:
                         self._merge_keyword_into(keyword_id, peer["id"])
                         self._normalize_keyword_row_name(peer["id"])
                         self.conn.commit()
-                        return peer["id"]
+                        return _UpdateKeywordResult(
+                            peer["id"],
+                            peer_pre_name=peer_pre_name,
+                            peer_pre_photos=peer_pre_photos,
+                        )
                     # No same-type peer, but a DIFFERENT-type peer at the
                     # same (name, parent_id) would hit the table-level
                     # UNIQUE(name, parent_id) constraint at UPDATE time for a
