@@ -8953,6 +8953,44 @@ def test_folder_under_rule_matches_backslash_paths(tmp_path, monkeypatch):
     assert db.count_photos_for_rules(under_sib) == 1
 
 
+def test_folder_legacy_is_op_resolves_like_under(tmp_path, monkeypatch):
+    """Folder collections saved with the pre-'under' vocabulary use op 'is'
+    (and 'is not'). Those legacy ops must resolve as aliases for
+    'under'/'not_under' instead of raising 'unsupported field/op', which
+    previously 500'd the whole /api/collections list and blanked every
+    collection dropdown."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    f_2023 = db.add_folder("/photos/2023", name="2023")
+    f_sub = db.add_folder("/photos/2023/trip", name="trip", parent_id=f_2023)
+    f_sib = db.add_folder("/photos/2023-trip", name="2023-trip")
+    for fid, name in [(f_2023, "a"), (f_sub, "b"), (f_sib, "c")]:
+        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+                     file_size=100, file_mtime=1.0)
+
+    legacy_is = [{"field": "folder", "op": "is", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_is) == 2  # folder + descendant
+
+    legacy_is_not = [{"field": "folder", "op": "is not", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_is_not) == 1  # only the sibling
+
+    # 'equals' is the third legacy alias; it also resolves like 'under'
+    # (the folder plus its descendants), matching how the rule behaved
+    # when the older UI wrote it.
+    legacy_equals = [{"field": "folder", "op": "equals", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_equals) == 2
+
+    # count_collection_photos (used by /api/collections) must not raise.
+    import json
+    cid = db.add_collection("Legacy Folder", json.dumps(legacy_is))
+    assert db.count_collection_photos(cid) == 2
+
+
 def test_check_filename_collisions(db):
     """check_filename_collisions detects conflicts at destination folder."""
     fid1 = db.add_folder("/src", name="src")

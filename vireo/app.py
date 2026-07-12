@@ -3385,12 +3385,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_dicts = []
         for c in collections:
             d = dict(c)
+            # Flag degraded rules at first paint so a fast click on the
+            # sidebar row can't fall into the 400 /photos path before
+            # loadCollectionCounts() lands. Only validate the rules — do
+            # not run COUNT(DISTINCT p.id) per collection here; that
+            # N+1 is what the async loadCollectionCounts() call in
+            # bootstrapBrowse() was designed to avoid, and re-adding it
+            # to the critical first-paint path makes opening Browse wait
+            # on every smart-collection query. Malformed JSON is treated
+            # as degraded too — those rules would 400 downstream just
+            # like an unresolvable rule.
             try:
-                d["can_add_photos"] = _collection_accepts_manual_photos(
-                    json.loads(c["rules"])
-                )
+                parsed_rules = json.loads(c["rules"])
             except (TypeError, ValueError):
                 d["can_add_photos"] = False
+                d["count_error"] = True
+                collection_dicts.append(d)
+                continue
+            if not db.rules_resolvable(parsed_rules):
+                app.logger.warning(
+                    "Collection %s (%s) has unresolvable rules; marking degraded",
+                    c["id"],
+                    c["name"],
+                )
+                d["count_error"] = True
+                # Same reasoning as /api/collections: an unresolvable rule
+                # cannot be safely merged into via add-photos, so keep it
+                # out of the add-to-collection modal.
+                d["can_add_photos"] = False
+            else:
+                d["can_add_photos"] = _collection_accepts_manual_photos(parsed_rules)
             collection_dicts.append(d)
 
         return jsonify(
@@ -8301,13 +8325,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = []
         for c in collections:
             d = dict(c)
-            d["photo_count"] = db.count_collection_photos(c["id"])
+            # A single collection with an unresolvable rule must not 500 the
+            # whole list — that blanks every collection dropdown in the UI.
+            # Degrade to an unknown count and flag it so the client can show
+            # the collection instead of hiding all of them.
+            #
+            # Only rule-validation failures degrade to count_error: the pickers
+            # tell users to fix the rule, so labelling a locked/corrupt DB or a
+            # bad generated query as count_error would send them to edit rules
+            # that aren't the actual problem. ValueError covers both malformed
+            # rules (raised by _build_query_from_rules) and malformed JSON in
+            # the rules column (json.JSONDecodeError is a ValueError subclass).
+            # Anything else bubbles up as a 500 so real infra failures surface.
             try:
-                d["can_add_photos"] = _collection_accepts_manual_photos(
-                    json.loads(c["rules"])
+                d["photo_count"] = db.count_collection_photos(c["id"])
+            except ValueError:
+                app.logger.exception(
+                    "Failed to count photos for collection %s (%s)",
+                    c["id"],
+                    c["name"],
                 )
-            except (TypeError, ValueError):
+                d["photo_count"] = None
+                d["count_error"] = True
+            # Degraded rows must never advertise manual-add support: the
+            # add-to-collection modal filters only on can_add_photos, and
+            # /api/collections/<id>/add-photos calls set(ids_rule["value"])
+            # on the existing rule — which 500s on any malformed photo_ids
+            # payload (non-scalar entries, non-list value, etc.). If the
+            # rule is bad enough to fail count, it isn't safe to merge into.
+            if d.get("count_error"):
                 d["can_add_photos"] = False
+            else:
+                try:
+                    d["can_add_photos"] = _collection_accepts_manual_photos(
+                        json.loads(c["rules"])
+                    )
+                except (TypeError, ValueError):
+                    d["can_add_photos"] = False
             result.append(d)
         return jsonify(result)
 
@@ -8492,8 +8546,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
-        photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
-        total = db.count_collection_photos(collection_id)
+        # If the saved rules can't be resolved (e.g. an unknown field/op left
+        # over from an older schema), surface a 400 instead of a 500 so
+        # callers can render a real error — this is the same collection state
+        # that /api/collections flags with count_error=True.
+        try:
+            photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
+            total = db.count_collection_photos(collection_id)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
         _attach_species_representatives(db, photo_dicts)
@@ -8512,7 +8576,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_collection_photo_ids(collection_id):
         """Return every photo ID matching a collection."""
         db = _get_db()
-        photo_ids = db.get_collection_photo_ids(collection_id)
+        try:
+            photo_ids = db.get_collection_photo_ids(collection_id)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
         return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
 
     # -- Highlights --
@@ -14119,7 +14189,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("collection_id required", 400)
 
         db = _get_db()
-        photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
+        try:
+            photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
 
         folder_rows = db.conn.execute("SELECT id, path, name FROM folders").fetchall()
         folder_map = {r["id"]: dict(r) for r in folder_rows}

@@ -11207,6 +11207,280 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
         assert _math.isfinite(pipe["tau_enc"])
 
 
+def test_collections_list_survives_one_unresolvable_rule(app_and_db):
+    """A single collection whose rule can't be resolved must not 500 the
+    whole /api/collections list. Before this, one bad rule raised an
+    unhandled ValueError, the endpoint 500'd, and every collection
+    dropdown in the UI came back empty. The bad collection should degrade
+    to photo_count=None with count_error=True; the others still count.
+    """
+    import json
+    app, db = app_and_db
+    client = app.test_client()
+
+    good = db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    resp = client.get("/api/collections")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()}
+
+    assert by_id[good]["photo_count"] == 1
+    assert "count_error" not in by_id[good]
+
+    assert by_id[bad]["photo_count"] is None
+    assert by_id[bad]["count_error"] is True
+
+
+def test_browse_init_flags_degraded_without_counting(app_and_db, monkeypatch):
+    """/api/browse/init must mark collections with unresolvable rules as
+    degraded (count_error=True) so the sidebar first paint disables them —
+    but it must NOT run COUNT(DISTINCT p.id) per collection to figure that
+    out. That N+1 is what the async loadCollectionCounts() in
+    bootstrapBrowse() was designed to avoid, and re-adding it to the
+    critical first-paint path makes Browse wait on every smart-collection
+    query.
+    """
+    import json
+    import sqlite3
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    good = db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    # If browse init still ran a full count per collection, this monkeypatch
+    # would blow up the request. The endpoint must derive the count_error
+    # flag from rule validation alone, with actual counts left to the
+    # client's async /api/collections call.
+    def boom(self, _cid):
+        raise sqlite3.OperationalError("count_collection_photos should not run on browse init")
+
+    monkeypatch.setattr(Database, "count_collection_photos", boom)
+
+    resp = client.get("/api/browse/init")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()["collections"]}
+
+    # The healthy collection is neither degraded nor eagerly counted.
+    assert by_id[good].get("count_error") in (None, False)
+    assert "photo_count" not in by_id[good]
+
+    # The broken one is still flagged so the sidebar renders it disabled
+    # before loadCollectionCounts() has a chance to run.
+    assert by_id[bad]["count_error"] is True
+
+
+def test_collections_list_surfaces_non_rule_failures(app_and_db, monkeypatch):
+    """The count_error path is for rule-validation failures only. If
+    count_collection_photos raises a genuine infrastructure error (locked or
+    corrupt DB, bad generated query), /api/collections must NOT silently
+    downgrade it to a count_error row — the pickers would then tell the user
+    to fix the rule when the real problem is DB-side. Non-ValueError errors
+    must bubble up so the 5xx surfaces where a human will see it.
+    """
+    import json
+    import sqlite3
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+
+    # Patch the class so the per-request Database instance built by
+    # _get_db() is affected too — the route does not share the fixture's
+    # instance.
+    def boom(self, _cid):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Database, "count_collection_photos", boom)
+
+    resp = client.get("/api/collections")
+    # Not a 200 with count_error — a real 5xx so the incident is visible.
+    assert resp.status_code >= 500
+
+
+def test_collection_photos_returns_400_for_unresolvable_rule(app_and_db):
+    """When a collection's rules can't be resolved, /photos, /photo-ids and
+    /api/import/collection-preview must return a 400, not 500. Otherwise the
+    pipeline picker (which just shows every collection from /api/collections)
+    would advertise a source whose downstream endpoints crash the moment a
+    user selects it — leaving the UI stuck.
+    """
+    import json
+    app, db = app_and_db
+    client = app.test_client()
+
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    resp = client.get(f"/api/collections/{bad}/photos")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    resp = client.get(f"/api/collections/{bad}/photo-ids")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    resp = client.post(
+        "/api/import/collection-preview",
+        json={"collection_id": bad},
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+
+def test_pipeline_picker_disables_degraded_collections(app_and_db):
+    """The pipeline page's collection picker must not offer degraded
+    collections as selectable — count_error entries render with a `disabled`
+    attribute so users can't accidentally pick a source that would 500 the
+    downstream /photos endpoint.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+    html = client.get("/pipeline").get_data(as_text=True)
+    # The renderer keys off c.count_error and adds ' disabled' to the option
+    # (plus a tooltip explaining why it's unavailable). Assert the branch is
+    # actually in the template rather than probing it from the DOM.
+    assert "c.count_error" in html
+    assert "unavailable" in html
+
+
+def test_collection_pickers_disable_degraded_collections(app_and_db):
+    """Every page that renders a collection picker from /api/collections must
+    honor count_error. Before this fix only the pipeline picker did — the
+    review, cull, compare, pipeline-review, and browse pickers still appended
+    every collection as selectable, so picking a broken one 400'd the
+    downstream request. Regression guard: the same count_error /
+    'unavailable' branch that exists on the pipeline page must exist on each
+    of these pages too.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+    for route in ("/review", "/cull", "/compare", "/pipeline/review", "/browse"):
+        html = client.get(route).get_data(as_text=True)
+        assert "count_error" in html, (
+            f"{route} does not check count_error on its collection picker"
+        )
+        assert "unavailable" in html, (
+            f"{route} does not label degraded collections as unavailable"
+        )
+
+
+def test_degraded_collections_never_advertise_manual_add(app_and_db, monkeypatch):
+    """A count_error collection must not report can_add_photos=True from
+    either /api/collections or /api/browse/init. The add-to-collection
+    modal filters only on can_add_photos, and /api/collections/<id>/add-photos
+    reaches set(ids_rule["value"]) — which 500s on any malformed photo_ids
+    payload. Defense-in-depth alongside the picker guards: degraded rows
+    are surfaced (so the user can edit them) but never offered as an
+    append target.
+    """
+    import json
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    # A static photo_ids collection whose count query fails at rule-resolve
+    # time: the shape looks like a manual-add target, but the DB can't
+    # count it, so it lands in the count_error path.
+    bad = db.add_collection(
+        "Broken static",
+        json.dumps([
+            {"field": "photo_ids", "value": [1, 2, 3]},
+            {"field": "nonexistent_field", "op": "is", "value": 1},
+        ]),
+    )
+
+    resp = client.get("/api/collections")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()}
+    assert by_id[bad]["count_error"] is True
+    assert by_id[bad]["can_add_photos"] is False, (
+        "degraded /api/collections row must not advertise manual-add support"
+    )
+
+    # /api/browse/init derives count_error from cheap rule validation, so
+    # patch that instead of count_collection_photos to trigger the branch.
+    monkeypatch.setattr(Database, "rules_resolvable", lambda self, rules: False)
+
+    resp = client.get("/api/browse/init")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()["collections"]}
+    assert by_id[bad]["count_error"] is True
+    assert by_id[bad]["can_add_photos"] is False, (
+        "degraded /api/browse/init row must not advertise manual-add support"
+    )
+
+
+def test_browse_filter_by_collection_guards_degraded_rows():
+    """The Browse sidebar renders every collection from /api/collections as a
+    clickable filter target (filterByCollection). Before this fix,
+    left-clicking a degraded row hit /api/collections/<id>/photos, which now
+    400s, leaving Browse advertising a source that can't load. Regression
+    guard: filterByCollection must bail out at the top for count_error rows
+    (with a toast) rather than firing the request.
+    """
+    from pathlib import Path
+    src = Path(__file__).parent.parent / "templates" / "browse.html"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("async function filterByCollection")
+    assert fn_start != -1, "filterByCollection function not found"
+    # Grab enough of the function body to include the guard block. The guard
+    # must reference count_error and return before the normal load path runs.
+    body = text[fn_start:fn_start + 2000]
+    assert "count_error" in body, (
+        "browse.html filterByCollection does not check count_error"
+    )
+    guard_end = body.find("return;")
+    fetch_start = body.find("loadPhotos")
+    assert guard_end != -1 and fetch_start != -1 and guard_end < fetch_start, (
+        "browse.html filterByCollection does not early-return before loading"
+    )
+
+
+def test_review_switch_collection_does_not_silently_widen_scope():
+    """When /api/collections/<id>/photos fails, the review page must not fall
+    back to `allPredictions.slice()` — that silently widened the scope back
+    to every prediction, the opposite of what the user asked for. Regression
+    guard on the template source itself.
+    """
+    from pathlib import Path
+    src = Path(__file__).parent.parent / "templates" / "review.html"
+    text = src.read_text(encoding="utf-8")
+    # Locate the switchCollection function and the catch branch inside it.
+    fn_start = text.find("async function switchCollection")
+    assert fn_start != -1, "switchCollection function not found"
+    fn_end = text.find("\n}", fn_start)
+    assert fn_end != -1
+    body = text[fn_start:fn_end]
+    # The old silent fallback assigned allPredictions.slice() from the catch;
+    # the new behavior keeps the scope empty and surfaces a toast.
+    assert "predictions = allPredictions.slice()" not in body.split("catch")[1], (
+        "review.html still silently widens scope on collection load failure"
+    )
+    assert "predictions = []" in body
+    assert "showToast" in body
+
+
 def test_collection_preview_returns_match_count(app_and_db):
     """POST /api/collections/preview returns the count of photos that
     would match an unsaved rules list. Powers the smart-collection

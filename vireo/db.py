@@ -15340,9 +15340,15 @@ class Database:
                 base = _path_for_subtree_match(str(value or ""))
                 subtree_params = [base, _escape_like(base) + "/%"]
                 norm = "REPLACE(f.path, '\\', '/')"
-                if op == "under":
+                # Legacy folder collections were saved with op "is"/"is not"
+                # before the rule vocabulary switched to "under"/"not_under".
+                # Treat the old ops as aliases so those rows keep resolving
+                # (a single unrecognized rule used to raise ValueError and 500
+                # the whole /api/collections list). "is" always meant the
+                # folder and its descendants, which is exactly "under".
+                if op in ("under", "is", "equals"):
                     return f"({norm} = ? OR {norm} LIKE ? ESCAPE '\\')", subtree_params
-                if op == "not_under":
+                if op in ("not_under", "is not"):
                     return (
                         f"(f.path IS NULL OR ({norm} != ? AND {norm} NOT LIKE ? ESCAPE '\\'))",
                         subtree_params,
@@ -15585,6 +15591,22 @@ class Database:
             {where}
         """
         return self.conn.execute(query, params).fetchone()[0]
+
+    def rules_resolvable(self, rules):
+        """Return True if a rule tree can be resolved to SQL clauses without
+        executing them.
+
+        Callers (notably ``/api/browse/init``) use this to flag degraded
+        collections at first paint without running the full
+        ``COUNT(DISTINCT p.id)`` per collection — that N+1 is what the
+        Browse client's async ``loadCollectionCounts()`` was built to
+        avoid. Only the query-building step is exercised.
+        """
+        try:
+            self._build_query_from_rules(rules)
+        except ValueError:
+            return False
+        return True
 
     def count_photos_for_rules(self, rules):
         """Return the number of photos in the active workspace that match
