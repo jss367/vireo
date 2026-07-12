@@ -1686,6 +1686,9 @@ class Database:
             "DELETE FROM saved_processes WHERE id = ?", (process_id,)
         )
         # Null the per-workspace default pointer wherever it referenced this id.
+        # Write an explicit ``None`` (not ``pop``) so the workspace's effective
+        # config resolves to "import only" instead of silently inheriting a
+        # different global ``pipeline.default_process_id`` via _deep_merge.
         ws_rows = self.conn.execute(
             "SELECT id, config_overrides FROM workspaces "
             "WHERE config_overrides IS NOT NULL"
@@ -1701,7 +1704,7 @@ class Database:
             if not isinstance(pipeline_ov, dict):
                 continue
             if pipeline_ov.get("default_process_id") == process_id:
-                pipeline_ov.pop("default_process_id", None)
+                pipeline_ov["default_process_id"] = None
                 self.conn.execute(
                     "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
                     (json.dumps(overrides), row["id"]),
