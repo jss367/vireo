@@ -32,6 +32,14 @@ class PipelinePlanParams:
     skip_extract_masks: bool = False
     skip_eye_keypoints: bool = False
     skip_regroup: bool = False
+    # Per-run override for the config-gated eye-detect setting. Mirrors
+    # ``PipelineParams.eye_detect_override``: None defers to the workspace-
+    # effective ``pipeline.eye_detect_enabled``; a bool wins in both
+    # directions. The Process page sends this alongside the Eye Keypoints
+    # checkbox state so the plan pill is honest — without it, an opt-in
+    # against a default-off workspace would still show
+    # "Will skip — Disabled in config" even though the actual job would run.
+    eye_detect_override: bool | None = None
     model_ids: list = field(default_factory=list)
     labels_files: list = field(default_factory=list)
     reclassify: bool = False
@@ -648,6 +656,16 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
         }
     from pipeline import eye_keypoint_stage_preflight
 
+    # Mirror ``pipeline_job``'s per-run override so the plan pill matches
+    # what the job would do: without this, a Process-page opt-in against
+    # a default-off workspace would still render "Will skip — Disabled in
+    # config" here even though the actual run would toggle the config on
+    # and execute the stage.
+    if params.eye_detect_override is not None:
+        pipeline_cfg = {
+            **pipeline_cfg,
+            "eye_detect_enabled": params.eye_detect_override,
+        }
     skip_reason = eye_keypoint_stage_preflight(pipeline_cfg)
     if skip_reason is not None:
         return {

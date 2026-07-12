@@ -1891,6 +1891,50 @@ def test_eye_keypoints_plan_will_skip_when_preflight_fails(tmp_path, monkeypatch
     assert "disabled in config" in eye["summary"]
 
 
+def test_eye_keypoints_plan_honors_per_run_override_against_config_disabled(
+    tmp_path, monkeypatch,
+):
+    """When Settings has ``eye_detect_enabled=False`` but the caller opted
+    in via ``eye_detect_override=True`` (Process-page checkbox on), the
+    plan must show the stage as ``will-run``, not ``will-skip — Disabled
+    in config``. The pill has to match what the job would actually do —
+    which is toggle the config on for the run and execute the stage.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    # Give the stage some eligible work so it lands on will-run (not
+    # done-prior). eye_keypoint_stage_preflight is exercised with the
+    # REAL implementation — no monkeypatch — so the override must reach
+    # its config lookup.
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,),
+    )
+    db.conn.execute(
+        """INSERT INTO predictions
+            (detection_id, classifier_model, labels_fingerprint,
+             species, confidence)
+           VALUES (?, ?, ?, ?, ?)""",
+        (did, "BioCLIP-2", "fp1", "robin", 0.9),
+    )
+    db.conn.commit()
+
+    plan_no_override = compute_plan(
+        db, _params(), str(tmp_path / "test.db"),
+    )
+    assert plan_no_override["stages"]["EyeKeypoints"]["state"] == "will-skip"
+
+    plan_with_override = compute_plan(
+        db, _params(eye_detect_override=True), str(tmp_path / "test.db"),
+    )
+    eye = plan_with_override["stages"]["EyeKeypoints"]
+    assert eye["state"] != "will-skip", (
+        f"eye_detect_override=True must let the plan pill show what the "
+        f"job would actually do (run the stage), not the stale Settings "
+        f"disabled reason: got {eye!r}"
+    )
+
+
 def test_eye_keypoints_plan_done_prior_when_all_processed(tmp_path, monkeypatch):
     """The headline bug case: every eligible photo has eye_tenengrad set
     (with the current fingerprint, so it isn't stale), so the next run is

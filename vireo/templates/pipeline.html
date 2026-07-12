@@ -2178,6 +2178,14 @@ async function startPipeline() {
   body.skip_eye_keypoints = !eyeKeypointsEnabled;
   body.skip_regroup = !groupEnabled;
 
+  // Explicit per-run signal: the Eye Keypoints checkbox is the user's
+  // opt-in for this run. Send it as ``eye_detect_override`` so the backend
+  // can force ``pipeline_cfg["eye_detect_enabled"]`` accordingly — needed
+  // because the default Settings value is off, and reaching the stage with
+  // ``skip_eye_keypoints=false`` alone (which is also the ``full`` strategy
+  // default) is not proof of user intent.
+  body.eye_detect_override = !!eyeKeypointsEnabled;
+
   // Classification options (only if enabled)
   if (classifyEnabled) {
     var selectedModels = [];
@@ -4069,6 +4077,12 @@ function _buildPlanBody() {
   body.skip_extract_masks  = !document.getElementById('enableExtract').checked;
   body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
   body.skip_regroup        = !document.getElementById('enableGroup').checked;
+
+  // Mirror startPipeline: send the checkbox state as ``eye_detect_override``
+  // so the plan pill matches what the job would actually do — otherwise
+  // opting in on a default-off workspace still renders "Will skip —
+  // Disabled in config".
+  body.eye_detect_override = !!document.getElementById('enableEyeKeypoints').checked;
 
   // Mirror the strategy field startPipeline() sends so /api/pipeline/plan
   // expands the preset with the same rules /api/jobs/pipeline does. The
