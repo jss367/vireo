@@ -93,10 +93,11 @@ DEFAULTS = {
     "cull_phash_threshold": 19,
     # --- Pipeline (nested — flows through effective_cfg.get("pipeline")) ---
     "pipeline": {
-        # Process strategy to run after an import. None = no automatic
-        # processing (the "import only" choice); otherwise a name from
-        # process_strategies.STRATEGIES. Per-workspace via config_overrides.
-        "default_strategy": None,
+        # Saved process to run after an import. None = no automatic
+        # processing (the "import only" choice); otherwise a saved_processes
+        # id. Per-workspace via config_overrides. Global default stays None
+        # so a fresh workspace is import-only until the user picks a process.
+        "default_process_id": None,
         "w_focus": 0.45,
         "w_exposure": 0.20,
         "w_composition": 0.15,
@@ -298,6 +299,7 @@ def set(key, value):
 MIGRATION_MISS_THRESHOLDS = "miss_thresholds_2026_05"
 MIGRATION_TOGGLE_UI_H_CONFLICT = "toggle_ui_h_conflict_2026_07"
 MIGRATION_EYE_DETECT_DEFAULT_OFF = "eye_detect_default_off_2026_07"
+MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID = "default_strategy_to_process_id_2026_07"
 
 _LEGACY_MISS_DET_CONFIDENCE = 0.25
 _LEGACY_MISS_DET_CONFIDENCE_BURST = 0.15
@@ -470,6 +472,80 @@ def migrate_eye_detect_default_off(db=None):
         raw["_migrations_applied"] = applied
         save(raw)
         return rewrote
+
+
+def migrate_default_strategy_to_process_id(db):
+    """One-time rewrite of the legacy global ``pipeline.default_strategy``
+    (a hardcoded strategy name) to ``pipeline.default_process_id`` (a
+    ``saved_processes.id``).
+
+    The workspace-side rewrite runs inside :class:`db.Database` at handle
+    creation (guarded by ``db_meta``). This function does the corresponding
+    rewrite for the *global* ``~/.vireo/config.json``: without it, an
+    upgraded install that had a global after-import default set via the old
+    ``pipeline.default_strategy`` silently falls back to import-only,
+    because the import endpoints and ``get_effective_config`` now read only
+    ``pipeline.default_process_id``. Workspaces that inherit the global
+    setting (i.e. have no per-workspace override) would stop auto-processing
+    on import until the user re-picks a default in Settings.
+
+    Unknown/removed legacy names map to null (import only). Gated by
+    ``_migrations_applied`` so it runs at most once per install; a user who
+    later manually adds ``default_strategy`` back is not silently rewritten.
+    """
+    import sqlite3
+
+    import process_strategies as ps
+    with _lock:
+        raw = _read_raw()
+        applied = _migrations_applied(raw)
+        if MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in applied:
+            return False
+        pipeline = raw.get("pipeline")
+        if not (isinstance(pipeline, dict) and "default_strategy" in pipeline):
+            # Nothing legacy to migrate — stamp so we don't re-check every
+            # boot. No saved_processes access needed on this (possibly
+            # schema-uninitialized) connection.
+            applied.append(MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID)
+            raw["_migrations_applied"] = applied
+            save(raw)
+            return False
+        # A legacy key is present and must be resolved against the seeded
+        # saved_processes table. create_app opens its startup ``init_db`` with
+        # ``initialize_schema=False``, so on the first boot after an upgrade
+        # this can run before any schema-initializing handle created/seeded
+        # the table. Defer WITHOUT stamping (and without dropping the legacy
+        # key) so a later boot completes the migration once a request-path
+        # Database has seeded the table — instead of crashing startup with
+        # "no such table: saved_processes".
+        try:
+            seeded = db.conn.execute(
+                "SELECT id FROM saved_processes WHERE name = ?",
+                (ps.DEFAULT_SEED_NAME,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return False
+        if seeded is None:
+            return False
+        old = pipeline.pop("default_strategy")
+        seed_name = (
+            ps.LEGACY_STRATEGY_NAMES.get(old)
+            if isinstance(old, str) else None
+        )
+        pid = None
+        if seed_name is not None:
+            rows = db.conn.execute(
+                "SELECT id FROM saved_processes WHERE name = ?",
+                (seed_name,),
+            ).fetchall()
+            if rows:
+                pid = rows[0]["id"]
+        if pid is not None:
+            pipeline["default_process_id"] = pid
+        applied.append(MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID)
+        raw["_migrations_applied"] = applied
+        save(raw)
+        return True
 
 
 def get_editors():

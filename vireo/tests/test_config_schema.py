@@ -340,23 +340,24 @@ def test_validate_enum_rejects_unknown():
         validate_value("keyword_case", "screaming-snake")
 
 
-def test_validate_nullable_enum_accepts_null():
-    """pipeline.default_strategy is nullable — a workspace override of null
-    (or the settings UI's empty-string proxy for null) must round-trip to
-    Python None so the import→process chaining hook short-circuits."""
+def test_validate_nullable_int_accepts_null():
+    """pipeline.default_process_id is a nullable int — a workspace override of
+    null (or the settings UI's empty-string proxy for null) must round-trip to
+    Python None so the import→process chaining hook short-circuits. A string id
+    from the settings <select> coerces back to int."""
     from config_schema import validate_value
 
-    assert validate_value("pipeline.default_strategy", None) is None
-    assert validate_value("pipeline.default_strategy", "") is None
-    assert validate_value("pipeline.default_strategy", "identify") == "identify"
-    assert validate_value("pipeline.default_strategy", "full") == "full"
+    assert validate_value("pipeline.default_process_id", None) is None
+    assert validate_value("pipeline.default_process_id", "") is None
+    assert validate_value("pipeline.default_process_id", 3) == 3
+    assert validate_value("pipeline.default_process_id", "3") == 3
 
 
-def test_validate_nullable_enum_rejects_unknown_non_null():
+def test_validate_process_id_rejects_non_int():
     from config_schema import ValidationError, validate_value
 
     with pytest.raises(ValidationError):
-        validate_value("pipeline.default_strategy", "not_a_strategy")
+        validate_value("pipeline.default_process_id", "not_a_number")
 
 
 def test_validate_string_passthrough():

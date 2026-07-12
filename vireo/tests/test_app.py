@@ -11627,16 +11627,18 @@ def test_import_page_returns_200(app_and_db):
     assert "/api/jobs/import-photos" in html
 
 
-def test_import_page_resolves_default_strategy_client_side(app_and_db):
+def test_import_page_resolves_default_process_client_side(app_and_db):
     """Templates are Jinja-free by convention, so the after-import menu's
     default resolves in page JS from the workspace's config_overrides
-    merged over /api/config — assert the wiring exists (behavior is
-    covered by the user-first scenario)."""
+    merged over /api/config, and the process options load from
+    /api/processes — assert the wiring exists (behavior is covered by the
+    user-first scenario)."""
     app, _ = app_and_db
     client = app.test_client()
     html = client.get("/import").data.decode()
     assert "/api/workspaces/active" in html
-    assert "default_strategy" in html
+    assert "default_process_id" in html
+    assert "/api/processes" in html
     assert "config_overrides" in html
 
 

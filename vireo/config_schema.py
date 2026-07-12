@@ -370,34 +370,27 @@ SCHEMA = {
     },
 
     # --- Pipeline (scoring weights & rejection thresholds) ---------------
-    "pipeline.default_strategy": {
-        # Workspace-scoped: the stored value the future import→process
-        # chaining hook will read via db.get_effective_config(cfg.load()).
-        # None (import only) is the DEFAULTS value; `nullable` here lets a
-        # workspace override the global default back to null via
-        # /api/settings/workspace, and the settings UI renders the null
-        # option so users can pick it. This PR (the import/process split
-        # phase 1) ships the storage, validation, and UI surfaces only —
-        # the chaining hook that actually enqueues the run at import
-        # completion is added in a follow-up PR, so today the setting is
-        # a stored preference and imports do not auto-chain regardless of
-        # the value.
-        "type": "enum",
-        "enum": ["identify", "full", "cull_ready", "quick_look"],
-        "enum_labels": {
-            "identify": "Identify birds",
-            "full": "Full",
-            "cull_ready": "Cull-ready",
-            "quick_look": "Quick look",
-        },
+    "pipeline.default_process_id": {
+        # Workspace-scoped pointer to a saved_processes row: the process the
+        # import→process chaining hook runs after import (read via
+        # db.get_effective_config(cfg.load())). None = "import only" (the
+        # DEFAULTS value); `nullable` lets a workspace override back to null
+        # and the settings UI renders that option.
+        #
+        # Stored/validated as an ``int`` so config_schema stays DB-agnostic:
+        # existence of the id is checked at the endpoint against the DB, not
+        # here. For DISPLAY, ``api_settings_schema`` swaps this entry to an
+        # ``enum`` and injects the live saved-process list as
+        # ``enum``/``enum_labels`` so the widget renders as a picker.
+        "type": "int",
         "nullable": True,
         "null_label": "Import only (no processing)",
         "category": "Pipeline", "scope": "workspace",
-        "label": "Default process strategy",
+        "label": "Default process (after import)",
         "desc": (
-            "Default strategy for post-import processing on this workspace. "
-            "Stored preference only in this release — automatic "
-            "import→process chaining is wired in a follow-up update."
+            "Which saved process runs automatically after an import on this "
+            "workspace. Manage processes on the Process page; “Import only” "
+            "means no automatic processing."
         ),
     },
     "pipeline.w_focus": {

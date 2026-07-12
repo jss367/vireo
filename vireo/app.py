@@ -2766,6 +2766,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # user's existing action keeps working; they can re-bind toggle_ui from
     # the shortcuts editor.
     cfg.migrate_toggle_ui_h_conflict()
+    # One-time rewrite of the global pipeline.default_strategy (legacy
+    # hardcoded strategy name) to pipeline.default_process_id (saved_processes
+    # id). The workspace-side rewrite happens inside Database(); this covers
+    # the global config file so workspaces that inherit the global default
+    # don't silently fall back to import-only after upgrade.
+    #
+    # init_db uses initialize_schema=False for boot perf, so on the first
+    # boot after upgrade the saved_processes table isn't guaranteed to
+    # exist yet on this connection — the migration would silently defer
+    # and any import in this session that would inherit the legacy global
+    # default falls back to import-only until the *next* boot. Open a
+    # short-lived schema-initializing handle so the migration completes on
+    # the very first boot instead. Only pay the schema-init cost if the
+    # migration hasn't been stamped yet; subsequent boots short-circuit
+    # inside the function and pass ``init_db`` (whose schema state is
+    # irrelevant because the marker check runs first).
+    if (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID
+        not in cfg._migrations_applied(cfg._read_raw())
+    ):
+        _default_strategy_migration_db = Database(db_path)
+        try:
+            cfg.migrate_default_strategy_to_process_id(
+                _default_strategy_migration_db,
+            )
+        finally:
+            _default_strategy_migration_db.close()
+    else:
+        cfg.migrate_default_strategy_to_process_id(init_db)
     init_db.create_default_collections_for_all_workspaces()
 
     # Wildlife backfill timing:
@@ -3591,6 +3620,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "process planner; use the Import page for photo imports",
                 400,
             )
+        # Reject the previous strategy-name shape so the plan endpoint's
+        # contract matches /api/jobs/pipeline: an old caller that still
+        # sends {"strategy": "quick_look"} must fail here rather than
+        # silently planning a full-pipeline run the job route would then
+        # reject too.
+        if "strategy" in body:
+            return json_error(
+                "strategy is no longer accepted; send process_id (a "
+                "saved_processes id) or explicit stage flags",
+                400,
+            )
         # hash_duplicate_paths is the frontend's pre-computed set of source
         # paths that ingest() will skip via the global duplicate gate (copy
         # mode + skip_duplicates=True; metadata-first matching or content
@@ -3671,34 +3711,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         tuple(chunk),
                     )
                 )
-        # Expand a named strategy the same way /api/jobs/pipeline does so
-        # the plan describes the run the same job body would produce.
-        # Without this, the identify preset (skip_regroup=True + species
-        # review) shows Group as "Disabled" in the plan even though the
-        # actual run prepares species review results — the exact "plan
-        # summary is wrong for the default workflow" transparency failure
-        # the review flagged. Strategy expansion supplies *defaults*;
-        # explicitly-present body keys still win, so an Advanced/Custom
-        # caller can pin one flag on top of a preset (mirrors the merge
-        # /api/jobs/pipeline runs). Copying only ``review_mode`` from
-        # the expansion, as the previous shape did, left ``skip_* =
-        # False`` in ``PipelinePlanParams`` when a caller sent only
-        # ``{"strategy": "identify"}`` (or ``"quick_look"``), so the plan
-        # promised Classify/Extract/Group work the actual strategy job
-        # would skip.
-        if "strategy" in body and body.get("strategy"):
-            strategy_name = body.get("strategy")
-            if not isinstance(strategy_name, str):
+        # Expand a saved-process id the same way /api/jobs/pipeline does so
+        # the plan describes the run the same job body would produce. Without
+        # this, the Identify-birds process (skip_regroup=True + species review)
+        # shows Group as "Disabled" in the plan even though the actual run
+        # prepares species review results — the exact "plan summary is wrong
+        # for the default workflow" transparency failure the review flagged.
+        # Expansion supplies *defaults*; explicitly-present body keys still
+        # win, so a Custom caller can pin one flag on top of a process
+        # (mirrors the merge /api/jobs/pipeline runs). The process page's Run
+        # sends explicit stage flags (including miss_enabled/review_mode), so
+        # process_id is optional here.
+        # Key presence — not truthiness — decides whether a process was
+        # requested, matching /api/jobs/pipeline: a present-but-null process_id
+        # must 400 (not be treated as omitted), so previewing and starting the
+        # same body agree instead of the plan describing a run the job route
+        # would reject.
+        if "process_id" in body:
+            pid = body.get("process_id")
+            if not isinstance(pid, int) or isinstance(pid, bool):
+                kind = "null" if pid is None else type(pid).__name__
                 return json_error(
-                    "strategy must be a string, got "
-                    f"{type(strategy_name).__name__}", 400,
+                    f"process_id must be an integer, got {kind}", 400
                 )
-            from process_strategies import resolve_strategy
             try:
-                expanded = resolve_strategy(strategy_name)
+                expanded = _get_db().resolve_process(pid)
             except ValueError as e:
-                return json_error(str(e), 400)
+                return json_error(str(e), 404)
             body = {**expanded, **body}
+            # Mirror the job path: a process with Eye Keypoints on opts into
+            # eye scoring, so the plan reflects the eye stage running rather
+            # than deferring to the workspace eye_detect_enabled default.
+            if (
+                not body.get("skip_eye_keypoints")
+                and body.get("eye_detect_override") is None
+            ):
+                body["eye_detect_override"] = True
         review_mode = body.get("review_mode")
         if review_mode is not None and not isinstance(review_mode, str):
             return json_error(
@@ -9902,37 +9950,158 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result["folders"] = [dict(f) for f in db.get_workspace_folder_roots(ws["id"])]
         return jsonify(result)
 
-    def _validate_workspace_config_overrides(overrides):
+    # ---- Saved processes (user-editable process presets) ----------------
+
+    def _coerce_process_fields(body, *, require_name):
+        """Return ``(kwargs, error_string)`` for create/update.
+
+        Only keys present in ``body`` are returned (so the update path treats
+        an omitted key as "leave unchanged"). Flags must be real booleans and
+        ``review_mode`` must be ``None`` or ``"species"`` — a bad value 400s
+        here rather than being silently coerced.
+        """
+        kwargs = {}
+        if require_name or "name" in body:
+            name = body.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return None, "name is required"
+            kwargs["name"] = name
+        for key in (
+            "skip_classify", "skip_extract_masks", "skip_eye_keypoints",
+            "skip_regroup", "miss_enabled",
+        ):
+            if key in body:
+                if not isinstance(body[key], bool):
+                    return None, f"{key} must be a boolean"
+                kwargs[key] = body[key]
+        if "review_mode" in body:
+            rm = body["review_mode"]
+            if rm is not None and rm != "species":
+                return None, "review_mode must be 'species' or null"
+            kwargs["review_mode"] = rm
+        return kwargs, None
+
+    @app.route("/api/processes")
+    def api_list_processes():
+        """List all saved processes (global; ordered for the pickers)."""
+        db = _get_db()
+        return jsonify(db.get_saved_processes())
+
+    @app.route("/api/processes", methods=["POST"])
+    def api_create_process():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        kwargs, err = _coerce_process_fields(body, require_name=True)
+        if err is not None:
+            return json_error(err)
+        try:
+            pid = db.create_saved_process(**kwargs)
+        except ValueError as e:
+            return json_error(str(e))
+        return jsonify(db.get_saved_process(pid))
+
+    @app.route("/api/processes/<int:process_id>", methods=["PUT"])
+    def api_update_process(process_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        kwargs, err = _coerce_process_fields(body, require_name=False)
+        if err is not None:
+            return json_error(err)
+        try:
+            existed = db.update_saved_process(process_id, **kwargs)
+        except ValueError as e:
+            return json_error(str(e))
+        if not existed:
+            return json_error("process not found", 404)
+        return jsonify(db.get_saved_process(process_id))
+
+    @app.route("/api/processes/<int:process_id>", methods=["DELETE"])
+    def api_delete_process(process_id):
+        db = _get_db()
+        if not db.delete_saved_process(process_id):
+            return json_error("process not found", 404)
+        # Per-workspace default pointers are nulled inside the DB call. Clear
+        # the app-wide default too if it pointed here (config-file I/O the DB
+        # layer intentionally leaves to the caller). Use the *raw* on-disk
+        # config (not ``cfg.load()``) so we don't fossilize every current
+        # DEFAULTS value as an explicit user override — a future change to
+        # DEFAULTS would otherwise be invisible on this install.
+        import config as cfg
+
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            pipeline_raw = raw.get("pipeline")
+            if (
+                isinstance(pipeline_raw, dict)
+                and pipeline_raw.get("default_process_id") == process_id
+            ):
+                pipeline_raw["default_process_id"] = None
+                cfg.save(raw)
+        return jsonify({"ok": True})
+
+    def _validate_workspace_config_overrides(overrides, db):
         """Validate ``config_overrides`` before persist. Returns an error
         response (from ``json_error``) on rejection, or None on success.
 
         Shared by POST /api/workspaces and PUT /api/workspaces/<id> so a
-        workspace created with a bogus ``pipeline.default_strategy`` can't
-        later feed the import/process settings or chaining hook an unknown
-        strategy — the update path already rejects it and the create path
+        workspace created with a bogus ``pipeline.default_process_id`` can't
+        later feed the import/process settings or chaining hook a nonexistent
+        process — the update path already rejects it and the create path
         must too, otherwise the create endpoint becomes a validation bypass.
         """
         # Anything else would be persisted as-is and crash the labels
         # accessors that expect a JSON object (or NULL) in this column.
         if overrides is not None and not isinstance(overrides, dict):
             return json_error("config_overrides must be an object or null")
-        # pipeline.default_strategy: None means "no automatic processing
-        # after import" (the chaining hook short-circuits on it) and is
-        # accepted as-is; a string must name a real strategy. The string
-        # "none" is NOT the null sentinel — one vocabulary with
-        # /api/jobs/pipeline, which also rejects it.
         pipeline_overrides = (overrides or {}).get("pipeline")
+        # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
+        # name) to ``pipeline.default_process_id`` before existence checks.
+        # An older client (or a workspace payload restored from a pre-migration
+        # backup) that still sends the legacy key would otherwise fall through
+        # this validator — non-schema pipeline keys are stored as-is — and
+        # `get_effective_config()` would then see `default_process_id: null`,
+        # so imports read only the new key and silently run import-only
+        # instead of the requested after-import process. Mirror the
+        # /api/settings/import translation exactly: unknown/removed names map
+        # to null (import only). If both keys are present the new one wins
+        # and the legacy key is dropped so it can't resurface on a later read.
         if (
             isinstance(pipeline_overrides, dict)
             and "default_strategy" in pipeline_overrides
-            and pipeline_overrides["default_strategy"] is not None
         ):
-            from process_strategies import resolve_strategy
+            import process_strategies as ps
 
-            try:
-                resolve_strategy(pipeline_overrides["default_strategy"])
-            except ValueError as e:
-                return json_error(str(e))
+            legacy = pipeline_overrides.pop("default_strategy")
+            if "default_process_id" not in pipeline_overrides:
+                seed_name = (
+                    ps.LEGACY_STRATEGY_NAMES.get(legacy)
+                    if isinstance(legacy, str) else None
+                )
+                translated_pid = None
+                if seed_name is not None:
+                    match = next(
+                        (
+                            p for p in db.get_saved_processes()
+                            if p["name"] == seed_name
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        translated_pid = match["id"]
+                pipeline_overrides["default_process_id"] = translated_pid
+        # pipeline.default_process_id: None means "no automatic processing
+        # after import" (the chaining hook short-circuits on it) and is
+        # accepted as-is; a non-null value must name a real saved_processes
+        # row so the chaining hook never fails hours later on a dangling id.
+        if (
+            isinstance(pipeline_overrides, dict)
+            and pipeline_overrides.get("default_process_id") is not None
+        ):
+            pid = pipeline_overrides["default_process_id"]
+            if not isinstance(pid, int) or isinstance(pid, bool):
+                return json_error("default_process_id must be an integer or null")
+            if db.get_saved_process(pid) is None:
+                return json_error(f"unknown process id: {pid}")
         return None
 
     @app.route("/api/workspaces", methods=["POST"])
@@ -9943,7 +10112,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name:
             return json_error("Name is required")
         config_overrides = body.get("config_overrides")
-        err = _validate_workspace_config_overrides(config_overrides)
+        err = _validate_workspace_config_overrides(config_overrides, db)
         if err is not None:
             return err
         try:
@@ -9982,7 +10151,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kwargs["name"] = body["name"]
         if "config_overrides" in body:
             overrides = body["config_overrides"]
-            err = _validate_workspace_config_overrides(overrides)
+            err = _validate_workspace_config_overrides(overrides, db)
             if err is not None:
                 return err
             kwargs["config_overrides"] = overrides
@@ -11658,7 +11827,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if key in ("keyboard_shortcuts", "remote_targets"):
                     continue
                 if key in cfg.DEFAULTS:
-                    current[key] = body[key]
+                    # Deep-merge for nested-dict config sections so a curated
+                    # payload that only ships a subset of keys (settings.html's
+                    # saveConfig posts a ``pipeline`` block with just the
+                    # weights/miss/eye sliders it renders) doesn't wipe the
+                    # keys it didn't include. Without this, the global
+                    # ``pipeline.default_process_id`` would silently reset to
+                    # null on every autosave and workspaces inheriting it
+                    # would go back to import-only.
+                    if (
+                        isinstance(cfg.DEFAULTS[key], dict)
+                        and isinstance(body[key], dict)
+                        and isinstance(current.get(key), dict)
+                    ):
+                        current[key] = cfg._deep_merge(current[key], body[key])
+                    else:
+                        current[key] = body[key]
+            # default_process_id points into saved_processes; the deep-merge
+            # above can carry a stale or foreign id into the global config.
+            # Reject it here like the settings PATCH/import paths, else
+            # workspaces inheriting this global default hit "unknown process
+            # id" in _validate_after_import on their next import instead of
+            # starting it.
+            pipeline_current = current.get("pipeline")
+            if isinstance(pipeline_current, dict):
+                pid = pipeline_current.get("default_process_id")
+                if pid is not None:
+                    if not isinstance(pid, int) or isinstance(pid, bool):
+                        return json_error(
+                            "pipeline.default_process_id must be an integer "
+                            "or null", status=400,
+                        )
+                    if _get_db().get_saved_process(pid) is None:
+                        return json_error(
+                            f"unknown process id: {pid}", status=400
+                        )
             # Apply HF token to environment immediately
             hf_token = current.get("hf_token", "")
             if hf_token:
@@ -11678,11 +11881,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Return the SCHEMA dict and the ordered category list.
 
         Consumed by the schema-rendered settings UI to generate widgets.
+
+        ``pipeline.default_process_id`` is stored/validated as an ``int``
+        (config_schema is DB-agnostic), but the widget should be a picker over
+        the live saved-process list. Present it here as a dynamic ``enum``
+        without mutating the module-level SCHEMA: shallow-copy the dict, swap
+        that one entry, and inject the current processes as enum/enum_labels.
         """
         import config_schema as schema
 
+        db = _get_db()
+        out = dict(schema.SCHEMA)
+        spec = dict(out.get("pipeline.default_process_id", {}))
+        if spec:
+            procs = db.get_saved_processes()
+            spec["type"] = "enum"
+            # Return numeric ids so the settings renderer, which selects the
+            # active option via strict equality against the effective value,
+            # matches. The stored/effective value is an ``int`` (validated by
+            # the static ``int`` spec), so string-typed enum values would
+            # never match and the picker would silently fall through to the
+            # nullable "Import only" option, misrepresenting an active
+            # default and resetting it on the next save. <option> values in
+            # the DOM still serialize to strings; the PATCH endpoint coerces
+            # them back to int via the static int spec on the way in.
+            spec["enum"] = [p["id"] for p in procs]
+            spec["enum_labels"] = {p["id"]: p["name"] for p in procs}
+            out["pipeline.default_process_id"] = spec
         return jsonify({
-            "schema": schema.SCHEMA,
+            "schema": out,
             "categories": list(schema.CATEGORIES),
         })
 
@@ -11815,6 +12042,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except schema.ValidationError as e:
             return json_error(str(e), status=400)
 
+        # default_process_id points into saved_processes; config_schema only
+        # int-coerces it, so validate existence here too (mirrors the
+        # workspace PATCH and _validate_workspace_config_overrides). Without
+        # this, a stale global default lets workspaces that inherit it hit the
+        # import endpoints' "unknown process id" wall and fail to auto-process.
+        if (
+            key == "pipeline.default_process_id"
+            and value is not None
+            and _get_db().get_saved_process(value) is None
+        ):
+            return json_error(f"unknown process id: {value}", status=400)
+
         with _settings_write_lock:
             raw = _read_raw_config_file()
             schema.set_dotted(raw, key, value)
@@ -11881,6 +12120,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), status=400)
 
         db = _get_db()
+        # default_process_id is a pointer into saved_processes: config_schema
+        # only coerces it to int/null, so existence is checked here against the
+        # DB (mirrors _validate_workspace_config_overrides).
+        if (
+            key == "pipeline.default_process_id"
+            and value is not None
+            and db.get_saved_process(value) is None
+        ):
+            return json_error(f"unknown process id: {value}", status=400)
         with _settings_write_lock:
             overrides = _read_workspace_overrides(db)
             schema.set_dotted(overrides, key, value)
@@ -11913,6 +12161,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         raw = _read_raw_config_file()
         raw.pop("_migrations_applied", None)
+        # ``pipeline.default_process_id`` points into ``saved_processes``,
+        # whose rows are DB-local — the ids don't transfer across databases.
+        # If the same integer id happens to exist in the target DB it points
+        # at a different process; the seed ids 1-4 make this collision
+        # common. Emit the current process name AND its full flag snapshot
+        # alongside the id as a portable identity so ``/api/settings/import``
+        # can verify the target DB's same-named row means the same thing.
+        # Name alone is not enough — process names are user-editable and two
+        # databases can end up with matching names on rows that differ in
+        # flags (renamed customs, edited seeds, unrelated customs that just
+        # happen to share a label). Importing a foreign backup would then
+        # silently repoint the after-import default at a divergent process.
+        # The extra keys live in the exported JSON only; the raw config file
+        # itself is never rewritten with them.
+        pipeline_raw = raw.get("pipeline")
+        if isinstance(pipeline_raw, dict):
+            pid = pipeline_raw.get("default_process_id")
+            if isinstance(pid, int):
+                match = _get_db().get_saved_process(pid)
+                if match is not None:
+                    import process_strategies as ps
+
+                    pipeline_raw["default_process_name"] = match["name"]
+                    pipeline_raw["default_process_flags"] = {
+                        k: match[k] for k in ps.FLAG_FIELDS
+                    }
         body = json.dumps(raw, indent=2)
         today = _datetime.date.today().isoformat()
         resp = make_response(body)
@@ -11947,6 +12221,88 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(payload, dict):
             return json_error("payload must be a JSON object", status=400)
 
+        # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
+        # name) to the current ``pipeline.default_process_id`` before schema
+        # validation runs. Startup migration does the same for
+        # ~/.vireo/config.json, but importing an older settings backup would
+        # otherwise write the legacy key through as a non-schema value (the
+        # import endpoints only read ``default_process_id``) and silently fall
+        # back to import-only until a restart. Mirror the migration's mapping
+        # exactly: unknown/removed legacy names -> null (import only). If both
+        # keys are present (e.g. a hand-edited backup), the new key wins and
+        # the legacy key is dropped so it can't reappear on a later export.
+        pipeline_payload = payload.get("pipeline")
+        if (
+            isinstance(pipeline_payload, dict)
+            and "default_strategy" in pipeline_payload
+        ):
+            import process_strategies as ps
+
+            legacy = pipeline_payload.pop("default_strategy")
+            if "default_process_id" not in pipeline_payload:
+                seed_name = (
+                    ps.LEGACY_STRATEGY_NAMES.get(legacy)
+                    if isinstance(legacy, str) else None
+                )
+                translated_pid = None
+                if seed_name is not None:
+                    match = next(
+                        (
+                            p for p in _get_db().get_saved_processes()
+                            if p["name"] == seed_name
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        translated_pid = match["id"]
+                pipeline_payload["default_process_id"] = translated_pid
+
+        # Translate the portable ``pipeline.default_process_name`` (emitted by
+        # /api/settings/export alongside the id) to the target DB's id.
+        # ``saved_processes`` rows are DB-local — the raw id doesn't transfer
+        # across databases (seed ids 1-4 collide, custom ids collide by
+        # chance), so a foreign backup that only carried ``default_process_id``
+        # would silently point at whatever unrelated row happens to share that
+        # id. Match by name AND by full flag snapshot when the exporter emits
+        # ``default_process_flags``: the name alone is not a stable identity
+        # (users rename processes, unrelated custom processes across DBs can
+        # share a label, and even a seed named "Full" may have been edited on
+        # one side). If the exporter didn't ship flags (older backup), fall
+        # back to name-only match. Any mismatch — no name row, no flag-equal
+        # row, or the flags entry is malformed — resolves to null (import
+        # only) instead of silently activating a divergent process. The name
+        # and flag fields are stripped from the payload so they don't persist
+        # to ~/.vireo/config.json as non-schema keys.
+        if isinstance(pipeline_payload, dict) and (
+            "default_process_name" in pipeline_payload
+            or "default_process_flags" in pipeline_payload
+        ):
+            import process_strategies as ps
+
+            name_val = pipeline_payload.pop("default_process_name", None)
+            flags_val = pipeline_payload.pop("default_process_flags", None)
+            if name_val is None:
+                pipeline_payload["default_process_id"] = None
+            elif isinstance(name_val, str):
+                candidates = [
+                    p for p in _get_db().get_saved_processes()
+                    if p["name"] == name_val
+                ]
+                translated_pid = None
+                if isinstance(flags_val, dict):
+                    for cand in candidates:
+                        if all(
+                            cand.get(k) == flags_val.get(k)
+                            for k in ps.FLAG_FIELDS
+                        ):
+                            translated_pid = cand["id"]
+                            break
+                elif candidates:
+                    translated_pid = candidates[0]["id"]
+                pipeline_payload["default_process_id"] = translated_pid
+            else:
+                pipeline_payload["default_process_id"] = None
+
         # Iterate the schema directly rather than relying on flatten() — empty
         # objects at schema leaves (e.g. {"classification_threshold": {}}) flatten
         # to nothing and would otherwise be written as-is, replacing a numeric
@@ -11976,6 +12332,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 schema.set_dotted(payload, schema_key, coerced)
             except schema.ValidationError as e:
                 errors[schema_key] = str(e)
+
+        # default_process_id points into saved_processes; config_schema only
+        # coerces it to int/null. An imported config carrying an id from
+        # another DB — or a stale id after a process was deleted — would
+        # silently write through here and then hit the "unknown process id"
+        # 400 at every import that inherits this global default. Mirror the
+        # global PATCH check so the failure surfaces at the import layer.
+        pid_key = "pipeline.default_process_id"
+        if pid_key not in errors:
+            pid_val = schema.get_dotted(payload, pid_key, default=_MISSING)
+            if (
+                pid_val is not _MISSING
+                and pid_val is not None
+                and _get_db().get_saved_process(pid_val) is None
+            ):
+                errors[pid_key] = f"unknown process id: {pid_val}"
 
         # Structured non-schema keys still need shape validation, otherwise a
         # malformed payload would write through to the file and crash
@@ -17956,27 +18328,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except Exception as e:
             return None, None, json_error(str(e))
 
-    def _validate_after_import(value):
+    def _validate_after_import(value, db):
         """Return a JSON error response for a bad after_import spec, else None.
 
-        Shared by both import endpoints: the type check rejects non-string,
-        non-null bodies and resolve_strategy() rejects unknown names, so
-        chained processing can't fail hours later on a typo the enqueue
-        step could have caught.
+        Shared by both import endpoints: null means import-only; a non-null
+        value must be a saved-process id that exists, so chained processing
+        can't fail hours later on a dangling id the enqueue step could have
+        caught.
         """
         if value is None:
             return None
-        if not isinstance(value, str):
+        if not isinstance(value, int) or isinstance(value, bool):
             return json_error(
-                "after_import must be a strategy name or null, got "
+                "after_import must be a process id or null, got "
                 f"{type(value).__name__}"
             )
-        from process_strategies import resolve_strategy
-
-        try:
-            resolve_strategy(value)
-        except ValueError as e:
-            return json_error(str(e))
+        if db.get_saved_process(value) is None:
+            return json_error(f"unknown process id: {value}")
         return None
 
     def _create_import_collection(thread_db, photo_ids):
@@ -18055,7 +18423,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         explicit_after_import = "after_import" in body
         if explicit_after_import:
             after_import = body.get("after_import")
-            err = _validate_after_import(after_import)
+            err = _validate_after_import(after_import, db)
             if err is not None:
                 return err
 
@@ -18066,18 +18434,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return workspace_err
 
         # Resolve the omitted-default AFTER the workspace switch. Reading
-        # pipeline.default_strategy off the previously-active workspace
+        # pipeline.default_process_id off the previously-active workspace
         # would leak that workspace's override into a new-workspace import.
         if not explicit_after_import:
             import config as cfg
 
             effective_cfg = db.get_effective_config(cfg.load())
             after_import = (
-                effective_cfg.get("pipeline", {}).get("default_strategy")
+                effective_cfg.get("pipeline", {}).get("default_process_id")
             )
-            err = _validate_after_import(after_import)
+            err = _validate_after_import(after_import, db)
             if err is not None:
                 return err
+
+        # Snapshot the chosen saved process's stage flags at enqueue time
+        # so a mid-import edit or delete can't silently change (or void)
+        # the after-import run the user already accepted. An in-place
+        # import can take many minutes on a full card, and until the
+        # chain hook fires the pipeline_job's actual toggles are still up
+        # for grabs — resolving here freezes them.
+        after_import_snapshot = None
+        if after_import is not None:
+            try:
+                after_import_snapshot = db.resolve_process(after_import)
+            except ValueError as e:
+                return json_error(str(e), 404)
 
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
@@ -18108,8 +18489,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 process_job_id, model_warning = _enqueue_process_job(
                     thread_db, runner, active_ws,
                     collection_id=col_id,
-                    strategy_name=after_import,
+                    process_id=after_import,
                     chained_from=job["id"],
+                    expanded=after_import_snapshot,
                 )
                 result["process_job_id"] = process_job_id
                 if model_warning:
@@ -18519,7 +18901,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # After-import strategy: validated at enqueue (failing the chain
         # hours later is the old pipeline's mistake). Key present -> null
         # means import-only, a string must name a real strategy. Key
-        # omitted -> default from the workspace's pipeline.default_strategy
+        # omitted -> default from the workspace's pipeline.default_process_id
         # (nullable, same vocabulary). Stored in the job config for the
         # PR 3 chaining hook; the import job itself never reads it.
         # Preflight an explicit value before creating a workspace so a bad
@@ -18527,7 +18909,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         explicit_after_import = "after_import" in body
         if explicit_after_import:
             after_import = body.get("after_import")
-            err = _validate_after_import(after_import)
+            err = _validate_after_import(after_import, db)
             if err is not None:
                 return err
 
@@ -18551,18 +18933,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return workspace_err
 
         # Resolve the omitted-default AFTER the workspace switch. Reading
-        # pipeline.default_strategy off the previously-active workspace
+        # pipeline.default_process_id off the previously-active workspace
         # would leak that workspace's override into a new-workspace import.
         if not explicit_after_import:
             import config as cfg
 
             effective_cfg = db.get_effective_config(cfg.load())
             after_import = (
-                effective_cfg.get("pipeline", {}).get("default_strategy")
+                effective_cfg.get("pipeline", {}).get("default_process_id")
             )
-            err = _validate_after_import(after_import)
+            err = _validate_after_import(after_import, db)
             if err is not None:
                 return err
+
+        # Snapshot the chosen saved process's stage flags at enqueue time
+        # so a mid-import edit or delete can't silently change (or void)
+        # the after-import run the user already accepted. An archive-copy
+        # import from a full card can take many minutes, and until the
+        # chain hook fires the pipeline_job's actual toggles are still up
+        # for grabs — resolving here freezes them (mirrors the remote-
+        # transport snapshot below).
+        after_import_snapshot = None
+        if after_import is not None:
+            try:
+                after_import_snapshot = db.resolve_process(after_import)
+            except ValueError as e:
+                return json_error(str(e), 404)
 
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
@@ -18638,8 +19034,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 process_job_id, model_warning = _enqueue_process_job(
                     thread_db, runner, active_ws,
                     collection_id=col_id,
-                    strategy_name=after_import,
+                    process_id=after_import,
                     chained_from=job["id"],
+                    expanded=after_import_snapshot,
                 )
                 result["process_job_id"] = process_job_id
                 if model_warning:
@@ -20620,21 +21017,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
 
     def _enqueue_process_job(thread_db, runner, workspace_id, *,
-                             collection_id, strategy_name,
-                             chained_from=None):
-        """Enqueue a collection-scoped process run for a named strategy.
+                             collection_id, process_id,
+                             chained_from=None, expanded=None):
+        """Enqueue a collection-scoped process run for a saved-process id.
 
         The after-import chaining hook's path into the pipeline. Runs on a
         job thread — no request context: takes an explicit thread-local
         ``Database`` and never touches ``request``/``_get_db``. Applies the
-        same strategy expansion and no-model auto-skip as
-        ``api_job_pipeline`` so a chained run degrades identically to a
-        manual one. Returns ``(job_id, model_warning)``.
+        same process expansion and no-model auto-skip as ``api_job_pipeline``
+        so a chained run degrades identically to a manual one. Returns
+        ``(job_id, model_warning)``.
+
+        ``expanded`` is the pre-resolved flag snapshot the import endpoint
+        captured at enqueue-request time. Pass it through so a saved-process
+        edit or delete while the import copies photos (a card copy can take
+        many minutes) can't silently swap in different toggles — or fail
+        the chain outright — after the user has already accepted the choice.
+        Falls back to a live resolve for callers that don't pre-capture.
         """
         from pipeline_job import PipelineParams, run_pipeline_job
-        from process_strategies import resolve_strategy
 
-        expanded = resolve_strategy(strategy_name)
+        if expanded is None:
+            expanded = thread_db.resolve_process(process_id)
         params = PipelineParams(
             collection_id=collection_id,
             skip_classify=expanded["skip_classify"],
@@ -20643,6 +21047,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_regroup=expanded["skip_regroup"],
             miss_enabled=expanded["miss_enabled"],
             review_mode=expanded["review_mode"],
+            # A saved process's Eye Keypoints toggle is an explicit opt-in
+            # (the Process-page checkbox sends eye_detect_override alongside
+            # it). When the process runs the eye stage, opt into eye scoring
+            # too so a chained/by-id run matches running the same toggles on
+            # the page, instead of silently deferring to the workspace's
+            # eye_detect_enabled default and skipping eye detection.
+            eye_detect_override=(
+                None if expanded["skip_eye_keypoints"] else True
+            ),
         )
         model_warning = _apply_no_model_auto_skip(params)
 
@@ -20679,12 +21092,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
             "destination": None,
             "local_processing": False,
-            "strategy": strategy_name,
+            "process_id": process_id,
             "skip_classify": params.skip_classify,
             "skip_extract_masks": params.skip_extract_masks,
             "skip_regroup": params.skip_regroup,
             "review_mode": params.review_mode,
             "miss_enabled": params.miss_enabled,
+            "eye_detect_override": params.eye_detect_override,
         }
         if chained_from:
             # Provenance for the jobs panel: this run was started by an
@@ -20710,34 +21124,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         body = request.get_json(silent=True) or {}
 
-        # Named process strategy: expand server-side into stage flags so the
-        # import page, the process page, and import→process chaining share
-        # one vocabulary (process_strategies.py). Key presence — not
-        # truthiness — decides whether a strategy was requested: a
-        # present-but-null strategy must 400 rather than silently fall
+        # Reject the previous strategy-name shape ({"strategy": "quick_look"},
+        # "identify", "full", "cull_ready"). That vocabulary was replaced by
+        # saved-process ids; without an explicit 400 here, an old caller's
+        # `strategy` field is silently dropped and the request falls through
+        # to a default full-pipeline run — silently reclassifying/regrouping
+        # the whole collection when the caller meant a quick-look scan.
+        if "strategy" in body:
+            return json_error(
+                "strategy is no longer accepted; send process_id (a "
+                "saved_processes id) or explicit stage flags",
+                400,
+            )
+
+        # Saved process: expand a process id server-side into stage flags so
+        # the import page, the process page, and import→process chaining share
+        # one vocabulary (a saved_processes row). Key presence — not
+        # truthiness — decides whether a process was requested: a
+        # present-but-null process_id must 400 rather than silently fall
         # through to default processing for a caller who thought null meant
         # "no processing" (that case is expressed by not calling this
-        # endpoint at all).
-        strategy_name = None
-        if "strategy" in body:
-            strategy_name = body.get("strategy")
-            if not isinstance(strategy_name, str):
-                kind = (
-                    "null" if strategy_name is None
-                    else type(strategy_name).__name__
-                )
-                return json_error(f"strategy must be a string, got {kind}")
-            from process_strategies import resolve_strategy
-
-            try:
-                expanded = resolve_strategy(strategy_name)
-            except ValueError as e:
-                return json_error(str(e))
-            # Expansion supplies *defaults*; explicitly-present body keys
-            # win, so a caller can pin one flag on top of a preset.
-            body = {**expanded, **body}
-
+        # endpoint at all). The process page's Run instead sends explicit
+        # stage flags (including miss_enabled/review_mode), so process_id is
+        # optional.
         db = _get_db()
+        process_id = None
+        if "process_id" in body:
+            process_id = body.get("process_id")
+            if not isinstance(process_id, int) or isinstance(process_id, bool):
+                kind = (
+                    "null" if process_id is None
+                    else type(process_id).__name__
+                )
+                return json_error(f"process_id must be an integer, got {kind}")
+            try:
+                expanded = db.resolve_process(process_id)
+            except ValueError as e:
+                return json_error(str(e), 404)
+            # Expansion supplies *defaults*; explicitly-present body keys
+            # win, so a caller can pin one flag on top of a process.
+            body = {**expanded, **body}
+            # The process's Eye Keypoints toggle is an explicit opt-in (the
+            # Process-page checkbox sends eye_detect_override with it). Mirror
+            # that for a by-id run so the eye stage runs instead of deferring
+            # to the workspace eye_detect_enabled default; an explicit caller
+            # override still wins.
+            if (
+                not body.get("skip_eye_keypoints")
+                and body.get("eye_detect_override") is None
+            ):
+                body["eye_detect_override"] = True
+
         source = body.get("source")
         sources = body.get("sources")
         collection_id = body.get("collection_id")
@@ -21376,12 +21813,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "collection_name": collection_name,
             "destination": destination,
             "local_processing": local_processing,
-            "strategy": strategy_name,
+            "process_id": process_id,
             "skip_classify": params.skip_classify,
             "skip_extract_masks": params.skip_extract_masks,
             "skip_regroup": params.skip_regroup,
             "review_mode": params.review_mode,
             "miss_enabled": params.miss_enabled,
+            "eye_detect_override": params.eye_detect_override,
         }
         # Preserve the caller's original folder_ids alongside the derived
         # ad-hoc collection_id so the Jobs page can show both what the user

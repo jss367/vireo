@@ -720,16 +720,25 @@ body { padding-bottom: 36px; }
   </div>
 
   <div class="stage-section-header">AI processing<span class="stage-section-sub">optional &mdash; toggle to include</span>
-    <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);">
-      Strategy
-      <select id="strategySelect" onchange="applyStrategyPreset()" style="font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 6px;">
-        <option value="__custom__" selected>Custom (use toggles)</option>
-        <option value="identify">Identify birds</option>
-        <option value="quick_look">Quick look</option>
-        <option value="full" data-advanced-strategy>Full pipeline</option>
-        <option value="cull_ready" data-advanced-strategy>Cull-ready</option>
+    <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);flex-wrap:wrap;justify-content:flex-end;">
+      Saved process
+      <select id="strategySelect" onchange="onProcessSelect()" style="font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 6px;">
+        <option value="__custom__" selected>Custom (unsaved)</option>
       </select>
+      <span id="processModifiedTag" style="color:var(--warning,#e0a030);display:none;">&bull; modified (unsaved)</span>
+      <button type="button" id="btnProcessSave" onclick="saveProcess()" title="Overwrite the selected process with the current toggles" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Save</button>
+      <button type="button" id="btnProcessSaveNew" onclick="saveProcessAsNew()" title="Save the current toggles as a new process" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Save as new&hellip;</button>
+      <button type="button" id="btnProcessRename" onclick="renameProcess()" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Rename</button>
+      <button type="button" id="btnProcessDelete" onclick="deleteProcess()" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Delete</button>
     </span>
+  </div>
+  <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--text-secondary);margin:2px 0 6px;">
+    <label id="lblEnableMisses" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;" title="Flag likely-missed keepers (no subject, clipped, out of focus) after grouping. Needs Classify and Group.">
+      <input type="checkbox" id="enableMisses" checked onchange="onPostOptToggle()" style="accent-color:var(--accent);"> Find misses
+    </label>
+    <label id="lblEnableSpeciesReview" style="display:none;align-items:center;gap:6px;cursor:pointer;" title="Write lightweight species-review results instead of full encounter grouping (the Identify-birds path).">
+      <input type="checkbox" id="enableSpeciesReview" onchange="onPostOptToggle()" style="accent-color:var(--accent);"> Write species review results
+    </label>
   </div>
 
   <!-- Card 4: Classify -->
@@ -1394,60 +1403,237 @@ function updateSourceSummary() {
   }
 }
 
-function applyStrategyPreset() {
-  // Mirror process_strategies.py so the visible toggles always tell the
-  // truth about what the preset will run (transparency rule) — the
-  // explicit flags sent alongside body.strategy agree with the expansion.
-  var sel = document.getElementById('strategySelect');
-  if (!sel || sel.value === '__custom__') { refreshPipelineUI(); return; }
-  var presets = {
-    identify:   { classify: true,  extract: false, eyes: false, group: false },
-    full:       {
-      classify: true,
-      extract: true,
-      eyes: _savedModelConfig.eye_detect_enabled === true,
-      group: true
-    },
-    cull_ready: { classify: true,  extract: false, eyes: false, group: true  },
-    quick_look: { classify: false, extract: false, eyes: false, group: false },
-  };
-  var p = presets[sel.value];
-  if (!p) return;
-  document.getElementById('enableClassify').checked = p.classify;
-  document.getElementById('enableExtract').checked = p.extract;
-  document.getElementById('enableEyeKeypoints').checked = p.eyes;
-  document.getElementById('enableGroup').checked = p.group;
-  ['classify', 'extract', 'eyekeypoints', 'group'].forEach(function(st) {
-    try { onStageToggle(st); } catch (e) { /* stage rows update below */ }
-  });
-  // cull_ready enables group without extract (regroup is cheap and cull
-  // review needs encounters — see process_strategies.py), but the
-  // onStageToggle chain treats group as downstream of extract and would
-  // have unchecked+disabled Group when we cascaded extract=false above.
-  // Re-force the preset value for any stage the preset said should be on
-  // so startPipeline sends skip_regroup=false for cull_ready instead of
-  // overriding the server-side expansion.
-  if (p.group) {
-    var gCb = document.getElementById('enableGroup');
-    gCb.checked = true;
-    gCb.disabled = false;
-  }
-  refreshPipelineUI();
-}
+// ---- Saved processes (the process page IS the editor) --------------------
+// A saved process is a named snapshot of the stage toggles below. The picker
+// loads/saves them; Run always uses the CURRENT toggle values (a one-off
+// tweak never mutates a saved process until you Save).
+var _processesById = {};        // id -> process dict (from /api/processes)
+var _selectedProcessId = null;  // currently-loaded process, or null (Custom)
+var _processDirty = false;      // toggles diverge from the loaded process
+var _applyingProcess = false;   // guard: programmatic toggle changes
 
-function updateAdvancedPipelineOptions() {
+async function loadSavedProcesses(selectId) {
   var sel = document.getElementById('strategySelect');
   if (!sel) return;
-  var advanced = !!(window.isAdvancedMode && window.isAdvancedMode());
-  sel.querySelectorAll('[data-advanced-strategy]').forEach(function(opt) {
-    opt.hidden = !advanced;
-    opt.disabled = !advanced;
-  });
-  if (!advanced && sel.selectedOptions.length && sel.selectedOptions[0].disabled) {
-    sel.value = 'identify';
-  }
-  applyStrategyPreset();
+  try {
+    var resp = await fetch('/api/processes');
+    if (!resp.ok) return;
+    var procs = await resp.json();
+    _processesById = {};
+    sel.innerHTML = '<option value="__custom__">Custom (unsaved)</option>';
+    (procs || []).forEach(function(p) {
+      _processesById[p.id] = p;
+      var opt = document.createElement('option');
+      opt.value = String(p.id);
+      opt.textContent = p.name;
+      sel.appendChild(opt);
+    });
+    if (selectId != null && _processesById[selectId]) {
+      sel.value = String(selectId);
+      onProcessSelect();
+    } else {
+      sel.value = '__custom__';
+      _selectedProcessId = null;
+      _processDirty = false;
+      updateDerivedProcessControls();
+      updateProcessEditorUI();
+    }
+  } catch (e) { /* leave with Custom only */ }
 }
+
+function currentProcessFields() {
+  return {
+    skip_classify: !document.getElementById('enableClassify').checked,
+    skip_extract_masks: !document.getElementById('enableExtract').checked,
+    skip_eye_keypoints: !document.getElementById('enableEyeKeypoints').checked,
+    skip_regroup: !document.getElementById('enableGroup').checked,
+    miss_enabled: !!document.getElementById('enableMisses').checked,
+    review_mode:
+      document.getElementById('enableSpeciesReview').checked ? 'species' : null,
+  };
+}
+
+function applyProcessToToggles(proc) {
+  _applyingProcess = true;
+  try {
+    document.getElementById('enableClassify').checked = !proc.skip_classify;
+    document.getElementById('enableExtract').checked = !proc.skip_extract_masks;
+    document.getElementById('enableEyeKeypoints').checked = !proc.skip_eye_keypoints;
+    document.getElementById('enableGroup').checked = !proc.skip_regroup;
+    document.getElementById('enableMisses').checked = !!proc.miss_enabled;
+    document.getElementById('enableSpeciesReview').checked =
+      (proc.review_mode === 'species');
+    // Re-run the cascade so downstream enable/disable state is consistent,
+    // then force back on any stage the process says should run (the cascade
+    // would otherwise disable e.g. Group when Extract is off).
+    ['classify', 'extract', 'eyekeypoints', 'group'].forEach(function(st) {
+      try { onStageToggle(st); } catch (e) {}
+    });
+    if (!proc.skip_regroup) {
+      var g = document.getElementById('enableGroup'); g.checked = true; g.disabled = false;
+    }
+    if (!proc.skip_eye_keypoints) {
+      var ek = document.getElementById('enableEyeKeypoints'); ek.checked = true; ek.disabled = false;
+    }
+  } finally {
+    _applyingProcess = false;
+  }
+  updateDerivedProcessControls();
+  updateStartButton();
+  refreshPipelineUI();
+  schedulePlanRefresh();
+}
+
+function onProcessSelect() {
+  var sel = document.getElementById('strategySelect');
+  if (!sel) return;
+  if (sel.value === '__custom__') {
+    _selectedProcessId = null;
+    _processDirty = false;
+    updateProcessEditorUI();
+    return;
+  }
+  var proc = _processesById[parseInt(sel.value, 10)];
+  if (!proc) {
+    _selectedProcessId = null;
+    _processDirty = false;
+    updateProcessEditorUI();
+    return;
+  }
+  _selectedProcessId = proc.id;
+  _processDirty = false;
+  applyProcessToToggles(proc);
+  updateProcessEditorUI();
+}
+
+// Called by the two post-processing toggles (Find misses / Species review).
+function onPostOptToggle() {
+  updateDerivedProcessControls();
+  if (!_applyingProcess) markProcessModified();
+  updateStartButton();
+  refreshPipelineUI();
+  schedulePlanRefresh();
+}
+
+function markProcessModified() {
+  _processDirty = true;
+  updateProcessEditorUI();
+}
+
+function updateProcessEditorUI() {
+  var sel = document.getElementById('strategySelect');
+  var tag = document.getElementById('processModifiedTag');
+  var hasSel = _selectedProcessId != null;
+  // Keep the select pointing at the selected process even while modified,
+  // so Save knows which process to overwrite.
+  if (sel) sel.value = hasSel ? String(_selectedProcessId) : '__custom__';
+  if (tag) tag.style.display = _processDirty ? 'inline' : 'none';
+  var save = document.getElementById('btnProcessSave');
+  var rename = document.getElementById('btnProcessRename');
+  var del = document.getElementById('btnProcessDelete');
+  if (save) save.disabled = !(hasSel && _processDirty);
+  if (rename) rename.disabled = !hasSel;
+  if (del) del.disabled = !hasSel;
+}
+
+// Keep Find misses / Species review honest about when they actually apply,
+// mirroring the server-side stage gates.
+function updateDerivedProcessControls() {
+  var classifyOn = document.getElementById('enableClassify').checked;
+  var groupOn = document.getElementById('enableGroup').checked;
+  // Find misses only runs when both Classify and Group ran.
+  var missCb = document.getElementById('enableMisses');
+  var missLbl = document.getElementById('lblEnableMisses');
+  var missOk = classifyOn && groupOn;
+  if (missCb) {
+    missCb.disabled = !missOk;
+    if (!missOk) missCb.checked = false;
+  }
+  if (missLbl) missLbl.style.opacity = missOk ? '1' : '0.5';
+  // Species review only applies when Classify is on and Group is off (the
+  // Identify-birds shape). Hidden otherwise, and force-off so it can't leak
+  // into a run where it means nothing.
+  var srLbl = document.getElementById('lblEnableSpeciesReview');
+  var srCb = document.getElementById('enableSpeciesReview');
+  var srApplies = classifyOn && !groupOn;
+  if (srLbl) srLbl.style.display = srApplies ? 'inline-flex' : 'none';
+  if (srCb && !srApplies) srCb.checked = false;
+}
+
+async function _postProcessJSON(url, method, body) {
+  var opts = { method: method };
+  if (body !== undefined) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(body);
+  }
+  var resp = await fetch(url, opts);
+  if (!resp.ok) {
+    var e = await resp.json().catch(function() { return {}; });
+    throw new Error(e.error || ('HTTP ' + resp.status));
+  }
+  return resp.status === 204 ? null : resp.json();
+}
+
+async function saveProcess() {
+  if (_selectedProcessId == null) return;
+  try {
+    var updated = await _postProcessJSON(
+      '/api/processes/' + _selectedProcessId, 'PUT', currentProcessFields());
+    _processesById[updated.id] = updated;
+    _processDirty = false;
+    updateProcessEditorUI();
+  } catch (e) { alert('Save failed: ' + e.message); }
+}
+
+async function saveProcessAsNew() {
+  var name = prompt('Name this process:');
+  if (name == null) return;
+  name = name.trim();
+  if (!name) return;
+  var body = currentProcessFields();
+  body.name = name;
+  try {
+    var created = await _postProcessJSON('/api/processes', 'POST', body);
+    await loadSavedProcesses(created.id);
+  } catch (e) { alert('Save failed: ' + e.message); }
+}
+
+async function renameProcess() {
+  if (_selectedProcessId == null) return;
+  var cur = _processesById[_selectedProcessId];
+  var name = prompt('Rename process:', cur ? cur.name : '');
+  if (name == null) return;
+  name = name.trim();
+  if (!name) return;
+  try {
+    await _postProcessJSON(
+      '/api/processes/' + _selectedProcessId, 'PUT', { name: name });
+    await loadSavedProcesses(_selectedProcessId);
+  } catch (e) { alert('Rename failed: ' + e.message); }
+}
+
+async function deleteProcess() {
+  if (_selectedProcessId == null) return;
+  var cur = _processesById[_selectedProcessId];
+  if (!confirm('Delete process "' + (cur ? cur.name : '') +
+               '"? Any workspace defaulting to it falls back to import-only.')) {
+    return;
+  }
+  var id = _selectedProcessId;
+  try {
+    await _postProcessJSON('/api/processes/' + id, 'DELETE');
+    _selectedProcessId = null;
+    _processDirty = false;
+    await loadSavedProcesses(null);
+  } catch (e) { alert('Delete failed: ' + e.message); }
+}
+
+// Saved processes have no advanced tier, so there's nothing to hide/show.
+// Kept for the advancedmodechange/devmodechange listeners it's wired to.
+function updateAdvancedPipelineOptions() {
+  updateDerivedProcessControls();
+}
+document.addEventListener('DOMContentLoaded', function() { loadSavedProcesses(null); });
 
 var _sourceMode = 'folders'; // 'folders', 'collection', or 'new_images'
 
@@ -1996,6 +2182,8 @@ function onStageToggle(stage) {
     }
   }
 
+  updateDerivedProcessControls();
+  if (!_applyingProcess) markProcessModified();
   updateStartButton();
   refreshPipelineUI();
   schedulePlanRefresh();
@@ -2162,16 +2350,9 @@ async function startPipeline() {
     }
   }
 
-  // Named strategy preset: when one is active the run is described by
-  // the preset name; the stage checkboxes were synced to it by
-  // applyStrategyPreset so the explicit flags below agree with the
-  // expansion (and miss_enabled comes from the preset server-side).
-  var strategySel = document.getElementById('strategySelect');
-  if (strategySel && strategySel.value !== '__custom__') {
-    body.strategy = strategySel.value;
-  }
-
-  // Optional stages
+  // The process page sends explicit stage flags: Run always uses the CURRENT
+  // toggle values (whether or not a saved process is selected), including
+  // miss_enabled and review_mode which used to be preset-only server-side.
   var classifyEnabled = document.getElementById('enableClassify').checked;
   var extractEnabled = document.getElementById('enableExtract').checked;
   var eyeKeypointsEnabled = document.getElementById('enableEyeKeypoints').checked;
@@ -2181,6 +2362,9 @@ async function startPipeline() {
   body.skip_extract_masks = !extractEnabled;
   body.skip_eye_keypoints = !eyeKeypointsEnabled;
   body.skip_regroup = !groupEnabled;
+  body.miss_enabled = !!document.getElementById('enableMisses').checked;
+  body.review_mode =
+    document.getElementById('enableSpeciesReview').checked ? 'species' : null;
 
   // Only send ``eye_detect_override`` when the checkbox is CHECKED — an
   // explicit per-run opt-in that forces ``pipeline_cfg["eye_detect_enabled"]``
@@ -4093,26 +4277,22 @@ function _buildPlanBody() {
   body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
   body.skip_regroup        = !document.getElementById('enableGroup').checked;
 
-  // Mirror startPipeline: only send ``eye_detect_override`` when the
-  // checkbox is CHECKED. An unchecked box means "skip the eye stage"
-  // and does NOT imply "disable eye scoring" — on a workspace with
-  // Settings ``eye_detect_enabled=true`` the plan must still reflect
-  // Settings for regroup, otherwise the plan would show a different
-  // outcome (e.g. no ``eye_override_differs``) than the workspace would
-  // produce via any non-Process-page path. Sending ``false`` here
-  // caused the plan to silently disable eye scoring on such workspaces.
+  // Send review_mode so the plan describes the species-review path correctly:
+  // with skip_regroup=true + review_mode="species" the run prepares species
+  // review results, and without this the plan would report Group as
+  // "Disabled" and imply no grouping work at all.
+  body.review_mode =
+    document.getElementById('enableSpeciesReview').checked ? 'species' : null;
+
+  // Only send ``eye_detect_override`` when the checkbox is CHECKED. An
+  // unchecked box means "skip the eye stage" and does NOT imply "disable eye
+  // scoring" — on a workspace with Settings ``eye_detect_enabled=true`` the
+  // plan must still reflect Settings for regroup, otherwise the plan would
+  // show a different outcome (e.g. no ``eye_override_differs``) than the
+  // workspace would produce via any non-Process-page path. Sending ``false``
+  // here caused the plan to silently disable eye scoring on such workspaces.
   if (document.getElementById('enableEyeKeypoints').checked) {
     body.eye_detect_override = true;
-  }
-
-  // Mirror the strategy field startPipeline() sends so /api/pipeline/plan
-  // expands the preset with the same rules /api/jobs/pipeline does. The
-  // identify preset sets skip_regroup=true but flags review_mode="species";
-  // without the strategy the plan reports Group as "Disabled" even though
-  // the actual run prepares species review results.
-  var planStrategySel = document.getElementById('strategySelect');
-  if (planStrategySel && planStrategySel.value && planStrategySel.value !== '__custom__') {
-    body.strategy = planStrategySel.value;
   }
 
   // Preview size is a workspace/library setting. Omit preview_max_size so
