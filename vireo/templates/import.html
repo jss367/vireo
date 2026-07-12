@@ -44,6 +44,10 @@ body { display: flex; flex-direction: column; height: 100vh; }
   font-size: 11px; color: var(--text-secondary); overflow-wrap: anywhere;
   margin-top: 4px; width: 100%;
 }
+.recent-destinations { margin: -2px 0 8px 0; }
+.recent-destinations-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+.recent-destination-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.recent-destination-list .btn { font-size: 11px; padding: 2px 8px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .input-fixed { max-width: 240px; flex: 0 1 240px; }
 .preview-summary { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
 .import-preview-grid { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; max-height: 520px; overflow-y: auto; }
@@ -287,10 +291,15 @@ body { display: flex; flex-direction: column; height: 100vh; }
       <div id="destLocalRows">
       <div class="row">
         <button class="btn btn-primary" id="btnBrowseDestination" data-testid="import-destination-browse-btn" onclick="browseForDestination()">Browse...</button>
-        <input type="text" id="destInput" list="recentDestinations"
+        <input type="text" id="destInput" list="recentDestinationOptions"
                placeholder="Archive folder"
                value="">
-        <datalist id="recentDestinations"></datalist>
+        <datalist id="recentDestinationOptions"></datalist>
+      </div>
+      <div id="recentDestinations" class="recent-destinations" style="display:none;"
+           data-testid="recent-destinations">
+        <div class="recent-destinations-label">Recent destinations</div>
+        <div id="recentDestinationList" class="recent-destination-list"></div>
       </div>
       </div>
       <div id="destRemoteRows" style="display:none;">
@@ -533,6 +542,39 @@ function setFolderTemplate(template) {
   preset.value = commonOption ? template : '__custom__';
   custom.value = commonOption ? '' : template;
   updateFolderTemplateControls();
+}
+
+function recentDestinationLabel(path) {
+  const trimmed = path.replace(/[\\/]+$/, '');
+  const parts = trimmed.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+function selectRecentDestination(path) {
+  const destination = document.getElementById('destInput');
+  destination.value = path;
+  // Match a manually entered destination so an already-rendered preview
+  // cannot remain visible for the previous folder.
+  destination.dispatchEvent(new Event('input', { bubbles: true }));
+  destination.focus();
+}
+
+function renderRecentDestinations(recents) {
+  const section = document.getElementById('recentDestinations');
+  const list = document.getElementById('recentDestinationList');
+  if (!section || !list) return;
+  list.replaceChildren();
+  recents.forEach((path) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn';
+    button.textContent = recentDestinationLabel(path);
+    button.title = path;
+    button.setAttribute('aria-label', 'Use ' + path);
+    button.addEventListener('click', () => selectRecentDestination(path));
+    list.appendChild(button);
+  });
+  section.style.display = recents.length ? '' : 'none';
 }
 
 function wireDestStructureInvalidation() {
@@ -2295,13 +2337,16 @@ async function initImportPage() {
       'Add a Google Maps API key in Settings to resolve GPS coordinates into location tags.';
   }
 
-  const recents = ingestCfg.recent_destinations || [];
-  const dl = document.getElementById('recentDestinations');
+  const recents = Array.isArray(ingestCfg.recent_destinations)
+    ? ingestCfg.recent_destinations.filter((destination) => typeof destination === 'string')
+    : [];
+  const dl = document.getElementById('recentDestinationOptions');
   recents.forEach((d) => {
     const opt = document.createElement('option');
     opt.value = d;
     dl.appendChild(opt);
   });
+  renderRecentDestinations(recents);
   if (typeof ingestCfg.folder_template === 'string') {
     setFolderTemplate(ingestCfg.folder_template);
   }
