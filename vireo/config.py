@@ -299,6 +299,7 @@ def set(key, value):
 MIGRATION_MISS_THRESHOLDS = "miss_thresholds_2026_05"
 MIGRATION_TOGGLE_UI_H_CONFLICT = "toggle_ui_h_conflict_2026_07"
 MIGRATION_EYE_DETECT_DEFAULT_OFF = "eye_detect_default_off_2026_07"
+MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID = "default_strategy_to_process_id_2026_07"
 
 _LEGACY_MISS_DET_CONFIDENCE = 0.25
 _LEGACY_MISS_DET_CONFIDENCE_BURST = 0.15
@@ -468,6 +469,56 @@ def migrate_eye_detect_default_off(db=None):
             if not global_was_explicit_false:
                 db.invalidate_group_fingerprints_without_explicit_eye_false()
         applied.append(MIGRATION_EYE_DETECT_DEFAULT_OFF)
+        raw["_migrations_applied"] = applied
+        save(raw)
+        return rewrote
+
+
+def migrate_default_strategy_to_process_id(db):
+    """One-time rewrite of the legacy global ``pipeline.default_strategy``
+    (a hardcoded strategy name) to ``pipeline.default_process_id`` (a
+    ``saved_processes.id``).
+
+    The workspace-side rewrite runs inside :class:`db.Database` at handle
+    creation (guarded by ``db_meta``). This function does the corresponding
+    rewrite for the *global* ``~/.vireo/config.json``: without it, an
+    upgraded install that had a global after-import default set via the old
+    ``pipeline.default_strategy`` silently falls back to import-only,
+    because the import endpoints and ``get_effective_config`` now read only
+    ``pipeline.default_process_id``. Workspaces that inherit the global
+    setting (i.e. have no per-workspace override) would stop auto-processing
+    on import until the user re-picks a default in Settings.
+
+    Unknown/removed legacy names map to null (import only). Gated by
+    ``_migrations_applied`` so it runs at most once per install; a user who
+    later manually adds ``default_strategy`` back is not silently rewritten.
+    """
+    import process_strategies as ps
+    with _lock:
+        raw = _read_raw()
+        applied = _migrations_applied(raw)
+        if MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in applied:
+            return False
+        rewrote = False
+        pipeline = raw.get("pipeline")
+        if isinstance(pipeline, dict) and "default_strategy" in pipeline:
+            old = pipeline.pop("default_strategy")
+            seed_name = (
+                ps.LEGACY_STRATEGY_NAMES.get(old)
+                if isinstance(old, str) else None
+            )
+            pid = None
+            if seed_name is not None:
+                rows = db.conn.execute(
+                    "SELECT id FROM saved_processes WHERE name = ?",
+                    (seed_name,),
+                ).fetchall()
+                if rows:
+                    pid = rows[0]["id"]
+            if pid is not None:
+                pipeline["default_process_id"] = pid
+            rewrote = True
+        applied.append(MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID)
         raw["_migrations_applied"] = applied
         save(raw)
         return rewrote

@@ -163,7 +163,26 @@ def test_delete_nulls_referencing_workspace_default(tmp_path):
     db.delete_saved_process(pid)
     ws = db.get_workspace(ws_id)
     overrides = json.loads(ws["config_overrides"])
-    assert "default_process_id" not in overrides.get("pipeline", {})
+    # Explicit None (not a popped key) so a global default_process_id set
+    # elsewhere does not silently re-adopt for this workspace via _deep_merge.
+    assert overrides["pipeline"]["default_process_id"] is None
+
+
+def test_delete_workspace_default_beats_global_default(tmp_path):
+    """A workspace whose default pointed at the deleted process must fall
+    back to import-only even when a global default_process_id is set."""
+    db = _db(tmp_path)
+    keep = db.create_saved_process("KeepGlobal")
+    doomed = db.create_saved_process("Doomed")
+    ws_id = db.create_workspace(
+        "WS", config_overrides={"pipeline": {"default_process_id": doomed}},
+    )
+    db.set_active_workspace(ws_id)
+    db.delete_saved_process(doomed)
+    effective = db.get_effective_config(
+        {"pipeline": {"default_process_id": keep}}
+    )
+    assert effective["pipeline"]["default_process_id"] is None
 
 
 def test_delete_leaves_other_workspace_defaults_intact(tmp_path):
