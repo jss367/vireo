@@ -441,9 +441,17 @@ def migrate_eye_detect_default_off(db=None):
             pipeline["eye_detect_enabled"] = False
             rewrote = True
         if db is not None:
-            ws_rewrites = db.rewrite_legacy_eye_detect_default_in_workspaces()
-            if ws_rewrites:
-                rewrote = True
+            # Only rewrite workspace ``eye_detect_enabled=True`` overrides
+            # when the global default they were mirroring was also True (or
+            # absent — the old DEFAULTS value). If the global was already
+            # explicit False, a workspace ``True`` override is an
+            # intentional per-workspace opt-in that intentionally differs
+            # from Settings; flipping it here would silently disable eye
+            # detection for that workspace after the upgrade.
+            if not global_was_explicit_false:
+                ws_rewrites = db.rewrite_legacy_eye_detect_default_in_workspaces()
+                if ws_rewrites:
+                    rewrote = True
             # A workspace's cached ``pipeline_results_ws*.json`` and stamped
             # ``last_group_fingerprint`` were produced with whatever
             # ``eye_detect_enabled`` was effective at the time. Flipping the

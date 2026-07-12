@@ -2329,6 +2329,80 @@ def test_regroup_plan_will_run_when_workspace_fingerprint_outdated(tmp_path, mon
 
 
 
+def test_regroup_plan_will_run_when_eye_detect_override_differs_from_workspace(
+    tmp_path, monkeypatch,
+):
+    """Cache is fresh against workspace settings, but the run carries a
+    ``eye_detect_override`` that flips ``eye_detect_enabled`` for THIS
+    press. Because ``compute_group_fingerprint`` doesn't hash
+    ``eye_detect_enabled``, the fingerprint match alone would let the
+    plan report ``done-prior`` — hiding the fact that ``regroup_stage``
+    will actually rescore with different eye behavior. The plan must
+    call this out as will-run instead.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    _mark_sam_done(db, pid, "/m/a.png")
+    from labels_fingerprint import TOL_SENTINEL
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+
+    cache_path = os.path.join(
+        str(tmp_path), f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(cache_path, "w") as f:
+        f.write('{"photos": []}')
+
+    # Workspace's own effective config: eye off (the new default). Stamp
+    # fingerprint so the fingerprint check would pass without the override.
+    import config as cfg
+    from pipeline import compute_group_fingerprint
+    effective = db.get_effective_config(cfg.load())
+    db.set_workspace_group_state(
+        db._active_workspace_id,
+        fingerprint=compute_group_fingerprint(effective),
+        when_ts=1714579200,
+    )
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    # Sanity check: no override → plan is done-prior.
+    plan_no_override = compute_plan(
+        db,
+        _params(model_ids=["m1"], skip_eye_keypoints=True),
+        str(tmp_path / "test.db"),
+    )
+    assert plan_no_override["stages"]["Group"]["state"] == "done-prior"
+
+    # Same state + eye_detect_override=True (Process-page checkbox) → the
+    # eye override differs from the workspace's eye-off setting, so
+    # regroup will rescore with different eye behavior; must be will-run.
+    plan_with_override = compute_plan(
+        db,
+        _params(
+            model_ids=["m1"], skip_eye_keypoints=True,
+            eye_detect_override=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    group = plan_with_override["stages"]["Group"]
+    assert group["state"] == "will-run", (
+        "eye_detect_override differs from workspace eye_detect_enabled — "
+        "regroup will rescore with different eye behavior, so the plan "
+        "must report will-run instead of the cache-fresh done-prior: "
+        f"got {group!r}"
+    )
+    assert group.get("detail", {}).get("eye_override_differs") is True
+
+
 def test_regroup_plan_will_run_when_cache_exists_but_fingerprint_invalidated(
     tmp_path, monkeypatch,
 ):

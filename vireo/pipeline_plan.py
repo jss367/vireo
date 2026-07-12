@@ -1044,6 +1044,39 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg,
                     "fingerprint_outdated": True,
                 },
             }
+        # A per-run ``eye_detect_override`` that differs from the
+        # workspace's own effective ``eye_detect_enabled`` will cause
+        # regroup_stage to rescore with different eye behavior than the
+        # cached results. ``compute_group_fingerprint`` reads only
+        # encounter/burst keys — not ``eye_detect_enabled`` — so the
+        # fingerprint check above cannot see the mismatch. Without this
+        # signal, a default-off workspace with an existing default-off
+        # grouping cache would still show Group as ``done-prior`` after
+        # the Process-page Eye Keypoints checkbox toggles the override,
+        # even though the job would actually rescore with eye focus on.
+        # Mirror the freshness-stamp check in ``regroup_stage`` and
+        # surface will-run when the per-run intent disagrees with
+        # Settings.
+        workspace_eye_setting = bool(
+            (effective_cfg or {}).get("pipeline", {}).get(
+                "eye_detect_enabled", False,
+            )
+        )
+        if (
+            params.eye_detect_override is not None
+            and bool(params.eye_detect_override) != workspace_eye_setting
+        ):
+            return {
+                "state": "will-run",
+                "summary": (
+                    "Will re-group — eye focus setting differs for this run"
+                ),
+                "detail": {
+                    "cache_exists": True,
+                    "upstream_will_run": False,
+                    "eye_override_differs": True,
+                },
+            }
         return {
             "state": "done-prior",
             "summary": "Grouping cached from prior run",

@@ -951,6 +951,45 @@ def test_migrate_eye_detect_default_off_keeps_fingerprint_when_global_already_fa
     )
 
 
+def test_migrate_eye_detect_default_off_preserves_explicit_workspace_opt_ins(
+    tmp_path, monkeypatch,
+):
+    """When the global config already had ``eye_detect_enabled=False`` (an
+    installation that intentionally scored eye-disabled globally before
+    this migration ran), a workspace override of ``True`` is an explicit
+    per-workspace opt-in — the user chose to run eye detection in that
+    workspace despite the global default. The migration must leave those
+    intentional overrides alone; otherwise upgrading silently disables
+    eye detection/scoring for workspaces whose settings intentionally
+    differed from the global default.
+    """
+    import config as cfg
+    from db import Database
+
+    config_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(config_path))
+    config_path.write_text(
+        json.dumps({"pipeline": {"eye_detect_enabled": False}})
+    )
+    db = Database(str(tmp_path / "test.db"), initialize_schema=True)
+    db.create_workspace(
+        "opt-in",
+        config_overrides={"pipeline": {"eye_detect_enabled": True}},
+    )
+
+    cfg.migrate_eye_detect_default_off(db)
+
+    row = db.conn.execute(
+        "SELECT config_overrides FROM workspaces WHERE name = 'opt-in'"
+    ).fetchone()
+    overrides = json.loads(row["config_overrides"])
+    assert overrides["pipeline"]["eye_detect_enabled"] is True, (
+        "when the global default was already False, a workspace "
+        "eye_detect_enabled=True override is an explicit per-workspace "
+        "opt-in and must not be flipped by the legacy-default migration"
+    )
+
+
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):
     """Default subject_types is the set of keyword types that count as
     'identifying' a photo — taxonomy + individual + genre by default."""
