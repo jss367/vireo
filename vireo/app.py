@@ -10230,11 +10230,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # accessors that expect a JSON object (or NULL) in this column.
         if overrides is not None and not isinstance(overrides, dict):
             return json_error("config_overrides must be an object or null")
+        pipeline_overrides = (overrides or {}).get("pipeline")
+        # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
+        # name) to ``pipeline.default_process_id`` before existence checks.
+        # An older client (or a workspace payload restored from a pre-migration
+        # backup) that still sends the legacy key would otherwise fall through
+        # this validator — non-schema pipeline keys are stored as-is — and
+        # `get_effective_config()` would then see `default_process_id: null`,
+        # so imports read only the new key and silently run import-only
+        # instead of the requested after-import process. Mirror the
+        # /api/settings/import translation exactly: unknown/removed names map
+        # to null (import only). If both keys are present the new one wins
+        # and the legacy key is dropped so it can't resurface on a later read.
+        if (
+            isinstance(pipeline_overrides, dict)
+            and "default_strategy" in pipeline_overrides
+        ):
+            import process_strategies as ps
+
+            legacy = pipeline_overrides.pop("default_strategy")
+            if "default_process_id" not in pipeline_overrides:
+                seed_name = (
+                    ps.LEGACY_STRATEGY_NAMES.get(legacy)
+                    if isinstance(legacy, str) else None
+                )
+                translated_pid = None
+                if seed_name is not None:
+                    match = next(
+                        (
+                            p for p in db.get_saved_processes()
+                            if p["name"] == seed_name
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        translated_pid = match["id"]
+                pipeline_overrides["default_process_id"] = translated_pid
         # pipeline.default_process_id: None means "no automatic processing
         # after import" (the chaining hook short-circuits on it) and is
         # accepted as-is; a non-null value must name a real saved_processes
         # row so the chaining hook never fails hours later on a dangling id.
-        pipeline_overrides = (overrides or {}).get("pipeline")
         if (
             isinstance(pipeline_overrides, dict)
             and pipeline_overrides.get("default_process_id") is not None

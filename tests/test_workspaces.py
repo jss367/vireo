@@ -2954,3 +2954,138 @@ def test_create_workspace_rejects_non_object_config_overrides(client):
     )
     assert resp.status_code == 400
     assert "config_overrides" in resp.get_json()["error"]
+
+
+# ---------------------------------------------------------------------------
+# Legacy ``pipeline.default_strategy`` translation on workspace overrides.
+#
+# An older client (or a payload restored from a pre-migration backup) may
+# still send the hardcoded strategy name. The workspace endpoints must
+# translate it to ``default_process_id`` up front — otherwise it falls
+# through as an inert non-schema key and the effective default_process_id
+# stays null, silently downgrading the workspace to import-only.
+# ---------------------------------------------------------------------------
+
+
+def _effective_pipeline(client, ws_id):
+    import config as cfg
+    from db import Database
+
+    db = Database(client.application.config["DB_PATH"])
+    db.set_active_workspace(ws_id)
+    return db.get_effective_config(cfg.load())["pipeline"]
+
+
+def test_put_workspace_translates_legacy_default_strategy(client):
+    """PUT with the legacy ``default_strategy: "identify"`` must land on the
+    matching seed's ``default_process_id`` in the effective config, not fall
+    through as an inert override."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "LegacyPut"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+
+    resp = client.put(
+        f"/api/workspaces/{ws_id}",
+        data=json.dumps(
+            {"config_overrides": {"pipeline": {"default_strategy": "identify"}}}
+        ),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+
+    expected_pid = _a_process_id(client, "Identify birds")
+    effective = _effective_pipeline(client, ws_id)
+    assert effective["default_process_id"] == expected_pid
+    assert "default_strategy" not in effective
+
+
+def test_put_workspace_unknown_legacy_strategy_maps_to_null(client):
+    """An unrecognized legacy name must translate to ``None`` (import only)
+    rather than falling through as an inert override that leaves
+    ``default_process_id`` null-by-omission on the workspace but subject to
+    the global default via effective-config merging."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "LegacyPutUnknown"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+
+    resp = client.put(
+        f"/api/workspaces/{ws_id}",
+        data=json.dumps(
+            {"config_overrides": {"pipeline": {"default_strategy": "not-a-strategy"}}}
+        ),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+
+    # Read the persisted override directly from the workspaces list — the
+    # per-workspace effective config would fall back to the global default
+    # if the workspace had NO override, so we need to see what was actually
+    # stored to distinguish "translated to explicit null" from "silently
+    # dropped".
+    ws = next(
+        w for w in client.get("/api/workspaces").get_json() if w["id"] == ws_id
+    )
+    raw_overrides = ws.get("config_overrides")
+    overrides = (
+        json.loads(raw_overrides) if isinstance(raw_overrides, str) else (raw_overrides or {})
+    )
+    pipeline = overrides.get("pipeline") or {}
+    assert "default_strategy" not in pipeline
+    assert pipeline.get("default_process_id") is None
+
+
+def test_put_workspace_both_keys_new_wins(client):
+    """If a caller sends both the legacy and the new key, the new one wins
+    and the legacy key is dropped so it can't resurface on a later read."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "LegacyPutBoth"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+
+    cull_ready = _a_process_id(client, "Cull-ready")
+    resp = client.put(
+        f"/api/workspaces/{ws_id}",
+        data=json.dumps({
+            "config_overrides": {
+                "pipeline": {
+                    # legacy names "identify" (would map to "Identify birds"),
+                    # but the explicit new key must take precedence.
+                    "default_strategy": "identify",
+                    "default_process_id": cull_ready,
+                }
+            }
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+
+    effective = _effective_pipeline(client, ws_id)
+    assert effective["default_process_id"] == cull_ready
+    assert "default_strategy" not in effective
+
+
+def test_create_workspace_translates_legacy_default_strategy(client):
+    """The create path shares the validator, so the same translation must
+    apply — otherwise a workspace can be spawned with an inert legacy key."""
+    expected_pid = _a_process_id(client, "Cull-ready")
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "LegacyCreate",
+            "config_overrides": {"pipeline": {"default_strategy": "cull_ready"}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    ws_id = resp.get_json()["id"]
+
+    effective = _effective_pipeline(client, ws_id)
+    assert effective["default_process_id"] == expected_pid
