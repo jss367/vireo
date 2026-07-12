@@ -4258,7 +4258,11 @@ function grmRenderKeepingCurrentSelection(items, fallbackId) {
 
   var nextId = grmFallbackSelectionId(items, fallbackId);
   if (nextId != null) {
-    grmSelect(nextId);
+    grmState.selected = nextId;
+    grmState.selectedIds = new Set([nextId]);
+    grmState.selectionAnchor = nextId;
+    renderGroupModal();
+    grmRefreshSelectedLoupe();
     return;
   }
 

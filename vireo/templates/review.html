@@ -1722,7 +1722,11 @@ async function loadGroupData(groupId) {
 
     // Auto-select the best photo for the loupe
     if (best) {
-      grmSelect(best.photo_id);
+      grmState.selected = best.photo_id;
+      grmState.selectedIds = new Set([best.photo_id]);
+      grmState.selectionAnchor = best.photo_id;
+      renderGroupModal();
+      grmRefreshSelectedLoupe();
     } else {
       renderGroupModal();
     }
