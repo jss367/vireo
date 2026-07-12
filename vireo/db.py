@@ -9645,6 +9645,41 @@ class Database:
                     f"DELETE FROM {table} WHERE species = ?", (old,)
                 )
 
+        # Second curation pass: align case-only mismatches with the stored
+        # keyword spelling. normalize_keyword_display() preserves case, so
+        # the punctuation sweep above leaves a curation row keyed
+        # `Saffron Finch` untouched while the species keyword row is
+        # `Saffron finch` — and the eligible-highlight/life-list queries
+        # compare those strings EXACT against keywords.name, so the curated
+        # selection silently drops out. Case-variant keyword rows themselves
+        # were already merged by the match-key grouping above, so this map
+        # is unambiguous per match key.
+        species_by_key = {}
+        for row in self.conn.execute(
+            "SELECT name FROM keywords "
+            "WHERE parent_id IS NULL AND (is_species = 1 OR type = 'taxonomy')"
+        ).fetchall():
+            species_by_key.setdefault(keyword_match_key(row["name"]), row["name"])
+        for table, rename in (
+            ("photo_preferences", self.rename_photo_preferences_species),
+            ("species_representatives",
+             self.rename_species_representatives_species),
+            ("species_highlights", self.rename_species_highlights_species),
+        ):
+            names = [
+                r["species"] for r in self.conn.execute(
+                    f"SELECT DISTINCT species FROM {table}"
+                ).fetchall()
+            ]
+            for old in names:
+                stored = species_by_key.get(keyword_match_key(old or ""))
+                if not stored or stored == old:
+                    continue
+                curation_fixed += rename(old, stored, _commit=False) or 0
+                self.conn.execute(
+                    f"DELETE FROM {table} WHERE species = ?", (old,)
+                )
+
         if dropped_empty or merged or renamed or pending_fixed or curation_fixed:
             log.info(
                 "keyword normalization migration: dropped %d empty-name "

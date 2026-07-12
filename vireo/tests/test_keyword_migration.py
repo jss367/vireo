@@ -364,6 +364,92 @@ def test_migration_normalizes_curation_tables(tmp_path):
         db.close()
 
 
+def test_migration_aligns_curation_case_with_stored_keyword(tmp_path):
+    """Curation rows differing from the species keyword only by case are
+    re-keyed to the stored spelling. normalize_keyword_display() preserves
+    case, so the punctuation sweep alone leaves `Saffron Finch` curation
+    orphaned from a `Saffron finch` keyword row — and the eligible
+    highlight/life-list queries compare those strings exact."""
+    db, ws_id, p1, _p2 = _make_db(tmp_path)
+    try:
+        kid = _insert_keyword(db, "Saffron finch", "taxonomy", is_species=1)
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, kid),
+        )
+        db.conn.execute(
+            "INSERT INTO species_highlights "
+            "(workspace_id, species, photo_id, rank) VALUES (?, ?, ?, 1)",
+            (ws_id, "Saffron Finch", p1),
+        )
+        db.conn.execute(
+            "INSERT INTO photo_preferences "
+            "(workspace_id, purpose, species, photo_id) VALUES (?, ?, ?, ?)",
+            (ws_id, "life_list", "Saffron Finch", p1),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        hl = db.conn.execute(
+            "SELECT species FROM species_highlights WHERE photo_id = ?", (p1,)
+        ).fetchall()
+        assert [r["species"] for r in hl] == ["Saffron finch"]
+        prefs = db.conn.execute(
+            "SELECT species FROM photo_preferences WHERE photo_id = ?", (p1,)
+        ).fetchall()
+        assert [r["species"] for r in prefs] == ["Saffron finch"]
+    finally:
+        db.close()
+
+
+def test_migration_merges_case_variant_keyword_rows(tmp_path):
+    """`Snowy Egret` and `Snowy egret` rows merge into one, and curation
+    keyed under the merged-away spelling follows to the survivor."""
+    db, ws_id, p1, p2 = _make_db(tmp_path)
+    try:
+        first = _insert_keyword(db, "Snowy egret", "taxonomy", is_species=1)
+        second = _insert_keyword(db, "Snowy Egret", "taxonomy", is_species=1)
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, first),
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p2, second),
+        )
+        db.conn.execute(
+            "INSERT INTO species_highlights "
+            "(workspace_id, species, photo_id, rank) VALUES (?, ?, ?, 1)",
+            (ws_id, "Snowy Egret", p2),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        rows = db.conn.execute(
+            "SELECT id, name FROM keywords WHERE name LIKE '%egret%' "
+            "OR name LIKE '%Egret%'"
+        ).fetchall()
+        assert len(rows) == 1
+        survivor = rows[0]["name"]
+        tagged = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (rows[0]["id"],),
+            )
+        }
+        assert tagged == {p1, p2}
+        hl = db.conn.execute(
+            "SELECT species FROM species_highlights WHERE photo_id = ?", (p2,)
+        ).fetchall()
+        assert [r["species"] for r in hl] == [survivor]
+    finally:
+        db.close()
+
+
 def test_migration_preserves_okina_names(tmp_path):
     """A legitimate leading okina (U+02BB) is not a stray quote; the
     migration must leave such names untouched."""
