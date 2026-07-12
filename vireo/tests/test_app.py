@@ -3842,11 +3842,13 @@ def test_rename_keyword_detects_stored_edge_quote_peer(app_and_db):
     ).fetchone()
     assert other_row is None
     # The legacy row survives because the merge target is the peer, not
-    # the renamed row.
+    # the renamed row — but its stored spelling is canonicalized to the
+    # clean name so the survivor doesn't remain visible/exported as the
+    # stray-quote variant after a rename to the clean spelling.
     survived = db.conn.execute(
         "SELECT name FROM keywords WHERE id = ?", (legacy_id,)
     ).fetchone()
-    assert survived["name"] == "‘apapane"
+    assert survived["name"] == "apapane"
 
 
 def test_rename_keyword_does_not_merge_across_types_toplevel(app_and_db):

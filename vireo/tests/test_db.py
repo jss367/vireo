@@ -13425,6 +13425,73 @@ def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
         db.close()
 
 
+def test_update_keyword_merge_canonicalizes_legacy_peer_name(tmp_path):
+    """When update_keyword merges a clean row into a legacy edge-quote peer,
+    the survivor's stored name must be the canonical spelling and any
+    pending sidecar changes queued under the legacy spelling must be
+    retargeted to the clean name. Without this, the merge preserves the
+    legacy `‘apapane` as the survivor and _merge_keyword_into rewrites the
+    source's pending changes onto that quoted value, so the keyword remains
+    visible/exported as `‘apapane` even though the requested rename was
+    `apapane`.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws_id = db.ensure_default_workspace()
+        db.set_active_workspace(ws_id)
+        fid = db.add_folder('/photos', name='photos')
+        p1 = db.add_photo(
+            folder_id=fid, filename='a.jpg', extension='.jpg',
+            file_size=100, file_mtime=1.0,
+        )
+        p2 = db.add_photo(
+            folder_id=fid, filename='b.jpg', extension='.jpg',
+            file_size=100, file_mtime=1.0,
+        )
+        # Legacy edge-quoted taxonomy row at the top level (imported/
+        # upgraded DB shape). One photo is tagged with it, and its
+        # pending sidecar add is queued under the legacy spelling.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("‘apapane",),
+        )
+        legacy_id = cur.lastrowid
+        db.tag_photo(p1, legacy_id)
+        db.queue_change(p1, 'keyword_add', '‘apapane')
+        # Clean general peer at the same slot, tagged on the other photo.
+        general_id = db.add_keyword("apapane", kw_type="general")
+        db.tag_photo(p2, general_id)
+        assert general_id != legacy_id
+
+        # PUT-style retype: turn the clean general row into taxonomy. The
+        # peer lookup finds the legacy row and merges the clean row into
+        # it. The survivor must end up as clean `apapane`, not `‘apapane`.
+        effective_id = db.update_keyword(general_id, type="taxonomy")
+        assert effective_id == legacy_id
+
+        # Survivor's stored name must be the canonical spelling.
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (legacy_id,)
+        ).fetchone()
+        assert row is not None
+        assert row["name"] == "apapane"
+
+        # Pending change queued under the legacy spelling must now
+        # reference the canonical name so sync_to_xmp doesn't leak the
+        # stray-quote spelling back into the sidecar.
+        pending = db.conn.execute(
+            "SELECT value FROM pending_changes "
+            "WHERE photo_id = ? AND change_type = 'keyword_add'",
+            (p1,),
+        ).fetchall()
+        values = sorted(r["value"] for r in pending)
+        assert values == ["apapane"], values
+    finally:
+        db.close()
+
+
 def test_add_keyword_species_prefers_taxonomy_peer_over_general_exact_match(tmp_path):
     """When both a clean `general` row `apapane` and a legacy `taxonomy`
     edge-quote row `‘apapane` exist at the same slot, add_keyword('apapane',

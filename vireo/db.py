@@ -11068,6 +11068,21 @@ class Database:
                             (new_name, parent_id, effective_type, keyword_id),
                         ).fetchone()
                     if peer:
+                        # Canonicalize the peer's stored spelling before
+                        # merging into it. Without this, when the peer is an
+                        # upgraded legacy row whose stored name still carries
+                        # an edge quote (e.g. taxonomy `‘apapane`) and the
+                        # edited row is the clean `apapane`, _merge_keyword_into
+                        # keeps the peer's legacy name as the survivor and
+                        # rewrites the source's pending changes onto that
+                        # quoted value. The keyword then remains visible/
+                        # exported as `‘apapane` even though the effective
+                        # requested name is `apapane`. _normalize_keyword_row_name
+                        # scopes pending-change and species-curation retargeting
+                        # to photos actually tagged with the peer row, so a
+                        # separate same-name legacy row in another workspace
+                        # isn't rewritten by side effect.
+                        self._normalize_keyword_row_name(peer["id"])
                         self._merge_keyword_into(keyword_id, peer["id"])
                         self.conn.commit()
                         return peer["id"]
