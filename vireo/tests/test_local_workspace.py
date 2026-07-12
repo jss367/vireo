@@ -62,6 +62,15 @@ def _folder_path(db, folder_id):
     return db.conn.execute("SELECT path FROM folders WHERE id=?", (folder_id,)).fetchone()["path"]
 
 
+def _source_fs_preserves_case(directory: Path) -> bool:
+    probe = directory / "VireoCaseProbe"
+    probe.write_bytes(b"")
+    try:
+        return not (directory / "vireocaseprobe").exists()
+    finally:
+        probe.unlink()
+
+
 def test_stage_modify_and_sync_back(local_workspace_env):
     env = local_workspace_env
     result = stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
@@ -171,6 +180,11 @@ def test_stage_rejects_case_colliding_source_paths(local_workspace_env, monkeypa
     # second copy silently overwrites the first while the manifest keeps
     # both, so sync can later delete one original and overwrite the other.
     env = local_workspace_env
+    # The bug can only be exercised when the source can actually hold both
+    # case variants; on a case-folding source tmp_path the two writes below
+    # collapse into one file and there is nothing to detect.
+    if not _source_fs_preserves_case(env["child"]):
+        pytest.skip("source tmp_path is on a case-insensitive filesystem")
     (env["child"] / "Bird.jpg").write_bytes(b"uppercase")
 
     monkeypatch.setattr(local_workspace, "_dest_case_insensitive", lambda _base: True)
@@ -187,6 +201,11 @@ def test_stage_accepts_case_variants_on_case_sensitive_destination(local_workspa
     # The check must not fire when the destination truly preserves case,
     # or every source with a case-only pair becomes unstageable.
     env = local_workspace_env
+    # Requires both source and destination to actually be case-sensitive:
+    # otherwise the two writes collapse into one file (source) or the
+    # copies collapse into one on the destination regardless of the probe.
+    if not _source_fs_preserves_case(env["child"]) or not _source_fs_preserves_case(env["vireo_dir"]):
+        pytest.skip("tmp_path is on a case-insensitive filesystem")
     (env["child"] / "Bird.jpg").write_bytes(b"uppercase")
 
     monkeypatch.setattr(local_workspace, "_dest_case_insensitive", lambda _base: False)
