@@ -24,6 +24,7 @@ from image_loader import (
     safe_iter_dir,
     safe_scan_walk,
 )
+from keyword_normalization import keyword_match_key
 from metadata import extract_metadata
 from PIL import Image
 from render_source import exif_orientation as _exif_orientation_from_data
@@ -158,8 +159,14 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
 
     # Build hierarchy from lr:hierarchicalSubject
     # e.g., 'Birds|Raptors|Black kite' creates Birds -> Raptors -> Black kite
+    # Skip a hierarchical entry whose chain contains any segment that
+    # normalizes to `""` (e.g. `"|Birds"` or `"Birds|'|Hawk"`). add_keyword()
+    # raises ValueError on those, and letting it propagate would abort the
+    # whole scan on a malformed sidecar entry instead of ignoring it.
     for hier in hier_keywords:
         parts = hier.split("|")
+        if any(not keyword_match_key(part) for part in parts):
+            continue
         parent_id = None
         for part in parts:
             kid = db.add_keyword(part, parent_id=parent_id)
@@ -167,12 +174,26 @@ def _import_keywords_for_photo(db, photo_id, xmp_path_str):
         # Tag with the leaf keyword
         db.tag_photo(photo_id, parent_id)
 
-    # Also add any flat keywords not already covered by hierarchy
-    existing_kw_names = {k["name"] for k in db.get_photo_keywords(photo_id)}
+    # Also add any flat keywords not already covered by hierarchy. Compare
+    # via the normalized match key on both sides: DB names are stored in
+    # their cleaned form (add_keyword normalizes on insert), so a raw
+    # `dc:subject` value like `‘apapane` that matches an existing clean
+    # `apapane` on this photo would otherwise fall through to add_keyword
+    # and get tagged again as a redundant top-level row. Same empty-key
+    # filter as above — a lone smart-quote entry would raise inside
+    # add_keyword() and abort the scan.
+    existing_keys = {
+        keyword_match_key(k["name"]) for k in db.get_photo_keywords(photo_id)
+    }
     for kw in flat_keywords:
-        if kw not in existing_kw_names:
-            kid = db.add_keyword(kw)
-            db.tag_photo(photo_id, kid)
+        key = keyword_match_key(kw)
+        if not key:
+            continue
+        if key in existing_keys:
+            continue
+        kid = db.add_keyword(kw)
+        db.tag_photo(photo_id, kid)
+        existing_keys.add(key)
 
 
 def _extract_dimensions(exif_group, file_group, extension=None):

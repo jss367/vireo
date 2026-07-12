@@ -50,6 +50,7 @@ from flask import (
     send_from_directory,
 )
 from jobs import SLOT_CAP, JobRunner, LogBroadcaster
+from keyword_normalization import normalize_keyword_display
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
@@ -5013,6 +5014,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _queue_keyword_add(photo_id, keyword_name, workspace_id=None, _commit=True):
         """Queue a keyword add unless it cancels a pending removal."""
+        # Normalize before the cancellation lookup: queue_change normalizes
+        # on insert, so pending values are stored in clean form and an
+        # exact-match cancel against a raw variant would miss its pair.
+        keyword_name = normalize_keyword_display(keyword_name)
+        if not keyword_name:
+            return
         db = _get_db()
         removed = db.remove_pending_changes(
             photo_id, "keyword_remove", keyword_name,
@@ -5026,6 +5033,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _queue_keyword_remove(photo_id, keyword_name, workspace_id=None, _commit=True):
         """Queue a keyword removal unless it cancels a pending add."""
+        # See _queue_keyword_add: keep the cancellation lookup in the same
+        # normalized form queue_change stores.
+        keyword_name = normalize_keyword_display(keyword_name)
+        if not keyword_name:
+            return
         db = _get_db()
         removed = db.remove_pending_changes(
             photo_id, "keyword_add", keyword_name,
@@ -5854,7 +5866,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
                 else None
             )
-            kid = db.add_keyword(name, kw_type=kw_type)
+            try:
+                kid = db.add_keyword(name, kw_type=kw_type)
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Queue/record the stored spelling: add_keyword normalizes
+            # punctuation and applies the species casing convention, so it
+            # can differ from the raw request name.
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored:
+                name = stored["name"]
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
@@ -5968,28 +5991,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_update_keyword(keyword_id):
         db = _get_db()
         body = request.get_json(silent=True) or {}
-        # Capture old name before update for sidecar queuing
-        new_name = body.get("name")
-        old_name = None
-        old_is_species_keyword = False
-        if new_name:
-            old_row = db.conn.execute(
-                """SELECT name, is_species, type
-                   FROM keywords WHERE id = ?""",
-                (keyword_id,),
-            ).fetchone()
-            if old_row and old_row["name"] != new_name:
-                old_name = old_row["name"]
-                old_is_species_keyword = (
-                    old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
-                )
-        # Apply the update first — if it raises, no sidecar changes are queued
-        try:
-            db.update_keyword(keyword_id, **body)
-        except ValueError as e:
-            return json_error(str(e), 400)
-        # Queue sidecar updates only after successful DB update, for all affected workspaces
-        if old_name:
+        # Capture old identity and tagged photos BEFORE the update: a rename
+        # or retype can merge this row into a normalized same-slot peer, in
+        # which case the original id and its photo_keywords rows are gone
+        # afterwards (update_keyword returns the surviving id).
+        old_row = db.conn.execute(
+            """SELECT name, is_species, type
+               FROM keywords WHERE id = ?""",
+            (keyword_id,),
+        ).fetchone()
+        affected = []
+        if body.get("name"):
             affected = db.conn.execute(
                 """SELECT pk.photo_id, wf.workspace_id
                    FROM photo_keywords pk
@@ -5998,14 +6010,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                    WHERE pk.keyword_id = ?""",
                 (keyword_id,),
             ).fetchall()
-            new_row = db.conn.execute(
-                """SELECT is_species, type
-                   FROM keywords WHERE id = ?""",
-                (keyword_id,),
-            ).fetchone()
+        # Apply the update first — if it raises, no sidecar changes are queued
+        try:
+            effective_id = db.update_keyword(keyword_id, **body)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        # Queue sidecar updates only after a successful DB update, using the
+        # STORED spelling of the surviving row — update_keyword normalizes
+        # the requested name, so it can differ from the raw request value.
+        new_row = db.conn.execute(
+            """SELECT name, is_species, type
+               FROM keywords WHERE id = ?""",
+            (effective_id,),
+        ).fetchone()
+        if (
+            old_row is not None and new_row is not None
+            and old_row["name"] != new_row["name"]
+        ):
+            old_name = old_row["name"]
+            new_name = new_row["name"]
+            old_is_species_keyword = (
+                old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
+            )
             new_is_species_keyword = (
-                new_row is not None
-                and (new_row["is_species"] == 1 or new_row["type"] == "taxonomy")
+                new_row["is_species"] == 1 or new_row["type"] == "taxonomy"
             )
             if old_is_species_keyword and new_is_species_keyword:
                 pairs = [
@@ -6024,7 +6052,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
                 _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "keyword_id": effective_id})
 
     @app.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
     def api_delete_keyword(keyword_id):
@@ -6973,7 +7001,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
                 else None
             )
-            kid = db.add_keyword(name, kw_type=kw_type)
+            try:
+                kid = db.add_keyword(name, kw_type=kw_type)
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Queue/record the stored spelling (see api_add_keyword).
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored:
+                name = stored["name"]
 
         already_tagged = set()
         batch_size = 800
@@ -8922,6 +8959,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(error)
         species = body.get("species", "")
         species = species.strip() if isinstance(species, str) else ""
+        # Normalize up front: the curation snapshots below compare this
+        # value against stored species strings, and add_keyword would
+        # normalize on insert anyway — one spelling throughout the route.
+        species = normalize_keyword_display(species)
         if not species:
             return json_error("species required")
         error, status = _validate_highlight_photo_ids(db, photo_ids)
@@ -9162,6 +9203,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 })
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
+            # Use the stored spelling from here on: add_keyword applies the
+            # species casing convention, so it can differ from the request
+            # value, and the queued sidecar changes / curation renames /
+            # history payload must match the row actually tagged.
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored and stored["name"]:
+                species = stored["name"]
             items = []
             rejected_prediction_ids = []
             has_old_species = False
@@ -10535,6 +10585,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             if species:
                 kid = db.add_keyword(species, is_species=True)
+                # Queue/record the stored spelling (see api_add_keyword).
+                stored = db.conn.execute(
+                    "SELECT name FROM keywords WHERE id = ?", (kid,)
+                ).fetchone()
+                if stored and stored["name"]:
+                    species = stored["name"]
                 for pid in picks:
                     db.update_photo_flag(pid, "flagged")
                     db.tag_photo(pid, kid)
@@ -19187,7 +19243,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photo_ids or not label:
             return json_error("photo_ids and label required")
 
-        kid = db.add_keyword(label)
+        try:
+            kid = db.add_keyword(label)
+        except ValueError as exc:
+            return json_error(str(exc))
+        # Queue/record the stored spelling (see api_add_keyword).
+        stored = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        if stored and stored["name"]:
+            label = stored["name"]
         for pid in photo_ids:
             db.tag_photo(pid, kid)
             db.queue_change(pid, "keyword_add", label)
@@ -20706,6 +20771,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_ids = body.get("photo_ids", [])
         burst_index = body.get("burst_index")
 
+        # Normalize up front: this route compares the requested species
+        # against stored keyword rows and previous_species cache values
+        # below, and add_keyword would normalize on insert anyway — keep one
+        # spelling throughout. Rejects quote-only input as empty.
+        species = normalize_keyword_display(species)
         if not species:
             return json_error("species is required")
         if not photo_ids:
@@ -20795,6 +20865,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             else:
                 previous_species = target_enc.get("confirmed_species")
 
+        # previous_species comes from the pipeline cache on disk, which the
+        # v5 DB migration does not touch — a pre-normalization cache can
+        # still carry a quoted spelling like `‘Apapane`. Normalize before
+        # comparing/looking up against stored keyword rows, which are always
+        # clean.
+        if previous_species is not None:
+            previous_species = normalize_keyword_display(previous_species)
+            if not previous_species:
+                previous_species = None
+
         ws_id = db._ws_id()
 
         old_kid = None
@@ -20804,14 +20884,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         if is_replacement:
             # Match add_keyword's write path: species keywords live as root
-            # keywords (parent_id IS NULL) with is_species=1. Looking up by
-            # name alone could collide with a non-species homonym nested under
-            # another keyword (schema allows UNIQUE(name, parent_id)).
+            # keywords (parent_id IS NULL). Looking up by name alone could
+            # collide with a non-species homonym nested under another keyword
+            # (schema allows UNIQUE(name, parent_id)). Accept taxonomy-typed
+            # rows with is_species=0 too: update_keyword with an explicit
+            # type='taxonomy' (the Keywords type dropdown) doesn't set the
+            # legacy is_species column, and the rest of the app treats
+            # (is_species = 1 OR type = 'taxonomy') as species.
             old_kid_row = db.conn.execute(
                 """SELECT id FROM keywords
                    WHERE name = ? COLLATE NOCASE
                      AND parent_id IS NULL
-                     AND is_species = 1""",
+                     AND (is_species = 1 OR type = 'taxonomy')""",
                 (previous_species,),
             ).fetchone()
             if old_kid_row:
@@ -20825,6 +20909,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # which photos already carry it. add_keyword is idempotent and
             # returns the existing id when the species already exists.
             kid = db.add_keyword(species, is_species=True, _commit=False)
+            # Queue/record the stored spelling (see api_add_keyword).
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored and stored["name"]:
+                species = stored["name"]
 
             # Precheck which submitted photos already carry the new species
             # keyword. Only photos that get a *new* tag should generate

@@ -679,6 +679,36 @@ def test_label_cluster_records_history(app_and_db):
     assert history[0]['item_count'] == 2
 
 
+def test_label_cluster_normalizes_edge_quote_label(app_and_db):
+    """Label cluster with a stray edge quote queues the normalized name.
+
+    Regression: prior to re-reading the stored name after add_keyword, a
+    label like `‘juvenile` would tag the normalized 'juvenile' row but
+    queue the raw stray-quote value for XMP sync, so the sidecar would
+    persist the wrong spelling and a later removal of the stored keyword
+    would not cancel the pending add.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photos = db.get_photos()
+    pids = [p['id'] for p in photos[:2]]
+
+    resp = client.post('/api/species/label-cluster',
+                       json={'photo_ids': pids, 'label': '‘juvenile'})
+    assert resp.status_code == 200
+
+    pending = db.get_pending_changes()
+    keyword_adds = [c for c in pending if c['change_type'] == 'keyword_add']
+    assert keyword_adds, "expected keyword_add pending change"
+    assert all(c['value'] == 'juvenile' for c in keyword_adds), \
+        f"expected normalized label, got {[c['value'] for c in keyword_adds]}"
+
+    history = db.get_edit_history()
+    assert len(history) == 1
+    assert 'juvenile' in history[0]['description']
+    assert '‘' not in history[0]['description']
+
+
 def test_encounter_species_records_history(app_and_db):
     """Confirming encounter species records keyword_add in edit history."""
     app, db = app_and_db

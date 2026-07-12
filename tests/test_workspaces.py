@@ -1259,6 +1259,521 @@ def test_merge_duplicate_keywords_preserves_differently_typed_children(db):
     assert genre_tags == {m_genre}
 
 
+def test_add_keyword_normalizes_stray_edge_quotes(db):
+    """New keywords should not preserve accidental leading/trailing quote marks."""
+    keyword_id = db.add_keyword("‘apapane'")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    assert db.add_keyword("apapane") == keyword_id
+
+
+def test_add_keyword_preserves_leading_okina(db):
+    """Modifier-letter okinas (U+02BB/U+02BC) are letters inside legitimate
+    species names like ʻApapane and must not be stripped."""
+    for name in ("ʻApapane", "ʼHawaiʻi", "ʻIʻiwi"):
+        keyword_id = db.add_keyword(name)
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+        assert row["name"] == name, (
+            f"okina stripped from {name!r} -> {row['name']!r}"
+        )
+
+
+def test_add_keyword_normalizes_acute_accent_edge_variant(db):
+    """U+00B4 (ACUTE ACCENT) NFKC-decomposes to U+0020 U+0301, so unless it
+    is stripped before NFKC runs, ``´apapane`` normalizes to a
+    stranded leading combining acute (`́apapane`) that survives the
+    post-NFKC strip and creates a nearly-invisible distinct keyword."""
+    kid = db.add_keyword("´apapane")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    assert db.add_keyword("apapane") == kid
+
+
+def test_add_keyword_normalizes_acute_accent_with_leading_whitespace(db):
+    """When an imported/synced XMP keyword has whitespace before U+00B4
+    (e.g. `` ´apapane`` from an XMP element with pretty-printed text),
+    the pre-NFKC edge-quote strip must still see the acute. Otherwise
+    NFKC decomposes it to a leading combining mark U+0301 that survives
+    the later strip and produces a nearly-invisible variant."""
+    kid = db.add_keyword(" ´apapane")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    assert db.add_keyword("apapane") == kid
+
+
+def test_add_keyword_preserves_internal_acute_accent(db):
+    """U+00B4 should be stripped only at the edges, not inside a keyword."""
+    keyword_id = db.add_keyword("O´Brien")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "O´Brien"
+
+
+def test_add_keyword_preserves_private_use_area_character(db):
+    """U+E000 is a valid Private Use Area code point that users may include
+    in a keyword. Prior implementations reserved it as an internal sentinel
+    for U+00B4 protection, which meant a lone U+E000 in the input round-tripped
+    as U+00B4 (data corruption)."""
+    keyword_id = db.add_keyword("a\ue000b")
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "a\ue000b"
+
+    # A lone U+E000 keyword should also survive intact (no accidental
+    # substitution to U+00B4 by the sentinel round-trip).
+    keyword_id = db.add_keyword("\ue000")
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "\ue000"
+
+
+def test_add_keyword_rejects_name_that_normalizes_to_empty(db):
+    """Input like `'` or `\"\"` is non-empty as raw text but normalizes to '',
+    which would otherwise insert an invisible keyword row."""
+    for empty in ("'", '"', "‘", "“”", "'\"'"):
+        try:
+            db.add_keyword(empty)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"expected ValueError for name={empty!r}, none raised"
+            )
+    # No rows should have been inserted from the failed attempts.
+    assert (
+        db.conn.execute("SELECT COUNT(*) FROM keywords WHERE name = ''").fetchone()[0]
+        == 0
+    )
+
+
+def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
+    """When keyword rename/dedupe collapses a legacy variant into the clean
+    spelling, any still-unsynced ``keyword_add``/``keyword_remove`` queued
+    under the source name must be rewritten to the destination name so the
+    next XMP sync writes/removes the canonical text instead of leaking the
+    stray-quote spelling back into the sidecar.
+
+    Pending rows are seeded with raw INSERTs: ``queue_change`` now
+    normalizes keyword values at write time, so legacy spellings can only
+    exist as pre-normalization rows — exactly what the merge rewrite is
+    there to clean up."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('apapane')")
+    db.conn.commit()
+    quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
+    ).fetchone()[0]
+    clean = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'apapane'"
+    ).fetchone()[0]
+    db.tag_photo(pid_a, quoted)
+    db.tag_photo(pid_b, clean)
+
+    # Seed an unsynced keyword_add under the legacy spelling. Simulates a
+    # tag applied before this normalization pass landed.
+    # Also seed a duplicate under the destination name so we exercise the
+    # dedupe branch (the merge must drop the source row without producing
+    # two identical pending entries).
+    for token, pid, value in (
+        ("tok-a-legacy", pid_a, "‘apapane"),
+        ("tok-b-clean", pid_b, "apapane"),
+        ("tok-b-legacy", pid_b, "‘apapane"),
+    ):
+        db.conn.execute(
+            """INSERT INTO pending_changes
+                  (photo_id, change_type, value, change_token, workspace_id)
+               VALUES (?, 'keyword_add', ?, ?, ?)""",
+            (pid, value, token, ws),
+        )
+    db.conn.commit()
+
+    db.merge_duplicate_keywords()
+
+    add_values = sorted(
+        (row["photo_id"], row["value"]) for row in db.conn.execute(
+            """SELECT photo_id, value FROM pending_changes
+               WHERE change_type = 'keyword_add'"""
+        ).fetchall()
+    )
+    assert add_values == [(pid_a, "apapane"), (pid_b, "apapane")]
+
+
+def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
+    """Cleanup should collapse existing edge-quote variants to a clean spelling."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('apapane')")
+    db.conn.commit()
+    quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
+    ).fetchone()[0]
+    clean = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'apapane'"
+    ).fetchone()[0]
+    db.tag_photo(pid_a, quoted)
+    db.tag_photo(pid_b, clean)
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 1
+    rows = db.conn.execute(
+        "SELECT id, name FROM keywords WHERE name LIKE '%apapane'"
+    ).fetchall()
+    assert [(row["id"], row["name"]) for row in rows] == [(clean, "apapane")]
+    tagged = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id IN (?, ?)",
+            (pid_a, pid_b),
+        ).fetchall()
+    }
+    assert tagged == {clean}
+
+
+def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename(db):
+    """When cleanup canonicalizes the surviving keyword row from a legacy
+    spelling to a clean one, ``species_highlights``, ``photo_preferences``,
+    and ``species_representatives`` rows keyed on the legacy string must
+    follow. Otherwise a highlighted or life-list representative photo under
+    the kept spelling silently drops out of the eligible/highlight queries
+    (which compare ``sh.species``/``sr.species`` exact against ``k.name``)
+    even though the tag itself was retained.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Legacy variant is the only surviving row (no clean sibling), so
+    # ``_normalize_keyword_row_name`` rewrites its ``name`` in place.
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("'apapane",))
+    db.conn.commit()
+    quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
+    ).fetchone()[0]
+    ascii_variant = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("'apapane",)
+    ).fetchone()[0]
+    db.tag_photo(pid_a, quoted)
+    db.tag_photo(pid_b, ascii_variant)
+
+    # Seed curation under the legacy spelling on both variants: a
+    # highlight rank, a life-list preference, and a global representative
+    # pick. The keep_id will end up being one of these rows and must
+    # carry its curation with it when the name is canonicalized.
+    db.conn.execute(
+        """INSERT INTO species_highlights
+              (workspace_id, species, photo_id, rank,
+               created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws, "‘apapane", pid_a),
+    )
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+              (workspace_id, purpose, species, photo_id,
+               created_at, updated_at)
+           VALUES (?, 'representative', ?, ?, datetime('now'), datetime('now'))""",
+        (ws, "‘apapane", pid_a),
+    )
+    db.conn.execute(
+        """INSERT INTO species_representatives
+              (species, photo_id, selected_order,
+               created_at, updated_at)
+           VALUES (?, ?, 1, datetime('now'), datetime('now'))""",
+        ("‘apapane", pid_a),
+    )
+    db.conn.commit()
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 1
+    # Surviving keyword row was canonicalized to the clean spelling.
+    remaining = db.conn.execute(
+        "SELECT name FROM keywords WHERE name LIKE '%apapane'"
+    ).fetchall()
+    assert [row["name"] for row in remaining] == ["apapane"]
+
+    # All three curation tables must now key the row on the clean
+    # spelling — no rows left under the legacy spelling, and each
+    # migrated entry preserved its photo association.
+    hl = db.conn.execute(
+        "SELECT species, photo_id FROM species_highlights"
+    ).fetchall()
+    assert [(row["species"], row["photo_id"]) for row in hl] == [
+        ("apapane", pid_a),
+    ]
+    pref = db.conn.execute(
+        "SELECT species, purpose, photo_id FROM photo_preferences"
+    ).fetchall()
+    assert [(row["species"], row["purpose"], row["photo_id"]) for row in pref] == [
+        ("apapane", "representative", pid_a),
+    ]
+    rep = db.conn.execute(
+        "SELECT species, photo_id FROM species_representatives"
+    ).fetchall()
+    assert [(row["species"], row["photo_id"]) for row in rep] == [
+        ("apapane", pid_a),
+    ]
+
+
+def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
+    """When one workspace runs keyword cleanup, curation rows keyed on the
+    legacy spelling in a DIFFERENT workspace whose photos are not tagged with
+    the merged/canonicalized keyword must NOT be rewritten. A separate legacy
+    keyword row can carry the same species string across workspaces, and a
+    global rename by species text would silently retarget the second
+    workspace's highlights/preferences onto a canonical name it has no tag
+    for — the eligible highlight/preference queries JOIN back to
+    ``keywords.name`` exactly, so those rows would then drop out of the UI
+    even though the tag itself is still present.
+
+    Pending rows are seeded with raw INSERTs: ``queue_change`` now
+    normalizes keyword values at write time, so legacy spellings only
+    exist as pre-normalization rows.
+    """
+    # Workspace A owns folder A with the duplicate keyword rows to clean up.
+    ws_a = db.create_workspace("A")
+    fid_a = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws_a, fid_a)
+    pid_a = db.add_photo(folder_id=fid_a, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    # Workspace B owns a separate folder and has its own legacy keyword row
+    # that is NOT part of workspace A's cleanup scope.
+    ws_b = db.create_workspace("B")
+    fid_b = db.add_folder("/photos/b", name="b")
+    db.add_workspace_folder(ws_b, fid_b)
+    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+
+    # Two normalized-equal legacy rows in workspace A -- cleanup will merge
+    # them and canonicalize the survivor's spelling.
+    db.set_active_workspace(ws_a)
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("'apapane",))
+    db.conn.commit()
+    a_quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
+    ).fetchone()[0]
+    a_ascii = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("'apapane",)
+    ).fetchone()[0]
+    db.tag_photo(pid_a, a_quoted)
+    db.tag_photo(pid_a, a_ascii)
+
+    # A SEPARATE legacy keyword row that is only tagged in workspace B. Cleanup
+    # in A must not touch it -- keywords are global but B's photo is not
+    # tagged with either of A's duplicate rows, so curation and pending
+    # changes referencing this independent row must survive untouched.
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
+    db.conn.commit()
+    b_quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ? ORDER BY id DESC LIMIT 1",
+        ("‘apapane",),
+    ).fetchone()[0]
+    assert b_quoted not in (a_quoted, a_ascii)
+    db.tag_photo(pid_b, b_quoted)
+
+    # Seed curation in BOTH workspaces under the legacy spelling and a
+    # pending keyword_add in each workspace.
+    db.conn.execute(
+        """INSERT INTO species_highlights
+              (workspace_id, species, photo_id, rank,
+               created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws_a, "‘apapane", pid_a),
+    )
+    db.conn.execute(
+        """INSERT INTO species_highlights
+              (workspace_id, species, photo_id, rank,
+               created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws_b, "‘apapane", pid_b),
+    )
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+              (workspace_id, purpose, species, photo_id,
+               created_at, updated_at)
+           VALUES (?, 'life_list', ?, ?, datetime('now'), datetime('now'))""",
+        (ws_b, "‘apapane", pid_b),
+    )
+    for token, pid, ws in (
+        ("tok-a-legacy", pid_a, ws_a),
+        ("tok-b-legacy", pid_b, ws_b),
+    ):
+        db.conn.execute(
+            """INSERT INTO pending_changes
+                  (photo_id, change_type, value, change_token, workspace_id)
+               VALUES (?, 'keyword_add', ?, ?, ?)""",
+            (pid, "‘apapane", token, ws),
+        )
+    db.conn.commit()
+
+    db.merge_duplicate_keywords()
+
+    # Workspace A's curation and pending change should be canonicalized.
+    a_hl = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE workspace_id = ?",
+        (ws_a,),
+    ).fetchone()
+    assert a_hl["species"] == "apapane"
+    a_pending = db.conn.execute(
+        """SELECT value FROM pending_changes
+           WHERE photo_id = ? AND change_type = 'keyword_add'""",
+        (pid_a,),
+    ).fetchone()
+    assert a_pending["value"] == "apapane"
+
+    # Workspace B's curation and pending change must NOT be rewritten -- its
+    # keyword row is a separate row not touched by A's cleanup, and the
+    # eligible-highlight/preferences queries join by species text to that
+    # row's stored name.
+    b_hl = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE workspace_id = ?",
+        (ws_b,),
+    ).fetchone()
+    assert b_hl["species"] == "‘apapane"
+    b_pref = db.conn.execute(
+        "SELECT species FROM photo_preferences WHERE workspace_id = ?",
+        (ws_b,),
+    ).fetchone()
+    assert b_pref["species"] == "‘apapane"
+    b_pending = db.conn.execute(
+        """SELECT value FROM pending_changes
+           WHERE photo_id = ? AND change_type = 'keyword_add'""",
+        (pid_b,),
+    ).fetchone()
+    assert b_pending["value"] == "‘apapane"
+
+
+def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
+    """``keyword_match_key`` must use ``str.lower()``, not ``str.casefold()``.
+
+    ``str.casefold()`` folds ``ß`` to ``ss``, so ``"Maße".casefold() ==
+    "Masse".casefold() == "masse"``. If cleanup grouped on that key, it
+    would silently retag and delete one of two distinct German keywords
+    even though ``add_keyword()`` and the table constraints treat them as
+    distinct — a data-loss regression. Using ``str.lower()`` (which
+    leaves ``ß`` alone, matching SQLite's ASCII ``COLLATE NOCASE``) keeps
+    them as separate keywords.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    masse_id = db.add_keyword("Masse")
+    masze_id = db.add_keyword("Maße")
+    assert masse_id != masze_id
+    db.tag_photo(pid_a, masse_id)
+    db.tag_photo(pid_b, masze_id)
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 0
+    remaining = {
+        row["id"]: row["name"] for row in db.conn.execute(
+            "SELECT id, name FROM keywords WHERE id IN (?, ?)",
+            (masse_id, masze_id),
+        ).fetchall()
+    }
+    assert remaining == {masse_id: "Masse", masze_id: "Maße"}
+    tagged = {
+        (row["photo_id"], row["keyword_id"])
+        for row in db.conn.execute(
+            "SELECT photo_id, keyword_id FROM photo_keywords "
+            "WHERE photo_id IN (?, ?)",
+            (pid_a, pid_b),
+        ).fetchall()
+    }
+    assert tagged == {(pid_a, masse_id), (pid_b, masze_id)}
+
+
+def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
+    """``keyword_match_key`` must ignore non-ASCII case pairs.
+
+    ``"Éclair".lower() == "éclair"`` in Python, but SQLite's
+    ``LOWER()``/``COLLATE NOCASE`` used by ``add_keyword()`` is
+    ASCII-only and treats them as distinct. If cleanup grouped on
+    ``str.lower()``, the merge path would silently retag and delete one
+    of two distinct keywords that ``add_keyword()`` kept separate.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    upper_id = db.add_keyword("Éclair")
+    lower_id = db.add_keyword("éclair")
+    assert upper_id != lower_id
+    db.tag_photo(pid_a, upper_id)
+    db.tag_photo(pid_b, lower_id)
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 0
+    remaining = {
+        row["id"]: row["name"] for row in db.conn.execute(
+            "SELECT id, name FROM keywords WHERE id IN (?, ?)",
+            (upper_id, lower_id),
+        ).fetchall()
+    }
+    assert remaining == {upper_id: "Éclair", lower_id: "éclair"}
+    tagged = {
+        (row["photo_id"], row["keyword_id"])
+        for row in db.conn.execute(
+            "SELECT photo_id, keyword_id FROM photo_keywords "
+            "WHERE photo_id IN (?, ?)",
+            (pid_a, pid_b),
+        ).fetchall()
+    }
+    assert tagged == {(pid_a, upper_id), (pid_b, lower_id)}
+
+
 def test_empty_workspace_labels_does_not_fallback_to_global(db):
     """An explicit empty active_labels [] should NOT fall back to global labels."""
     ws = db.create_workspace("Empty Labels")

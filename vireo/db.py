@@ -10,6 +10,7 @@ import unicodedata
 import uuid
 from datetime import datetime
 
+from keyword_normalization import keyword_match_key, normalize_keyword_display
 from new_images import get_shared_cache
 
 log = logging.getLogger(__name__)
@@ -494,6 +495,17 @@ class Database:
         # Idempotent, one-shot: seed globally shared species representatives
         # from the older per-workspace single-preference rows.
         self.backfill_species_representatives_from_legacy_preferences()
+        # One-shot keyword-name normalization backfill. keywords.name,
+        # pending sidecar change values, and species curation rows
+        # historically stored names verbatim, so imports could seed
+        # edge-quote variants like `‘apapane` alongside `apapane`.
+        # add_keyword / update_keyword / queue_change now normalize on
+        # write; this brings pre-existing rows onto the same invariant so
+        # runtime code never guards against stored variants. Gated by
+        # db_meta rather than PRAGMA user_version: unmerged branch builds
+        # have already advanced some live DBs past the next free version
+        # number, which would silently skip a version-gated migration.
+        self.normalize_keyword_data()
         self._restore_active_workspace()
 
     def _restore_active_workspace(self):
@@ -8457,6 +8469,19 @@ class Database:
         """
         if kw_type is not None and kw_type not in KEYWORD_TYPES:
             raise ValueError(f"invalid keyword type: {kw_type!r}")
+        # Normalization choke point: every keywords.name write funnels
+        # through here (or update_keyword / _upsert_one_keyword), and the
+        # v5 migration normalized all pre-existing rows, so stored names
+        # are always in normalize_keyword_display() form and the plain
+        # COLLATE NOCASE dedupe below is sufficient.
+        name = normalize_keyword_display(name)
+        # Reject names that normalize to empty. Input like `"'"` is
+        # non-empty before normalization (so the API boundary's `if not
+        # name` guard passes), but the strip turns it into `""`. Without
+        # this check, we would insert an invisible keyword row that could
+        # still be tagged, synced to XMP, and reported in duplicate cleanup.
+        if not name:
+            raise ValueError("keyword name is empty after normalization")
         # Reconcile is_species and kw_type to keep the legacy column coherent
         # with the type enum.
         if is_species and kw_type is not None and kw_type != 'taxonomy':
@@ -8640,6 +8665,9 @@ class Database:
         row that our narrow SELECT somehow missed, we defensively return its
         id.
         """
+        name = normalize_keyword_display(name)
+        if not name:
+            raise ValueError("keyword name is empty after normalization")
         if place_id is not None:
             insert_sql = (
                 "INSERT INTO keywords "
@@ -9163,10 +9191,10 @@ class Database:
             )
 
     def merge_duplicate_keywords(self):
-        """Find and merge case-insensitive duplicate keywords in active workspace.
+        """Find and merge normalized duplicate keywords in active workspace.
 
-        Duplicates are grouped by (LOWER(name), parent_id, type) — name alone
-        is not identity: the location system deliberately creates same-name
+        Duplicates are grouped by (normalized name, parent_id, type) — name
+        alone is not identity: the location system deliberately creates same-name
         keywords under different parents (Springfield under Illinois vs.
         Missouri), and same-name keywords of different types (species vs.
         genre) are distinct by design. Merging across those slots retags
@@ -9205,7 +9233,7 @@ class Database:
         """Convergence loop for merge_duplicate_keywords. Caller commits."""
         total_merged = 0
         while True:
-            dupes = self.conn.execute(
+            rows = self.conn.execute(
                 """WITH RECURSIVE
                    tagged AS (
                        SELECT DISTINCT pk.keyword_id AS id
@@ -9222,20 +9250,36 @@ class Database:
                        JOIN in_scope s ON s.id = k.id
                        WHERE k.parent_id IS NOT NULL
                    )
-                   SELECT MIN(k.id) as keep_id,
-                          GROUP_CONCAT(k.id) as all_ids
+                   SELECT k.id, k.name, k.parent_id, k.type
                    FROM keywords k
-                   JOIN in_scope s ON s.id = k.id
-                   GROUP BY LOWER(k.name), k.parent_id, k.type
-                   HAVING COUNT(k.id) > 1""",
+                   JOIN in_scope s ON s.id = k.id""",
                 (ws,),
             ).fetchall()
+            grouped = {}
+            for row in rows:
+                key = keyword_match_key(row["name"])
+                if not key:
+                    continue
+                grouped.setdefault((key, row["parent_id"], row["type"]), []).append(row)
+            dupes = [
+                group for group in grouped.values()
+                if len({row["id"] for row in group}) > 1
+            ]
             if not dupes:
                 break
 
-            for d in dupes:
-                keep_id = d["keep_id"]
-                all_ids = [int(x) for x in d["all_ids"].split(",")]
+            for group in dupes:
+                # Prefer an already-clean spelling when one exists; otherwise
+                # keep the earliest row to preserve the old case-only behavior.
+                ordered = sorted(
+                    group,
+                    key=lambda row: (
+                        normalize_keyword_display(row["name"]) != row["name"],
+                        row["id"],
+                    ),
+                )
+                keep_id = ordered[0]["id"]
+                all_ids = [row["id"] for row in ordered]
 
                 # A prior group in this pass can recursively delete ids
                 # from later groups: merging duplicate parents cascades
@@ -9256,10 +9300,358 @@ class Database:
                     continue
                 remove_ids = [x for x in all_ids if x != keep_id and x in alive]
 
+                self._normalize_keyword_row_name(keep_id)
                 for rid in remove_ids:
                     total_merged += self._merge_keyword_into(rid, keep_id)
 
         return total_merged
+
+    def _normalize_keyword_row_name(self, keyword_id):
+        """Trim stray edge punctuation from a surviving keyword row name.
+
+        Post-migration, stored names are already normalized, so this is a
+        no-op in the common case — it exists so the duplicate-cleanup and
+        migration paths can canonicalize a survivor whose spelling predates
+        normalization, keeping every dependent name string (pending sidecar
+        changes, species curation snapshots) in lockstep with the row.
+
+        Retargeting of pending changes and species curation rows is scoped
+        to photos that actually carry ``keyword_id`` (and, for pending
+        changes, the workspaces those (photo, keyword) tags belong to), so
+        a separate same-spelling keyword row elsewhere in the DB is never
+        rewritten by side effect.
+        """
+        row = self.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+        if row is None:
+            return
+        old_name = row["name"]
+        cleaned = normalize_keyword_display(old_name)
+        if not cleaned or cleaned == old_name:
+            return
+        # Collect (photo_id, workspace_id) for photos actually tagged with
+        # this keyword row, scoped through workspace_folders. Captured
+        # before the keywords UPDATE so a downstream _merge_keyword_into
+        # still sees the same tags via photo_keywords.
+        tag_rows = self.conn.execute(
+            """SELECT DISTINCT pk.photo_id, wf.workspace_id
+               FROM photo_keywords pk
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE pk.keyword_id = ?""",
+            (keyword_id,),
+        ).fetchall()
+        photo_workspace_pairs = [
+            (r["photo_id"], r["workspace_id"]) for r in tag_rows
+        ]
+        affected_photo_ids = sorted({r["photo_id"] for r in tag_rows})
+        # A same-name row in a different dedupe boundary (another type at
+        # the same parent) can still occupy the table-level
+        # UNIQUE(name, parent_id) slot. The links still merge correctly;
+        # keep the stored spelling unchanged in that case.
+        try:
+            self.conn.execute(
+                "UPDATE keywords SET name = ? WHERE id = ?", (cleaned, keyword_id)
+            )
+        except sqlite3.IntegrityError:
+            return
+        # Retarget pending keyword_add/keyword_remove rows queued under the
+        # pre-canonical spelling so a still-unsynced sidecar write can't
+        # leak the legacy variant after the DB row was rewritten. A pending
+        # row that would collide with an existing (photo_id, change_type,
+        # cleaned) row is dropped rather than duplicated, matching
+        # queue_change's dedupe contract.
+        if affected_photo_ids:
+            for chunk in _chunks(affected_photo_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"""DELETE FROM pending_changes
+                        WHERE change_type IN ('keyword_add', 'keyword_remove')
+                          AND value = ?
+                          AND photo_id IN ({placeholders})
+                          AND EXISTS (
+                              SELECT 1 FROM pending_changes pc2
+                              WHERE pc2.photo_id = pending_changes.photo_id
+                                AND pc2.change_type = pending_changes.change_type
+                                AND pc2.value = ?
+                                AND COALESCE(pc2.workspace_id, -1)
+                                    = COALESCE(pending_changes.workspace_id, -1)
+                          )""",
+                    [old_name, *chunk, cleaned],
+                )
+                self.conn.execute(
+                    f"""UPDATE pending_changes
+                        SET value = ?
+                        WHERE change_type IN ('keyword_add', 'keyword_remove')
+                          AND value = ?
+                          AND photo_id IN ({placeholders})""",
+                    [cleaned, old_name, *chunk],
+                )
+        # Species curation tables key rows by the species name string, which
+        # is compared exact against ``keywords.name``. Now that the UPDATE
+        # above rewrote this row to the canonical spelling, rows still keyed
+        # on the legacy spelling would drop out of the highlight/life-list
+        # queries even though the tag was retained. Rename them for the same
+        # old→clean mapping, scoped to the tagged (photo, workspace) pairs.
+        # ``rename_photo_preferences_species`` also retargets
+        # ``species_representatives`` in its scoped branch, so a separate
+        # representatives rename isn't needed here.
+        if photo_workspace_pairs:
+            self.rename_species_highlights_species(
+                old_name, cleaned,
+                photo_workspace_pairs=photo_workspace_pairs, _commit=False,
+            )
+            self.rename_photo_preferences_species(
+                old_name, cleaned,
+                photo_workspace_pairs=photo_workspace_pairs, _commit=False,
+            )
+
+    def normalize_keyword_data(self):
+        """One-shot, db_meta-gated wrapper around the normalization backfill.
+
+        Runs at most once per database (``db_meta['keyword_names_normalized']``).
+        All-or-nothing: an exception rolls the whole sweep back — including
+        the marker — so a failed run retries on the next open instead of
+        leaving a half-normalized keyword table.
+        """
+        if self.get_meta("keyword_names_normalized") == "1":
+            return
+        try:
+            self._normalize_keyword_data_once()
+            self.set_meta("keyword_names_normalized", "1", _commit=False)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _normalize_keyword_data_once(self):
+        """One-shot backfill: normalize every stored keyword/species name.
+
+        Historically, keyword names were stored verbatim, so sidecars and
+        imports could seed edge-quote variants like ``‘apapane`` alongside
+        ``apapane``. After this runs — and with add_keyword /
+        update_keyword / queue_change normalizing on write — the DB only
+        ever contains ``normalize_keyword_display()`` spellings, so runtime
+        code never needs per-call-site legacy-variant guards. Caller
+        (normalize_keyword_data) commits.
+        """
+        # Keyword rows whose name normalizes to empty are pure stray
+        # punctuation (e.g. a keyword literally named "'"). There is no
+        # canonical spelling to merge into, so reparent children up, drop
+        # tags, and delete the row.
+        dropped_empty = 0
+        for row in self.conn.execute(
+            "SELECT id, name FROM keywords"
+        ).fetchall():
+            if keyword_match_key(row["name"]):
+                continue
+            # Re-read the parent: an earlier empty row in this loop may have
+            # been this row's parent and already reparented it upward.
+            cur_row = self.conn.execute(
+                "SELECT parent_id FROM keywords WHERE id = ?", (row["id"],)
+            ).fetchone()
+            if cur_row is None:
+                continue
+            parent_id = cur_row["parent_id"]
+            children = self.conn.execute(
+                "SELECT id, name, type FROM keywords WHERE parent_id = ?",
+                (row["id"],),
+            ).fetchall()
+            for child in children:
+                try:
+                    self.conn.execute(
+                        "UPDATE keywords SET parent_id = ? WHERE id = ?",
+                        (parent_id, child["id"]),
+                    )
+                except sqlite3.IntegrityError:
+                    existing = self.conn.execute(
+                        "SELECT id, type FROM keywords "
+                        "WHERE parent_id = ? AND name = ?",
+                        (parent_id, child["name"]),
+                    ).fetchone()
+                    if existing and existing["type"] == child["type"]:
+                        self._merge_keyword_into(child["id"], existing["id"])
+                    else:
+                        # Same name + parent but different type: outside the
+                        # (name, parent_id, type) dedup boundary, preserve
+                        # both (mirrors _merge_keyword_into's child handling).
+                        self.conn.execute(
+                            "UPDATE keywords SET parent_id = ?, name = ? "
+                            "WHERE id = ?",
+                            (parent_id, f"{child['name']} (id-{child['id']})",
+                             child["id"]),
+                        )
+            self.conn.execute(
+                "DELETE FROM photo_keywords WHERE keyword_id = ?", (row["id"],)
+            )
+            self.conn.execute("DELETE FROM keywords WHERE id = ?", (row["id"],))
+            dropped_empty += 1
+
+        # Merge rows that collapse to the same normalized identity. Global
+        # (all workspaces), grouped by (normalized key, parent_id):
+        # same-type rows merge; 'general' rows fold into the
+        # highest-priority specific-typed peer (mirrors add_keyword's
+        # promotion); rows of two different specific types are distinct by
+        # design and stay separate. Convergence loop because merging
+        # duplicate parents makes their children same-slot duplicates.
+        type_priority = {
+            "taxonomy": 0, "genre": 1, "individual": 2, "location": 3,
+            "general": 4,
+        }
+        merged = 0
+        while True:
+            grouped = {}
+            for row in self.conn.execute(
+                "SELECT id, name, parent_id, type FROM keywords"
+            ).fetchall():
+                key = keyword_match_key(row["name"])
+                if not key:
+                    continue
+                grouped.setdefault((key, row["parent_id"]), []).append(row)
+            made_progress = False
+            for group in grouped.values():
+                if len(group) < 2:
+                    continue
+                specific_types = sorted(
+                    {r["type"] for r in group if r["type"] != "general"},
+                    key=lambda t: type_priority.get(t, 9),
+                )
+                generals = [r for r in group if r["type"] == "general"]
+                if specific_types:
+                    subgroups = [
+                        [r for r in group if r["type"] == t]
+                        for t in specific_types
+                    ]
+                    subgroups[0] += generals
+                else:
+                    subgroups = [generals]
+                for members in subgroups:
+                    if len(members) < 2:
+                        continue
+                    # Survivor: highest-priority type first (so the merged
+                    # row keeps its deliberate type), then an already-clean
+                    # spelling, then the earliest id.
+                    ordered = sorted(
+                        members,
+                        key=lambda r: (
+                            type_priority.get(r["type"], 9),
+                            normalize_keyword_display(r["name"]) != r["name"],
+                            r["id"],
+                        ),
+                    )
+                    keep_id = ordered[0]["id"]
+                    ids = [r["id"] for r in ordered]
+                    # A prior merge in this pass can cascade-delete ids from
+                    # later groups (children merging under merged parents).
+                    placeholders = ",".join("?" * len(ids))
+                    alive = {
+                        r["id"] for r in self.conn.execute(
+                            f"SELECT id FROM keywords WHERE id IN ({placeholders})",
+                            ids,
+                        )
+                    }
+                    if keep_id not in alive:
+                        continue
+                    for rid in ids:
+                        if rid == keep_id or rid not in alive:
+                            continue
+                        merged += self._merge_keyword_into(rid, keep_id)
+                        made_progress = True
+            if not made_progress:
+                break
+
+        # Rewrite the surviving variant spellings (also retargets each
+        # row's scoped pending changes and curation snapshots).
+        renamed = 0
+        leftovers = []
+        for row in self.conn.execute("SELECT id, name FROM keywords").fetchall():
+            clean = normalize_keyword_display(row["name"])
+            if not clean or clean == row["name"]:
+                continue
+            self._normalize_keyword_row_name(row["id"])
+            after = self.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (row["id"],)
+            ).fetchone()
+            if after and after["name"] == clean:
+                renamed += 1
+            else:
+                leftovers.append(row["name"])
+        if leftovers:
+            log.warning(
+                "keyword normalization migration: %d name(s) kept their "
+                "stored spelling because a different-type keyword already "
+                "uses the normalized form under the same parent: %s",
+                len(leftovers), ", ".join(repr(n) for n in leftovers[:10]),
+            )
+
+        # Pending sidecar changes: the queued value is written verbatim to
+        # XMP, so normalize globally (the scoped rewrites above only cover
+        # values tied to a surviving keyword row's tags).
+        pending_fixed = 0
+        for row in self.conn.execute(
+            "SELECT id, photo_id, change_type, value, workspace_id "
+            "FROM pending_changes "
+            "WHERE change_type IN ('keyword_add', 'keyword_remove')"
+        ).fetchall():
+            clean = normalize_keyword_display(row["value"] or "")
+            if clean == (row["value"] or ""):
+                continue
+            dup = None
+            if clean:
+                dup = self.conn.execute(
+                    "SELECT id FROM pending_changes "
+                    "WHERE photo_id = ? AND change_type = ? AND value = ? "
+                    "AND COALESCE(workspace_id, -1) = COALESCE(?, -1) "
+                    "AND id != ?",
+                    (row["photo_id"], row["change_type"], clean,
+                     row["workspace_id"], row["id"]),
+                ).fetchone()
+            if clean and dup is None:
+                self.conn.execute(
+                    "UPDATE pending_changes SET value = ? WHERE id = ?",
+                    (clean, row["id"]),
+                )
+            else:
+                self.conn.execute(
+                    "DELETE FROM pending_changes WHERE id = ?", (row["id"],)
+                )
+            pending_fixed += 1
+
+        # Species curation snapshots key rows by name string and are
+        # compared exact against keywords.name. Route leftovers through the
+        # existing rename methods (which rebucket highlight ranks and drop
+        # duplicates), then clear any old-spelling stragglers the rename
+        # skipped as duplicates.
+        curation_fixed = 0
+        for table, rename in (
+            ("photo_preferences", self.rename_photo_preferences_species),
+            ("species_representatives",
+             self.rename_species_representatives_species),
+            ("species_highlights", self.rename_species_highlights_species),
+        ):
+            names = [
+                r["species"] for r in self.conn.execute(
+                    f"SELECT DISTINCT species FROM {table}"
+                ).fetchall()
+            ]
+            for old in names:
+                clean = normalize_keyword_display(old or "")
+                if clean == (old or ""):
+                    continue
+                if clean:
+                    curation_fixed += rename(old, clean, _commit=False) or 0
+                self.conn.execute(
+                    f"DELETE FROM {table} WHERE species = ?", (old,)
+                )
+
+        if dropped_empty or merged or renamed or pending_fixed or curation_fixed:
+            log.info(
+                "keyword normalization migration: dropped %d empty-name "
+                "keyword(s), merged %d duplicate row(s), renamed %d, "
+                "rewrote %d pending change(s), moved %d curation row(s)",
+                dropped_empty, merged, renamed, pending_fixed, curation_fixed,
+            )
 
     def _merge_keyword_into(self, src_id, dst_id):
         """Merge keyword ``src_id`` into ``dst_id`` and delete the source.
@@ -9279,14 +9671,24 @@ class Database:
         Non-link metadata (is_species, coordinates, taxon_id) folds into
         the destination when it lacks its own, so deleting the source can't
         silently drop species/location info that only the duplicate carried.
+
+        Rewrites pending_changes so an unsynced keyword_add/keyword_remove
+        queued under the source spelling points at the surviving name after
+        the merge. Without this, the merge deletes the source row but leaves
+        the pending change referring to the old spelling, so the next
+        ``sync_to_xmp`` writes a keyword the DB no longer has.
+
         Returns the number of keyword rows merged away (>= 1). Caller
         commits.
         """
         merged = 1
         src = self.conn.execute(
-            "SELECT is_species, latitude, longitude, taxon_id "
+            "SELECT name, is_species, latitude, longitude, taxon_id "
             "FROM keywords WHERE id = ?",
             (src_id,),
+        ).fetchone()
+        dst = self.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (dst_id,),
         ).fetchone()
         if src is not None:
             self.conn.execute(
@@ -9299,6 +9701,50 @@ class Database:
                 (src["is_species"], src["latitude"], src["longitude"],
                  src["taxon_id"], dst_id),
             )
+        # Retarget pending keyword_add/keyword_remove rows queued under the
+        # source name onto the destination name. A pending row that would
+        # collide with an existing (photo_id, change_type, dst_name) row is
+        # dropped rather than duplicated — matches the dedupe contract
+        # queue_change enforces. Scope the rewrite to photos actually tagged
+        # with either row: a value-only rewrite would otherwise affect every
+        # workspace whose pending_changes carry the same name string for a
+        # keyword row that was not merged. Captured before the
+        # photo_keywords UPDATE below so the query still sees the src tags.
+        if src is not None and dst is not None:
+            src_name = src["name"]
+            dst_name = dst["name"]
+            if src_name and dst_name and src_name != dst_name:
+                affected_pcx = [
+                    r["photo_id"] for r in self.conn.execute(
+                        "SELECT DISTINCT photo_id FROM photo_keywords WHERE keyword_id IN (?, ?)",
+                        (src_id, dst_id),
+                    ).fetchall()
+                ]
+                for chunk in _chunks(affected_pcx):
+                    placeholders = ",".join("?" for _ in chunk)
+                    self.conn.execute(
+                        f"""DELETE FROM pending_changes
+                            WHERE change_type IN ('keyword_add', 'keyword_remove')
+                              AND value = ?
+                              AND photo_id IN ({placeholders})
+                              AND EXISTS (
+                                  SELECT 1 FROM pending_changes pc2
+                                  WHERE pc2.photo_id = pending_changes.photo_id
+                                    AND pc2.change_type = pending_changes.change_type
+                                    AND pc2.value = ?
+                                    AND COALESCE(pc2.workspace_id, -1)
+                                        = COALESCE(pending_changes.workspace_id, -1)
+                              )""",
+                        [src_name, *chunk, dst_name],
+                    )
+                    self.conn.execute(
+                        f"""UPDATE pending_changes
+                            SET value = ?
+                            WHERE change_type IN ('keyword_add', 'keyword_remove')
+                              AND value = ?
+                              AND photo_id IN ({placeholders})""",
+                        [dst_name, src_name, *chunk],
+                    )
         # Move photo associations (ignore if already exists for dst_id),
         # then drop the leftovers.
         self.conn.execute(
@@ -10609,52 +11055,140 @@ class Database:
         allowed = {'type', 'taxon_id', 'latitude', 'longitude', 'name'}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
-            return
+            return keyword_id
 
-        # Auto-retype on rename: same logic as add_keyword. Only fires
-        # on an actual name change so idempotent PUT-style updates
-        # (client re-sending the existing name) don't unexpectedly
-        # reclassify a 'general' keyword once the taxa table is
-        # populated.
+        # Normalize the rename target with the same rules add_keyword
+        # applies on insert, so PUT /api/keywords/<id> can't sneak stray
+        # edge quotes or an empty-after-normalization string into a row
+        # that add_keyword would have rejected/deduped.
         if 'name' in updates:
-            new_name = updates['name']
+            updates['name'] = normalize_keyword_display(updates['name'])
+            if not updates['name']:
+                raise ValueError("keyword name is empty after normalization")
+
+        # On a rename or retype, resolve the effective (name, type) and, if
+        # they diverge from the stored row, look for a same-slot peer to
+        # merge into instead of writing a duplicate. The type-only case
+        # matters too: the Keywords type dropdown sends `{type: newType}`
+        # with no `name`, and retyping `general apapane` to `taxonomy`
+        # while a taxonomy `apapane` peer exists at the same (NULL) parent
+        # would otherwise leave two same-name taxonomy rows — NULL parents
+        # bypass UNIQUE(name, parent_id).
+        if 'name' in updates or 'type' in updates:
             current = self.conn.execute(
-                "SELECT name, type, taxon_id FROM keywords WHERE id = ?",
+                "SELECT name, type, taxon_id, parent_id FROM keywords WHERE id = ?",
                 (keyword_id,),
             ).fetchone()
-            if current is not None and new_name != current["name"]:
+            if current is not None:
+                parent_id = current["parent_id"]
                 cur_type = current["type"]
-                taxon_id = self._lookup_taxon_id_for_keyword(new_name)
+                new_name = updates.get('name', current['name'])
+                name_changed = new_name != current["name"]
+                # Resolve taxon match lazily: only a rename needs it (both
+                # for auto-promotion below and for the effective type when
+                # no explicit type is passed).
+                taxon_id = (
+                    self._lookup_taxon_id_for_keyword(new_name)
+                    if name_changed else None
+                )
+                # Peer lookup must use the EFFECTIVE type, not the pre-update
+                # row type: an explicit retype kwarg or the general→taxonomy
+                # auto-promotion below can move this row into a slot where a
+                # peer already lives.
+                effective_type = updates.get('type', cur_type)
+                if 'type' not in updates and cur_type == 'general' and taxon_id:
+                    effective_type = 'taxonomy'
+                type_changed = effective_type != cur_type
+                if name_changed or type_changed:
+                    # Merge into a same-slot same-type peer instead of
+                    # writing a duplicate. Without this, top-level renames
+                    # slip past UNIQUE(name, parent_id) — SQLite treats NULL
+                    # parents as distinct — silently producing two peer rows;
+                    # child renames raise IntegrityError from the UPDATE
+                    # below and surface as a 500. Restrict to same-type
+                    # peers: the dedup boundary elsewhere in this file is
+                    # (name, parent_id, type), so a rename onto a
+                    # different-type peer must NOT silently retag photos
+                    # across types.
+                    if parent_id is None:
+                        peer = self.conn.execute(
+                            "SELECT id FROM keywords "
+                            "WHERE name = ? COLLATE NOCASE "
+                            "AND parent_id IS NULL AND type = ? AND id != ? LIMIT 1",
+                            (new_name, effective_type, keyword_id),
+                        ).fetchone()
+                    else:
+                        peer = self.conn.execute(
+                            "SELECT id FROM keywords "
+                            "WHERE name = ? COLLATE NOCASE "
+                            "AND parent_id = ? AND type = ? AND id != ? LIMIT 1",
+                            (new_name, parent_id, effective_type, keyword_id),
+                        ).fetchone()
+                    if peer:
+                        # Return the surviving id so callers
+                        # (api_update_keyword) can retarget sidecar and
+                        # preferences bookkeeping onto the surviving row.
+                        self._merge_keyword_into(keyword_id, peer["id"])
+                        self.conn.commit()
+                        return peer["id"]
+                    # No same-type peer, but a DIFFERENT-type peer at the
+                    # same (name, parent_id) would hit the table-level
+                    # UNIQUE(name, parent_id) constraint at UPDATE time for
+                    # a non-NULL parent and surface as an uncaught
+                    # IntegrityError/500. Detect it here and raise
+                    # ValueError so api_update_keyword returns a documented
+                    # 400. For NULL parents a cross-type peer is allowed to
+                    # coexist (mirrors add_keyword).
+                    if parent_id is not None:
+                        cross = self.conn.execute(
+                            "SELECT id, type FROM keywords "
+                            "WHERE name = ? COLLATE NOCASE "
+                            "AND parent_id = ? AND id != ? LIMIT 1",
+                            (new_name, parent_id, keyword_id),
+                        ).fetchone()
+                        if cross is not None:
+                            raise ValueError(
+                                f"cannot rename to {new_name!r}: a "
+                                f"{cross['type']!r} keyword with that name "
+                                f"already exists under this parent"
+                            )
 
-                if cur_type == 'general':
-                    # Only promote to taxonomy if a match exists; otherwise
-                    # leave type/taxon_id alone.
-                    if taxon_id:
-                        updates.setdefault('type', 'taxonomy')
-                        # Gate taxon_id on the EFFECTIVE type so an
-                        # explicit non-taxonomy type kwarg (e.g.
-                        # type='location') doesn't end up with a
-                        # taxonomy link. Mirror add_keyword's invariant
-                        # for the auto-promoted case: type='taxonomy'
-                        # backed by a matched taxon implies is_species=1.
-                        if updates.get('type') == 'taxonomy':
-                            updates.setdefault('taxon_id', taxon_id)
-                            updates['is_species'] = 1
-                elif (cur_type == 'taxonomy' and taxon_id
-                      and updates.get('type', 'taxonomy') == 'taxonomy'):
-                    # Already taxonomy: refresh taxon_id only if the new
-                    # name matches a (possibly different) taxon AND the
-                    # effective type stays 'taxonomy' (caller may demote
-                    # to 'location' etc.). If no match, leave the existing
-                    # link in place.
-                    updates.setdefault('taxon_id', taxon_id)
-                # Other manual types ('location', 'people', etc.) are
-                # preserved — user intent wins.
+                # Auto-retype on rename: same logic as add_keyword. Only
+                # fires on an actual name change so idempotent PUT-style
+                # updates (client re-sending the existing name) don't
+                # unexpectedly reclassify a 'general' keyword once the taxa
+                # table is populated.
+                if name_changed:
+                    if cur_type == 'general':
+                        # Only promote to taxonomy if a match exists;
+                        # otherwise leave type/taxon_id alone.
+                        if taxon_id:
+                            updates.setdefault('type', 'taxonomy')
+                            # Gate taxon_id on the EFFECTIVE type so an
+                            # explicit non-taxonomy type kwarg (e.g.
+                            # type='location') doesn't end up with a
+                            # taxonomy link. Mirror add_keyword's invariant
+                            # for the auto-promoted case: type='taxonomy'
+                            # backed by a matched taxon implies is_species=1.
+                            if updates.get('type') == 'taxonomy':
+                                updates.setdefault('taxon_id', taxon_id)
+                                updates['is_species'] = 1
+                    elif (cur_type == 'taxonomy' and taxon_id
+                          and updates.get('type', 'taxonomy') == 'taxonomy'):
+                        # Already taxonomy: refresh taxon_id only if the new
+                        # name matches a (possibly different) taxon AND the
+                        # effective type stays 'taxonomy' (caller may demote
+                        # to 'location' etc.). If no match, leave the
+                        # existing link in place.
+                        updates.setdefault('taxon_id', taxon_id)
+                    # Other manual types ('location', 'people', etc.) are
+                    # preserved — user intent wins.
 
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [keyword_id]
         self.conn.execute(f"UPDATE keywords SET {set_clause} WHERE id = ?", values)
         self.conn.commit()
+        return keyword_id
 
     def get_all_keywords(self):
         """Return keywords used in the active workspace (plus ancestors) with photo counts, type, and taxon info."""
@@ -11641,6 +12175,18 @@ class Database:
                     pass
 
             kid = self.add_keyword(species, is_species=True, _commit=False)
+            # Re-read the stored keyword name so the queued sidecar changes,
+            # curation renames, and returned history payload all reflect the
+            # row actually tagged. add_keyword normalizes punctuation and
+            # applies the species casing convention, so the stored spelling
+            # can differ from the raw prediction label; using the raw value
+            # downstream would queue pending add/remove pairs that no longer
+            # cancel and write the un-normalized label to XMP.
+            stored = self.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored and stored["name"]:
+                species = stored["name"]
             # list of {"photo_id", "prediction_id", "old_species"}
             affected = []
 
@@ -12504,6 +13050,16 @@ class Database:
             _commit: If False, skip the internal commit (caller is responsible
                      for committing the transaction).
         """
+        # Normalization choke point for sidecar-bound keyword names: the
+        # queued value is written verbatim into XMP by sync_to_xmp, so a
+        # stray-quote variant here would leak into sidecars even though
+        # add_keyword stores the clean spelling. Normalizing in one place
+        # also keeps the (photo_id, change_type, value) dedupe below and
+        # the add/remove cancellation in app.py working on one spelling.
+        if change_type in ("keyword_add", "keyword_remove"):
+            value = normalize_keyword_display(value)
+            if not value:
+                return None
         ws_id = workspace_id if workspace_id is not None else self._ws_id()
         existing = self.conn.execute(
             "SELECT id FROM pending_changes WHERE photo_id = ? AND change_type = ? AND value = ? AND workspace_id = ?",

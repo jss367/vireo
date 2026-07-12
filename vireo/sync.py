@@ -4,6 +4,7 @@ import logging
 import os
 from collections import defaultdict
 
+from keyword_normalization import keyword_match_key
 from xmp import (
     read_keywords,
     remove_keywords,
@@ -70,6 +71,30 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
     changes = db.get_pending_changes()
     if change_ids is not None:
         selected_ids = {int(cid) for cid in change_ids}
+        # Auto-include any unselected pending keyword_add / keyword_remove
+        # changes that share a (photo_id, normalized key) with a selected
+        # one. Both remove_keywords() (for keyword_remove) and the
+        # add-canonicalization pass below match by normalized key, so a
+        # rename's paired add(clean) + remove(legacy variant) split across
+        # two syncs lets each half clobber the sidecar entry the other
+        # half writes -- the add-only sync strips the legacy `<rdf:li>`
+        # before writing the clean spelling, and a later remove-only sync
+        # strips the clean spelling under the same normalized match. Sync
+        # both sides together whenever the user picks either.
+        kw_index = defaultdict(list)
+        for c in changes:
+            if c["change_type"] in ("keyword_add", "keyword_remove") and c["value"]:
+                key = (c["photo_id"], keyword_match_key(c["value"]))
+                kw_index[key].append(c["id"])
+        for c in changes:
+            if c["id"] not in selected_ids:
+                continue
+            if c["change_type"] not in ("keyword_add", "keyword_remove"):
+                continue
+            if not c["value"]:
+                continue
+            key = (c["photo_id"], keyword_match_key(c["value"]))
+            selected_ids.update(kw_index[key])
         changes = [c for c in changes if c["id"] in selected_ids]
     if not changes:
         return {"synced": 0, "failed": 0, "failures": []}
@@ -141,15 +166,61 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
                     edit_recipe_json = c["value"] or ""
                     supported_ids.append(c["id"])
 
-            # Write keywords
+            # Apply keyword removals BEFORE additions. remove_keywords()
+            # compares by normalized match key, so a remove of `‘apapane`
+            # matches any `<rdf:li>` whose text normalizes to `apapane` --
+            # including a clean `apapane` we would otherwise have just added.
+            # A rename that queues remove `‘apapane` and add `apapane` for
+            # the same photo would then have its newly-written clean entry
+            # stripped along with the old quoted one, clearing pending
+            # changes and leaving the sidecar without the keyword. Applying
+            # the remove first strips only the pre-existing quoted variant;
+            # the subsequent write_sidecar then adds the clean spelling.
+            #
+            # Split removals by whether they're paired with an add for the
+            # same normalized key. A paired remove+add is a normalization-only
+            # rename (e.g. remove `‘Birds` + add `Birds`); hierarchical mode
+            # would then strip unrelated hierarchies like `Animals|Birds|Hawk`
+            # because remove_keywords() matches by any pipe-segment key. Use
+            # flat-only removal for those paired removes so the rename only
+            # touches the flat `dc:subject` legacy entry. Solo removes keep
+            # hierarchical semantics so real keyword deletions still drop
+            # pipe-segment matches.
+            if keywords_to_remove:
+                paired_keys = {
+                    keyword_match_key(kw) for kw in keywords_to_add
+                }
+                paired_keys.discard("")
+                paired_removes = {
+                    kw for kw in keywords_to_remove
+                    if keyword_match_key(kw) in paired_keys
+                }
+                solo_removes = keywords_to_remove - paired_removes
+                if solo_removes:
+                    remove_keywords(xmp_path, solo_removes)
+                if paired_removes:
+                    remove_keywords(
+                        xmp_path, paired_removes, hierarchical=False,
+                    )
+
+            # Strip any sidecar dc:subject entry that normalizes to a
+            # keyword we're about to add. write_sidecar() dedupes with an
+            # exact-string set difference, so a pure keyword_add for
+            # `apapane` against a legacy sidecar `‘apapane` would append a
+            # second <rdf:li>. Canonicalizing first collapses variants into
+            # the clean spelling that write_sidecar writes below. Use the
+            # flat-only mode: a hierarchical remove (which drops any entry
+            # whose segment matches) would delete unrelated hierarchies
+            # such as `Animals|Birds|Hawk` when we add flat `Birds`.
+            if keywords_to_add:
+                remove_keywords(xmp_path, keywords_to_add, hierarchical=False)
+
+            # Write keyword additions after removals so a same-photo
+            # remove+add pair does not race (see above).
             if keywords_to_add:
                 write_sidecar(
                     xmp_path, flat_keywords=keywords_to_add, hierarchical_keywords=set()
                 )
-
-            # Handle keyword removals: remove matching li elements from bags
-            if keywords_to_remove:
-                remove_keywords(xmp_path, keywords_to_remove)
 
             # Write flag before rating: write_pick_flag creates a sidecar if
             # needed, while write_rating intentionally only updates existing
@@ -229,23 +300,40 @@ def sync_from_xmp(db, photo_ids):
         if not os.path.exists(xmp_path):
             continue
 
-        # Read current XMP keywords
+        # Read current XMP keywords. Compare with a normalized match key on
+        # both sides so an XMP variant like `‘apapane` matches a DB row
+        # stored as `apapane` (add_keyword normalizes on insert). A plain
+        # `.lower()` comparison would treat them as different names, making
+        # the add-side an INSERT-OR-IGNORE no-op and then prune the DB tag
+        # because the raw DB name is not in the raw XMP set -- leaving the
+        # photo untagged.
+        #
+        # Skip XMP entries whose normalized match key is empty (e.g. a
+        # lone ASCII or smart quote). add_keyword() now raises ValueError
+        # for names that normalize to empty, so keeping such entries would
+        # abort the whole sidecar reconcile on a malformed edge-quote
+        # keyword instead of ignoring it and processing the rest.
         xmp_keywords = read_keywords(xmp_path)
-        xmp_keywords_lower = {kw.lower(): kw for kw in xmp_keywords}
+        xmp_keywords_by_key = {}
+        for kw in xmp_keywords:
+            key = keyword_match_key(kw)
+            if not key:
+                continue
+            xmp_keywords_by_key.setdefault(key, kw)
 
         # Get current DB keywords
         db_keywords = db.get_photo_keywords(photo_id)
-        db_keywords_lower = {k["name"].lower(): k for k in db_keywords}
+        db_keywords_by_key = {keyword_match_key(k["name"]): k for k in db_keywords}
 
         # Reconcile DB keyword associations to match the current XMP file.
-        for kw_lower, kw_name in xmp_keywords_lower.items():
-            if kw_lower in db_keywords_lower:
+        for kw_key, kw_name in xmp_keywords_by_key.items():
+            if kw_key in db_keywords_by_key:
                 continue
             kid = db.add_keyword(kw_name)
             db.tag_photo(photo_id, kid)
 
         for kw in db_keywords:
-            if kw["name"].lower() not in xmp_keywords_lower:
+            if keyword_match_key(kw["name"]) not in xmp_keywords_by_key:
                 db.untag_photo(photo_id, kw["id"])
 
         # Update xmp_mtime

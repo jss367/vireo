@@ -5130,6 +5130,47 @@ def test_accept_prediction_tags_photo(tmp_path):
     assert any(k["name"] == "Elk" for k in kws)
 
 
+def test_accept_prediction_queues_normalized_species(tmp_path):
+    """When the prediction's species carries stray edge quotes (e.g.
+    `‘apapane`), accept_prediction must tag the photo with the normalized
+    row AND queue the pending sidecar keyword_add / return the payload
+    using the stored (clean) spelling. Without this, the DB tag points to
+    `apapane` while pending changes and the response payload use
+    `‘apapane`, so a later delete queues the clean name, pending changes
+    stop cancelling, and XMP sync persists the stray-quote label."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="‘apapane",
+                      confidence=0.9, model="bioclip")
+    pred = db.get_predictions()[0]
+
+    result = db.accept_prediction(pred["id"])
+    # The stored keyword name is the normalized (clean) spelling.
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (result["keyword_id"],)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    # Response payload uses the stored spelling too.
+    assert result["species"] == "apapane"
+    # Pending keyword_add uses the clean spelling — a later remove of the
+    # stored keyword can then cancel the queued add.
+    pending = db.get_pending_changes()
+    add_values = [
+        c["value"] for c in pending if c["change_type"] == "keyword_add"
+    ]
+    assert "apapane" in add_values
+    assert "‘apapane" not in add_values
+
+
 def test_accept_prediction_commit_false_preserves_caller_transaction_on_error(
     tmp_path, monkeypatch,
 ):
@@ -13272,6 +13313,159 @@ def test_update_keyword_idempotent_name_update_does_not_auto_retype(tmp_path):
         "no actual name change — auto-detection must not fire"
     )
     assert row["taxon_id"] is None
+
+
+def test_update_keyword_rename_normalizes_edge_quotes(tmp_path):
+    """Rename must apply the same normalization as add_keyword so a
+    request like `‘apapane` stores `apapane`. Without this the PUT path
+    bypasses the duplicate-prevention contract enforced on insert."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        kid = db.add_keyword("apapane")
+        db.update_keyword(kid, name="‘apapane")
+
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "apapane"
+    finally:
+        db.close()
+
+
+def test_update_keyword_rename_rejects_empty_after_normalization(tmp_path):
+    """A rename whose normalized value is empty (quote-only input) must
+    raise ValueError, mirroring add_keyword. Otherwise the PUT path
+    would store an invisible/invalid keyword row."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        kid = db.add_keyword("Real Keyword")
+
+        with pytest.raises(ValueError):
+            db.update_keyword(kid, name="'")
+        with pytest.raises(ValueError):
+            db.update_keyword(kid, name="“”")
+
+        # Original name still in place.
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "Real Keyword"
+    finally:
+        db.close()
+
+
+def test_update_keyword_rename_preserves_okina(tmp_path):
+    """Legitimate leading okina (U+02BB) must survive rename normalization
+    the same way it does through add_keyword — species names such as
+    'ʻApapane' are the point of that carve-out."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        kid = db.add_keyword("Placeholder")
+        db.update_keyword(kid, name="ʻApapane")
+
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "ʻApapane"
+    finally:
+        db.close()
+
+
+def test_update_keyword_same_name_retype_merges_into_peer(tmp_path):
+    """A PUT that normalizes the name back to the current stored value but
+    changes the type (e.g. `{name: "‘apapane", type: "taxonomy"}` on a
+    general `apapane` row) must run the same peer/collision check that a
+    real rename does. Otherwise the UPDATE silently produces two
+    taxonomy rows that normalize to the same key at the same slot,
+    because UNIQUE(name, parent_id) doesn't constrain NULL parents.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Top-level taxonomy `apapane` already exists.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # A separate top-level general `apapane` row also exists.
+        general_id = db.add_keyword("apapane", kw_type="general")
+        assert general_id != taxonomy_id
+
+        # PUT-style retype whose name normalizes back to the current stored
+        # value (`‘apapane` → `apapane`) but whose type moves to
+        # 'taxonomy'. Must merge into the existing taxonomy peer rather
+        # than promoting the general row and leaving two taxonomy rows.
+        effective_id = db.update_keyword(
+            general_id, name="‘apapane", type="taxonomy"
+        )
+        assert effective_id == taxonomy_id
+
+        # Exactly one top-level taxonomy `apapane` row must remain.
+        # Stored names are always normalized, so a plain name comparison
+        # is exact.
+        rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE name = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in rows] == [taxonomy_id]
+        # The old general row must be gone (merged away).
+        gone = db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert gone is None
+    finally:
+        db.close()
+
+
+def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
+    """A type-only PUT (no `name` kwarg) must still run the same-slot peer
+    check. Otherwise, changing a general `apapane` row's type to
+    `taxonomy` via the Browse/Keywords type dropdown while a taxonomy
+    `apapane` peer already exists at the same (NULL) parent leaves two
+    same-name taxonomy rows at the top level (UNIQUE(name, parent_id)
+    treats NULL parents as distinct), so later calls bind to either id at
+    random.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Clean top-level taxonomy row (stored rows are always normalized).
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # General peer at the same slot.
+        general_id = db.add_keyword("apapane", kw_type="general")
+        assert general_id != taxonomy_id
+
+        # Type-only PUT: the dropdown changes just the type, no name.
+        effective_id = db.update_keyword(general_id, type="taxonomy")
+        assert effective_id == taxonomy_id
+
+        # Exactly one top-level taxonomy row must remain for the name, and
+        # it must be the pre-existing taxonomy row.
+        rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE name = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in rows] == [taxonomy_id]
+        # The old general row must be gone (merged away).
+        gone = db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert gone is None
+    finally:
+        db.close()
 
 
 def test_add_photo_retries_on_database_is_locked(tmp_path):

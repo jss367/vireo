@@ -1341,6 +1341,98 @@ def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
         assert root_sparrow_id not in kw_ids
 
 
+def test_encounter_species_replacement_finds_taxonomy_only_previous(app_and_db):
+    """Replacement path resolves ``previous_species`` via the taxonomy-only rule.
+
+    When ``previous_species`` (drawn from the pipeline cache's
+    ``confirmed_species``) resolves to a stored row that carries
+    ``type='taxonomy'`` but ``is_species=0`` (update_keyword with an explicit
+    type doesn't set the legacy column), the ``old_kid`` lookup must find it.
+    Without ``OR type='taxonomy'`` it misses, ``is_replacement`` stays true
+    but no ``old_kid`` is resolved, so the previously-tagged photo keeps the
+    old tag while ``add_keyword`` adds the new species alongside it —
+    leaving two taxonomy tags on the same photo.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    prev_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 0)"
+    ).lastrowid
+    db.conn.commit()
+
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    db.tag_photo(photo_id, prev_kid)
+
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="apapane")
+
+    resp = client.post(
+        '/api/encounters/species',
+        json={"species": "iiwi", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json().get("previous_species") == "apapane"
+
+    remaining = db.conn.execute(
+        """SELECT k.name FROM keywords k
+           JOIN photo_keywords pk ON pk.keyword_id = k.id
+           WHERE pk.photo_id = ?
+             AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+        (photo_id,),
+    ).fetchall()
+    names = sorted(row["name"] for row in remaining)
+    assert names == ["iiwi"], (
+        f"expected only the new species after replacement, got {names!r}"
+    )
+
+
+def test_encounter_species_replacement_queues_stored_previous_name(app_and_db):
+    """When the pipeline cache still holds a legacy quoted species like
+    `‘apapane` but the DB row is stored under the normalized `apapane`, the
+    replacement path must queue keyword_remove with the STORED normalized
+    name so it cancels an outstanding keyword_add for the same normalized
+    key. Queuing the raw quoted value would leave both the stale add and a
+    quoted remove in the pending set, and the next XMP sync would then
+    write the stray-quote spelling back to the sidecar. The v5 migration
+    normalizes DB rows but not pipeline cache files, so this state remains
+    reachable.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    # Pretend an earlier confirm queued a keyword_add for the normalized
+    # spelling. This is the state we need cancellation to fire against.
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Apapane", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_add", "Apapane") in values
+
+    # Seed the pipeline cache's confirmed_species with the LEGACY quoted
+    # spelling — an upgraded pipeline cache written before keyword
+    # normalization landed. The DB row is stored as clean `Apapane`.
+    _seed_encounter_cache(app, db, photo_ids, confirmed_species="‘Apapane")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    # The stale keyword_add for the normalized spelling must be cancelled by
+    # a remove that targets the same normalized value — not the raw quoted
+    # cache value. If the queue used the cache spelling, both would linger.
+    assert ("keyword_add", "Apapane") not in values
+    assert ("keyword_remove", "‘Apapane") not in values
+    assert ("keyword_add", "Blue Jay") in values
+
+
 def test_species_search(app_and_db):
     """GET /api/species/search returns matching species from keywords."""
     app, db = app_and_db
@@ -3422,6 +3514,194 @@ def test_rename_keyword_queues_sidecar_changes(app_and_db):
     assert ("keyword_add", "NewBird") in actions
 
 
+def test_rename_keyword_normalizes_edge_quotes_and_queues_clean_name(app_and_db):
+    """A rename request with stray edge quotes must store the normalized
+    value AND queue that normalized value to sidecars. Otherwise the DB
+    holds the clean spelling while pending changes and history reference
+    the raw quoted variant, and XMP sync would then write the wrong name.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird")
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "OldBird") in actions
+    assert ("keyword_add", "apapane") in actions
+    assert ("keyword_add", "‘apapane") not in actions
+
+
+def test_rename_keyword_rejects_empty_after_normalization(app_and_db):
+    """PUT /api/keywords/<id> with a quote-only name must be rejected at
+    the boundary — same contract as add_keyword — instead of storing an
+    invisible empty-string keyword row."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("Real")
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "'"})
+    assert resp.status_code == 400
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Real"
+
+
+def test_rename_keyword_merges_into_normalized_peer_toplevel(app_and_db):
+    """Renaming a top-level keyword to a name that normalizes to an existing
+    top-level peer must merge into that peer instead of writing a second row.
+    SQLite treats NULL parent_ids as distinct under UNIQUE(name, parent_id),
+    so without the peer check the rename would silently produce two peer
+    `apapane` rows for later duplicate cleanup to mop up."""
+    app, db = app_and_db
+    client = app.test_client()
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    apapane_id = db.add_keyword("apapane")
+    other_id = db.add_keyword("Other")
+    db.tag_photo(p1, other_id)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT id FROM keywords WHERE parent_id IS NULL "
+        "AND name = 'apapane'"
+    ).fetchall()
+    assert [row["id"] for row in rows] == [apapane_id]
+    other_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert other_row is None
+    tag_ids = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (p1,)
+        ).fetchall()
+    }
+    assert apapane_id in tag_ids
+    assert other_id not in tag_ids
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
+        "ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "Other") in actions
+    assert ("keyword_add", "apapane") in actions
+    assert ("keyword_add", "‘apapane") not in actions
+
+
+def test_rename_keyword_merges_into_normalized_peer_child(app_and_db):
+    """Same guard for child keywords: without the peer check, two rows under
+    the same parent with normalized-equal names would violate
+    UNIQUE(name, parent_id) at UPDATE time and surface as a 500. The merge
+    turns that into an in-place consolidation instead."""
+    app, db = app_and_db
+    client = app.test_client()
+    parent_id = db.add_keyword("Birds")
+    apapane_id = db.add_keyword("apapane", parent_id=parent_id)
+    other_id = db.add_keyword("Other", parent_id=parent_id)
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT id FROM keywords WHERE parent_id = ? AND name = 'apapane'",
+        (parent_id,),
+    ).fetchall()
+    assert [row["id"] for row in rows] == [apapane_id]
+    other_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert other_row is None
+
+
+def test_rename_keyword_does_not_merge_across_types_toplevel(app_and_db):
+    """Cross-type collisions at the top level must not be merged into a
+    peer. Silently moving photos from an 'individual' keyword onto a
+    same-named 'taxonomy' peer would rewrite the tag's semantics; the
+    dedup boundary elsewhere is (name, parent_id, type). SQLite treats
+    NULL parent_ids as distinct under UNIQUE(name, parent_id), so a
+    cross-type rename at the top level is allowed to produce a
+    coexisting row rather than a silent merge."""
+    app, db = app_and_db
+    client = app.test_client()
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    taxonomy_id = db.add_keyword("apapane", kw_type="taxonomy")
+    other_id = db.add_keyword("Other", kw_type="individual")
+    db.tag_photo(p1, other_id)
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    # The individual row survives with its normalized name; the taxonomy
+    # peer is untouched.
+    survivor = db.conn.execute(
+        "SELECT id, name, type FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert survivor is not None
+    assert survivor["name"] == "apapane"
+    assert survivor["type"] == "individual"
+    taxonomy_row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (taxonomy_id,)
+    ).fetchone()
+    assert taxonomy_row["type"] == "taxonomy"
+    # The individual tag must NOT have silently retargeted onto the
+    # taxonomy peer.
+    tag_ids = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (p1,)
+        ).fetchall()
+    }
+    assert other_id in tag_ids
+    assert taxonomy_id not in tag_ids
+
+
+def test_rename_keyword_does_not_merge_across_types_child(app_and_db):
+    """Cross-type collisions under the same parent surface as an error
+    rather than silently retagging photos across types. UNIQUE(name,
+    parent_id) fires when the plain UPDATE lands on a cross-type peer."""
+    app, db = app_and_db
+    client = app.test_client()
+    parent_id = db.add_keyword("Birds")
+    db.add_keyword("apapane", parent_id=parent_id, kw_type="taxonomy")
+    other_id = db.add_keyword("Other", parent_id=parent_id, kw_type="individual")
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    # A cross-type same-name collision under a shared parent hits the
+    # table-level UNIQUE(name, parent_id) at UPDATE time and surfaces to
+    # the caller, rather than being silently absorbed into the wrong-typed
+    # peer.
+    assert resp.status_code >= 400
+    # The original individual keyword is preserved with its old name.
+    survivor = db.conn.execute(
+        "SELECT name, type FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert survivor is not None
+    assert survivor["name"] == "Other"
+    assert survivor["type"] == "individual"
+
+
 def test_rename_keyword_updates_photo_preferences(app_and_db):
     """Representative-photo preferences follow species keyword renames."""
     app, db = app_and_db
@@ -4346,6 +4626,154 @@ def test_batch_keyword_route_handles_non_string_type(app_and_db):
     )
 
 
+def test_add_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
+    """Names like `'` are non-empty as raw text (so the `not name` guard
+    passes) but strip to '' during normalization. The route must return a
+    clean 400 rather than 500-ing on add_keyword's ValueError, and must not
+    insert an empty keyword row."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/pe")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "pe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    before = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    for empty in ("'", '"', "‘", "“”"):
+        resp = client.post(
+            f"/api/photos/{photo_id}/keywords",
+            json={"name": empty},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400, (
+            f"expected 400 for name={empty!r}, got {resp.status_code} "
+            f"{resp.get_data(as_text=True)}"
+        )
+    after = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    assert after == before
+    assert (
+        db.conn.execute("SELECT COUNT(*) FROM keywords WHERE name = ''").fetchone()[0]
+        == 0
+    )
+
+
+def test_batch_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
+    """Same normalized-empty guard on the batch endpoint."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qe")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    before = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "name": "‘"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 400, (
+        f"expected 400 for edge-quote-only name, got {resp.status_code} "
+        f"{resp.get_data(as_text=True)}"
+    )
+    assert (
+        db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0] == before
+    )
+
+
+def test_add_keyword_route_queues_stored_name_after_normalization(app_and_db):
+    """When a stray-quote name is submitted, the pending-change queue must
+    record the stored (normalized) name — not the raw request string —
+    so a later delete (which reads k.name from the DB) queues the same
+    string and the add/remove pair cancels instead of both persisting to
+    XMP."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qn")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qn.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+    client = app.test_client()
+
+    resp = client.post(
+        f"/api/photos/{photo_id}/keywords",
+        json={"name": "‘quailquail"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    kid = resp.get_json()["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert stored == "quailquail"
+
+    queued_add = db.conn.execute(
+        "SELECT value FROM pending_changes "
+        "WHERE photo_id = ? AND change_type = 'keyword_add'",
+        (photo_id,),
+    ).fetchall()
+    assert [row["value"] for row in queued_add] == [stored], (
+        "keyword_add queue must record the stored name so it matches what a "
+        "later keyword_remove would queue via k.name"
+    )
+
+    resp = client.delete(f"/api/photos/{photo_id}/keywords/{kid}")
+    assert resp.status_code == 200
+    remaining = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchall()
+    assert remaining == [], (
+        f"add/remove should cancel, but pending_changes still has "
+        f"{[dict(r) for r in remaining]}"
+    )
+
+
+def test_batch_keyword_route_queues_stored_name_after_normalization(app_and_db):
+    """Batch endpoint must queue the stored keyword name too, so the
+    per-photo add/remove pair cancels the same way the single endpoint does."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qb")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qb.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "name": "‘quailquail"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    kid = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (photo_id,)
+    ).fetchone()["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert stored == "quailquail"
+
+    queued_add = db.conn.execute(
+        "SELECT value FROM pending_changes "
+        "WHERE photo_id = ? AND change_type = 'keyword_add'",
+        (photo_id,),
+    ).fetchall()
+    assert [row["value"] for row in queued_add] == [stored]
+
+    resp = client.delete(f"/api/photos/{photo_id}/keywords/{kid}")
+    assert resp.status_code == 200
+    remaining = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchall()
+    assert remaining == []
+
+
 def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     """Multi-select suggestions should offer keywords present on only some photos."""
     app, db = app_and_db
@@ -4490,6 +4918,70 @@ def test_batch_keyword_remove_route_removes_existing_keyword_id(app_and_db):
         (cardinal_id,),
     ).fetchall()
     assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
+
+
+def test_batch_keyword_remove_cancels_pending_add_queued_with_variant_spelling(app_and_db):
+    """Batch remove must cancel a pending add that was queued via a
+    stray-quote spelling variant.
+
+    Keyword normalization happens at the choke points: POSTing `‘apapane`
+    stores both the keyword row and its pending `keyword_add` under the
+    clean spelling `apapane`. A later batch remove of the clean keyword
+    must find and cancel that still-unsynced pending add instead of
+    queuing a `keyword_remove` alongside it — otherwise the next XMP sync
+    would see a remove for a keyword that was never written.
+    """
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+    client = app.test_client()
+
+    # Queue the pending add through the API with a variant spelling.
+    resp = client.post(
+        f"/api/photos/{ids[1]}/keywords",
+        json={"name": "‘apapane"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    kid = resp.get_json()["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert stored == "apapane"
+
+    # The pending change is stored under the clean spelling, not the raw
+    # request variant.
+    pending = db.conn.execute(
+        "SELECT value FROM pending_changes "
+        "WHERE photo_id = ? AND change_type = 'keyword_add'",
+        (ids[1],),
+    ).fetchall()
+    assert [row["value"] for row in pending] == ["apapane"]
+
+    resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": kid},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 1
+
+    still_tagged = db.conn.execute(
+        "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+        (kid,),
+    ).fetchall()
+    assert still_tagged == []
+
+    remaining = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes "
+        "WHERE photo_id = ? AND value = 'apapane'",
+        (ids[1],),
+    ).fetchall()
+    assert remaining == [], (
+        "the pending add should be cancelled, not left alongside a remove"
+    )
 
 
 def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
