@@ -3554,7 +3554,7 @@ def test_import_can_add_structured_locations_from_each_photos_gps(
 
 
 def test_import_in_place_no_destination_required(app_and_db, tmp_path):
-    app, _ = app_and_db
+    app, db = app_and_db
     client = app.test_client()
     card = _import_card(tmp_path)
 
@@ -3578,6 +3578,11 @@ def test_import_in_place_no_destination_required(app_and_db, tmp_path):
     assert result["indexed"] == 1
     assert result["ok"] is True
     assert result["after_import_skipped"] == "import-only"
+    assert result["collection_name"].startswith("Import ")
+    photos = db.get_collection_photos(
+        result["collection_id"], per_page=999999,
+    )
+    assert [p["id"] for p in photos] == result["photo_ids"]
 
 
 def test_import_in_place_can_target_new_workspace(app_and_db, tmp_path):
@@ -4045,16 +4050,17 @@ def test_import_chains_process_job(app_and_db, tmp_path):
         assert pj["config"]["strategy"] == "quick_look"
         assert pj["config"].get("chained_from") == job_id
         col_id = pj["config"]["collection_id"]
+        assert res["collection_id"] == col_id
+        assert res["collection_name"].startswith("Import ")
         photos = db.get_collection_photos(col_id, per_page=999999)
         assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
 
 
 def test_import_only_choice_skips_chaining(app_and_db, tmp_path):
-    """after_import null (and the omitted->workspace-default-null case)
-    never reaches /api/jobs/pipeline; the result says why."""
+    """Import-only still records the exact import as a Browse collection."""
     from wait import wait_for_job_via_client
 
-    app, _ = app_and_db
+    app, db = app_and_db
     card = _chain_card(tmp_path)
     with app.test_client() as client:
         job_id = _post_import(client, card, tmp_path / "arch", None)
@@ -4062,6 +4068,11 @@ def test_import_only_choice_skips_chaining(app_and_db, tmp_path):
         res = job["result"]
         assert res.get("after_import_skipped") == "import-only"
         assert "process_job_id" not in res
+        assert res["collection_name"].startswith("Import ")
+        photos = db.get_collection_photos(
+            res["collection_id"], per_page=999999,
+        )
+        assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
 
 
 def test_failed_import_does_not_chain(app_and_db, tmp_path):
@@ -4084,8 +4095,43 @@ def test_failed_import_does_not_chain(app_and_db, tmp_path):
             assert res["failed"] >= 1
             assert res.get("after_import_skipped") == "import failed"
             assert "process_job_id" not in res
+            assert "collection_id" not in res
     finally:
         os.chmod(str(unreadable), 0o644)
+
+
+def test_cancelled_import_does_not_create_collection(
+        app_and_db, tmp_path, monkeypatch):
+    """Partial photo ids from a cancelled run must not look like a complete
+    import collection in Browse."""
+    import import_job
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    existing_photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    def cancelled_result(*args, **kwargs):
+        return {
+            "ok": False,
+            "cancelled": True,
+            "photo_ids": [existing_photo_id],
+            "copied": 1,
+            "failed": 0,
+        }
+
+    monkeypatch.setattr(import_job, "run_import_job", cancelled_result)
+    card = _chain_card(tmp_path, n=1)
+    with app.test_client() as client:
+        job_id = _post_import(
+            client, card, tmp_path / "arch", "quick_look",
+        )
+        result = wait_for_job_via_client(client, job_id)["result"]
+
+    assert result["after_import_skipped"] == "import failed"
+    assert "collection_id" not in result
+    assert "process_job_id" not in result
 
 
 def test_duplicates_only_import_skips_chaining(app_and_db, tmp_path):
@@ -4104,6 +4150,7 @@ def test_duplicates_only_import_skips_chaining(app_and_db, tmp_path):
         assert res["skipped_duplicate"] == 2
         assert res.get("after_import_skipped") == "no new photos"
         assert "process_job_id" not in res
+        assert "collection_id" not in res
 
 
 def test_chained_run_surfaces_model_warning(app_and_db, tmp_path):
