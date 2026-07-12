@@ -952,6 +952,56 @@ def test_import_browse_button_opens_folder_browser_fallback(live_server, page):
         "aria-labelledby", "folderBrowserTitle")
 
 
+def test_import_folder_browser_shows_recursive_photo_counts(live_server, page):
+    """Source picker rows show the recursive count returned for each folder."""
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate("window.pickDirectory = async () => null")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target === '/api/browse/photo-counts') {
+              const body = JSON.parse(init.body || '{}');
+              window.__folderCountRequest = body;
+              return Promise.resolve(new Response(JSON.stringify({
+                counts: {
+                  '/tmp/card-a': 1,
+                  '/tmp/card-b': 1234,
+                  '/tmp/empty': 0,
+                },
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/browse') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                path: '/tmp',
+                dirs: [
+                  {name: 'card-a', path: '/tmp/card-a'},
+                  {name: 'card-b', path: '/tmp/card-b'},
+                  {name: 'empty', path: '/tmp/empty'},
+                ],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("[data-testid='import-source-browse-btn']").click()
+
+    rows = page.locator("#folderBrowserList .folder-browser-item[data-folder-path]")
+    expect(rows).to_have_count(3)
+    expect(rows.nth(0).locator(".folder-browser-count")).to_have_text("1 photo")
+    expect(rows.nth(1).locator(".folder-browser-count")).to_have_text("1,234 photos")
+    expect(rows.nth(2).locator(".folder-browser-count")).to_be_empty()
+    request = page.evaluate("window.__folderCountRequest")
+    assert request["paths"] == ["/tmp/card-a", "/tmp/card-b", "/tmp/empty"]
+    assert request["file_types"] == "both"
+
+
 def test_import_folder_browser_selects_multiple_source_folders(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")
