@@ -672,6 +672,7 @@ def test_trust_likely_duplicates_skips_metadata_match_without_byte_check(
     assert result["copied"] == 0
     assert result["skipped_duplicate"] == 1
     assert result["unverified_duplicate"] == 1
+    assert result["unverified_duplicates_only"] is True
     assert result["safe_to_format"] is False
     assert not list(archive.rglob("IMG_0400.jpg"))
 

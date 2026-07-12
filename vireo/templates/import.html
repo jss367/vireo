@@ -2068,7 +2068,10 @@ function renderResult(res, status) {
     pill.className = 'pill pill-ok';
     pill.textContent = 'Safe to format the card — every file is verified in the archive';
     unsafe.style.display = 'none';
-  } else if (res.unverified_duplicate) {
+  } else if (
+    res.unverified_duplicates_only
+    && (!status || status === 'completed')
+  ) {
     pill.className = 'pill pill-warn';
     pill.textContent = 'Import complete — keep the card until likely duplicates are verified';
     const files = res.unsafe_files || [];

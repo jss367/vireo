@@ -1931,6 +1931,16 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         and unverified_duplicate == 0
         and (copied + skipped_duplicate) == discovered
     )
+    unverified_duplicates_only = (
+        unverified_duplicate > 0
+        and not cancelled
+        and failed == 0
+        and not discovery_errors
+        and not dup_link_failed
+        and not partial_scope
+        and not remote_unverified
+        and (copied + skipped_duplicate) == discovered
+    )
     result = {
         "discovered": discovered,
         "copied": copied,
@@ -1944,6 +1954,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         "photo_ids": sorted(imported_photo_ids),
         "skipped_duplicate": skipped_duplicate,
         "unverified_duplicate": unverified_duplicate,
+        "unverified_duplicates_only": unverified_duplicates_only,
         "failed": failed,
         "safe_to_format": safe_to_format,
         "unsafe_files": unsafe_files,
@@ -3307,6 +3318,15 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         and unverified_duplicate == 0
         and (copied + skipped_duplicate) == discovered
     )
+    unverified_duplicates_only = (
+        unverified_duplicate > 0
+        and not cancelled
+        and failed == 0
+        and not discovery_errors
+        and not dup_link_failed
+        and not partial_scope
+        and (copied + skipped_duplicate) == discovered
+    )
     result = {
         "discovered": discovered,
         "copied": copied,
@@ -3314,6 +3334,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         "photo_ids": sorted(imported_photo_ids),
         "skipped_duplicate": skipped_duplicate,
         "unverified_duplicate": unverified_duplicate,
+        "unverified_duplicates_only": unverified_duplicates_only,
         "failed": failed,
         "safe_to_format": safe_to_format,
         "unsafe_files": unsafe_files,

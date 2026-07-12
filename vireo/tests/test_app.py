@@ -12090,6 +12090,7 @@ def test_import_page_returns_200(app_and_db):
     assert "Trust likely duplicates" in html
     assert "Verify duplicates byte-for-byte" in html
     assert "capture time to the second" in html
+    assert "res.unverified_duplicates_only" in html
     assert 'id="safeToFormatPill"' in html
     assert "/api/jobs/import-in-place" in html
     assert "/api/jobs/import-photos" in html
