@@ -11816,7 +11816,7 @@ def test_browse_filter_by_collection_guards_degraded_rows():
     """
     from pathlib import Path
     src = Path(__file__).parent.parent / "templates" / "browse.html"
-    text = src.read_text()
+    text = src.read_text(encoding="utf-8")
     fn_start = text.find("async function filterByCollection")
     assert fn_start != -1, "filterByCollection function not found"
     # Grab enough of the function body to include the guard block. The guard
