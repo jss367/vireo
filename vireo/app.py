@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12329,6 +12330,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         offline_count_row = db.conn.execute(
             "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
         ).fetchone()
+        masks_size = sum(v["bytes"] for v in db.mask_variants_summary())
 
         # HuggingFace cache — only count Vireo-relevant models
         hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
@@ -12357,11 +12359,49 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + models_size
             + hf_size
             + offline_size
+            + masks_size
         )
+        reclaimable = thumb["size"] + preview["size"] + emb["size"]
+
+        storage_root = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        usage_path = os.path.abspath(storage_root)
+        while not os.path.exists(usage_path):
+            parent = os.path.dirname(usage_path)
+            if parent == usage_path:
+                break
+            usage_path = parent
+        try:
+            usage = shutil.disk_usage(usage_path)
+            free_bytes = usage.free
+            capacity_bytes = usage.total
+        except OSError:
+            free_bytes = None
+            capacity_bytes = None
+
+        mount_path = usage_path
+        while not os.path.ismount(mount_path):
+            parent = os.path.dirname(mount_path)
+            if parent == mount_path:
+                break
+            mount_path = parent
+        if sys.platform.startswith("win"):
+            volume_name = os.path.splitdrive(mount_path)[0] or mount_path
+        elif mount_path == os.path.sep:
+            volume_name = "System volume"
+        else:
+            volume_name = os.path.basename(mount_path.rstrip(os.path.sep)) or mount_path
 
         return jsonify(
             {
                 "total": total,
+                "reclaimable": reclaimable,
+                "storage_root": storage_root,
+                "volume": {
+                    "name": volume_name,
+                    "mount_path": mount_path,
+                    "free": free_bytes,
+                    "capacity": capacity_bytes,
+                },
                 "database": {"size": db_size, "path": db_path},
                 "thumbnails": thumb,
                 "previews": preview,
@@ -12373,6 +12413,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "size": offline_size,
                     "path": os.path.join(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "offline"),
                 },
+                "masks": {"size": masks_size},
             }
         )
 
@@ -12526,14 +12567,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "limit": limit,
         })
 
-    @app.route("/api/storage/clear", methods=["POST"])
-    def api_storage_clear():
-        """Clear a specific cache."""
-        import shutil
-
-        body = request.get_json(silent=True) or {}
-        cache_type = body.get("type", "")
-
+    def _clear_storage_cache(cache_type):
         if cache_type == "previews":
             preview_dir = os.path.join(
                 os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
@@ -12576,6 +12610,54 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"ok": True})
         else:
             return json_error("Unknown cache type")
+
+    @app.route("/api/storage/clear", methods=["POST"])
+    def api_storage_clear():
+        """Clear a specific cache."""
+        body = request.get_json(silent=True) or {}
+        return _clear_storage_cache(body.get("type", ""))
+
+    @app.route("/api/storage/clear-safe", methods=["POST"])
+    def api_storage_clear_safe():
+        """Clear every regenerable cache without touching models or originals."""
+        for cache_type in ("thumbnails", "previews", "embeddings"):
+            _clear_storage_cache(cache_type)
+        return jsonify({
+            "ok": True,
+            "cleared": ["thumbnails", "previews", "embeddings"],
+        })
+
+    @app.route("/api/storage/open-folder", methods=["POST"])
+    def api_storage_open_folder():
+        """Open Vireo's server-selected storage root in the OS file manager."""
+        path = os.path.abspath(os.path.dirname(app.config["THUMB_CACHE_DIR"]))
+        if not os.path.isdir(path):
+            return jsonify({"ok": False, "reason": "storage folder not found"})
+        try:
+            if sys.platform == "darwin":
+                proc = subprocess.run(
+                    ["open", "--", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            elif sys.platform.startswith("win"):
+                proc = subprocess.run(
+                    ["explorer", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            else:
+                proc = subprocess.run(
+                    ["xdg-open", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            if not sys.platform.startswith("win") and proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or "").strip()
+                return jsonify({
+                    "ok": False,
+                    "reason": reason or f"open command exited {proc.returncode}",
+                })
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            return jsonify({"ok": False, "reason": str(exc)})
+        return jsonify({"ok": True})
 
     @app.route("/api/storage/delete-files", methods=["POST"])
     def api_storage_delete_files():

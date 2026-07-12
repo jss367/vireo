@@ -23,6 +23,29 @@ body { padding-bottom: 36px; }
   font-size: 24px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums;
 }
 .stat-label { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.stat-kind {
+  display: inline-block; margin-top: 7px; border-radius: 999px; padding: 2px 7px;
+  font-size: 9px; font-weight: 600; letter-spacing: .02em;
+}
+.stat-kind.safe { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.stat-kind.download { color: var(--warning); background: color-mix(in srgb, var(--warning) 15%, transparent); }
+.stat-kind.keep { color: var(--text-dim); background: var(--bg-secondary); }
+.storage-health {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px;
+}
+@media (max-width: 680px) { .storage-health { grid-template-columns: 1fr; } }
+.health-card { background: var(--bg-tertiary); border-radius: 6px; padding: 14px 16px; }
+.health-label { color: var(--text-dim); font-size: 11px; margin-bottom: 5px; }
+.health-value { color: var(--text-primary); font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.health-detail { color: var(--text-ghost); font-size: 10px; margin-top: 4px; }
+.stat-card .btn-manage { display: block; margin-left: auto; margin-right: auto; }
+.storage-location {
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:10px 12px;
+  background:var(--bg-tertiary); border-radius:6px; margin-bottom:12px;
+}
+.storage-location code { color:var(--text-secondary); font-size:11px; overflow-wrap:anywhere; }
+.storage-legend { color:var(--text-dim); font-size:11px; margin:10px 0 14px; line-height:1.6; }
+.storage-warning { border-left-color: var(--warning); color: var(--warning); margin-bottom: 12px; }
 .setting-row {
   display: flex; justify-content: space-between; align-items: center; gap: 16px;
   padding: 10px 0; border-bottom: 1px solid var(--border-primary);
@@ -93,7 +116,40 @@ body { padding-bottom: 36px; }
 
 <div class="content">
   <div class="section">
-    <div class="section-title">Storage <span id="storageTotalSize" style="font-size:12px;font-weight:400;color:var(--text-dim);margin-left:8px;">-</span></div>
+    <div class="section-title" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <span>Storage</span>
+      <span id="storageUpdatedAt" style="font-size:11px;font-weight:400;color:var(--text-ghost);">Loading…</span>
+      <button id="refreshStorageBtn" class="btn-secondary" onclick="refreshStoragePage()" style="margin-left:auto;">Refresh</button>
+    </div>
+    <div class="storage-health">
+      <div class="health-card">
+        <div class="health-label">Vireo storage</div>
+        <div class="health-value" id="storageTotalSize">-</div>
+        <div class="health-detail">Database, generated files, models, and offline originals</div>
+      </div>
+      <div class="health-card">
+        <div class="health-label">Available on volume</div>
+        <div class="health-value" id="storageFreeSize">-</div>
+        <div class="health-detail" id="storageVolumeName">Checking volume…</div>
+      </div>
+      <div class="health-card">
+        <div class="health-label">Safe to reclaim</div>
+        <div class="health-value" id="storageReclaimableSize">-</div>
+        <div class="health-detail">Thumbnails, previews, and label embeddings</div>
+        <button id="clearSafeCachesBtn" class="btn-secondary" onclick="clearSafeCaches()" style="margin-top:9px;">Clear safe caches</button>
+      </div>
+    </div>
+    <div id="storageLowSpaceWarning" class="storage-note storage-warning" style="display:none;"></div>
+    <div class="storage-location">
+      <span style="font-size:11px;color:var(--text-dim);">Storage location</span>
+      <code id="storageRootPath">-</code>
+      <button class="btn-secondary" onclick="openStorageFolder()" style="margin-left:auto;">Open folder</button>
+    </div>
+    <div class="storage-legend">
+      <span class="stat-kind safe">Safe to clear</span> regenerates automatically &nbsp;
+      <span class="stat-kind download">Download again</span> can be restored from its source &nbsp;
+      <span class="stat-kind keep">Keep</span> contains catalog or original data
+    </div>
     <div id="storageGrid" class="stats-grid"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
     <div id="masksCard" style="margin-top:16px;"></div>
   </div>
@@ -145,6 +201,9 @@ body { padding-bottom: 36px; }
     <div class="section">
       <div class="section-title">Detection Cache</div>
       <div id="detectionCacheStats" style="font-size:13px;color:var(--text-secondary);">Loading...</div>
+      <div style="font-size:11px;color:var(--text-dim);line-height:1.5;margin-top:8px;">
+        Stored inside the Vireo database and reused automatically across workspaces. It cannot currently be reclaimed separately from the catalog.
+      </div>
     </div>
   </div>
 
@@ -219,19 +278,15 @@ function storageEscapeAttr(s) {
 }
 
 function storageFormatBytes(b) {
-  if (b == null || b === 0) return '0';
+  if (b == null || b === 0) return '0 B';
   if (b < 1024) return b + ' B';
   if (b < 1024 * 1024) return Math.round(b / 1024) + ' KB';
   if (b < 1024 * 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
   return (b / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
 }
 
-loadStoragePanel();
+refreshStoragePage();
 loadStorageConfig();
-loadPreviewCacheStatus();
-loadDetectionCacheStats();
-loadEmbeddingMatrix();
-loadEmbeddingCache();
 
 var _storageSaveTimer = null;
 
@@ -274,16 +329,38 @@ function saveStorageConfig() {
 async function loadStoragePanel() {
   try {
     var s = await safeFetch('/api/storage', {}, { toast: false });
-    document.getElementById('storageTotalSize').textContent = 'Total: ' + storageFormatBytes(s.total);
+    document.getElementById('storageTotalSize').textContent = storageFormatBytes(s.total);
+    document.getElementById('storageReclaimableSize').textContent = storageFormatBytes(s.reclaimable);
+    document.getElementById('storageRootPath').textContent = s.storage_root || '-';
+    var volume = s.volume || {};
+    document.getElementById('storageFreeSize').textContent = storageFormatBytes(volume.free);
+    document.getElementById('storageVolumeName').textContent = volume.name
+      ? volume.name + (volume.capacity != null ? ' · ' + storageFormatBytes(volume.capacity) + ' capacity' : '')
+      : 'Volume unavailable';
+    var lowSpace = volume.free != null && volume.capacity != null &&
+      (volume.free < 10 * 1024 * 1024 * 1024 || volume.free / volume.capacity < 0.10);
+    var lowSpaceEl = document.getElementById('storageLowSpaceWarning');
+    if (lowSpace) {
+      lowSpaceEl.textContent = 'Storage is running low on ' + (volume.name || 'this volume') +
+        '. Only ' + storageFormatBytes(volume.free) + ' remains.';
+      lowSpaceEl.style.display = '';
+    } else {
+      lowSpaceEl.style.display = 'none';
+    }
+    var clearSafeBtn = document.getElementById('clearSafeCachesBtn');
+    clearSafeBtn.disabled = !s.reclaimable;
+    clearSafeBtn.textContent = s.reclaimable
+      ? 'Clear safe caches · ' + storageFormatBytes(s.reclaimable)
+      : 'Safe caches are empty';
 
     var categories = [
-      {name: 'Database', size: s.database.size, type: null},
-      {name: 'Thumbnails', size: s.thumbnails.size, count: s.thumbnails.count, type: 'thumbnails'},
-      {name: 'Previews', size: s.previews.size, count: s.previews.count, type: 'previews'},
-      {name: 'Embeddings', size: s.embeddings.size, count: s.embeddings.count, type: 'embeddings'},
-      {name: 'Models', size: s.models.size, type: null},
-      {name: 'HF Cache', size: s.hf_cache.size, type: null},
-      {name: 'Offline Originals', size: s.offline_originals.size, count: s.offline_originals.count, type: null},
+      {name: 'Database', size: s.database.size, type: null, kind: 'keep', kindLabel: 'Keep'},
+      {name: 'Thumbnails', size: s.thumbnails.size, count: s.thumbnails.count, type: 'thumbnails', kind: 'safe', kindLabel: 'Safe to clear'},
+      {name: 'Previews', size: s.previews.size, count: s.previews.count, type: 'previews', kind: 'safe', kindLabel: 'Safe to clear'},
+      {name: 'Label Embeddings', size: s.embeddings.size, count: s.embeddings.count, type: 'embeddings', kind: 'safe', kindLabel: 'Safe to clear'},
+      {name: 'Models', size: s.models.size, type: null, kind: 'download', kindLabel: 'Download again', settings: true},
+      {name: 'Hugging Face Cache', size: s.hf_cache.size, type: null, kind: 'download', kindLabel: 'Download again', settings: true},
+      {name: 'Offline Originals', size: s.offline_originals.size, count: s.offline_originals.count, type: null, kind: 'keep', kindLabel: 'Keep'},
     ];
     _storageSummary = {};
 
@@ -295,9 +372,12 @@ async function loadStoragePanel() {
         '<div class="stat-number">' + storageFormatBytes(c.size) + '</div>' +
         '<div class="stat-label">' + c.name +
           (c.count != null ? ' (' + c.count.toLocaleString() + ')' : '') +
-        '</div>';
+        '</div>' +
+        '<span class="stat-kind ' + c.kind + '">' + c.kindLabel + '</span>';
       if (c.type) {
         html += '<button class="btn-manage" onclick="openStorageModal(\'' + c.type + '\')">Manage</button>';
+      } else if (c.settings) {
+        html += '<button class="btn-manage" onclick="window.location.href=\'/settings\'">Manage in Settings</button>';
       }
       html += '</div>';
     });
@@ -305,7 +385,43 @@ async function loadStoragePanel() {
   } catch(e) {
     document.getElementById('storageGrid').innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load storage info</span>';
   }
-  loadMasksCard();
+  await loadMasksCard();
+}
+
+async function refreshStoragePage() {
+  var btn = document.getElementById('refreshStorageBtn');
+  if (btn) btn.disabled = true;
+  await Promise.all([
+    loadStoragePanel(), loadPreviewCacheStatus(), loadDetectionCacheStats(),
+    loadEmbeddingMatrix(), loadEmbeddingCache(),
+  ]);
+  document.getElementById('storageUpdatedAt').textContent =
+    'Updated ' + new Date().toLocaleTimeString([], {hour: 'numeric', minute: '2-digit', second: '2-digit'});
+  if (btn) btn.disabled = false;
+}
+
+async function clearSafeCaches() {
+  var size = document.getElementById('storageReclaimableSize').textContent;
+  if (!confirm('Clear ' + size + ' of thumbnails, previews, and label embeddings? They will regenerate as needed.')) return;
+  var btn = document.getElementById('clearSafeCachesBtn');
+  btn.disabled = true;
+  btn.textContent = 'Clearing…';
+  try {
+    await safeFetch('/api/storage/clear-safe', {method: 'POST'});
+    showToast('Safe caches cleared', 'success');
+  } catch(e) {
+    showToast('Could not clear all safe caches', 'error');
+  }
+  await refreshStoragePage();
+}
+
+async function openStorageFolder() {
+  try {
+    var result = await safeFetch('/api/storage/open-folder', {method: 'POST'});
+    if (!result.ok) throw new Error(result.reason || 'Could not open storage folder');
+  } catch(e) {
+    showToast((e && e.message) || 'Could not open storage folder', 'error');
+  }
 }
 
 var _masksData = null;
@@ -323,7 +439,8 @@ async function loadMasksCard() {
     inner += '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;">';
     inner += '<div style="font-size:13px;font-weight:600;color:var(--text-primary);">Masks ' +
       '<span style="font-size:11px;font-weight:400;color:var(--text-dim);margin-left:6px;">' +
-      storageFormatBytes(totalBytes) + '</span></div>';
+      storageFormatBytes(totalBytes) + '</span> ' +
+      '<span class="stat-kind keep" style="margin-left:6px;">Review before clearing</span></div>';
     inner += '<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">';
     inner += '<button class="btn-manage" onclick="openMasksModal()"' +
       (variants.length === 0 ? ' disabled style="opacity:0.5;cursor:default;"' : '') +
@@ -339,6 +456,7 @@ async function loadMasksCard() {
     if (variants.length === 0) {
       inner += '<div style="font-size:12px;color:var(--text-ghost);">No SAM masks yet.</div>';
     } else {
+      inner += '<div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">Generated from detections; deleting them may require another mask-generation run.</div>';
       inner += '<div style="display:flex;flex-direction:column;gap:4px;">';
       variants.forEach(function(v) {
         var isActive = (v.active_count || 0) > 0;
