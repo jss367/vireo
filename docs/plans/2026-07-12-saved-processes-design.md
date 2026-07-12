@@ -36,12 +36,22 @@ the saved-process library.
 3. **Global library, per-workspace default.** One shared list of processes;
    *which one is the default* is remembered per workspace (as today).
 4. **DB table with stable integer IDs.** Everything that points at a process
-   (workspace default, import chaining, job provenance) references it by **id**,
-   so renaming never breaks a reference. Deleting a process nulls out any
-   workspace that defaulted to it (→ "import only").
+   (workspace default, import chaining) references it by **id**, so renaming
+   never breaks a reference. Deleting a process nulls out any workspace that
+   defaulted to it (→ "import only").
 5. **Process page = editor** (explicit Save / Save as new / Rename / Delete,
    with a "modified (unsaved)" state; Run always uses current toggle values).
    **Import page = pure picker** (no toggles).
+6. **Job provenance stamps a `process_id` only when the run matches a saved
+   process as-is.** The process-page Run uses the live toggle values, so an
+   unsaved / modified / no-process-selected ("Custom") run has no id to
+   attribute — the job config's `process_id` is null in that case and the
+   full stage-flag snapshot (`skip_*`, `miss_enabled`, `review_mode`,
+   `eye_detect_override`) is what carries the run's meaning. A saved-process
+   Run with untouched toggles stamps the id AND the same flag snapshot, so
+   the jobs panel can label it and downstream code never has to re-resolve.
+   Editing or deleting the referenced process later doesn't rewrite prior
+   job records — the frozen snapshot describes what actually ran.
 
 ## Data model
 
@@ -64,20 +74,38 @@ New global SQLite table `saved_processes`:
   (int, nullable). Points at the seed used for fresh workspaces / import UI
   default.
 - **Per-workspace default:** replaces `pipeline.default_strategy` (a string) with
-  `pipeline.default_process_id` (int) in `workspaces.config_overrides`.
-  NULL/absent = "import only, no processing".
+  `pipeline.default_process_id` (int) in `workspaces.config_overrides`. The
+  key's three states are distinct:
+  - **absent** — no per-workspace override; the effective value inherits the
+    global `pipeline.default_process_id` (a fresh workspace's behavior).
+  - **explicit `null`** — the workspace explicitly opts out of after-import
+    processing regardless of the global default. Delete-process cleanup writes
+    this so a workspace that was pointing at the deleted process falls back to
+    "import only" instead of silently starting to run whatever the global
+    default happens to be. Legacy `default_strategy` migration writes it too
+    when the old value was `null` or an unrecognized name.
+  - **integer** — a specific `saved_processes.id`.
+  Both migration and deletion tests cover the absent vs explicit-`null` split
+  so `get_effective_config()`'s deep-merge doesn't quietly promote one to the
+  other.
 
 ### Seeds (`process_strategies.SEED_PROCESSES`)
 
 `_BASE` defaults stay as the "everything on" baseline (column defaults for a
-brand-new process). The four seeds keep today's semantics:
+brand-new process). The four seeds keep today's semantics. Every persisted
+field has an explicit value (thumbnails/previews are not saved-process
+fields — they run whenever there are photos to render — so "off" seeds like
+Quick look show that by leaving them out of the schema entirely):
 
-- **Identify birds** — `skip_extract_masks, skip_eye_keypoints, skip_regroup`;
-  `miss_enabled=False`; `review_mode='species'`. (App default.)
-- **Full** — all stages on.
-- **Cull-ready** — `skip_extract_masks, skip_eye_keypoints`; `miss_enabled=False`.
-- **Quick look** — everything off except thumbnails/previews
-  (`skip_classify` + the rest); `miss_enabled=False`.
+| seed | skip_classify | skip_extract_masks | skip_eye_keypoints | skip_regroup | miss_enabled | review_mode |
+|---|---|---|---|---|---|---|
+| **Identify birds** (app default) | False | True | True | True | False | `'species'` |
+| **Full** | False | False | False | False | True | `None` |
+| **Cull-ready** | False | True | True | False | False | `None` |
+| **Quick look** | True | True | True | True | False | `None` |
+
+Migration and fresh-workspace seeding both apply this table verbatim so a
+resolved seed matches whichever path produced it.
 
 ### Migration (one-shot, db_meta-guarded)
 

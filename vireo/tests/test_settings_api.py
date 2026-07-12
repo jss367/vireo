@@ -758,6 +758,95 @@ def test_import_default_process_name_null_clears_id(app_and_db):
     assert raw["pipeline"]["default_process_id"] is None
 
 
+def test_export_includes_default_process_flags(app_and_db):
+    """Export emits the full flag snapshot alongside the name/id so import can
+    verify the target's same-named row means the same thing (see
+    test_import_flag_mismatch_falls_back_to_null)."""
+    app, db = app_and_db
+    full = next(p for p in db.get_saved_processes() if p["name"] == "Full")
+    import config as cfg
+
+    cfg.set("pipeline", {**cfg.load()["pipeline"], "default_process_id": full["id"]})
+    client = app.test_client()
+    resp = client.get("/api/settings/export")
+    body = json.loads(resp.get_data())
+    flags = body["pipeline"]["default_process_flags"]
+    for k in (
+        "skip_classify",
+        "skip_extract_masks",
+        "skip_eye_keypoints",
+        "skip_regroup",
+        "miss_enabled",
+        "review_mode",
+    ):
+        assert flags[k] == full[k], f"{k} mismatch on export"
+
+
+def test_import_flag_match_translates_to_target_id(app_and_db):
+    """When the payload's flag snapshot matches the target's same-named row, the
+    default is set to the target's id — the name+flag pair is a portable
+    identity that survives DB-local id collisions."""
+    app, db = app_and_db
+    cull_ready = next(p for p in db.get_saved_processes() if p["name"] == "Cull-ready")
+    client = app.test_client()
+    payload = {
+        "pipeline": {
+            "default_process_id": 999,
+            "default_process_name": "Cull-ready",
+            "default_process_flags": {
+                "skip_classify": cull_ready["skip_classify"],
+                "skip_extract_masks": cull_ready["skip_extract_masks"],
+                "skip_eye_keypoints": cull_ready["skip_eye_keypoints"],
+                "skip_regroup": cull_ready["skip_regroup"],
+                "miss_enabled": cull_ready["miss_enabled"],
+                "review_mode": cull_ready["review_mode"],
+            },
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] == cull_ready["id"]
+    assert "default_process_flags" not in raw["pipeline"]
+    assert "default_process_name" not in raw["pipeline"]
+
+
+def test_import_flag_mismatch_falls_back_to_null(app_and_db):
+    """When the target has a same-named row but its flags differ from the
+    exporter's, the default falls back to null. Silently linking to the local
+    row would misattribute the after-import default to a divergent process."""
+    app, db = app_and_db
+    full = next(p for p in db.get_saved_processes() if p["name"] == "Full")
+    client = app.test_client()
+    payload = {
+        "pipeline": {
+            "default_process_id": full["id"],
+            "default_process_name": "Full",
+            "default_process_flags": {
+                "skip_classify": True,   # target's Full has False
+                "skip_extract_masks": full["skip_extract_masks"],
+                "skip_eye_keypoints": full["skip_eye_keypoints"],
+                "skip_regroup": full["skip_regroup"],
+                "miss_enabled": full["miss_enabled"],
+                "review_mode": full["review_mode"],
+            },
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] is None
+    assert "default_process_flags" not in raw["pipeline"]
+
+
 def test_import_rejects_invalid_json(app_and_db):
     app, _ = app_and_db
     client = app.test_client()

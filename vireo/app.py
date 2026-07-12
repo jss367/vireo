@@ -12165,17 +12165,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # whose rows are DB-local — the ids don't transfer across databases.
         # If the same integer id happens to exist in the target DB it points
         # at a different process; the seed ids 1-4 make this collision
-        # common. Emit the current process name alongside the id as a
-        # portable identity so ``/api/settings/import`` can translate it to
-        # the right id in the target DB. The name lives in the exported
-        # JSON only — the raw config file itself is never rewritten with it.
+        # common. Emit the current process name AND its full flag snapshot
+        # alongside the id as a portable identity so ``/api/settings/import``
+        # can verify the target DB's same-named row means the same thing.
+        # Name alone is not enough — process names are user-editable and two
+        # databases can end up with matching names on rows that differ in
+        # flags (renamed customs, edited seeds, unrelated customs that just
+        # happen to share a label). Importing a foreign backup would then
+        # silently repoint the after-import default at a divergent process.
+        # The extra keys live in the exported JSON only; the raw config file
+        # itself is never rewritten with them.
         pipeline_raw = raw.get("pipeline")
         if isinstance(pipeline_raw, dict):
             pid = pipeline_raw.get("default_process_id")
             if isinstance(pid, int):
                 match = _get_db().get_saved_process(pid)
                 if match is not None:
+                    import process_strategies as ps
+
                     pipeline_raw["default_process_name"] = match["name"]
+                    pipeline_raw["default_process_flags"] = {
+                        k: match[k] for k in ps.FLAG_FIELDS
+                    }
         body = json.dumps(raw, indent=2)
         today = _datetime.date.today().isoformat()
         resp = make_response(body)
@@ -12252,27 +12263,45 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # across databases (seed ids 1-4 collide, custom ids collide by
         # chance), so a foreign backup that only carried ``default_process_id``
         # would silently point at whatever unrelated row happens to share that
-        # id. When the name is present, it wins over the raw id; when the
-        # target DB has no process by that name (renamed, deleted, or a foreign
-        # custom process that never existed here) the effective default falls
-        # back to null (import only) rather than silently activating a stale
-        # process. The name field is stripped from the payload so it doesn't
-        # persist to ~/.vireo/config.json as a non-schema key.
-        if isinstance(pipeline_payload, dict) and "default_process_name" in pipeline_payload:
-            name_val = pipeline_payload.pop("default_process_name")
+        # id. Match by name AND by full flag snapshot when the exporter emits
+        # ``default_process_flags``: the name alone is not a stable identity
+        # (users rename processes, unrelated custom processes across DBs can
+        # share a label, and even a seed named "Full" may have been edited on
+        # one side). If the exporter didn't ship flags (older backup), fall
+        # back to name-only match. Any mismatch — no name row, no flag-equal
+        # row, or the flags entry is malformed — resolves to null (import
+        # only) instead of silently activating a divergent process. The name
+        # and flag fields are stripped from the payload so they don't persist
+        # to ~/.vireo/config.json as non-schema keys.
+        if isinstance(pipeline_payload, dict) and (
+            "default_process_name" in pipeline_payload
+            or "default_process_flags" in pipeline_payload
+        ):
+            import process_strategies as ps
+
+            name_val = pipeline_payload.pop("default_process_name", None)
+            flags_val = pipeline_payload.pop("default_process_flags", None)
             if name_val is None:
                 pipeline_payload["default_process_id"] = None
             elif isinstance(name_val, str):
-                match = next(
-                    (
-                        p for p in _get_db().get_saved_processes()
-                        if p["name"] == name_val
-                    ),
-                    None,
-                )
-                pipeline_payload["default_process_id"] = (
-                    match["id"] if match is not None else None
-                )
+                candidates = [
+                    p for p in _get_db().get_saved_processes()
+                    if p["name"] == name_val
+                ]
+                translated_pid = None
+                if isinstance(flags_val, dict):
+                    for cand in candidates:
+                        if all(
+                            cand.get(k) == flags_val.get(k)
+                            for k in ps.FLAG_FIELDS
+                        ):
+                            translated_pid = cand["id"]
+                            break
+                elif candidates:
+                    translated_pid = candidates[0]["id"]
+                pipeline_payload["default_process_id"] = translated_pid
+            else:
+                pipeline_payload["default_process_id"] = None
 
         # Iterate the schema directly rather than relying on flatten() — empty
         # objects at schema leaves (e.g. {"classification_threshold": {}}) flatten
