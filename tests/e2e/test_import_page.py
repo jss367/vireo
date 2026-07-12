@@ -355,8 +355,8 @@ def test_import_preview_passes_verify_by_hash_to_duplicate_check(live_server, pa
 
 
 def test_import_preview_shows_destination_folder_structure(live_server, page):
-    """Copy-mode preview surfaces the destination folder structure (new vs
-    existing folders) and a managed-archive callout, wired to
+    """Copy-mode preview surfaces exact destination folder paths and file
+    counts beside the folder template, plus a managed-archive callout, wired to
     /api/import/destination-preview. Skipped duplicates are excluded so the
     folder counts match the files that will actually land."""
     url = live_server["url"]
@@ -424,7 +424,16 @@ def test_import_preview_shows_destination_folder_structure(live_server, page):
     structure = page.locator("#destStructure")
     expect(structure).to_be_visible()
     expect(structure).to_contain_text(
-        "2 photos → 2 folders (1 new, 1 existing)"
+        "Resulting folders: 2 files split into 2 folders (1 new, 1 existing)"
+    )
+    expect(page.locator("#destCard #destStructure")).to_be_visible()
+    expect(structure.locator("th")).to_have_text(["Exact folder", "Files", "Status"])
+    rows = structure.locator("tr")
+    expect(rows.nth(1).locator("td")).to_have_text(
+        ["/archive/2026/2026-07-01", "1", "new"]
+    )
+    expect(rows.nth(2).locator("td")).to_have_text(
+        ["/archive/2026/2026-07-02", "1", "existing"]
     )
     expect(structure).to_contain_text("Merging into a managed archive at")
     expect(structure).to_contain_text("/archive")
