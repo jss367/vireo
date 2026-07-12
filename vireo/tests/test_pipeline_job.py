@@ -6818,7 +6818,7 @@ def test_pipeline_thumbnail_retry_uses_near_full_working_copy(tmp_path):
     )
 
     assert result.endswith("7.jpg")
-    assert calls[0][1] == str(wc_path)
+    assert os.path.normpath(calls[0][1]) == os.path.normpath(str(wc_path))
 
 
 def test_thumbnail_progress_counter_includes_failed(tmp_path, monkeypatch):
