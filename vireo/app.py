@@ -18161,6 +18161,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e))
         return None
 
+    def _create_import_collection(thread_db, photo_ids):
+        """Create the static collection that records one completed import.
+
+        Collection creation belongs to the import itself, not to optional
+        after-import processing.  Keeping it separate ensures "Import only"
+        runs remain discoverable in Browse while processed imports can reuse
+        the exact same scope for their chained pipeline job.
+        """
+        collection_name = "Import " + datetime.now().strftime("%Y-%m-%d %H:%M")
+        collection_id = thread_db.add_collection(
+            collection_name,
+            json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+        )
+        return collection_id, collection_name
+
+    def _record_import_collection(result, workspace_id):
+        """Attach a collection to a complete, successful import result."""
+        photo_ids = result.get("photo_ids") or []
+        if not result.get("ok") or result.get("cancelled") or not photo_ids:
+            return None, None
+        try:
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+            collection_id, collection_name = _create_import_collection(
+                thread_db, photo_ids,
+            )
+            result["collection_id"] = collection_id
+            result["collection_name"] = collection_name
+            return thread_db, collection_id
+        except Exception as e:
+            log.exception("import collection creation failed")
+            result["collection_error"] = str(e)
+            return None, None
+
     @app.route("/api/jobs/import-in-place", methods=["POST"])
     def api_job_import_in_place():
         """Import existing folders without copying files.
@@ -18232,6 +18266,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         vireo_dir = os.path.dirname(thumb_cache_dir)
 
         def _chain_after_import(job, result):
+            photo_ids = result.get("photo_ids") or []
+            thread_db, col_id = _record_import_collection(result, active_ws)
+
             if after_import is None:
                 result["after_import_skipped"] = "import-only"
                 return
@@ -18241,21 +18278,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if result.get("cancelled"):
                 result["after_import_skipped"] = "import cancelled"
                 return
-            photo_ids = result.get("photo_ids") or []
             if not photo_ids:
                 result["after_import_skipped"] = "no photos"
                 return
-            try:
-                from datetime import datetime as _dt
-
-                thread_db = Database(db_path)
-                thread_db.set_active_workspace(active_ws)
-                col_id = thread_db.add_collection(
-                    "Import " + _dt.now().strftime("%Y-%m-%d %H:%M"),
-                    json.dumps(
-                        [{"field": "photo_ids", "value": photo_ids}]
-                    ),
+            if col_id is None:
+                result["after_import_skipped"] = (
+                    "failed to create import collection"
                 )
+                return
+            try:
                 process_job_id, model_warning = _enqueue_process_job(
                     thread_db, runner, active_ws,
                     collection_id=col_id,
@@ -18758,15 +18789,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
 
         def _chain_after_import(job, result):
-            """Enqueue the after-import process job, or record why not.
+            """Create the import collection and optionally enqueue processing.
 
             Every skip is written to the result as ``after_import_skipped``
-            so the jobs panel shows exactly what happened and why
-            (transparency rule). Guards, in order: import-only choice,
-            failed import (a green processing run must not hide a failed
-            import — rollup convention), cancelled import, and
-            duplicates-only imports with nothing new to process.
+            so the jobs panel shows exactly why processing did not run.  The
+            collection is independent: every successful import with new
+            photos gets one, including the import-only choice.
             """
+            photo_ids = result.get("photo_ids") or []
+            thread_db, col_id = _record_import_collection(result, active_ws)
+
             if after_import is None:
                 result["after_import_skipped"] = "import-only"
                 return
@@ -18776,23 +18808,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if result.get("cancelled"):
                 result["after_import_skipped"] = "import cancelled"
                 return
-            photo_ids = result.get("photo_ids") or []
             if not photo_ids:
                 result["after_import_skipped"] = "no new photos"
                 return
-            try:
-                from datetime import datetime as _dt
-
-                from db import Database
-
-                thread_db = Database(db_path)
-                thread_db.set_active_workspace(active_ws)
-                col_id = thread_db.add_collection(
-                    "Import " + _dt.now().strftime("%Y-%m-%d %H:%M"),
-                    json.dumps(
-                        [{"field": "photo_ids", "value": photo_ids}]
-                    ),
+            if col_id is None:
+                result["after_import_skipped"] = (
+                    "failed to create import collection"
                 )
+                return
+            try:
                 process_job_id, model_warning = _enqueue_process_job(
                     thread_db, runner, active_ws,
                     collection_id=col_id,
