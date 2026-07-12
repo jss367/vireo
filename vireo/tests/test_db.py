@@ -13768,6 +13768,62 @@ def test_merge_keyword_into_dedupes_keyword_ids_after_retarget(tmp_path):
         db.close()
 
 
+def test_merge_keyword_into_preserves_prediction_accept_old_value(tmp_path):
+    """`_merge_keyword_into`'s bare-string rewrite of
+    edit_history_items.old_value must skip prediction_accept entries.
+    api_accept_prediction records item.old_value = str(prediction_id),
+    and _edit_prediction_id falls back to that raw value. If the merged
+    keyword id happens to equal a stored prediction id, a blanket rewrite
+    would silently retarget undo/redo onto a different prediction.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        keep_id = db.add_keyword("Sparrow", kw_type="general")
+        merge_id = db.add_keyword("sparrow variant", kw_type="general")
+
+        # Contrive a prediction_accept edit whose item.old_value (the
+        # prediction id per api_accept_prediction) numerically equals the
+        # keyword row about to be merged — the exact collision the
+        # CodeRabbit finding calls out. The prediction row itself is not
+        # required for the rewrite pass; the retarget operates purely on
+        # edit_history_items.
+        prediction_id = merge_id
+        eid = db.record_edit(
+            "prediction_accept", "Accepted prediction", str(merge_id),
+            [{
+                "photo_id": pid,
+                "old_value": str(prediction_id),
+                "new_value": str(merge_id),
+            }],
+        )
+
+        db.tag_photo(pid, merge_id)
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid,),
+        ).fetchone()
+        # new_value (keyword id) IS retargeted onto the survivor.
+        assert item["new_value"] == str(keep_id)
+        # old_value is the prediction id — MUST stay unchanged even
+        # though it numerically equals src_id.
+        assert item["old_value"] == str(merge_id), (
+            "prediction_accept.old_value (prediction id) was incorrectly "
+            "rewritten as if it were a keyword id"
+        )
+    finally:
+        db.close()
+
+
 def test_add_photo_retries_on_database_is_locked(tmp_path):
     """The INSERT inside add_photo must retry transient 'database is locked'.
 

@@ -186,6 +186,115 @@ def test_migration_keeps_distinct_specific_types_separate(tmp_path):
         db.close()
 
 
+def test_migration_keeps_clean_general_homonym_of_specific_type(tmp_path):
+    """A clean 'general' row sharing a match_key with a specific-type peer
+    is an intentional homonym (e.g. general 'Robin' as a bird-tag hint plus
+    individual 'Robin' as a person). The migration must not fold the
+    general onto the individual — _merge_keyword_into's cross-type merge
+    clears species metadata, so folding a legacy `type='general',
+    is_species=1` species row into an individual peer would silently drop
+    those photos out of species/life-list filters. Only variant spellings
+    should fold across types."""
+    db, _ws_id, p1, p2 = _make_db(tmp_path)
+    try:
+        # Legacy species row stored as type='general', is_species=1 — the
+        # exact shape the finding calls out. Clean spelling.
+        general_species_id = _insert_keyword(
+            db, "Robin", "general", is_species=1
+        )
+        individual_id = _insert_keyword(db, "Robin", "individual")
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, general_species_id),
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p2, individual_id),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        rows = db.conn.execute(
+            "SELECT id, name, type, is_species FROM keywords "
+            "WHERE name = 'Robin' ORDER BY type"
+        ).fetchall()
+        # Both rows survive, each keeps its own photo tag and metadata.
+        assert [(r["id"], r["type"], r["is_species"]) for r in rows] == [
+            (general_species_id, "general", 1),
+            (individual_id, "individual", 0),
+        ]
+        general_tags = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (general_species_id,),
+            )
+        }
+        individual_tags = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (individual_id,),
+            )
+        }
+        assert general_tags == {p1}
+        assert individual_tags == {p2}
+    finally:
+        db.close()
+
+
+def test_migration_folds_general_variant_alongside_clean_general_homonym(tmp_path):
+    """A variant 'general' still folds into the specific-type peer even
+    when a clean 'general' homonym exists at the same slot: the variant
+    would collide with the peer's clean name after normalization, so it
+    must be resolved; the clean general homonym stays put."""
+    db, _ws_id, p1, p2 = _make_db(tmp_path)
+    try:
+        clean_general_id = _insert_keyword(db, "Robin", "general")
+        variant_general_id = _insert_keyword(db, "‘Robin", "general")
+        individual_id = _insert_keyword(db, "Robin", "individual")
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, variant_general_id),
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p2, clean_general_id),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        surviving = db.conn.execute(
+            "SELECT id, name, type FROM keywords WHERE name = 'Robin' "
+            "ORDER BY type"
+        ).fetchall()
+        # Variant is gone; clean general and individual coexist.
+        assert [(r["id"], r["type"]) for r in surviving] == [
+            (clean_general_id, "general"),
+            (individual_id, "individual"),
+        ]
+        # Variant's tag migrated onto the individual (top-priority
+        # specific type wins the fold at this slot).
+        individual_tags = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (individual_id,),
+            )
+        }
+        clean_general_tags = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (clean_general_id,),
+            )
+        }
+        assert individual_tags == {p1}
+        assert clean_general_tags == {p2}
+    finally:
+        db.close()
+
+
 def test_migration_cross_type_child_collision_disambiguates_variant(tmp_path):
     """Under a non-NULL parent, UNIQUE(name, parent_id) blocks renaming a
     variant onto a clean name a different-type sibling already holds. The

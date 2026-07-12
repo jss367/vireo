@@ -9511,11 +9511,21 @@ class Database:
 
         # Merge rows that collapse to the same normalized identity. Global
         # (all workspaces), grouped by (normalized key, parent_id):
-        # same-type rows merge; 'general' rows fold into the
-        # highest-priority specific-typed peer (mirrors add_keyword's
-        # promotion); rows of two different specific types are distinct by
-        # design and stay separate. Convergence loop because merging
-        # duplicate parents makes their children same-slot duplicates.
+        # same-type rows merge; a 'general' row folds into the
+        # highest-priority specific-typed peer ONLY when its stored name
+        # is un-normalized (a variant that would collide with the peer's
+        # clean spelling after normalize_keyword_display). Clean generals
+        # sharing a match_key with a specific-type peer are intentional
+        # cross-type homonyms (e.g. general 'Robin' alongside individual
+        # 'Robin', or a legacy `type='general', is_species=1` species row
+        # coexisting with an individual person named 'Robin') and must
+        # stay separate — otherwise all their tags migrate onto the
+        # specific-type survivor and _merge_keyword_into then clears
+        # species metadata for the cross-type merge, silently dropping
+        # those photos out of species/life-list filters. Rows of two
+        # different specific types are distinct by design and stay
+        # separate. Convergence loop because merging duplicate parents
+        # makes their children same-slot duplicates.
         type_priority = {
             "taxonomy": 0, "genre": 1, "individual": 2, "location": 3,
             "general": 4,
@@ -9544,7 +9554,27 @@ class Database:
                         [r for r in group if r["type"] == t]
                         for t in specific_types
                     ]
-                    subgroups[0] += generals
+                    # Split generals by whether they need normalization.
+                    # Variant generals fold into the top specific-type
+                    # subgroup so the merge resolves the imminent name
+                    # collision at rename time; clean generals form their
+                    # own subgroup so they collapse among themselves (a
+                    # SQLite case-sensitive UNIQUE lets two clean rows
+                    # like 'Robin' and 'robin' coexist under the same
+                    # parent — they still ARE duplicates by NOCASE and
+                    # should merge) but do not cross into the specific
+                    # types.
+                    variant_generals = [
+                        r for r in generals
+                        if normalize_keyword_display(r["name"]) != r["name"]
+                    ]
+                    clean_generals = [
+                        r for r in generals
+                        if normalize_keyword_display(r["name"]) == r["name"]
+                    ]
+                    subgroups[0] += variant_generals
+                    if clean_generals:
+                        subgroups.append(clean_generals)
                 else:
                     subgroups = [generals]
                 for members in subgroups:
@@ -9926,18 +9956,37 @@ class Database:
             (dst_str, src_str, *_kw_id_actions),
         )
         # 2) edit_history_items new_value / old_value: bare keyword-id
-        #    strings (e.g. keyword_remove records old_value=str(kid);
-        #    species_replace batches record new_value=str(new_kid)).
-        for col in ("new_value", "old_value"):
+        #    strings, but only the specific (action_type, column) pairs
+        #    that actually store keyword ids. record_edit populates:
+        #      keyword_add       → new_value=str(kid), old_value=''
+        #      keyword_remove    → old_value=str(kid), new_value=''
+        #      species_replace   → old_value=str(old_kid), new_value=str(kid)
+        #      prediction_accept → old_value=str(prediction_id),
+        #                          new_value=str(kid)
+        #    prediction_accept.old_value is the prediction id, NOT a
+        #    keyword id (see api_accept_prediction and _edit_prediction_id
+        #    which falls back to the bare string). A blanket rewrite over
+        #    every column would corrupt any prediction id whose numeric
+        #    value happens to equal src_id — undo/redo would then act on
+        #    the wrong prediction. Restrict each rewrite to the action
+        #    types whose column contains a keyword id.
+        _kw_id_by_col = {
+            "new_value": (
+                "keyword_add", "species_replace", "prediction_accept",
+            ),
+            "old_value": ("keyword_remove", "species_replace"),
+        }
+        for col, actions in _kw_id_by_col.items():
+            col_placeholders = ",".join("?" * len(actions))
             self.conn.execute(
                 f"""UPDATE edit_history_items
                     SET {col} = ?
                     WHERE {col} = ?
                       AND edit_id IN (
                           SELECT id FROM edit_history
-                          WHERE action_type IN ({_kw_placeholders})
+                          WHERE action_type IN ({col_placeholders})
                       )""",
-                (dst_str, src_str, *_kw_id_actions),
+                (dst_str, src_str, *actions),
             )
         # 3) edit_history_items.old_value JSON payloads: species_replace
         #    and metadata-carrying keyword_add/prediction_accept entries
