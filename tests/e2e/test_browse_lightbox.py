@@ -354,6 +354,146 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     assert abs(carried["centerY"] - before["viewport"]["centerY"]) < 0.03
 
 
+def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
+    live_server, page
+):
+    """A save while the outgoing bitmap is still frozen must not stomp the
+    incoming photo's intended inspection point.
+
+    Regression: while _lbVisualTransitionPending is true, _lightboxCurrentId
+    already points at the incoming photo but the DOM transform still belongs
+    to the outgoing bitmap. A save triggered by another arrow press or
+    closeLightbox in that window used to read the DOM and record the outgoing
+    transform under the incoming photo's id, replacing the state the next
+    open of that photo would otherwise restore.
+    """
+    first_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
+        '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
+    )
+    next_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="3000" height="3000" '
+        'viewBox="0 0 3000 3000"><rect width="3000" height="3000" fill="#426"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=first_svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").nth(1).wait_for(state="visible")
+    next_id = page.evaluate("window.photos[1].id")
+    held_original = {}
+
+    def hold_next_original(route):
+        if f"/photos/{next_id}/original" in route.request.url:
+            held_original["route"] = route
+            return
+        route.fulfill(body=first_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", hold_next_original)
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+
+    outgoing = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbCurrentSrcKey = 'original';
+            window._lbApplyViewportState({
+                zoom: window._lbNativeZoom,
+                centerX: 0.20,
+                centerY: 0.75,
+                oneToOne: true,
+            });
+            window._lbSaveViewportState(window._lightboxCurrentId);
+            return window._lbViewportStateFromCurrent();
+        }"""
+    )
+
+    # Prime a distinctive saved viewport for the incoming photo so we can
+    # tell "our intended state survives" from "outgoing DOM state leaked in".
+    incoming_id = page.evaluate("window.photos[1].id")
+    intended = {"zoom": 2.5, "centerX": 0.80, "centerY": 0.15}
+    page.evaluate(
+        """([id, state]) => {
+            window._lbViewportByPhotoId[String(id)] = {
+                zoom: state.zoom,
+                centerX: state.centerX,
+                centerY: state.centerY,
+                oneToOne: false,
+                pending1To1: false,
+            };
+        }""",
+        [incoming_id, intended],
+    )
+
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    page.wait_for_function("() => window._lbVisualTransitionPending === true")
+    page.wait_for_function("() => window._lightboxCurrentId === window.photos[1].id")
+    page.wait_for_timeout(50)
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(10)
+    assert "route" in held_original
+
+    # Simulate the user pressing another arrow / closing the lightbox before
+    # the incoming image finishes decoding: openLightbox / lightboxNav /
+    # closeLightbox all call _lbSaveViewportState(_lightboxCurrentId) in this
+    # state. The DOM transform is still the outgoing bitmap's.
+    saved_during_transition = page.evaluate(
+        """(id) => {
+            const returned = window._lbSaveViewportState(id);
+            return {
+                returned: returned,
+                stored: window._lbViewportByPhotoId[String(id)],
+            };
+        }""",
+        incoming_id,
+    )
+
+    # The stored state for the incoming photo must not be the outgoing
+    # bitmap's transform. It should be either the pending restore state that
+    # openLightbox armed for the incoming photo, or the pre-existing saved
+    # state we primed above — never the outgoing photo's centerX/centerY.
+    stored = saved_during_transition["stored"]
+    assert stored is not None
+    # Guard against the specific regression: the outgoing photo's off-center
+    # inspection point (0.20, 0.75) must not be recorded under the incoming
+    # photo's id.
+    assert not (
+        abs(stored["centerX"] - outgoing["centerX"]) < 0.05
+        and abs(stored["centerY"] - outgoing["centerY"]) < 0.05
+    ), (
+        "outgoing DOM transform leaked into incoming photo's saved viewport"
+    )
+
+    held_original.pop("route").fulfill(
+        body=next_svg, content_type="image/svg+xml"
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbVisualTransitionPending === false
+                && img && img.complete && img.naturalWidth === 3000;
+        }"""
+    )
+
+
 def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server, page):
     """A saved zoom > 4 is not lost when native zoom is unknown at first apply.
 

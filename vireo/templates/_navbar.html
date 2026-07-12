@@ -5304,6 +5304,22 @@ function _lbViewportStateFromCurrent() {
 
 function _lbSaveViewportState(photoId) {
   if (photoId == null) return null;
+  // Mid-navigation the DOM transform still belongs to the outgoing photo but
+  // _lightboxCurrentId has already advanced to the incoming id. Reading from
+  // the DOM here would misattribute the frozen bitmap to the incoming photo
+  // and stomp its intended inspection point. Prefer the pending restore
+  // state (what handleInitialImageLoad is about to apply), and otherwise
+  // leave any previously saved state alone.
+  if (_lbVisualTransitionPending && String(photoId) === String(_lightboxCurrentId)) {
+    var pending = _lbPendingViewportState;
+    if (pending) {
+      var pendingClone = _lbCloneViewportState(pending);
+      _lbViewportByPhotoId[String(photoId)] = pendingClone;
+      return _lbCloneViewportState(pendingClone);
+    }
+    var existing = _lbViewportByPhotoId[String(photoId)];
+    return existing ? _lbCloneViewportState(existing) : null;
+  }
   var state = _lbViewportStateFromCurrent();
   _lbViewportByPhotoId[String(photoId)] = state;
   return _lbCloneViewportState(state);
