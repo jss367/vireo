@@ -751,3 +751,49 @@ def test_sync_to_xmp_normalized_rename_preserves_unrelated_hierarchy(tmp_path):
     # Unrelated hierarchy survives -- was NOT stripped by the paired
     # remove even though `Birds` segment normalizes to the remove key.
     assert 'Animals|Birds|Hawk' in read_hierarchical_keywords(xmp_path)
+
+
+def test_sync_from_xmp_prunes_duplicate_normalized_db_variants(tmp_path):
+    """A single canonical XMP entry must collapse duplicate DB variants.
+
+    Regression: when an upgraded photo carries both a legacy row like
+    ``‘apapane`` and the clean row ``apapane``, and the sidecar has only
+    the canonical ``apapane``, the old prune loop kept both DB tags
+    because ``keyword_match_key`` matched them both against the same XMP
+    key. The reconciler now keeps the canonical row (preferring the
+    stored name equal to ``normalize_keyword_display(xmp_name)``) and
+    untags the rest.
+    """
+    from db import Database
+    from sync import sync_from_xmp
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'apapane'})
+
+    # Clean row (canonical) via the normal path.
+    kid_clean = db.add_keyword('apapane')
+    # Legacy quoted row inserted directly so it survives the
+    # add_keyword() normalization step.
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ('‘apapane',))
+    db.conn.commit()
+    kid_legacy = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ('‘apapane',)
+    ).fetchone()[0]
+
+    db.tag_photo(pid, kid_clean)
+    db.tag_photo(pid, kid_legacy)
+
+    os.remove(xmp_path)
+    write_sidecar(xmp_path, flat_keywords={'apapane'}, hierarchical_keywords=set())
+
+    sync_from_xmp(db, [pid])
+
+    keywords = db.get_photo_keywords(pid)
+    # Exactly one tag survives, and it is the canonical clean row --
+    # not the legacy `‘apapane` id.
+    assert len(keywords) == 1
+    assert keywords[0]['name'] == 'apapane'
+    assert keywords[0]['id'] == kid_clean
