@@ -13468,6 +13468,82 @@ def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
         db.close()
 
 
+def test_update_keyword_retype_to_nontaxonomy_does_not_leak_is_species(tmp_path):
+    """Retyping a taxonomy row to a non-taxonomy type that already has a
+    same-name peer must not copy is_species=1 (or the taxon link) onto the
+    surviving peer. Otherwise species queries — `is_species = 1 OR type =
+    'taxonomy'` — would keep matching photos tagged with the survivor
+    (e.g. an ``individual`` row), silently mis-tagging every photo already
+    on it. Guards `_merge_keyword_into`'s destination-side flag propagation.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Simulate a real folder + photos so tag rows are well-formed.
+        fid = db.add_folder("/photos", name="photos")
+        pid_src = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_dst = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        # Taxonomy `Robin` (species=1) at the top level.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+            "VALUES (?, NULL, 1, 'taxonomy', NULL)",
+            ("Robin",),
+        )
+        taxonomy_id = cur.lastrowid
+        db.tag_photo(pid_src, taxonomy_id)
+
+        # Existing individual `Robin` peer at the same slot, is_species=0.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 0, 'individual')",
+            ("Robin",),
+        )
+        individual_id = cur.lastrowid
+        db.tag_photo(pid_dst, individual_id)
+
+        # Retype the taxonomy row to 'individual'. update_keyword must merge
+        # into the individual peer and return its id.
+        effective_id = db.update_keyword(taxonomy_id, type="individual")
+        assert effective_id == individual_id
+
+        # The taxonomy row is gone.
+        assert db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (taxonomy_id,)
+        ).fetchone() is None
+
+        # Critically: the surviving individual row must NOT have inherited
+        # is_species=1 or a taxon_id from the taxonomy source.
+        survivor = db.conn.execute(
+            "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+            (individual_id,),
+        ).fetchone()
+        assert survivor["type"] == "individual"
+        assert survivor["is_species"] == 0, (
+            "is_species must not leak into a non-taxonomy destination"
+        )
+        assert survivor["taxon_id"] is None, (
+            "taxon_id must not leak into a non-taxonomy destination"
+        )
+
+        # Photos from both sides are retained on the survivor.
+        tagged = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (individual_id,),
+            ).fetchall()
+        }
+        assert tagged == {pid_src, pid_dst}
+    finally:
+        db.close()
+
+
 def test_add_photo_retries_on_database_is_locked(tmp_path):
     """The INSERT inside add_photo must retry transient 'database is locked'.
 

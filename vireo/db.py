@@ -9727,6 +9727,25 @@ class Database:
             (dst_id,),
         ).fetchone()
         if src is not None:
+            # A taxonomy row being merged into a non-taxonomy destination
+            # must not leak its species flag or taxon link onto the
+            # survivor: species queries `is_species = 1 OR type =
+            # 'taxonomy'` would otherwise keep matching every photo
+            # already tagged with that individual/general row (see
+            # update_keyword's retype-into-peer path). Same-type merges
+            # and non-taxonomy sources keep the existing metadata-fold
+            # behavior so legacy is_species/coords set on general rows
+            # survive a case-variant duplicate collapse.
+            leaks_species_into_nontaxonomy = (
+                src["type"] == "taxonomy"
+                and dst is not None and dst["type"] != "taxonomy"
+            )
+            propagate_species_flag = (
+                src["is_species"] if not leaks_species_into_nontaxonomy else 0
+            )
+            propagate_taxon_id = (
+                None if leaks_species_into_nontaxonomy else src["taxon_id"]
+            )
             self.conn.execute(
                 """UPDATE keywords
                    SET is_species = CASE WHEN ? = 1 THEN 1 ELSE is_species END,
@@ -9734,8 +9753,8 @@ class Database:
                        longitude  = COALESCE(longitude, ?),
                        taxon_id   = COALESCE(taxon_id, ?)
                    WHERE id = ?""",
-                (src["is_species"], src["latitude"], src["longitude"],
-                 src["taxon_id"], dst_id),
+                (propagate_species_flag, src["latitude"], src["longitude"],
+                 propagate_taxon_id, dst_id),
             )
         # Retarget pending keyword_add/keyword_remove rows queued under the
         # source name onto the destination name. A pending row that would

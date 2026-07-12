@@ -5907,6 +5907,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ).fetchone()
             if stored:
                 name = stored["name"]
+        # tag_photo is INSERT OR IGNORE, so a repeated Add click on a
+        # keyword the photo already carries would still queue a
+        # keyword_add sidecar change and record a keyword_add edit whose
+        # undo calls untag_photo — removing the pre-existing tag. Skip
+        # the pending/history bookkeeping when the row already exists, so
+        # the second click is a true no-op (mirrors the batch route's
+        # already_tagged precheck).
+        already_tagged = db.conn.execute(
+            "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+            (photo_id, kid),
+        ).fetchone() is not None
+        if already_tagged:
+            return jsonify({"ok": True, "keyword_id": kid})
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
