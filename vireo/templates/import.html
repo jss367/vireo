@@ -111,6 +111,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 12px; padding: 3px 10px; font-size: 12px; font-weight: 600; }
 .pill-ok { background: color-mix(in srgb, var(--success, #2da44e) 18%, transparent); color: var(--success, #2da44e); }
 .pill-bad { background: color-mix(in srgb, var(--danger, #cf222e) 18%, transparent); color: var(--danger, #cf222e); }
+.pill-warn { background: color-mix(in srgb, var(--warning, #bf8700) 18%, transparent); color: var(--warning, #9a6700); }
 .unsafe-list { margin: 6px 0 0 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }
 .result-links a { color: var(--accent); font-size: 12px; }
 #importError { color: var(--danger); font-size: 12px; margin-top: 6px; display: none; }
@@ -326,7 +327,10 @@ body { display: flex; flex-direction: column; height: 100vh; }
       <div class="section-divider">
         <div class="option-stack">
           <label><input type="checkbox" id="chkSkipDuplicates" checked> Skip duplicates</label>
-          <label><input type="checkbox" id="chkVerifyByHash"> Verify copied files with full content hashes</label>
+          <label><input type="radio" name="duplicateVerification" id="chkTrustLikelyDuplicates" checked> Trust likely duplicates</label>
+          <div class="hint">Fast — matches filename, byte size, and EXIF capture time to the second. Existing files are not read again.</div>
+          <label><input type="radio" name="duplicateVerification" id="chkVerifyByHash"> Verify duplicates byte-for-byte</label>
+          <div class="hint">Slower — reads the complete source and existing archive copy to confirm their contents are identical.</div>
         </div>
       </div>
     </div>
@@ -580,7 +584,7 @@ function renderRecentDestinations(recents) {
 function wireDestStructureInvalidation() {
   [
     'chkRecursive', 'fileTypePreset', 'destMode', 'remoteSubpath',
-    'chkSkipDuplicates', 'chkVerifyByHash', 'destInput',
+    'chkSkipDuplicates', 'chkTrustLikelyDuplicates', 'chkVerifyByHash', 'destInput',
     'folderTemplatePreset', 'folderTemplate',
   ].forEach((id) => {
     const el = document.getElementById(id);
@@ -1755,6 +1759,7 @@ function destStructureSignature(destination, fileTypes, recursive, excludePaths)
     recursive: recursive,
     skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
     verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
     exclude_paths: (excludePaths || []).slice().sort(),
   });
 }
@@ -1768,6 +1773,7 @@ function importPreviewSignature() {
     recursive: document.getElementById('chkRecursive').checked,
     skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
     verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
   });
 }
 
@@ -2076,6 +2082,8 @@ async function startImport() {
     body.file_types = fileTypes;
     body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
     body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
+    body.trust_likely_duplicates =
+      document.getElementById('chkTrustLikelyDuplicates').checked;
   }
   // For new-workspace imports where the user hasn't touched the After
   // Import dropdown, the visible selection was prefilled from the
@@ -2189,6 +2197,25 @@ function renderResult(res, status) {
     pill.className = 'pill pill-ok';
     pill.textContent = 'Safe to format the card — every file is verified in the archive';
     unsafe.style.display = 'none';
+  } else if (
+    res.unverified_duplicates_only
+    && (!status || status === 'completed')
+  ) {
+    pill.className = 'pill pill-warn';
+    pill.textContent = 'Import complete — keep the card until likely duplicates are verified';
+    const files = res.unsafe_files || [];
+    unsafe.style.display = '';
+    if (!files.length) {
+      const li = document.createElement('li');
+      li.textContent = res.unverified_duplicate +
+        ' likely duplicates matched by filename, byte size, and capture time, but were not compared byte-for-byte.';
+      unsafe.appendChild(li);
+    }
+    files.forEach((u) => {
+      const item = document.createElement('li');
+      item.textContent = u.path + ' — ' + u.reason;
+      unsafe.appendChild(item);
+    });
   } else {
     pill.className = 'pill pill-bad';
     pill.textContent = 'Do NOT format the card yet';
