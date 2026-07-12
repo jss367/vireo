@@ -618,6 +618,21 @@ def test_storage_page_bounds_large_cache_file_listings(app_and_db):
     assert b'Delete Entire Cache' in resp.data
 
 
+def test_storage_page_has_health_cleanup_and_location_controls(app_and_db):
+    """Storage surfaces capacity, safety guidance, refresh, and folder actions."""
+    app, _ = app_and_db
+    page = app.test_client().get('/storage')
+    assert page.status_code == 200
+    for marker in (
+        b'storageFreeSize', b'storageReclaimableSize', b'clearSafeCaches',
+        b'openStorageFolder', b'refreshStoragePage', b'Safe to clear',
+        b'Download again', b'cannot currently be reclaimed separately',
+        b'loadMasksCard(s && s.masks)',
+    ):
+        assert marker in page.data
+    assert page.data.count(b"{name: 'Database'") == 1
+
+
 def test_api_storage_includes_offline_originals(app_and_db):
     """Storage totals include Vireo-managed offline originals."""
     app, _ = app_and_db
@@ -628,6 +643,118 @@ def test_api_storage_includes_offline_originals(app_and_db):
     assert data["offline_originals"]["count"] == 0
     assert data["offline_originals"]["size"] == 0
     assert data["offline_originals"]["path"].endswith("offline")
+
+
+def test_api_storage_reports_volume_reclaimable_and_masks(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    _seed_masks(db, tmp_path)
+
+    data = app.test_client().get('/api/storage').get_json()
+    assert data["masks"]["size"] == 450
+    assert data["masks"]["total_bytes"] == 450
+    assert len(data["masks"]["variants"]) == 2
+    assert data["reclaimable"] == sum(
+        data[name]["size"] for name in ("thumbnails", "previews", "embeddings")
+    )
+    assert data["total"] == sum([
+        data["database"]["size"], data["thumbnails"]["size"],
+        data["previews"]["size"], data["embeddings"]["size"],
+        data["models"]["size"], data["hf_cache"]["size"],
+        data["offline_originals"]["size"], data["masks"]["size"],
+    ])
+    assert data["storage_root"] == str(tmp_path)
+    assert data["locations"]
+    assert data["volumes"]
+    assert all(volume["name"] for volume in data["volumes"])
+    assert all(volume["free"] >= 0 for volume in data["volumes"])
+    assert all(volume["capacity"] > 0 for volume in data["volumes"])
+
+
+def test_api_storage_reports_each_backing_volume(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    import app as app_module
+    import classifier
+
+    embedding_dir = tmp_path / "separate-embedding-volume"
+    embedding_dir.mkdir()
+    (embedding_dir / "labels.npy").write_bytes(b"embedding")
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(embedding_dir))
+
+    real_ismount = app_module.os.path.ismount
+    simulated_mounts = {str(tmp_path), str(embedding_dir)}
+    monkeypatch.setattr(
+        app_module.os.path, "ismount",
+        lambda path: path in simulated_mounts or real_ismount(path),
+    )
+    disk_usage = app_module.shutil._ntuple_diskusage
+    monkeypatch.setattr(
+        app_module.shutil, "disk_usage",
+        lambda path: disk_usage(
+            1000, 900 if path == str(embedding_dir) else 600,
+            100 if path == str(embedding_dir) else 400,
+        ),
+    )
+
+    data = app.test_client().get('/api/storage').get_json()
+    by_mount = {volume["mount_path"]: volume for volume in data["volumes"]}
+    assert by_mount[str(tmp_path)]["free"] == 400
+    assert by_mount[str(embedding_dir)]["free"] == 100
+    embedding_location = next(
+        location for location in data["locations"]
+        if location["id"] == "embeddings"
+    )
+    assert embedding_location["volume"]["mount_path"] == str(embedding_dir)
+
+
+def test_clear_safe_storage_caches(app_and_db, tmp_path, monkeypatch):
+    app, db = app_and_db
+    import classifier
+
+    preview_dir = tmp_path / "previews"
+    preview_dir.mkdir()
+    (preview_dir / "1_1200.jpg").write_bytes(b"preview")
+    embedding_dir = tmp_path / "embedding-cache"
+    embedding_dir.mkdir()
+    (embedding_dir / "labels.npy").write_bytes(b"embedding")
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(embedding_dir))
+
+    response = app.test_client().post('/api/storage/clear-safe')
+    assert response.status_code == 200
+    assert response.get_json()["cleared"] == [
+        "thumbnails", "previews", "embeddings",
+    ]
+    assert not (tmp_path / "thumbs").exists()
+    assert not preview_dir.exists()
+    assert not embedding_dir.exists()
+    assert db.conn.execute("SELECT COUNT(*) FROM preview_cache").fetchone()[0] == 0
+
+
+def test_open_storage_folder_uses_server_selected_path(
+    app_and_db, monkeypatch,
+):
+    app, _ = app_and_db
+    import app as app_module
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    monkeypatch.setattr(
+        app_module.subprocess, "run",
+        lambda command, **kwargs: calls.append(command) or Result(),
+    )
+    response = app.test_client().post('/api/storage/open-folder')
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+    assert calls
+    assert calls[0][-1] == app.config["THUMB_CACHE_DIR"].rsplit(os.sep, 1)[0]
 
 
 def test_detection_cache_stats_endpoint(app_and_db):
@@ -4734,6 +4861,289 @@ def test_apply_ordered_highlights_resorts_when_visible_match():
     assert marks == {1: False, 2: True}
 
 
+def test_highlight_score_bucket_orders_picks_then_scored_then_unscored():
+    """Highlights ordering (picked_first) forms three contiguous regions:
+    picks (scored first, then unscored in capture order), scored non-picks by
+    score, then unscored non-picks in capture order. No rich metrics are set,
+    so highlight_score collapses to quality_score (+0.08 pick bonus)."""
+    from app import _highlight_score_bucket
+
+    photos = [
+        # scored non-picks (out of order to prove score sorts them)
+        {"id": 4, "quality_score": 0.3, "flag": "none", "timestamp": "2024-01-07"},
+        {"id": 5, "quality_score": 0.9, "flag": "none", "timestamp": "2024-01-06"},
+        # unscored non-picks (later capture times, shuffled)
+        {"id": 6, "quality_score": None, "flag": "none", "timestamp": "2024-03-02"},
+        {"id": 7, "quality_score": None, "flag": "none", "timestamp": "2024-03-01"},
+        # picks: one scored, two unscored (shuffled capture times)
+        {"id": 1, "quality_score": 0.5, "flag": "flagged", "timestamp": "2024-01-05"},
+        {"id": 2, "quality_score": None, "flag": "flagged", "timestamp": "2024-01-09"},
+        {"id": 3, "quality_score": None, "flag": "flagged", "timestamp": "2024-01-02"},
+    ]
+    _highlight_score_bucket(photos, picked_first=True)
+    # picks first (scored pick 1, then unscored picks 3<2 by capture time),
+    # then scored non-picks by score (5 before 4),
+    # then unscored non-picks by capture time (7 before 6).
+    assert [p["id"] for p in photos] == [1, 3, 2, 5, 4, 7, 6]
+
+
+def test_highlight_score_bucket_picked_first_false_unchanged():
+    """Regression: the non-picks-first path (life list / best-photo) still
+    ranks purely by score descending, ignoring flag and capture time."""
+    from app import _highlight_score_bucket
+
+    photos = [
+        {"id": 1, "quality_score": 0.4, "flag": "flagged", "timestamp": "2024-01-01"},
+        {"id": 2, "quality_score": 0.9, "flag": "none", "timestamp": "2024-01-09"},
+        {"id": 3, "quality_score": 0.6, "flag": "none", "timestamp": "2024-01-02"},
+    ]
+    _highlight_score_bucket(photos, picked_first=False)
+    assert [p["id"] for p in photos] == [2, 3, 1]
+
+
+def test_bucket_unanalyzed_count_counts_unscored_non_picks_only():
+    from app import _bucket_unanalyzed_count
+
+    photos = [
+        {"id": 1, "quality_score": 0.5, "flag": "flagged"},   # scored pick
+        {"id": 2, "quality_score": None, "flag": "flagged"},  # unscored pick (excluded)
+        {"id": 3, "quality_score": 0.4, "flag": "none"},      # scored non-pick
+        {"id": 4, "quality_score": None, "flag": "none"},     # unscored non-pick
+        {"id": 5, "quality_score": None, "flag": "none"},     # unscored non-pick
+    ]
+    assert _bucket_unanalyzed_count(photos) == 2
+    assert _bucket_unanalyzed_count([]) == 0
+    assert _bucket_unanalyzed_count(None) == 0
+
+
+def _set_photo_quality_flag(db, photo_id, quality=None, flag=None):
+    db.conn.execute(
+        "UPDATE photos SET quality_score = ?, flag = ? WHERE id = ?",
+        (quality, flag, photo_id),
+    )
+    db.conn.commit()
+
+
+def _seed_anianiau_bucket(db):
+    """Seed one species folder mirroring the real bug: a scored pick, two
+    unscored picks, scored/unscored non-picks, and a rejected photo. Returns
+    (folder_id, {label: photo_id})."""
+    fid = db.add_folder('/photos/hawaii', name='hawaii')
+    kid = db.add_keyword('Anianiau', is_species=True)
+    spec = [
+        # label, quality, flag, timestamp
+        ("scored_pick",   0.45, "flagged", "2024-01-05T10:00:00"),
+        ("unscored_pickB", None, "flagged", "2024-01-02T10:00:00"),
+        ("unscored_pickA", None, "flagged", "2024-01-09T10:00:00"),
+        ("np_high",       0.90, None,       "2024-01-06T10:00:00"),
+        ("np_low",        0.40, None,       "2024-01-07T10:00:00"),
+        ("unp_early",     None, None,       "2024-03-01T10:00:00"),
+        ("unp_late",      None, None,       "2024-03-02T10:00:00"),
+        ("rejected",      0.99, "rejected", "2024-01-01T10:00:00"),
+    ]
+    ids = {}
+    for i, (label, quality, flag, ts) in enumerate(spec):
+        pid = db.add_photo(
+            folder_id=fid, filename=f"{label}.jpg", extension='.jpg',
+            file_size=1000 + i, file_mtime=float(i), timestamp=ts,
+        )
+        db.tag_photo(pid, kid)
+        _set_photo_quality_flag(db, pid, quality=quality, flag=flag)
+        ids[label] = pid
+    return fid, ids
+
+
+def test_highlights_candidates_include_unscored_picks_and_order(app_and_db):
+    """Unscored photos now flow into Highlights: all three picks appear (the
+    real bug was two vanishing), ordered picks -> scored -> unscored, with
+    is_analyzed flags and unanalyzed_count set for the divider."""
+    from app import (
+        _apply_highlight_preferences,
+        _apply_ordered_highlights,
+        _collect_highlight_buckets,
+    )
+
+    app, db = app_and_db
+    fid, ids = _seed_anianiau_bucket(db)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    # unanalyzed_count is assigned in _apply_highlight_preferences (which
+    # always runs after ordering in the real flow) so its tail count
+    # reflects any curated promotion. Mirror the full pipeline here.
+    _apply_highlight_preferences(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Anianiau")
+
+    order = [p["filename"] for p in bucket["photos"]]
+    assert order == [
+        "scored_pick.jpg",       # scored pick leads
+        "unscored_pickB.jpg",    # unscored picks next, capture order
+        "unscored_pickA.jpg",
+        "np_high.jpg",           # scored non-picks by score
+        "np_low.jpg",
+        "unp_early.jpg",         # unscored non-picks last, capture order
+        "unp_late.jpg",
+    ]
+    # rejected photo is still excluded entirely
+    assert "rejected.jpg" not in order
+
+    by_name = {p["filename"]: p for p in bucket["photos"]}
+    assert by_name["scored_pick.jpg"]["is_analyzed"] is True
+    assert by_name["unscored_pickA.jpg"]["is_analyzed"] is False
+    assert by_name["unp_early.jpg"]["is_analyzed"] is False
+    # Only unscored non-picks form the labeled "not yet analyzed" tail.
+    assert bucket["unanalyzed_count"] == 2
+
+
+def test_highlights_candidates_exclude_unscored_when_quality_floor_raised(app_and_db):
+    """Raising the quality floor above 0 drops unscored photos (no measured
+    quality) and low-scored ones, leaving only photos above the floor."""
+    from app import _collect_highlight_buckets
+
+    app, db = app_and_db
+    fid, ids = _seed_anianiau_bucket(db)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.5)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    bucket = next(b for b in buckets if b["species"] == "Anianiau")
+    names = {p["filename"] for p in bucket["photos"]}
+
+    # Only np_high (0.90) clears the 0.5 floor; the rejected 0.99 stays excluded.
+    assert names == {"np_high.jpg"}
+
+
+def test_highlights_unscored_only_workspace_returns_content_with_empty_folders(app_and_db):
+    """Unscored-only workspaces must not silently blank the Highlights page.
+
+    ``get_folders_with_quality_data`` is scored-only, so the payload's
+    ``folders`` list is empty when nothing has been analyzed. But the
+    highlights payload can still return eligible content (buckets and
+    unidentified photos) via the min_quality<=0 admission of unscored
+    candidates. The frontend gate must key off actual content, not folder
+    presence — this test pins the API contract so a future regression that
+    drops content when ``folders == []`` is caught here.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/highlights")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    # The scored-only folder dropdown is legitimately empty in this fixture.
+    assert data["folders"] == []
+    # ...but the payload still carries eligible content — the workspace has
+    # three unscored, unrejected photos in the unidentified section.
+    assert data["unidentified"]["photo_count"] == 3
+    assert data["meta"]["eligible"] == 3
+
+
+def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotion(app_and_db):
+    """Curated promotion of an unscored photo must not misplace the divider.
+
+    ``_apply_highlight_preferences`` runs after the initial bucket sort and
+    can promote an unscored, non-flagged photo to the front when it's saved
+    as the species representative. The tail count anchors the "Not yet
+    analyzed" divider, so under the old (total-unscored-non-picks) semantic
+    a promoted unscored rep would inflate the count and the frontend divider
+    would misfire above analyzed photos. The tail semantic (trailing
+    contiguous run of unscored non-picks) fixes that: after promotion, the
+    count is the number of unscored non-picks that remain at the actual
+    tail, not the total in the bucket.
+    """
+    from app import (
+        _apply_highlight_preferences,
+        _apply_ordered_highlights,
+        _collect_highlight_buckets,
+    )
+
+    _app, db = app_and_db
+    fid = db.add_folder('/photos/curate', name='curate')
+    kid = db.add_keyword('Iiwi', is_species=True)
+    scored_a = db.add_photo(
+        folder_id=fid, filename='scored_a.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1.0, timestamp='2024-01-01T10:00:00',
+    )
+    scored_b = db.add_photo(
+        folder_id=fid, filename='scored_b.jpg', extension='.jpg',
+        file_size=1001, file_mtime=2.0, timestamp='2024-01-02T10:00:00',
+    )
+    unscored_rep = db.add_photo(
+        folder_id=fid, filename='unscored_rep.jpg', extension='.jpg',
+        file_size=1002, file_mtime=3.0, timestamp='2024-01-03T10:00:00',
+    )
+    unscored_tail = db.add_photo(
+        folder_id=fid, filename='unscored_tail.jpg', extension='.jpg',
+        file_size=1003, file_mtime=4.0, timestamp='2024-01-04T10:00:00',
+    )
+    for pid in (scored_a, scored_b, unscored_rep, unscored_tail):
+        db.tag_photo(pid, kid)
+    _set_photo_quality_flag(db, scored_a, quality=0.9)
+    _set_photo_quality_flag(db, scored_b, quality=0.4)
+    # unscored_rep and unscored_tail deliberately left with quality_score=NULL.
+
+    # Sanity-check the pre-curation ordering: unscored non-picks form a
+    # contiguous tail, so the tail count equals the total unscored non-pick
+    # count (2). This is the state the divider was designed for.
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    _apply_highlight_preferences(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Iiwi")
+    assert [p["filename"] for p in bucket["photos"]] == [
+        "scored_a.jpg", "scored_b.jpg",
+        "unscored_rep.jpg", "unscored_tail.jpg",
+    ]
+    assert bucket["unanalyzed_count"] == 2
+
+    # Now promote unscored_rep to species representative. Preferences run
+    # after the initial sort and push it to the front, so the tail shrinks
+    # to just unscored_tail — anything else would place the divider above
+    # analyzed content.
+    db.set_species_representative("Iiwi", unscored_rep)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    _apply_highlight_preferences(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Iiwi")
+
+    order = [p["filename"] for p in bucket["photos"]]
+    assert order[0] == "unscored_rep.jpg"  # rep promoted to the front
+    assert order[-1] == "unscored_tail.jpg"  # tail intact
+    assert bucket["unanalyzed_count"] == 1  # tail-only, not 2
+
+
+def test_bucket_unanalyzed_count_ignores_non_trailing_unscored():
+    """Only the trailing contiguous run of unscored non-picks counts.
+
+    Curated ordering can leave an unscored, non-flagged photo above analyzed
+    content; those interior unscored photos must NOT be counted, or the
+    frontend divider would misfire on the first one and leave analyzed
+    photos below the label.
+    """
+    from app import _bucket_unanalyzed_count
+
+    # Interior unscored rep, then a contiguous analyzed run, then two tail
+    # photos: only the trailing pair counts.
+    photos = [
+        {"id": 1, "quality_score": None, "flag": "none"},   # promoted, interior
+        {"id": 2, "quality_score": 0.9, "flag": "none"},
+        {"id": 3, "quality_score": 0.5, "flag": "none"},
+        {"id": 4, "quality_score": None, "flag": "none"},   # tail
+        {"id": 5, "quality_score": None, "flag": "none"},   # tail
+    ]
+    assert _bucket_unanalyzed_count(photos) == 2
+
+    # No trailing tail at all — an analyzed photo at the end means the
+    # divider must not fire.
+    photos = [
+        {"id": 1, "quality_score": None, "flag": "none"},
+        {"id": 2, "quality_score": 0.9, "flag": "none"},
+    ]
+    assert _bucket_unanalyzed_count(photos) == 0
+
+
 def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):
     """Renaming an unrelated same-name keyword must not rewrite species prefs."""
     app, db = app_and_db
@@ -6255,7 +6665,7 @@ def test_get_active_subject_types_workspace_override_wins(app_and_db, tmp_path, 
 
 
 def test_workspace_page_no_scan_button(app_and_db):
-    """Workspace page should not have a Scan & Add button — folders are added via Pipeline."""
+    """Workspace page should not expose the retired Scan & Add action."""
     app, _ = app_and_db
     with app.test_client() as c:
         resp = c.get('/workspace')
@@ -6265,15 +6675,15 @@ def test_workspace_page_no_scan_button(app_and_db):
         assert 'scanAndAddFolder' not in html
 
 
-def test_workspace_page_has_add_folder_link(app_and_db):
-    """Workspace page should have an Add Folder button linking to Pipeline."""
+def test_workspace_page_has_import_photos_link(app_and_db):
+    """Workspace page should send users to Import when they need photos."""
     app, _ = app_and_db
     with app.test_client() as c:
         resp = c.get('/workspace')
         assert resp.status_code == 200
         html = resp.data.decode()
-        assert 'href="/pipeline"' in html
-        assert 'Add Folder' in html
+        assert 'href="/import"' in html
+        assert 'Import Photos' in html
 
 
 # -- Missing folder API tests --
@@ -8275,17 +8685,22 @@ def test_highlights_page_renders_after_redesign(app_and_db):
     assert b"Per row" in resp.data
 
 
-def test_highlights_get_empty(app_and_db):
-    """GET /api/highlights returns empty buckets when no quality data exists."""
+def test_highlights_get_includes_unscored_photos(app_and_db):
+    """Unscored photos now surface on Highlights (the page used to be empty
+    until analysis ran). The fixture's three unanalyzed photos — none carrying
+    an accepted species keyword — appear in the unidentified section, marked
+    not-yet-analyzed so the divider can label them."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get("/api/highlights")
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["buckets"] == []
-    assert data["unidentified"]["photo_count"] == 0
-    assert data["folders"] == []
-    assert data["meta"]["eligible"] == 0
+    unid = data["unidentified"]
+    assert unid["photo_count"] == 3
+    assert unid["unanalyzed_count"] == 3
+    assert all(p["is_analyzed"] is False for p in unid["photos"])
+    assert data["meta"]["eligible"] == 3
 
 
 def test_highlights_buckets_by_accepted_species(app_and_db):
@@ -11692,6 +12107,22 @@ def test_import_page_resolves_default_process_client_side(app_and_db):
     assert "config_overrides" in html
 
 
+def test_import_page_offers_common_and_custom_folder_templates(app_and_db):
+    """Folder organization is approachable without removing strftime's
+    flexibility or breaking custom templates loaded from config."""
+    app, _ = app_and_db
+    client = app.test_client()
+    html = client.get("/import").data.decode()
+
+    assert 'id="folderTemplatePreset"' in html
+    assert '%Y/%m/%d — 2026/07/12' in html
+    assert '%Y/%Y-%m-%d — 2026/2026-07-12' in html
+    assert '<option value="__custom__">Custom…</option>' in html
+    assert 'id="folderTemplate"' in html
+    assert "function selectedFolderTemplate()" in html
+    assert "preset.value = commonOption ? template : '__custom__'" in html
+
+
 def test_process_page_has_no_import_source(app_and_db):
     """The wizard is the Process page now: the Import Photos radio flow is
     gone (it lives at /import); Folders / Collection / New images scopes
@@ -11709,6 +12140,7 @@ def test_process_page_has_no_import_source(app_and_db):
     assert 'id="radioNewImages"' in html
     assert 'id="strategySelect"' in html
     assert "folder_ids" in html
+    assert "Open Import to add photos" in html
     assert "<title>Vireo - Process</title>" in html
 
 

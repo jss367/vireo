@@ -192,6 +192,43 @@ def image_is_smaller_than_expected(img, expected_w, expected_h, *, abs_slack=1, 
     )
 
 
+def thumbnail_source_dimensions_are_acceptable(
+    width, height, expected_w, expected_h, *,
+    max_shortfall_px=32, max_shortfall_ratio=0.01,
+    max_aspect_ratio_delta=0.005,
+):
+    """Return whether a near-full image is safe for a thumbnail render.
+
+    Some RAW formats report the nominal sensor bounds while their embedded
+    JPEG contains the slightly smaller active image area. That difference is
+    harmless at thumbnail scale, but a relative tolerance alone would also
+    accept large missing borders on high-resolution files. Require all three:
+    a small relative shortfall, a small absolute shortfall, and a stable
+    aspect ratio. Full-resolution preview/export paths intentionally keep
+    using :func:`is_undersized` instead of this thumbnail-only policy.
+
+    When the expected dimensions are unknown (<= 0), returns True so callers
+    match :func:`is_undersized`'s pass-through semantic — a photo row missing
+    ``width``/``height`` should not cause an otherwise-decoded thumbnail to
+    be rejected. A broken image (width/height <= 0) is still unacceptable.
+    """
+    if width <= 0 or height <= 0:
+        return False
+    if expected_w <= 0 or expected_h <= 0:
+        return True
+    if width >= expected_w and height >= expected_h:
+        return True
+
+    allowed_w = min(max_shortfall_px, expected_w * max_shortfall_ratio)
+    allowed_h = min(max_shortfall_px, expected_h * max_shortfall_ratio)
+    if width < expected_w - allowed_w or height < expected_h - allowed_h:
+        return False
+
+    expected_aspect = expected_w / expected_h
+    actual_aspect = width / height
+    return abs(actual_aspect / expected_aspect - 1.0) <= max_aspect_ratio_delta
+
+
 def companion_image_can_replace_raw_result(
     companion_img, current_img, expected_w, expected_h,
 ):
@@ -216,6 +253,7 @@ def companion_image_can_replace_raw_result(
 
 def working_copy_satisfies_recipe_render(
     photo, recipe, max_size, vireo_dir, *, rel_slack=0.0,
+    thumbnail_tolerance=False,
 ):
     """Return True when the working copy is large enough for this recipe render.
 
@@ -270,6 +308,10 @@ def working_copy_satisfies_recipe_render(
             wc_scale = max_size / wc_render_long
             wc_render_w = wc_render_w * wc_scale
             wc_render_h = wc_render_h * wc_scale
+    if thumbnail_tolerance:
+        return thumbnail_source_dimensions_are_acceptable(
+            wc_render_w, wc_render_h, required_w, required_h,
+        )
     return not is_undersized(
         wc_render_w, wc_render_h, required_w, required_h,
         abs_slack=0, rel_slack=rel_slack,
@@ -278,6 +320,7 @@ def working_copy_satisfies_recipe_render(
 
 def working_copy_path_if_satisfies(
     photo, recipe, max_size, vireo_dir, *, rel_slack=0.0,
+    thumbnail_tolerance=False,
 ):
     """Return the working-copy path when it can satisfy this recipe render."""
     wc_rel = photo_value(photo, "working_copy_path")
@@ -288,6 +331,7 @@ def working_copy_path_if_satisfies(
         return None
     if not working_copy_satisfies_recipe_render(
         photo, recipe, max_size, vireo_dir, rel_slack=rel_slack,
+        thumbnail_tolerance=thumbnail_tolerance,
     ):
         return None
     return wc_path

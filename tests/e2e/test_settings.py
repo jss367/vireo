@@ -1,6 +1,16 @@
 from playwright.sync_api import expect
 
 
+def test_settings_links_to_storage_page(live_server, page):
+    """Settings makes the dedicated storage page discoverable."""
+    url = live_server["url"]
+    page.goto(f"{url}/settings", timeout=5000)
+
+    storage_link = page.get_by_role("link", name="Open Storage")
+    expect(storage_link).to_be_visible()
+    expect(storage_link).to_have_attribute("href", "/storage")
+
+
 def test_settings_system_info_renders(live_server, page):
     """Settings page loads and displays system info section with real data."""
     url = live_server["url"]

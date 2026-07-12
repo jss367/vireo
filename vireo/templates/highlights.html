@@ -60,6 +60,7 @@
   .bucket-expand:hover { text-decoration:underline; }
 
   .unid-divider { padding:20px 24px 8px; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:1px; border-top:2px solid var(--border-primary); margin-top:8px; }
+  .analyzed-divider { grid-column:1 / -1; padding:8px 2px 2px; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:1px; border-top:1px solid var(--border-primary); margin-top:4px; }
 
   .highlights-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
   .highlights-empty a { color:var(--accent); }
@@ -673,6 +674,37 @@ async function moveSpeciesHighlight(species, photoId, direction, button) {
   }
 }
 
+// Render a strip's cards, inserting the "Not yet analyzed" divider before the
+// trailing contiguous run of unscored non-pick photos. Walking backward from
+// the end anchors the divider to the actual tail boundary even after curated
+// ordering (species highlights, representatives) has promoted an unscored,
+// non-flagged photo to the front — a first-encountered check would have
+// misfired on that promoted card and left analyzed photos below the label.
+// If the visible slice ends on an analyzed photo (or on a flagged photo),
+// there is no tail and no divider fires. Unscored picks (flagged, at the
+// front) are always excluded from the tail.
+function renderStripCards(photos, _unanalyzedCount) {
+  var tailStart = photos.length;
+  for (var j = photos.length - 1; j >= 0; j--) {
+    var q = photos[j];
+    if (!q.is_analyzed && q.flag !== 'flagged') {
+      tailStart = j;
+    } else {
+      break;
+    }
+  }
+  var tailCount = photos.length - tailStart;
+  var html = '';
+  for (var i = 0; i < photos.length; i++) {
+    if (i === tailStart && tailCount) {
+      html += '<div class="analyzed-divider">Not yet analyzed — ' + tailCount
+        + ' photo' + (tailCount === 1 ? '' : 's') + '</div>';
+    }
+    html += renderCard(photos[i]);
+  }
+  return html;
+}
+
 function renderBucket(bucket) {
   var perRow = parseInt(document.getElementById('perRowSlider').value);
   var expanded = expandedBuckets.has(bucket.species);
@@ -711,7 +743,7 @@ function renderBucket(bucket) {
     + '<div class="bucket-meta">' + meta + '</div></div>'
     + actions
     + '</div>'
-    + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
+    + '<div class="bucket-strip">' + renderStripCards(visible, bucket.unanalyzed_count) + '</div>'
     + expandBtn
     + '</section>';
 }
@@ -738,7 +770,7 @@ function renderUnidentified() {
     + '<div class="bucket-meta">' + unid.photo_count + ' photos</div></div>'
     + '<div class="bucket-actions"><button class="bucket-action" data-action="change-unidentified">Set species</button></div>'
     + '</div>'
-    + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
+    + '<div class="bucket-strip">' + renderStripCards(visible, unid.unanalyzed_count) + '</div>'
     + expandBtn
     + '</section>';
 }
@@ -764,7 +796,17 @@ function render() {
   var meta = document.getElementById('meta');
   var controls = document.getElementById('controlsBar');
 
-  if (!currentData.folders.length) {
+  // Only bail to the empty state when NOTHING is renderable. Gating on
+  // folders alone would hide unscored-only workspaces (or subtrees): the
+  // folder dropdown is sourced from get_folders_with_quality_data, which is
+  // scored-only, but the highlights payload can still return eligible
+  // buckets and unidentified photos from unscored candidates. The workspace
+  // scope option is prepended unconditionally, so an empty folder list
+  // remains navigable via that entry.
+  var hasBuckets = (currentData.buckets || []).length > 0;
+  var hasUnidentified = !!(currentData.unidentified
+    && currentData.unidentified.photo_count);
+  if (!currentData.folders.length && !hasBuckets && !hasUnidentified) {
     content.innerHTML = '';
     empty.style.display = 'block';
     meta.textContent = '';

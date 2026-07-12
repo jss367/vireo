@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -323,17 +324,41 @@ def _highlight_score_bucket(photos, picked_first=False):
         }
         p["reasons"] = reasons[:3]
 
-    photos.sort(
-        key=lambda p: (
-            (1 if p.get("flag") == "flagged" else 0) if picked_first else 0,
-            p.get("highlight_score") or 0,
-            p.get("predicted_confidence") or 0,
-            p.get("quality_score") or 0,
-            p.get("rating") or 0,
-            -p.get("id", 0),
-        ),
-        reverse=True,
-    )
+    if picked_first:
+        # Highlights page ordering: three contiguous regions —
+        #   1. picks (flagged): analyzed first (by score desc), then
+        #      unanalyzed picks in capture order;
+        #   2. analyzed non-picks: by highlight_score desc;
+        #   3. unanalyzed non-picks: capture order (earliest first).
+        # The analyzed-before-unanalyzed tier separates the groups so the
+        # score term only reorders analyzed rows and the timestamp term only
+        # reorders unanalyzed rows — they never compete. Timestamps are ISO
+        # text, so lexicographic order is chronological; missing timestamps
+        # sort to the end of their group. This is an ascending sort (no
+        # reverse), negating the score to rank analyzed rows high-first.
+        def _bucket_sort_key(p):
+            analyzed = p.get("quality_score") is not None
+            ts = p.get("timestamp")
+            return (
+                0 if p.get("flag") == "flagged" else 1,
+                0 if analyzed else 1,
+                -(p.get("highlight_score") or 0) if analyzed else 0.0,
+                (ts is None, ts),
+                p.get("id", 0),
+            )
+
+        photos.sort(key=_bucket_sort_key)
+    else:
+        photos.sort(
+            key=lambda p: (
+                p.get("highlight_score") or 0,
+                p.get("predicted_confidence") or 0,
+                p.get("quality_score") or 0,
+                p.get("rating") or 0,
+                -p.get("id", 0),
+            ),
+            reverse=True,
+        )
 
 
 def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
@@ -370,6 +395,32 @@ def _bucket_best_score(photos):
     """
     scores = [p.get("highlight_score") for p in photos if p.get("highlight_score") is not None]
     return max(scores) if scores else None
+
+
+def _bucket_unanalyzed_count(photos):
+    """Length of the trailing "Not yet analyzed" tail of a bucket.
+
+    Counts only the contiguous run of unscored non-pick photos at the END of
+    ``photos``. This is what the divider labels, so callers can trust that a
+    non-zero value marks a real tail below the divider.
+
+    Only the trailing run is counted (not every unscored non-pick in the
+    bucket) so that curated ordering — where
+    :func:`_apply_ordered_highlights` or :func:`_apply_highlight_preferences`
+    can promote an unscored, non-flagged photo to the front as a species
+    highlight or representative — doesn't inflate the count with photos that
+    now live above the divider. Unscored picks are excluded because they
+    stay grouped with the other picks at the front regardless.
+    """
+    if not photos:
+        return 0
+    tail = 0
+    for p in reversed(photos):
+        if p.get("quality_score") is None and p.get("flag") != "flagged":
+            tail += 1
+        else:
+            break
+    return tail
 
 
 def _apply_highlight_preferences(db, buckets):
@@ -412,6 +463,10 @@ def _apply_highlight_preferences(db, buckets):
         # photos.
         bucket["best_score"] = _bucket_best_score(bucket["photos"])
         bucket["best_timestamp"] = top.get("timestamp")
+        # Run last so curated promotion (an unscored rep pushed to the front)
+        # doesn't leave a stale tail count that anchors the divider above
+        # analyzed content.
+        bucket["unanalyzed_count"] = _bucket_unanalyzed_count(bucket.get("photos"))
 
 
 def _apply_ordered_highlights(db, buckets):
@@ -450,6 +505,9 @@ def _apply_ordered_highlights(db, buckets):
         bucket["highlight_count"] = sum(
             1 for p in bucket.get("photos") or [] if p.get("is_highlighted")
         )
+        # unanalyzed_count is assigned in _apply_highlight_preferences instead:
+        # that runs after this pass and can still reorder photos, so anchoring
+        # the tail count here would be stale under curated ordering.
         bucket["best_quality"] = best.get("quality_score")
         bucket["best_score"] = best.get("highlight_score")
         bucket["best_timestamp"] = best.get("timestamp")
@@ -555,6 +613,7 @@ def _collect_highlight_buckets(
             "rating": r.get("rating") or 0,
             "flag": r.get("flag") or "none",
             "quality_score": r.get("quality_score"),
+            "is_analyzed": r.get("quality_score") is not None,
             "subject_sharpness": r.get("subject_sharpness"),
             "subject_size": r.get("subject_size"),
             "sharpness": r.get("sharpness"),
@@ -2688,6 +2747,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # workspace overrides. Gated by a marker so it runs once; re-saved
     # legacy values are preserved on subsequent boots.
     cfg.migrate_legacy_miss_thresholds(init_db)
+    # One-time rewrite of the previous eye-focus detection default from on to
+    # off in both global config and workspace overrides.
+    cfg.migrate_eye_detect_default_off(init_db)
     # One-time resolution of the browse.toggle_ui="h" default clashing with
     # any pre-existing browse binding on ``h``. Writes an explicit "" so the
     # user's existing action keeps working; they can re-bind toggle_ui from
@@ -3454,7 +3516,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "sam2_variant": sam2_variant,
                 "dinov2_variant": dinov2_variant,
                 "proxy_longest_edge": proxy_longest_edge,
-                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", True),
+                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", False),
                 "preview_max_size": effective_cfg.get("preview_max_size", 1920),
             },
             "mask_variant_coverage": db.mask_variant_coverage(),
@@ -3624,6 +3686,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "review_mode must be a string or null, got "
                 f"{type(review_mode).__name__}", 400,
             )
+        # ``eye_detect_override`` is tri-state (None/True/False); accept
+        # only bool or missing so the plan matches what /api/jobs/pipeline
+        # would do.
+        eye_detect_override_body = body.get("eye_detect_override")
+        if (
+            eye_detect_override_body is not None
+            and not isinstance(eye_detect_override_body, bool)
+        ):
+            return json_error(
+                f"eye_detect_override must be boolean, got "
+                f"{type(eye_detect_override_body).__name__}", 400,
+            )
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
             photo_ids=scope_photo_ids,
@@ -3631,6 +3705,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_classify=bool(body.get("skip_classify")),
             skip_extract_masks=bool(body.get("skip_extract_masks")),
             skip_eye_keypoints=bool(body.get("skip_eye_keypoints")),
+            eye_detect_override=eye_detect_override_body,
             skip_regroup=bool(body.get("skip_regroup")),
             model_ids=body.get("model_ids") or (
                 [body["model_id"]] if body.get("model_id") else []
@@ -8691,6 +8766,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "photos": unidentified_limited,
                 "loaded_count": len(unidentified_limited),
                 "has_more": len(unidentified_photos) > len(unidentified_limited),
+                "unanalyzed_count": _bucket_unanalyzed_count(unidentified_photos),
             },
             "folders": [
                 {"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]}
@@ -12371,6 +12447,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify({"opened": len(file_paths)})
 
+    def _storage_masks_data(db):
+        """Build the shared mask-storage payload once per storage refresh."""
+        import config as cfg
+
+        # This is a global view, so use the most permissive confidence floor
+        # across workspaces. The stale set must not change with active workspace.
+        min_detector_conf = db.min_detector_confidence_across_workspaces(
+            cfg.load()
+        )
+        variants = db.mask_variants_summary()
+        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
+        return {
+            "variants": variants,
+            "total_bytes": sum(v["bytes"] for v in variants),
+            "stale_count": len(stale),
+            "path": os.path.join(os.path.dirname(db_path), "masks"),
+        }
+
     @app.route("/api/storage")
     def api_storage():
         """Comprehensive storage info for the storage management panel."""
@@ -12409,6 +12503,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         offline_count_row = db.conn.execute(
             "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
         ).fetchone()
+        masks = _storage_masks_data(db)
+        masks_size = masks["total_bytes"]
 
         # HuggingFace cache — only count Vireo-relevant models
         hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
@@ -12437,11 +12533,90 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + models_size
             + hf_size
             + offline_size
+            + masks_size
         )
+        reclaimable = thumb["size"] + preview["size"] + emb["size"]
+
+        storage_root = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def _volume_for_path(path):
+            usage_path = os.path.abspath(path)
+            while not os.path.exists(usage_path):
+                parent = os.path.dirname(usage_path)
+                if parent == usage_path:
+                    break
+                usage_path = parent
+            try:
+                usage = shutil.disk_usage(usage_path)
+                free_bytes = usage.free
+                capacity_bytes = usage.total
+            except OSError:
+                free_bytes = None
+                capacity_bytes = None
+
+            mount_path = usage_path
+            while not os.path.ismount(mount_path):
+                parent = os.path.dirname(mount_path)
+                if parent == mount_path:
+                    break
+                mount_path = parent
+            if sys.platform.startswith("win"):
+                name = os.path.splitdrive(mount_path)[0] or mount_path
+            elif mount_path == os.path.sep:
+                name = "System volume"
+            else:
+                name = os.path.basename(mount_path.rstrip(os.path.sep)) or mount_path
+            return {
+                "name": name,
+                "mount_path": mount_path,
+                "free": free_bytes,
+                "capacity": capacity_bytes,
+            }
+
+        raw_locations = [
+            ("catalog", "Catalog and masks", os.path.dirname(db_path)),
+            (
+                "generated",
+                "Thumbnails, previews, and offline originals",
+                storage_root,
+            ),
+        ]
+        if emb["size"]:
+            raw_locations.append(("embeddings", "Label embeddings", EMB_CACHE_DIR))
+        if models_size:
+            raw_locations.append(("models", "Downloaded models", DEFAULT_MODELS_DIR))
+        if hf_size:
+            raw_locations.append(("hf_cache", "Hugging Face cache", hf_cache))
+
+        locations_by_path = {}
+        for location_id, label, path in raw_locations:
+            normalized = os.path.abspath(path)
+            if normalized not in locations_by_path:
+                locations_by_path[normalized] = {
+                    "id": location_id,
+                    "path": normalized,
+                    "labels": [],
+                    "volume": _volume_for_path(normalized),
+                }
+            locations_by_path[normalized]["labels"].append(label)
+        locations = list(locations_by_path.values())
+
+        volumes_by_mount = {}
+        for location in locations:
+            volume = location["volume"]
+            mount = volume["mount_path"]
+            if mount not in volumes_by_mount:
+                volumes_by_mount[mount] = dict(volume)
+                volumes_by_mount[mount]["location_ids"] = []
+            volumes_by_mount[mount]["location_ids"].append(location["id"])
 
         return jsonify(
             {
                 "total": total,
+                "reclaimable": reclaimable,
+                "storage_root": storage_root,
+                "locations": locations,
+                "volumes": list(volumes_by_mount.values()),
                 "database": {"size": db_size, "path": db_path},
                 "thumbnails": thumb,
                 "previews": preview,
@@ -12453,6 +12628,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "size": offline_size,
                     "path": os.path.join(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "offline"),
                 },
+                "masks": {"size": masks_size, **masks},
             }
         )
 
@@ -12460,28 +12636,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_storage_masks():
         """Per-variant SAM mask summary (counts, bytes, active counts)
         plus stale-mask count for the storage dashboard."""
-        import config as cfg
-
-        db = _get_db()
-        # Storage is global across all workspaces, so the stale floor
-        # must be too. Using the active workspace's detector_confidence
-        # would make stale_count flip when the user switches workspaces
-        # and let masks valid under another workspace's lower floor
-        # show up as stale. The minimum across workspaces is the most
-        # permissive view: only mark a mask stale when no workspace
-        # would still consider it fresh.
-        min_detector_conf = db.min_detector_confidence_across_workspaces(
-            cfg.load()
-        )
-        variants = db.mask_variants_summary()
-        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
-        masks_dir = os.path.join(os.path.dirname(db_path), "masks")
-        return jsonify({
-            "variants": variants,
-            "total_bytes": sum(v["bytes"] for v in variants),
-            "stale_count": len(stale),
-            "path": masks_dir,
-        })
+        return jsonify(_storage_masks_data(_get_db()))
 
     @app.route("/api/storage/masks/delete-variant", methods=["POST"])
     def api_storage_masks_delete_variant():
@@ -12606,14 +12761,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "limit": limit,
         })
 
-    @app.route("/api/storage/clear", methods=["POST"])
-    def api_storage_clear():
-        """Clear a specific cache."""
-        import shutil
-
-        body = request.get_json(silent=True) or {}
-        cache_type = body.get("type", "")
-
+    def _clear_storage_cache(cache_type):
         if cache_type == "previews":
             preview_dir = os.path.join(
                 os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
@@ -12656,6 +12804,70 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"ok": True})
         else:
             return json_error("Unknown cache type")
+
+    @app.route("/api/storage/clear", methods=["POST"])
+    def api_storage_clear():
+        """Clear a specific cache."""
+        body = request.get_json(silent=True) or {}
+        return _clear_storage_cache(body.get("type", ""))
+
+    @app.route("/api/storage/clear-safe", methods=["POST"])
+    def api_storage_clear_safe():
+        """Clear every regenerable cache without touching models or originals."""
+        for cache_type in ("thumbnails", "previews", "embeddings"):
+            _clear_storage_cache(cache_type)
+        return jsonify({
+            "ok": True,
+            "cleared": ["thumbnails", "previews", "embeddings"],
+        })
+
+    @app.route("/api/storage/open-folder", methods=["POST"])
+    def api_storage_open_folder():
+        """Open one of Vireo's server-selected storage paths."""
+        from classifier import CACHE_DIR as EMB_CACHE_DIR
+        from models import DEFAULT_MODELS_DIR
+
+        location_id = (request.get_json(silent=True) or {}).get(
+            "location", "generated"
+        )
+        locations = {
+            "catalog": os.path.dirname(db_path),
+            "generated": os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            "embeddings": EMB_CACHE_DIR,
+            "models": DEFAULT_MODELS_DIR,
+            "hf_cache": os.path.expanduser("~/.cache/huggingface/hub"),
+        }
+        path = locations.get(location_id)
+        if path is None:
+            return json_error("Unknown storage location")
+        path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            return jsonify({"ok": False, "reason": "storage folder not found"})
+        try:
+            if sys.platform == "darwin":
+                proc = subprocess.run(
+                    ["open", "--", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            elif sys.platform.startswith("win"):
+                proc = subprocess.run(
+                    ["explorer", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            else:
+                proc = subprocess.run(
+                    ["xdg-open", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            if not sys.platform.startswith("win") and proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or "").strip()
+                return jsonify({
+                    "ok": False,
+                    "reason": reason or f"open command exited {proc.returncode}",
+                })
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            return jsonify({"ok": False, "reason": str(exc)})
+        return jsonify({"ok": True})
 
     @app.route("/api/storage/delete-files", methods=["POST"])
     def api_storage_delete_files():
@@ -20892,6 +21104,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f"{type(miss_enabled_body).__name__}"
             )
 
+        # ``eye_detect_override`` mirrors ``miss_enabled`` as a tri-state
+        # per-run switch (None = defer to workspace config). Same validation
+        # rationale: a string "false" would flow through as truthy and force
+        # eye detection on for a caller expecting the workspace default.
+        eye_detect_override_body = body.get("eye_detect_override")
+        if (
+            eye_detect_override_body is not None
+            and not isinstance(eye_detect_override_body, bool)
+        ):
+            return json_error(
+                f"eye_detect_override must be boolean, got "
+                f"{type(eye_detect_override_body).__name__}"
+            )
+
         # Validate ``model_id`` / ``model_ids`` shape BEFORE the folder-scope
         # collection is materialized. The auto-skip-classify block further
         # down calls ``list(params.model_ids or [])`` and ``by_id.get(mid, ...)``
@@ -20954,6 +21180,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             download_taxonomy=body.get("download_taxonomy", True),
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_eye_keypoints=body.get("skip_eye_keypoints", False),
+            eye_detect_override=eye_detect_override_body,
             skip_regroup=body.get("skip_regroup", False),
             # ``review_mode`` reaches ``body`` only through the strategy
             # expansion at the top of this handler (identify sets it to

@@ -1891,6 +1891,50 @@ def test_eye_keypoints_plan_will_skip_when_preflight_fails(tmp_path, monkeypatch
     assert "disabled in config" in eye["summary"]
 
 
+def test_eye_keypoints_plan_honors_per_run_override_against_config_disabled(
+    tmp_path, monkeypatch,
+):
+    """When Settings has ``eye_detect_enabled=False`` but the caller opted
+    in via ``eye_detect_override=True`` (Process-page checkbox on), the
+    plan must show the stage as ``will-run``, not ``will-skip — Disabled
+    in config``. The pill has to match what the job would actually do —
+    which is toggle the config on for the run and execute the stage.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    # Give the stage some eligible work so it lands on will-run (not
+    # done-prior). eye_keypoint_stage_preflight is exercised with the
+    # REAL implementation — no monkeypatch — so the override must reach
+    # its config lookup.
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,),
+    )
+    db.conn.execute(
+        """INSERT INTO predictions
+            (detection_id, classifier_model, labels_fingerprint,
+             species, confidence)
+           VALUES (?, ?, ?, ?, ?)""",
+        (did, "BioCLIP-2", "fp1", "robin", 0.9),
+    )
+    db.conn.commit()
+
+    plan_no_override = compute_plan(
+        db, _params(), str(tmp_path / "test.db"),
+    )
+    assert plan_no_override["stages"]["EyeKeypoints"]["state"] == "will-skip"
+
+    plan_with_override = compute_plan(
+        db, _params(eye_detect_override=True), str(tmp_path / "test.db"),
+    )
+    eye = plan_with_override["stages"]["EyeKeypoints"]
+    assert eye["state"] != "will-skip", (
+        f"eye_detect_override=True must let the plan pill show what the "
+        f"job would actually do (run the stage), not the stale Settings "
+        f"disabled reason: got {eye!r}"
+    )
+
+
 def test_eye_keypoints_plan_done_prior_when_all_processed(tmp_path, monkeypatch):
     """The headline bug case: every eligible photo has eye_tenengrad set
     (with the current fingerprint, so it isn't stale), so the next run is
@@ -2283,6 +2327,80 @@ def test_regroup_plan_will_run_when_workspace_fingerprint_outdated(tmp_path, mon
     assert plan["stages"]["Group"]["state"] == "will-run"
     assert "settings" in plan["stages"]["Group"]["summary"].lower()
 
+
+
+def test_regroup_plan_will_run_when_eye_detect_override_differs_from_workspace(
+    tmp_path, monkeypatch,
+):
+    """Cache is fresh against workspace settings, but the run carries a
+    ``eye_detect_override`` that flips ``eye_detect_enabled`` for THIS
+    press. Because ``compute_group_fingerprint`` doesn't hash
+    ``eye_detect_enabled``, the fingerprint match alone would let the
+    plan report ``done-prior`` — hiding the fact that ``regroup_stage``
+    will actually rescore with different eye behavior. The plan must
+    call this out as will-run instead.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    _mark_sam_done(db, pid, "/m/a.png")
+    from labels_fingerprint import TOL_SENTINEL
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+
+    cache_path = os.path.join(
+        str(tmp_path), f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(cache_path, "w") as f:
+        f.write('{"photos": []}')
+
+    # Workspace's own effective config: eye off (the new default). Stamp
+    # fingerprint so the fingerprint check would pass without the override.
+    import config as cfg
+    from pipeline import compute_group_fingerprint
+    effective = db.get_effective_config(cfg.load())
+    db.set_workspace_group_state(
+        db._active_workspace_id,
+        fingerprint=compute_group_fingerprint(effective),
+        when_ts=1714579200,
+    )
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    # Sanity check: no override → plan is done-prior.
+    plan_no_override = compute_plan(
+        db,
+        _params(model_ids=["m1"], skip_eye_keypoints=True),
+        str(tmp_path / "test.db"),
+    )
+    assert plan_no_override["stages"]["Group"]["state"] == "done-prior"
+
+    # Same state + eye_detect_override=True (Process-page checkbox) → the
+    # eye override differs from the workspace's eye-off setting, so
+    # regroup will rescore with different eye behavior; must be will-run.
+    plan_with_override = compute_plan(
+        db,
+        _params(
+            model_ids=["m1"], skip_eye_keypoints=True,
+            eye_detect_override=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    group = plan_with_override["stages"]["Group"]
+    assert group["state"] == "will-run", (
+        "eye_detect_override differs from workspace eye_detect_enabled — "
+        "regroup will rescore with different eye behavior, so the plan "
+        "must report will-run instead of the cache-fresh done-prior: "
+        f"got {group!r}"
+    )
+    assert group.get("detail", {}).get("eye_override_differs") is True
 
 
 def test_regroup_plan_will_run_when_cache_exists_but_fingerprint_invalidated(
