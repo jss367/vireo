@@ -208,6 +208,11 @@ class ImportParams:
     file_types: str = "both"
     skip_duplicates: bool = True
     verify_by_hash: bool = False
+    # Fast interactive-import mode: accept a cataloged duplicate candidate
+    # from the metadata-first checker without re-reading both complete files.
+    # The result reports these separately and never claims the card is safe
+    # to format until they have been byte-verified.
+    trust_likely_duplicates: bool = False
     recursive: bool = True
     # After-import process strategy name. Stored in the job config for the
     # PR 3 chaining hook; unused by the import job itself.
@@ -438,12 +443,44 @@ def _key_twin_rows(db, key):
 
 def _hash_twin_rows(db, file_hash):
     return db.conn.execute(
-        """SELECT p.id, p.filename, f.path AS folder_path,
+        """SELECT p.id, p.filename, p.file_size, f.path AS folder_path,
                   f.status AS folder_status
            FROM photos p JOIN folders f ON f.id = p.folder_id
            WHERE p.file_hash = ?""",
         (file_hash,),
     ).fetchall()
+
+
+def _likely_twin_rows(db, token, source_file, path_under_source):
+    """Return live off-source catalog twins that plausibly back ``token``.
+
+    This is the intentionally fast duplicate mode: the checker has already
+    matched filename + byte size + capture time (or, for metadata-poor files,
+    a stored hash). We only stat the proposed archive twin to make sure it
+    still exists off the card at the expected size; we do not read either
+    complete file. Callers must report the resulting skip as unverified.
+    """
+    rows = (
+        _hash_twin_rows(db, token[1])
+        if token[0] == "hash"
+        else _key_twin_rows(db, token[1])
+    )
+    try:
+        source_size = os.path.getsize(str(source_file))
+    except OSError:
+        return []
+    likely = []
+    for row in rows:
+        twin_path = os.path.join(row["folder_path"], row["filename"])
+        if path_under_source(twin_path):
+            continue
+        try:
+            if os.path.getsize(twin_path) != source_size:
+                continue
+        except OSError:
+            continue
+        likely.append(row)
+    return likely
 
 
 def _linkable_twin_dirs(rows, under_destination):
@@ -640,6 +677,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
     copied = 0
     verified = 0            # count of files independently checksum-verified
     skipped_duplicate = 0
+    unverified_duplicate = 0
     failed = 0
     unsafe_files = []
     folder_counts = {}
@@ -871,6 +909,22 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
                     _fail(rel, source_file, f"duplicate check failed: {e}")
                     continue
                 if token is not None:
+                    if (
+                        params.trust_likely_duplicates
+                        and not params.verify_by_hash
+                    ):
+                        likely_rows = _likely_twin_rows(
+                            db, token, source_file, _path_under_any_source,
+                        )
+                        if likely_rows:
+                            skipped_duplicate += 1
+                            unverified_duplicate += 1
+                            dup_skipped += 1
+                            _counts(rel)["skipped_duplicate"] += 1
+                            dup_dirs.update(_linkable_twin_dirs(
+                                likely_rows, _path_under_destination,
+                            ))
+                            continue
                     # Confirm against a cataloged twin's on-disk bytes (mount
                     # side is locally readable). Only a byte-verified twin
                     # backs a skip; otherwise import the file normally.
@@ -1859,6 +1913,14 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
             "path": "<remote>",
             "reason": "enable verify_by_hash for remote verification",
         })
+    if unverified_duplicate:
+        unsafe_files.append({
+            "path": "Likely duplicates",
+            "reason": (
+                f"{unverified_duplicate} matched by filename, byte size, "
+                "and capture time but were not compared byte-for-byte"
+            ),
+        })
     safe_to_format = (
         not cancelled
         and failed == 0
@@ -1866,6 +1928,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         and not dup_link_failed
         and not partial_scope
         and not remote_unverified
+        and unverified_duplicate == 0
         and (copied + skipped_duplicate) == discovered
     )
     result = {
@@ -1880,6 +1943,7 @@ def _run_remote_import_job(job, runner, db, workspace_id, params):
         # after-import processing. See PR #1113 review.
         "photo_ids": sorted(imported_photo_ids),
         "skipped_duplicate": skipped_duplicate,
+        "unverified_duplicate": unverified_duplicate,
         "failed": failed,
         "safe_to_format": safe_to_format,
         "unsafe_files": unsafe_files,
@@ -2077,6 +2141,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
     copied = 0
     verified = 0
     skipped_duplicate = 0
+    unverified_duplicate = 0
     failed = 0
     unsafe_files = []          # [{path, reason}] — failed copies etc.
     # (folder_counts is initialized above _emit — see there.)
@@ -2280,6 +2345,21 @@ def run_import_job(job, runner, db_path, workspace_id, params):
                     _fail(rel, source_file, f"duplicate check failed: {e}")
                     continue
                 if token is not None:
+                    if (
+                        params.trust_likely_duplicates
+                        and not params.verify_by_hash
+                    ):
+                        likely_rows = _likely_twin_rows(
+                            db, token, source_file, _path_under_any_source,
+                        )
+                        if likely_rows:
+                            skipped_duplicate += 1
+                            unverified_duplicate += 1
+                            _counts(rel)["skipped_duplicate"] += 1
+                            dup_dirs.update(_linkable_twin_dirs(
+                                likely_rows, _path_under_destination,
+                            ))
+                            continue
                     accept = False
                     # verified_twin_rows records only the twin(s) whose
                     # bytes we actually hashed on disk this run and
@@ -3210,12 +3290,21 @@ def run_import_job(job, runner, db_path, workspace_id, params):
             )
         else:
             partial_scope = True
+    if unverified_duplicate:
+        unsafe_files.append({
+            "path": "Likely duplicates",
+            "reason": (
+                f"{unverified_duplicate} matched by filename, byte size, "
+                "and capture time but were not compared byte-for-byte"
+            ),
+        })
     safe_to_format = (
         not cancelled
         and failed == 0
         and not discovery_errors
         and not dup_link_failed
         and not partial_scope
+        and unverified_duplicate == 0
         and (copied + skipped_duplicate) == discovered
     )
     result = {
@@ -3224,6 +3313,7 @@ def run_import_job(job, runner, db_path, workspace_id, params):
         "verified": verified,
         "photo_ids": sorted(imported_photo_ids),
         "skipped_duplicate": skipped_duplicate,
+        "unverified_duplicate": unverified_duplicate,
         "failed": failed,
         "safe_to_format": safe_to_format,
         "unsafe_files": unsafe_files,

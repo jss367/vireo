@@ -12087,6 +12087,9 @@ def test_import_page_returns_200(app_and_db):
     assert 'id="afterImportSelect"' in html
     assert 'value="__none__"' in html  # "None — import only" option
     assert "/api/import/check-duplicates" in html
+    assert "Trust likely duplicates" in html
+    assert "Verify duplicates byte-for-byte" in html
+    assert "capture time to the second" in html
     assert 'id="safeToFormatPill"' in html
     assert "/api/jobs/import-in-place" in html
     assert "/api/jobs/import-photos" in html

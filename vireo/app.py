@@ -18366,6 +18366,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         file_types = body.get("file_types", "both")
         skip_duplicates = bool(body.get("skip_duplicates", True))
         verify_by_hash = bool(body.get("verify_by_hash", False))
+        trust_likely_duplicates = bool(
+            body.get("trust_likely_duplicates", False)
+        ) and not verify_by_hash
         recursive = bool(body.get("recursive", True))
 
         active_ws, created_workspace, workspace_err = (
@@ -18419,6 +18422,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "file_types": file_types,
             "skip_duplicates": skip_duplicates,
             "verify_by_hash": verify_by_hash,
+            "trust_likely_duplicates": trust_likely_duplicates,
             "recursive": recursive,
             "after_import": after_import,
             "remote_target_id": remote_target_id or None,
@@ -18492,6 +18496,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 file_types=file_types,
                 skip_duplicates=skip_duplicates,
                 verify_by_hash=verify_by_hash,
+                trust_likely_duplicates=trust_likely_duplicates,
                 recursive=recursive,
                 after_import=after_import,
                 remote_target=remote_target,
