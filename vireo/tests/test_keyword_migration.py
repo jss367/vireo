@@ -9,6 +9,7 @@ normalize it away) and then invoke the migration directly; the marker
 gating itself is covered by the reopen test at the bottom.
 """
 
+import json
 import os
 import sqlite3
 import sys
@@ -672,6 +673,66 @@ def test_migration_normalizes_curation_tables(tmp_path):
         db.close()
 
 
+def test_migration_normalizes_relabel_curation_history_payloads(tmp_path):
+    """The live curation sweep and undo snapshots must use the same species
+    spelling. Otherwise undoing a pre-migration relabel recreates curation
+    rows under the legacy quoted name after the keyword row was normalized.
+    """
+    db, ws_id, p1, _p2 = _make_db(tmp_path)
+    try:
+        kid = _insert_keyword(db, "‘Apapane", "taxonomy", is_species=1)
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (p1, kid),
+        )
+        payload = {
+            "keyword_id": kid,
+            "keyword_ids": [kid],
+            "curation": {
+                "hl_prev": [
+                    "‘Apapane",
+                    {"species": "‘Apapane", "rank": 2},
+                ],
+                "pref_prev": [
+                    {"species": "‘Apapane", "purpose": "life_list"},
+                ],
+                "rep_prev": [
+                    {"species": "‘Apapane", "selected_order": 3},
+                ],
+            },
+        }
+        db.conn.execute(
+            "INSERT INTO edit_history "
+            "(action_type, description, new_value, workspace_id) "
+            "VALUES ('species_replace', 'legacy relabel', ?, ?)",
+            (str(kid), ws_id),
+        )
+        edit_id = db.conn.execute(
+            "SELECT id FROM edit_history WHERE description = 'legacy relabel'"
+        ).fetchone()["id"]
+        db.conn.execute(
+            "INSERT INTO edit_history_items "
+            "(edit_id, photo_id, old_value, new_value) VALUES (?, ?, ?, ?)",
+            (edit_id, p1, json.dumps(payload, sort_keys=True), str(kid)),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        stored = db.conn.execute(
+            "SELECT old_value FROM edit_history_items WHERE edit_id = ?",
+            (edit_id,),
+        ).fetchone()
+        migrated = json.loads(stored["old_value"])["curation"]
+        assert migrated["hl_prev"][0] == "Apapane"
+        assert migrated["hl_prev"][1]["species"] == "Apapane"
+        assert migrated["pref_prev"][0]["species"] == "Apapane"
+        assert migrated["rep_prev"][0]["species"] == "Apapane"
+    finally:
+        db.close()
+
+
 def test_migration_aligns_curation_case_with_stored_keyword(tmp_path):
     """Curation rows differing from the species keyword only by case are
     re-keyed to the stored spelling. normalize_keyword_display() preserves
@@ -1242,5 +1303,83 @@ def test_migration_drops_keyword_remove_item_when_survivor_pre_existed(tmp_path)
             "WHERE photo_id = ? AND keyword_id = ?",
             (p1, dst_id),
         ).fetchone() is not None
+    finally:
+        db.close()
+
+
+def test_migration_keeps_source_add_when_survivor_was_added_later(tmp_path):
+    """If src was added first and dst later, merging them makes the later
+    add redundant. Preserve and retarget the original source add while
+    dropping the later survivor item, so latest-first undo leaves the merged
+    tag present until the original add is undone.
+    """
+    db, ws_id, p1, _p2 = _make_db(tmp_path)
+    try:
+        src_id = _insert_keyword(db, "‘Robin", "taxonomy", is_species=1)
+        dst_id = _insert_keyword(db, "Robin", "taxonomy", is_species=1)
+        db.conn.executemany(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            ((p1, src_id), (p1, dst_id)),
+        )
+
+        db.conn.execute(
+            "INSERT INTO edit_history "
+            "(action_type, description, new_value, workspace_id) "
+            "VALUES ('keyword_add', 'source add', ?, ?)",
+            (str(src_id), ws_id),
+        )
+        source_edit_id = db.conn.execute(
+            "SELECT id FROM edit_history WHERE description = 'source add'"
+        ).fetchone()["id"]
+        db.conn.execute(
+            "INSERT INTO edit_history_items "
+            "(edit_id, photo_id, old_value, new_value) VALUES (?, ?, '', ?)",
+            (source_edit_id, p1, str(src_id)),
+        )
+
+        db.conn.execute(
+            "INSERT INTO edit_history "
+            "(action_type, description, new_value, workspace_id) "
+            "VALUES ('keyword_add', 'survivor add', ?, ?)",
+            (str(dst_id), ws_id),
+        )
+        survivor_edit_id = db.conn.execute(
+            "SELECT id FROM edit_history WHERE description = 'survivor add'"
+        ).fetchone()["id"]
+        db.conn.execute(
+            "INSERT INTO edit_history_items "
+            "(edit_id, photo_id, old_value, new_value) VALUES (?, ?, '', ?)",
+            (survivor_edit_id, p1, str(dst_id)),
+        )
+        db.conn.commit()
+
+        db._normalize_keyword_data_once()
+        db.conn.commit()
+
+        source_items = db.conn.execute(
+            "SELECT new_value FROM edit_history_items WHERE edit_id = ?",
+            (source_edit_id,),
+        ).fetchall()
+        survivor_items = db.conn.execute(
+            "SELECT new_value FROM edit_history_items WHERE edit_id = ?",
+            (survivor_edit_id,),
+        ).fetchall()
+        assert [r["new_value"] for r in source_items] == [str(dst_id)]
+        assert survivor_items == []
+
+        # Undoing the now-redundant later add has no per-photo work; the
+        # merged tag remains until undo reaches the original source add.
+        assert db.conn.execute(
+            "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+            (p1, dst_id),
+        ).fetchone() is not None
+        db.conn.execute(
+            "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+            (p1, int(source_items[0]["new_value"])),
+        )
+        assert db.conn.execute(
+            "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+            (p1, dst_id),
+        ).fetchone() is None
     finally:
         db.close()

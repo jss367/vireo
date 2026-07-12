@@ -5087,10 +5087,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Find case-insensitive duplicate keywords within current workspace.
 
         Groups by the same slot key as merge_duplicate_keywords()
-        — (LOWER(name), parent_id, type) — so the UI does not report
-        legitimate same-name-different-slot rows (a taxonomy `Robin` and an
-        individual `Robin`, or leaves under different parents) as duplicates
-        the cleanup endpoint can never actually merge.
+        — (LOWER(name), parent_id, type, species-bearing) — so the UI does
+        not report legitimate same-name-different-slot rows (a taxonomy
+        `Robin` and an individual `Robin`, a legacy species-bearing general
+        and an ordinary general homonym, or leaves under different parents)
+        as duplicates the cleanup endpoint can never actually merge.
         """
         db = _get_db()
         ws = db._active_workspace_id
@@ -5102,7 +5103,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?
-               GROUP BY LOWER(k.name), k.parent_id, k.type
+               GROUP BY LOWER(k.name), k.parent_id, k.type,
+                        CASE WHEN k.type = 'taxonomy' OR k.is_species = 1
+                             THEN 1 ELSE 0 END
                HAVING COUNT(DISTINCT k.id) > 1""",
             (ws,),
         ).fetchall()
@@ -5580,39 +5583,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     stored["name"] if stored and stored["name"]
                     else requested_name
                 )
-                variant_ids = [keyword_id]
-                if stored is not None and keyword_match_key(stored["name"]):
-                    normalized_name = normalize_keyword_display(stored["name"])
-                    if stored["parent_id"] is None:
-                        peer_rows = thread_db.conn.execute(
-                            "SELECT id FROM keywords "
-                            "WHERE vireo_normalize_keyword(name) = ? "
-                            "COLLATE NOCASE AND parent_id IS NULL "
-                            "AND type = ? AND id != ?",
-                            (normalized_name, stored["type"], keyword_id),
-                        ).fetchall()
-                    else:
-                        peer_rows = thread_db.conn.execute(
-                            "SELECT id FROM keywords "
-                            "WHERE vireo_normalize_keyword(name) = ? "
-                            "COLLATE NOCASE AND parent_id = ? "
-                            "AND type = ? AND id != ?",
-                            (
-                                normalized_name, stored["parent_id"],
-                                stored["type"], keyword_id,
-                            ),
-                        ).fetchall()
-                    variant_ids.extend(row["id"] for row in peer_rows)
-                variant_placeholders = ",".join("?" for _ in variant_ids)
                 items = []
                 for photo_id in photo_ids:
                     if cancel_requested():
                         break
                     exists = thread_db.conn.execute(
                         "SELECT 1 FROM photo_keywords "
-                        f"WHERE photo_id = ? AND keyword_id IN "
-                        f"({variant_placeholders})",
-                        [photo_id, *variant_ids],
+                        "WHERE photo_id = ? AND keyword_id = ?",
+                        (photo_id, keyword_id),
                     ).fetchone()
                     if exists is not None:
                         continue

@@ -1643,6 +1643,50 @@ def test_merge_duplicate_keywords_respects_parent_and_type(db):
     ).fetchone()[0] == 2
 
 
+def test_merge_duplicate_keywords_preserves_species_bearing_general_homonym(db):
+    """A legacy species-bearing general and an ordinary general homonym
+    share name/parent/type but not semantics. Manual cleanup must not merge
+    them and spread the species flag to photos carrying the ordinary tag.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid_species = db.add_photo(
+        folder_id=fid, filename="species.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    pid_plain = db.add_photo(
+        folder_id=fid, filename="plain.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.set_active_workspace(ws)
+    species_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    plain_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'general', 0)"
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(pid_species, species_id)
+    db.tag_photo(pid_plain, plain_id)
+
+    assert db.merge_duplicate_keywords() == 0
+    rows = db.conn.execute(
+        "SELECT id, is_species FROM keywords WHERE id IN (?, ?) ORDER BY id",
+        (species_id, plain_id),
+    ).fetchall()
+    assert [(r["id"], r["is_species"]) for r in rows] == [
+        (species_id, 1),
+        (plain_id, 0),
+    ]
+    assert db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
+        (pid_plain,),
+    ).fetchone()["keyword_id"] == plain_id
+
+
 def test_merge_duplicate_keywords_reparents_children(db):
     """A duplicate with child keywords merges without tripping the
     keywords.parent_id FK; children move to the survivor, and a follow-up
@@ -1769,11 +1813,16 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
     ).fetchall():
         db.tag_photo(pid, row[0])
 
-    # Species/location metadata carried only by the duplicate must fold
-    # into the survivor instead of being deleted with it. (Set after
-    # tagging so the auto-Wildlife rule doesn't muddy the tag assertions.)
+    # Keep every child in the same species-bearing slot; this test exercises
+    # stale recursive groups, not the distinct species/plain homonym boundary.
+    # Location metadata carried only by the duplicate must still fold into
+    # the survivor instead of being deleted with it. (Set after tagging so
+    # the auto-Wildlife rule doesn't muddy the tag assertions.)
     db.conn.execute(
-        "UPDATE keywords SET is_species = 1, latitude = -33.9, longitude = 18.4 "
+        "UPDATE keywords SET is_species = 1 WHERE LOWER(name) = 'heron'"
+    )
+    db.conn.execute(
+        "UPDATE keywords SET latitude = -33.9, longitude = 18.4 "
         "WHERE name = 'heron' AND parent_id = ?", (lower,))
     db.conn.commit()
 

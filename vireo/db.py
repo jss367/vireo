@@ -9229,12 +9229,14 @@ class Database:
     def merge_duplicate_keywords(self):
         """Find and merge normalized duplicate keywords in active workspace.
 
-        Duplicates are grouped by (normalized name, parent_id, type) — name
-        alone is not identity: the location system deliberately creates same-name
-        keywords under different parents (Springfield under Illinois vs.
-        Missouri), and same-name keywords of different types (species vs.
-        genre) are distinct by design. Merging across those slots retags
-        photos with the wrong place/kind.
+        Duplicates are grouped by (normalized name, parent_id, type,
+        species-bearing) — name alone is not identity: the location system
+        deliberately creates same-name keywords under different parents
+        (Springfield under Illinois vs. Missouri), and same-name keywords of
+        different types (species vs. genre) are distinct by design. Legacy
+        ``type='general', is_species=1`` rows are also distinct from ordinary
+        general homonyms. Merging across those slots retags photos with the
+        wrong place/kind.
 
         A keyword is in scope when it — or any descendant — is tagged on a
         photo in the active workspace. XMP import only tags the leaf of a
@@ -9286,7 +9288,7 @@ class Database:
                        JOIN in_scope s ON s.id = k.id
                        WHERE k.parent_id IS NOT NULL
                    )
-                   SELECT k.id, k.name, k.parent_id, k.type
+                   SELECT k.id, k.name, k.parent_id, k.type, k.is_species
                    FROM keywords k
                    JOIN in_scope s ON s.id = k.id""",
                 (ws,),
@@ -9296,7 +9298,13 @@ class Database:
                 key = keyword_match_key(row["name"])
                 if not key:
                     continue
-                grouped.setdefault((key, row["parent_id"], row["type"]), []).append(row)
+                species_bearing = (
+                    row["type"] == "taxonomy" or row["is_species"] == 1
+                )
+                grouped.setdefault(
+                    (key, row["parent_id"], row["type"], species_bearing),
+                    [],
+                ).append(row)
             dupes = [
                 group for group in grouped.values()
                 if len({row["id"] for row in group}) > 1
@@ -9950,12 +9958,84 @@ class Database:
                     f"DELETE FROM {table} WHERE species = ?", (old,)
                 )
 
-        if dropped_empty or merged or renamed or pending_fixed or curation_fixed:
+        # Relabel undo/redo payloads carry snapshots of the same curation
+        # rows in edit_history_items.old_value. Normalizing only the live
+        # tables above leaves those JSON snapshots pointing at the legacy
+        # spelling; a later undo would then recreate orphaned curation rows
+        # that no longer compare equal to keywords.name. Apply the same
+        # punctuation normalization and unambiguous stored-species casing to
+        # every species value captured by hl_prev/pref_prev/rep_prev.
+        history_curation_fixed = 0
+
+        def _normalized_curation_species(value):
+            clean = normalize_keyword_display(value or "")
+            if not clean:
+                return clean
+            return unique_species_by_key.get(keyword_match_key(clean), clean)
+
+        history_rows = self.conn.execute(
+            "SELECT id, old_value FROM edit_history_items "
+            "WHERE old_value IS NOT NULL AND old_value LIKE ?",
+            ('{%curation%',),
+        ).fetchall()
+        for row in history_rows:
+            try:
+                payload = json.loads(row["old_value"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            curation = payload.get("curation")
+            if not isinstance(curation, dict):
+                continue
+            dirty = False
+            highlights = curation.get("hl_prev")
+            if isinstance(highlights, list):
+                for index, entry in enumerate(highlights):
+                    if isinstance(entry, str):
+                        normalized = _normalized_curation_species(entry)
+                        if normalized != entry:
+                            highlights[index] = normalized
+                            dirty = True
+                    elif isinstance(entry, dict):
+                        old = entry.get("species")
+                        if isinstance(old, str):
+                            normalized = _normalized_curation_species(old)
+                            if normalized != old:
+                                entry["species"] = normalized
+                                dirty = True
+            for key in ("pref_prev", "rep_prev"):
+                entries = curation.get(key)
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    old = entry.get("species")
+                    if not isinstance(old, str):
+                        continue
+                    normalized = _normalized_curation_species(old)
+                    if normalized != old:
+                        entry["species"] = normalized
+                        dirty = True
+            if dirty:
+                self.conn.execute(
+                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
+                    (json.dumps(payload, sort_keys=True), row["id"]),
+                )
+                history_curation_fixed += 1
+
+        if (
+            dropped_empty or merged or renamed or pending_fixed
+            or curation_fixed or history_curation_fixed
+        ):
             log.info(
                 "keyword normalization migration: dropped %d empty-name "
                 "keyword(s), merged %d duplicate row(s), renamed %d, "
-                "rewrote %d pending change(s), moved %d curation row(s)",
+                "rewrote %d pending change(s), moved %d curation row(s), "
+                "rewrote %d curation history item(s)",
                 dropped_empty, merged, renamed, pending_fixed, curation_fixed,
+                history_curation_fixed,
             )
 
     def _merge_keyword_into(self, src_id, dst_id):
@@ -10208,8 +10288,56 @@ class Database:
                                 'keyword_add', 'prediction_accept',
                                 'species_replace'
                             )
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM edit_history_items ehi2
+                          JOIN edit_history eh2
+                            ON eh2.id = ehi2.edit_id
+                          WHERE ehi2.photo_id = edit_history_items.photo_id
+                            AND ehi2.new_value IN (?, ?)
+                            AND eh2.action_type IN (
+                                'keyword_add',
+                                'prediction_accept',
+                                'species_replace'
+                            )
+                            AND ehi2.id > edit_history_items.id
                       )""",
-                [src_str, *chunk, src_str],
+                [src_str, *chunk, src_str, src_str, dst_str],
+            )
+            # When the source add happened first and a later add created
+            # the current survivor association, the later add becomes the
+            # redundant operation after src and dst converge. The guarded
+            # DELETE above deliberately preserves the earlier source item;
+            # drop the later add item instead so latest-first undo leaves
+            # the merged tag in place until the original source add is
+            # itself undone. Restrict this to add-like actions whose whole
+            # per-photo effect is the tag association; species_replace has
+            # an old-species restoration side that cannot be discarded.
+            self.conn.execute(
+                f"""DELETE FROM edit_history_items
+                    WHERE photo_id IN ({ph})
+                      AND new_value IN (?, ?)
+                      AND edit_id IN (
+                          SELECT id FROM edit_history
+                          WHERE action_type IN (
+                              'keyword_add', 'prediction_accept'
+                          )
+                      )
+                      AND EXISTS (
+                          SELECT 1
+                          FROM edit_history_items ehi1
+                          JOIN edit_history eh1
+                            ON eh1.id = ehi1.edit_id
+                          WHERE ehi1.photo_id = edit_history_items.photo_id
+                            AND ehi1.new_value = ?
+                            AND eh1.new_value = ?
+                            AND eh1.action_type IN (
+                                'keyword_add', 'prediction_accept'
+                            )
+                            AND ehi1.id < edit_history_items.id
+                      )""",
+                [*chunk, src_str, dst_str, src_str, src_str],
             )
             # keyword_remove: item.new_value is '' by convention (see
             # record_edit call sites in app.py); the keyword id lives in

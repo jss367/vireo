@@ -3711,7 +3711,8 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
 def test_keyword_duplicates_scoped_by_slot(app_and_db):
     """Same-name keywords in different slots (parent_id, type) are not reported.
 
-    The cleanup endpoint merges only within (keyword_match_key, parent_id, type).
+    The cleanup endpoint merges only within
+    (keyword_match_key, parent_id, type, species-bearing).
     If the duplicates listing groups solely by lowered name, users would see
     persistent false positives — a taxonomy `Robin` and an individual `Robin`,
     or `Springfield` under Illinois vs Missouri — that never disappear after
@@ -3746,6 +3747,17 @@ def test_keyword_duplicates_scoped_by_slot(app_and_db):
     db.tag_photo(p1, cur1.lastrowid)
     db.tag_photo(p2, cur2.lastrowid)
 
+    # Same name/parent/type but different effective species identity. Legacy
+    # databases may contain type=general,is_species=1 species alongside an
+    # ordinary general homonym; cleanup must not offer or merge this pair.
+    species_general = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES (?, 'general', 1)",
+        ("robin",),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(p1, species_general)
+
     with app.test_client() as c:
         resp = c.get("/api/keywords/duplicates")
         assert resp.status_code == 200
@@ -3754,6 +3766,7 @@ def test_keyword_duplicates_scoped_by_slot(app_and_db):
         # Neither slot-distinct name should be reported as a duplicate
         assert "Springfield" not in dupe_names
         assert "Robin" not in dupe_names
+        assert "robin" not in dupe_names
 
 
 def test_all_keywords_scoped_by_workspace(app_and_db):
