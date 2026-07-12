@@ -530,9 +530,18 @@ async function loadCollections() {
       var opt = document.createElement('option');
       opt.value = c.id;
       opt.textContent = c.name;
+      // count_error means /api/collections couldn't resolve this collection's
+      // rules — comparing against it would just 400 the downstream fetch.
+      // Show it disabled so the state is visible instead of offering a
+      // source that can't render.
+      if (c.count_error) {
+        opt.disabled = true;
+        opt.textContent = c.name + ' (unavailable — edit rules to fix)';
+        opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
+      }
       sel.appendChild(opt);
     });
-    var all = data.find(function(c) { return c.name === 'All Photos'; });
+    var all = data.find(function(c) { return c.name === 'All Photos' && !c.count_error; });
     if (all) {
       sel.value = all.id;
       loadComparison();

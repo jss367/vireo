@@ -3372,8 +3372,17 @@ function populateReviewScopeCollections(collections) {
   reviewScopeCollections.forEach(function(c) {
     var opt = document.createElement('option');
     opt.value = String(c.id);
-    var count = c.photo_count != null ? ' (' + c.photo_count + ')' : '';
-    opt.textContent = c.name + count;
+    // count_error collections have unresolvable rules; picking one would 400
+    // the pipeline reflow request. Show it disabled with a hint instead of
+    // offering a scope that can't run.
+    if (c.count_error) {
+      opt.disabled = true;
+      opt.textContent = c.name + ' (unavailable — edit rules to fix)';
+      opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
+    } else {
+      var count = c.photo_count != null ? ' (' + c.photo_count + ')' : '';
+      opt.textContent = c.name + count;
+    }
     sel.appendChild(opt);
   });
   updateReviewScopeControls();

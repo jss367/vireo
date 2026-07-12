@@ -11752,6 +11752,50 @@ def test_pipeline_picker_disables_degraded_collections(app_and_db):
     assert "unavailable" in html
 
 
+def test_collection_pickers_disable_degraded_collections(app_and_db):
+    """Every page that renders a collection picker from /api/collections must
+    honor count_error. Before this fix only the pipeline picker did — the
+    review, cull, compare, and pipeline-review pickers still appended every
+    collection as selectable, so picking a broken one 400'd the downstream
+    request. Regression guard: the same count_error / 'unavailable' branch
+    that exists on the pipeline page must exist on each of these pages too.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+    for route in ("/review", "/cull", "/compare", "/pipeline/review"):
+        html = client.get(route).get_data(as_text=True)
+        assert "count_error" in html, (
+            f"{route} does not check count_error on its collection picker"
+        )
+        assert "unavailable" in html, (
+            f"{route} does not label degraded collections as unavailable"
+        )
+
+
+def test_review_switch_collection_does_not_silently_widen_scope():
+    """When /api/collections/<id>/photos fails, the review page must not fall
+    back to `allPredictions.slice()` — that silently widened the scope back
+    to every prediction, the opposite of what the user asked for. Regression
+    guard on the template source itself.
+    """
+    from pathlib import Path
+    src = Path(__file__).parent.parent / "templates" / "review.html"
+    text = src.read_text()
+    # Locate the switchCollection function and the catch branch inside it.
+    fn_start = text.find("async function switchCollection")
+    assert fn_start != -1, "switchCollection function not found"
+    fn_end = text.find("\n}", fn_start)
+    assert fn_end != -1
+    body = text[fn_start:fn_end]
+    # The old silent fallback assigned allPredictions.slice() from the catch;
+    # the new behavior keeps the scope empty and surfaces a toast.
+    assert "predictions = allPredictions.slice()" not in body.split("catch")[1], (
+        "review.html still silently widens scope on collection load failure"
+    )
+    assert "predictions = []" in body
+    assert "showToast" in body
+
+
 def test_collection_preview_returns_match_count(app_and_db):
     """POST /api/collections/preview returns the count of photos that
     would match an unsaved rules list. Powers the smart-collection
