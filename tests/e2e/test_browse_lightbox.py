@@ -132,6 +132,40 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
     assert page.evaluate("window._lbZoom") > 1.001
 
 
+def test_browse_lightbox_predecodes_adjacent_photo_for_current_source_tier(
+    live_server, page
+):
+    """The next photo is decoded while the user is still viewing the current one."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+
+    next_id = page.evaluate("window._lightboxPhotoList[1].id")
+    page.evaluate("window._lbScheduleSourceSwap(100)")
+    page.wait_for_function(
+        """nextId => Object.values(window._lbAdjacentPreloads).some(entry => (
+            entry.photoId === nextId && entry.sourceKey === 'original' && entry.status === 'decoded'
+        ))""",
+        arg=next_id,
+    )
+
+    assert any(f"/photos/{next_id}/original" in url for url in original_requests)
+    assert page.evaluate("window._lightboxCurrentId") != next_id
+
+
 def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page):
     """Arrow navigation preserves pan/zoom per photo and carries it to unseen photos."""
     svg = (
@@ -203,6 +237,121 @@ def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page)
     assert abs(restored_view["zoom"] - first_view["zoom"]) < 0.05
     assert abs(restored_view["centerX"] - first_view["centerX"]) < 0.03
     assert abs(restored_view["centerY"] - first_view["centerY"]) < 0.03
+
+
+def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
+    live_server, page
+):
+    """100% navigation must not recenter the outgoing photo while loading.
+
+    The incoming photo's metadata often resolves before its image. Previously
+    navigation reset pan immediately, visibly jerking the outgoing bitmap to
+    center, then restored the carried viewport when the new bitmap decoded.
+    """
+    first_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
+        '<circle cx="1000" cy="1400" r="180" fill="#fff"/></svg>'
+    )
+    next_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="3000" height="3000" '
+        'viewBox="0 0 3000 3000"><rect width="3000" height="3000" fill="#426"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=first_svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").nth(1).wait_for(state="visible")
+    next_id = page.evaluate("window.photos[1].id")
+    held_original = {}
+
+    def hold_next_original(route):
+        if f"/photos/{next_id}/original" in route.request.url:
+            held_original["route"] = route
+            return
+        route.fulfill(body=first_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", hold_next_original)
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+
+    before = page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbCurrentSrcKey = 'original';
+            window._lbApplyViewportState({
+                zoom: window._lbNativeZoom,
+                centerX: 0.24,
+                centerY: 0.70,
+                oneToOne: true,
+            });
+            window._lbSaveViewportState(window._lightboxCurrentId);
+            const transform = document.getElementById('lightboxTransform');
+            return {
+                cssTransform: transform.style.transform,
+                width: transform.style.width,
+                height: transform.style.height,
+                viewport: window._lbViewportStateFromCurrent(),
+            };
+        }"""
+    )
+
+    page.locator("[title='Next (→)']").click()
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    page.wait_for_function("() => window._lbVisualTransitionPending === true")
+    page.wait_for_function("() => window._lightboxCurrentId === window.photos[1].id")
+    page.wait_for_timeout(100)
+
+    deadline = time.time() + 2
+    while "route" not in held_original and time.time() < deadline:
+        page.wait_for_timeout(10)
+    assert "route" in held_original
+
+    while_loading = page.evaluate(
+        """() => {
+            const transform = document.getElementById('lightboxTransform');
+            return {
+                cssTransform: transform.style.transform,
+                width: transform.style.width,
+                height: transform.style.height,
+            };
+        }"""
+    )
+    assert while_loading == {
+        "cssTransform": before["cssTransform"],
+        "width": before["width"],
+        "height": before["height"],
+    }
+
+    held_original.pop("route").fulfill(
+        body=next_svg, content_type="image/svg+xml"
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbVisualTransitionPending === false
+                && window._lbPendingViewportState === null
+                && img && img.complete && img.naturalWidth === 3000;
+        }"""
+    )
+    carried = page.evaluate("window._lbViewportStateFromCurrent()")
+    assert abs(carried["centerX"] - before["viewport"]["centerX"]) < 0.03
+    assert abs(carried["centerY"] - before["viewport"]["centerY"]) < 0.03
 
 
 def test_browse_lightbox_pending_high_zoom_survives_native_zoom_race(live_server, page):
