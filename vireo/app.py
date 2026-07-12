@@ -8172,9 +8172,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # whole list — that blanks every collection dropdown in the UI.
             # Degrade to an unknown count and flag it so the client can show
             # the collection instead of hiding all of them.
+            #
+            # Only rule-validation failures degrade to count_error: the pickers
+            # tell users to fix the rule, so labelling a locked/corrupt DB or a
+            # bad generated query as count_error would send them to edit rules
+            # that aren't the actual problem. ValueError covers both malformed
+            # rules (raised by _build_query_from_rules) and malformed JSON in
+            # the rules column (json.JSONDecodeError is a ValueError subclass).
+            # Anything else bubbles up as a 500 so real infra failures surface.
             try:
                 d["photo_count"] = db.count_collection_photos(c["id"])
-            except Exception:
+            except ValueError:
                 app.logger.exception(
                     "Failed to count photos for collection %s (%s)",
                     c["id"],

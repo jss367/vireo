@@ -11705,6 +11705,39 @@ def test_collections_list_survives_one_unresolvable_rule(app_and_db):
     assert by_id[bad]["count_error"] is True
 
 
+def test_collections_list_surfaces_non_rule_failures(app_and_db, monkeypatch):
+    """The count_error path is for rule-validation failures only. If
+    count_collection_photos raises a genuine infrastructure error (locked or
+    corrupt DB, bad generated query), /api/collections must NOT silently
+    downgrade it to a count_error row — the pickers would then tell the user
+    to fix the rule when the real problem is DB-side. Non-ValueError errors
+    must bubble up so the 5xx surfaces where a human will see it.
+    """
+    import json
+    import sqlite3
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+
+    # Patch the class so the per-request Database instance built by
+    # _get_db() is affected too — the route does not share the fixture's
+    # instance.
+    def boom(self, _cid):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Database, "count_collection_photos", boom)
+
+    resp = client.get("/api/collections")
+    # Not a 200 with count_error — a real 5xx so the incident is visible.
+    assert resp.status_code >= 500
+
+
 def test_collection_photos_returns_400_for_unresolvable_rule(app_and_db):
     """When a collection's rules can't be resolved, /photos, /photo-ids and
     /api/import/collection-preview must return a 400, not 500. Otherwise the
