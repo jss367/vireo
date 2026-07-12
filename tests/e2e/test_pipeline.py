@@ -335,6 +335,16 @@ def test_pipeline_eye_keypoints_pill_will_skip_by_default(live_server, page):
     """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
+    # Wait for the initial /api/pipeline/plan to settle before asserting.
+    # Otherwise the pill can read "Will skip" from the fallback (checkbox
+    # unchecked) even if the server-side plan has flipped Eye Keypoints
+    # back to opt-in-by-default — the very regression this test guards.
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-skip' "
+        "&& !window._planRefreshPending"
+    )
     expect(page.locator("#enableEyeKeypoints")).not_to_be_checked()
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
 
@@ -348,8 +358,24 @@ def test_pipeline_eye_keypoints_toggle_off_marks_will_skip(live_server, page):
     page.goto(f"{url}/pipeline")
     page.click("#card-eyekeypoints .stage-header")
     page.check("#enableEyeKeypoints")
+    # Wait for the debounced plan refresh to confirm 'will-run'. Reading
+    # only the pill would pass from the null-plan fallback in
+    # _stageStateFor, so a broken eye_detect_override wiring (plan comes
+    # back "will-skip" after opt-in) would be masked here.
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-run' "
+        "&& !window._planRefreshPending"
+    )
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
     page.uncheck("#enableEyeKeypoints")
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-skip' "
+        "&& !window._planRefreshPending"
+    )
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
     # Group does not depend on eye keypoints — it must still be runnable.
     expect(page.locator("#pillGroup")).not_to_contain_text("Will skip")
