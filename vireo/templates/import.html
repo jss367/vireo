@@ -249,9 +249,17 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <div class="remote-preview" id="remoteDestPreview"></div>
       </div>
       <div class="row">
-        <label>Folder template</label>
-        <input type="text" id="folderTemplate" value="%Y/%Y-%m-%d" style="max-width:200px;flex:0 1 auto;">
-        <span class="hint">strftime of each photo's capture time, e.g. %Y/%Y-%m-%d</span>
+        <label for="folderTemplatePreset">Folder template</label>
+        <select id="folderTemplatePreset" class="input-fixed" onchange="updateFolderTemplateControls()">
+          <option value="%Y/%Y-%m-%d" selected>%Y/%Y-%m-%d — 2026/2026-07-12</option>
+          <option value="%Y/%m/%d">%Y/%m/%d — 2026/07/12</option>
+          <option value="%Y/%m">%Y/%m — 2026/07</option>
+          <option value="%Y">%Y — 2026</option>
+          <option value="%Y-%m-%d">%Y-%m-%d — 2026-07-12</option>
+          <option value="__custom__">Custom…</option>
+        </select>
+        <input type="text" id="folderTemplate" value="" placeholder="Enter a strftime format"
+               aria-label="Custom folder template" style="display:none;max-width:240px;flex:0 1 240px;">
       </div>
       <div class="section-divider">
         <div class="option-stack">
@@ -401,10 +409,35 @@ function updateFileTypeControls() {
   custom.style.display = preset.value === 'custom' ? '' : 'none';
 }
 
+function selectedFolderTemplate() {
+  const preset = document.getElementById('folderTemplatePreset');
+  if (preset.value !== '__custom__') return preset.value;
+  return (document.getElementById('folderTemplate').value || '').trim();
+}
+
+function updateFolderTemplateControls() {
+  const preset = document.getElementById('folderTemplatePreset');
+  const custom = document.getElementById('folderTemplate');
+  if (!preset || !custom) return;
+  custom.style.display = preset.value === '__custom__' ? '' : 'none';
+  if (preset.value === '__custom__') custom.focus();
+}
+
+function setFolderTemplate(template) {
+  const preset = document.getElementById('folderTemplatePreset');
+  const custom = document.getElementById('folderTemplate');
+  const commonOption = Array.from(preset.options)
+    .some((option) => option.value === template && option.value !== '__custom__');
+  preset.value = commonOption ? template : '__custom__';
+  custom.value = commonOption ? '' : template;
+  updateFolderTemplateControls();
+}
+
 function wireDestStructureInvalidation() {
   [
     'chkRecursive', 'fileTypePreset', 'destMode', 'remoteSubpath',
-    'chkSkipDuplicates', 'chkVerifyByHash', 'destInput', 'folderTemplate',
+    'chkSkipDuplicates', 'chkVerifyByHash', 'destInput',
+    'folderTemplatePreset', 'folderTemplate',
   ].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -1509,7 +1542,7 @@ function destStructureSignature(destination, fileTypes, recursive, excludePaths)
   return JSON.stringify({
     sources: sources.slice(),
     destination: destination,
-    folder_template: (document.getElementById('folderTemplate').value || '').trim(),
+    folder_template: selectedFolderTemplate(),
     file_types: fileTypes,
     recursive: recursive,
     skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
@@ -1558,7 +1591,7 @@ async function renderDestStructure(excludePaths) {
       body: JSON.stringify({
         sources: sources,
         destination: destination,
-        folder_template: (document.getElementById('folderTemplate').value || '').trim(),
+        folder_template: selectedFolderTemplate(),
         file_types: fileTypes,
         recursive: recursive,
         exclude_paths: excludePaths || [],
@@ -1810,7 +1843,7 @@ async function startImport() {
       if (!destination) { showError('Choose a destination folder.'); return; }
       body.destination = destination;
     }
-    body.folder_template = (document.getElementById('folderTemplate').value || '').trim();
+    body.folder_template = selectedFolderTemplate();
     body.file_types = fileTypes;
     body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
     body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
@@ -2042,8 +2075,8 @@ async function initImportPage() {
     opt.value = d;
     dl.appendChild(opt);
   });
-  if (ingestCfg.folder_template) {
-    document.getElementById('folderTemplate').value = ingestCfg.folder_template;
+  if (typeof ingestCfg.folder_template === 'string') {
+    setFolderTemplate(ingestCfg.folder_template);
   }
 
   // Preselect the workspace's default strategy (null -> import only).
