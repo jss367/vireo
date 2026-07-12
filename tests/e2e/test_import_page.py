@@ -160,6 +160,90 @@ def test_import_preview_runs_automatically_after_source_selection(live_server, p
     expect(grid).to_contain_text("To: 2026/2026-07-11")
 
 
+def test_import_auto_preview_clears_grid_when_selection_becomes_invalid(
+    live_server, page
+):
+    url = live_server["url"]
+    page.goto(f"{url}/import")
+    page.evaluate(
+        """
+        () => {
+          const originalFetch = window.fetch.bind(window);
+          window.__fullPreviewCalls = 0;
+          window.fetch = (input, init) => {
+            const target = typeof input === 'string' ? input : input.url;
+            if (target && target.indexOf('/api/import/folder-preview') === 0) {
+              const body = JSON.parse(init.body || '{}');
+              if (body.summary_only) {
+                return Promise.resolve(new Response(JSON.stringify({
+                  total_count: 1,
+                  total_size: 1234,
+                  type_breakdown: {'.jpg': 1},
+                  duplicate_count: 0,
+                  files: [],
+                }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+              }
+              window.__fullPreviewCalls += 1;
+              return Promise.resolve(new Response(JSON.stringify({
+                total_count: 1,
+                total_size: 1234,
+                type_breakdown: {'.jpg': 1},
+                duplicate_count: 0,
+                files: [{
+                  path: '/tmp/card-a/IMG_0001.jpg',
+                  filename: 'IMG_0001.jpg',
+                  subfolder: 'card-a',
+                  size: 1234,
+                  extension: '.jpg',
+                  thumb_url: 'data:image/gif;base64,R0lGODlhAQABAAAAACw=',
+                }],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            if (target && target.indexOf('/api/import/check-duplicates') === 0) {
+              const frame = 'data: ' + JSON.stringify({
+                done: true, duplicate_count: 0, checked: 1, total: 1,
+              }) + '\\n\\n';
+              return Promise.resolve(new Response(frame, {
+                status: 200,
+                headers: {'Content-Type': 'text/event-stream'},
+              }));
+            }
+            if (target && target.indexOf('/api/import/destination-preview') === 0) {
+              return Promise.resolve(new Response(JSON.stringify({
+                folders: [],
+                files: [],
+              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+            }
+            return originalFetch(input, init);
+          };
+        }
+        """
+    )
+
+    page.locator("#modeCopy").check()
+    page.locator("#destInput").fill("/archive")
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.wait_for_function("window.__fullPreviewCalls >= 1")
+    expect(page.locator("#importPreviewGrid")).to_be_visible()
+
+    page.locator("#fileTypePreset").select_option("custom")
+    page.evaluate(
+        """
+        () => {
+          document.querySelectorAll('.file-ext').forEach(el => { el.checked = false; });
+          document.querySelector('.file-ext').dispatchEvent(
+            new Event('change', { bubbles: true }));
+        }
+        """
+    )
+
+    expect(page.locator("#importError")).to_contain_text(
+        "Choose at least one file extension."
+    )
+    expect(page.locator("#importPreviewGrid")).to_be_hidden()
+
+
 def test_import_destination_browse_button_sets_destination(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/import")

@@ -1628,17 +1628,23 @@ async function previewImport(opts) {
   clearScheduledImportPreview();
   showError('');
   hideDestStructure();
-  if (!sources.length) { showError('Add at least one source folder.'); return; }
+  clearImportPreviewGrid();
+  importPreviewSeq += 1;
+  const requestSeq = importPreviewSeq;
+  const summary = document.getElementById('previewSummary');
+  if (!sources.length) {
+    summary.textContent = '';
+    showError('Add at least one source folder.');
+    return;
+  }
   const copyMode = selectedImportMode() === 'copy';
   const fileTypes = copyMode ? selectedFileTypes() : 'both';
   if (copyMode && Array.isArray(fileTypes) && !fileTypes.length) {
+    summary.textContent = '';
     showError('Choose at least one file extension.');
     return;
   }
-  importPreviewSeq += 1;
-  const requestSeq = importPreviewSeq;
   const requestSignature = importPreviewSignature();
-  const summary = document.getElementById('previewSummary');
   const btnPreview = document.getElementById('btnPreview');
   if (btnPreview) btnPreview.disabled = true;
   summary.textContent = 'Discovering files…';
