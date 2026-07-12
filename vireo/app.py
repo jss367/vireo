@@ -9044,18 +9044,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(error, status)
 
         top_predictions = _highlight_top_predictions(db, photo_ids)
-        # Snapshot the top-prediction species per photo (lowercase). Used
-        # below in the current_species-empty filter branch to accept only
+        # Snapshot the top-prediction species per photo, keyed by
+        # keyword_match_key (SQLite's ASCII-only NOCASE fold). Used below
+        # in the current_species-empty filter branch to accept only
         # curation whose old species matches an active prediction — see
         # the prediction-only relabel scenario in
         # test_highlights_relabel_prediction_only_undo_restores_curation.
+        # keyword_match_key (not Python's str.lower()) matches
+        # add_keyword's SQLite dedupe, so `Éclair` vs `éclair` — which
+        # SQLite/add_keyword keep distinct — stay distinct here too;
+        # otherwise a stale curation row for one would fold onto the
+        # other on relabel.
         predicted_species_by_pid = {}
         for pid_pred, pred_row in top_predictions.items():
             pred_species = pred_row["species"] if pred_row else None
             if pred_species:
-                predicted_species_by_pid.setdefault(pid_pred, set()).add(
-                    pred_species.strip().lower()
-                )
+                key = keyword_match_key(pred_species)
+                if key:
+                    predicted_species_by_pid.setdefault(pid_pred, set()).add(key)
         ws_id = db._ws_id()
         # Chunk both lookups: photo_ids has no upstream cap
         # (_parse_highlight_photo_ids just parses the list), so a bulk
@@ -9083,9 +9089,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 chunk,
             ).fetchall()
             for row in rows:
-                current_species_by_pid.setdefault(row["photo_id"], set()).add(
-                    row["name"].strip().lower()
-                )
+                key = keyword_match_key(row["name"])
+                if key:
+                    current_species_by_pid.setdefault(row["photo_id"], set()).add(key)
 
         def _accept_curation_source(pid, old_species_name):
             """Shared filter for the highlight, preference, and rep passes.
@@ -9099,13 +9105,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ``test_highlights_relabel_prediction_only_undo_restores_curation``
             while blocking stale curation rows for species that were
             tagged and later untagged.
+
+            Keyed by keyword_match_key (see the snapshot above): SQLite's
+            ASCII-only NOCASE keeps `Éclair` and `éclair` distinct as
+            separate keyword rows, and str.lower() folds them together —
+            which would let a stale `éclair` curation row migrate onto a
+            photo still carrying `Éclair`.
             """
-            old_lower = old_species_name.strip().lower()
+            old_key = keyword_match_key(old_species_name)
+            if not old_key:
+                return False
             current = current_species_by_pid.get(pid)
             if current:
-                return old_lower in current
+                return old_key in current
             predicted = predicted_species_by_pid.get(pid) or set()
-            return old_lower in predicted
+            return old_key in predicted
 
         highlight_renames = {}
         hl_prev_by_pid = {}

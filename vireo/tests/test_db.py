@@ -13544,6 +13544,230 @@ def test_update_keyword_retype_to_nontaxonomy_does_not_leak_is_species(tmp_path)
         db.close()
 
 
+def test_update_keyword_retype_legacy_general_is_species_does_not_leak(tmp_path):
+    """Legacy `type='general', is_species=1` rows upgraded from pre-invariant
+    databases still count as species-bearing to the rest of the app
+    (`is_species = 1 OR type = 'taxonomy'`). Retyping such a row into an
+    existing individual/general peer must not stamp is_species=1 or a taxon
+    link onto the non-taxonomy survivor. Extends
+    ``test_update_keyword_retype_to_nontaxonomy_does_not_leak_is_species``
+    to cover the general-source variant flagged by Codex.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        fid = db.add_folder("/photos", name="photos")
+        pid_src = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_dst = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        # Legacy general row with is_species=1 and a taxon link — the shape
+        # upgraded DBs can carry before mark_species_keywords retypes them.
+        cur = db.conn.execute(
+            "INSERT INTO taxa (name, rank) VALUES (?, ?)",
+            ("Turdus migratorius", "species"),
+        )
+        taxon_row_id = cur.lastrowid
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+            "VALUES (?, NULL, 1, 'general', ?)",
+            ("Robin", taxon_row_id),
+        )
+        general_id = cur.lastrowid
+        db.tag_photo(pid_src, general_id)
+
+        # Existing individual `Robin` peer at the same slot, no species flag.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 0, 'individual')",
+            ("Robin",),
+        )
+        individual_id = cur.lastrowid
+        db.tag_photo(pid_dst, individual_id)
+
+        # Retype the legacy general row to 'individual'. update_keyword must
+        # merge into the individual peer.
+        effective_id = db.update_keyword(general_id, type="individual")
+        assert effective_id == individual_id
+
+        assert db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone() is None
+
+        # Critically: is_species and taxon_id must NOT leak onto the
+        # non-taxonomy survivor even though the source was type='general'
+        # (not 'taxonomy').
+        survivor = db.conn.execute(
+            "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+            (individual_id,),
+        ).fetchone()
+        assert survivor["type"] == "individual"
+        assert survivor["is_species"] == 0, (
+            "legacy is_species=1 general source must not stamp survivor"
+        )
+        assert survivor["taxon_id"] is None
+
+        tagged = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (individual_id,),
+            ).fetchall()
+        }
+        assert tagged == {pid_src, pid_dst}
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_retargets_edit_history(tmp_path):
+    """When _merge_keyword_into deletes the source keyword row, any
+    edit_history entry referring to it as a keyword id must be retargeted
+    onto the survivor. Otherwise undo of a recent keyword_add / _remove /
+    prediction_accept / species_replace looks up the deleted id, finds
+    nothing, and marks the entry undone without reversing the tag — the
+    photo keeps the survivor's tag with no way to undo it. Covers the
+    Codex finding on the one-shot normalization migration.
+    """
+    import json as _json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_replace = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        # Survivor and about-to-be-merged source of the same type.
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        # Both photos are tagged with merge_id so undo has something to hit.
+        db.tag_photo(pid, merge_id)
+        db.tag_photo(pid_replace, merge_id)
+
+        # 1) A bare-id keyword_add edit whose new_value points at merge_id.
+        eid_add = db.record_edit(
+            "keyword_add", "Added keyword", str(merge_id),
+            [{"photo_id": pid, "old_value": "", "new_value": str(merge_id)}],
+        )
+        # 2) A keyword_remove edit whose item.old_value carries the bare id.
+        db.tag_photo(pid, merge_id)  # ensure tagged before recording remove
+        eid_remove = db.record_edit(
+            "keyword_remove", "Removed keyword", str(merge_id),
+            [{"photo_id": pid, "old_value": str(merge_id), "new_value": ""}],
+        )
+        # 3) A species_replace edit with JSON metadata carrying keyword_id +
+        #    keyword_ids that reference merge_id.
+        payload = _json.dumps(
+            {"keyword_id": merge_id, "keyword_ids": [merge_id]},
+            sort_keys=True,
+        )
+        eid_replace = db.record_edit(
+            "species_replace", "Replaced species", str(merge_id),
+            [{
+                "photo_id": pid_replace,
+                "old_value": payload,
+                "new_value": str(merge_id),
+            }],
+        )
+
+        # Merge merge_id into keep_id (mirrors the migration's convergence
+        # loop, and update_keyword's retype-into-peer path).
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        # edit_history.new_value retargeted for all three action types.
+        for eid in (eid_add, eid_remove, eid_replace):
+            row = db.conn.execute(
+                "SELECT new_value FROM edit_history WHERE id = ?", (eid,)
+            ).fetchone()
+            assert row["new_value"] == str(keep_id), (
+                f"edit_history #{eid}.new_value not retargeted"
+            )
+
+        # Bare-id item columns retargeted.
+        add_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_add,),
+        ).fetchone()
+        assert add_item["new_value"] == str(keep_id)
+
+        remove_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_remove,),
+        ).fetchone()
+        assert remove_item["old_value"] == str(keep_id)
+
+        # JSON payload rewritten in place.
+        replace_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_replace,),
+        ).fetchone()
+        assert replace_item["new_value"] == str(keep_id)
+        parsed = _json.loads(replace_item["old_value"])
+        assert parsed["keyword_id"] == keep_id
+        assert parsed["keyword_ids"] == [keep_id]
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_dedupes_keyword_ids_after_retarget(tmp_path):
+    """A species_replace payload whose keyword_ids list already contains
+    the destination id must not end up with a duplicate after retarget.
+    Otherwise undo would re-tag the survivor twice for the same keyword id.
+    """
+    import json as _json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid, merge_id)
+
+        payload = _json.dumps(
+            {"keyword_id": merge_id, "keyword_ids": [keep_id, merge_id]},
+            sort_keys=True,
+        )
+        eid = db.record_edit(
+            "species_replace", "Replaced species", str(merge_id),
+            [{
+                "photo_id": pid,
+                "old_value": payload,
+                "new_value": str(merge_id),
+            }],
+        )
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        replace_item = db.conn.execute(
+            "SELECT old_value FROM edit_history_items WHERE edit_id = ?",
+            (eid,),
+        ).fetchone()
+        parsed = _json.loads(replace_item["old_value"])
+        assert parsed["keyword_ids"] == [keep_id], (
+            "duplicate destination id after retarget"
+        )
+    finally:
+        db.close()
+
+
 def test_add_photo_retries_on_database_is_locked(tmp_path):
     """The INSERT inside add_photo must retry transient 'database is locked'.
 

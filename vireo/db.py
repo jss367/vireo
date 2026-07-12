@@ -9727,18 +9727,27 @@ class Database:
             (dst_id,),
         ).fetchone()
         if src is not None:
-            # A taxonomy row being merged into a non-taxonomy destination
-            # must not leak its species flag or taxon link onto the
-            # survivor: species queries `is_species = 1 OR type =
-            # 'taxonomy'` would otherwise keep matching every photo
-            # already tagged with that individual/general row (see
-            # update_keyword's retype-into-peer path). Same-type merges
-            # and non-taxonomy sources keep the existing metadata-fold
-            # behavior so legacy is_species/coords set on general rows
-            # survive a case-variant duplicate collapse.
+            # A species-bearing row being RETYPED into a non-taxonomy
+            # destination must not leak its species flag or taxon link
+            # onto the survivor: species queries `is_species = 1 OR
+            # type = 'taxonomy'` would otherwise keep matching every
+            # photo already tagged with that individual/general row
+            # (see update_keyword's retype-into-peer path, and the
+            # migration's general→specific-type fold). "Species-
+            # bearing" is `type='taxonomy'` OR `is_species=1` — legacy
+            # rows can still be `type='general', is_species=1` on
+            # upgraded DBs, and retyping them into an individual/general
+            # peer would otherwise take the else branch below and stamp
+            # is_species=1 onto the non-taxonomy destination. Gated on
+            # `src.type != dst.type` so same-type case-variant collapses
+            # (e.g. two `general, is_species=1` rows merging under one
+            # normalized spelling) still keep their metadata-fold
+            # behavior.
             leaks_species_into_nontaxonomy = (
-                src["type"] == "taxonomy"
-                and dst is not None and dst["type"] != "taxonomy"
+                dst is not None
+                and dst["type"] != "taxonomy"
+                and src["type"] != dst["type"]
+                and (src["type"] == "taxonomy" or src["is_species"] == 1)
             )
             if leaks_species_into_nontaxonomy:
                 # Retype-into-peer path (see update_keyword): the survivor
@@ -9852,6 +9861,105 @@ class Database:
                             photo_workspace_pairs=photo_workspace_pairs,
                             _commit=False,
                         )
+        # Retarget edit_history entries that reference src_id as a
+        # keyword id so undo/redo lands on the survivor instead of a
+        # deleted row. Without this, undo of a recent keyword_add /
+        # keyword_remove / prediction_accept / species_replace looks up
+        # src_id, gets no keyword row (it's about to be deleted below),
+        # and marks the entry undone without reversing the effect: the
+        # tag stays on the photo and the pending sidecar change (already
+        # rewritten to the survivor spelling above) is left in place.
+        # Applies globally across workspaces — workspace_id scopes WHO
+        # ran the edit, not which keyword row it references.
+        _kw_id_actions = (
+            'keyword_add', 'keyword_remove', 'prediction_accept',
+            'species_replace',
+        )
+        src_str = str(src_id)
+        dst_str = str(dst_id)
+        _kw_placeholders = ",".join("?" * len(_kw_id_actions))
+        # 1) edit_history.new_value: the canonical keyword id per entry.
+        self.conn.execute(
+            f"""UPDATE edit_history
+                SET new_value = ?
+                WHERE new_value = ?
+                  AND action_type IN ({_kw_placeholders})""",
+            (dst_str, src_str, *_kw_id_actions),
+        )
+        # 2) edit_history_items new_value / old_value: bare keyword-id
+        #    strings (e.g. keyword_remove records old_value=str(kid);
+        #    species_replace batches record new_value=str(new_kid)).
+        for col in ("new_value", "old_value"):
+            self.conn.execute(
+                f"""UPDATE edit_history_items
+                    SET {col} = ?
+                    WHERE {col} = ?
+                      AND edit_id IN (
+                          SELECT id FROM edit_history
+                          WHERE action_type IN ({_kw_placeholders})
+                      )""",
+                (dst_str, src_str, *_kw_id_actions),
+            )
+        # 3) edit_history_items.old_value JSON payloads: species_replace
+        #    and metadata-carrying keyword_add/prediction_accept entries
+        #    store {"keyword_id": ..., "keyword_ids": [...], ...}. Load,
+        #    rewrite, re-serialize per row. Scoped to values that look
+        #    like JSON so bare id strings (already handled above) are
+        #    skipped cheaply. Uses ? for the LIKE prefix to keep the
+        #    format string free of literal SQL wildcard characters.
+        json_rows = self.conn.execute(
+            f"""SELECT ehi.id, ehi.old_value
+                FROM edit_history_items ehi
+                JOIN edit_history eh ON eh.id = ehi.edit_id
+                WHERE eh.action_type IN ({_kw_placeholders})
+                  AND ehi.old_value IS NOT NULL
+                  AND ehi.old_value LIKE ?""",
+            (*_kw_id_actions, '{%'),
+        ).fetchall()
+        for row in json_rows:
+            try:
+                data = json.loads(row["old_value"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            dirty = False
+            raw_kid = data.get("keyword_id")
+            if raw_kid is not None:
+                try:
+                    if int(raw_kid) == src_id:
+                        data["keyword_id"] = dst_id
+                        dirty = True
+                except (TypeError, ValueError):
+                    pass
+            raw_kids = data.get("keyword_ids")
+            if isinstance(raw_kids, list) and raw_kids:
+                rewritten = []
+                changed = False
+                for k in raw_kids:
+                    try:
+                        k_int = int(k)
+                    except (TypeError, ValueError):
+                        rewritten.append(k)
+                        continue
+                    if k_int == src_id:
+                        k_int = dst_id
+                        changed = True
+                    rewritten.append(k_int)
+                if changed:
+                    # Dedup preserving order: if the destination id was
+                    # already in the list, don't repeat it after rewrite.
+                    seen = []
+                    for k in rewritten:
+                        if k not in seen:
+                            seen.append(k)
+                    data["keyword_ids"] = seen
+                    dirty = True
+            if dirty:
+                self.conn.execute(
+                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
+                    (json.dumps(data, sort_keys=True), row["id"]),
+                )
         # Move photo associations (ignore if already exists for dst_id),
         # then drop the leftovers.
         self.conn.execute(

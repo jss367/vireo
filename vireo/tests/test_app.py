@@ -9026,6 +9026,74 @@ def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_an
     assert "New Species" not in hl
 
 
+def test_highlights_relabel_does_not_fold_non_ascii_case_variants(app_and_db):
+    """`_accept_curation_source` must key by ``keyword_match_key`` (SQLite's
+    ASCII-only NOCASE fold), not Python's ``str.lower()``. SQLite/add_keyword
+    keep ``Éclair`` and ``éclair`` as distinct species rows, but
+    ``str.lower()`` folds them together — so a stale ``éclair`` curation
+    row on a photo currently carrying ``Éclair`` would be swept into the
+    relabel target if the filter used ``.lower()``. Under the fix, the
+    stale row stays under ``éclair``.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/nonascii', 'nonascii', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    # Two DISTINCT species keywords: `Éclair` (uppercase É) and `éclair`
+    # (lowercase é). add_keyword's NOCASE dedupe is ASCII-only, so they
+    # coexist. Insert directly to avoid any casing-convention rewrite.
+    kid_upper = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('Éclair', NULL, 1, 'taxonomy')"
+    ).lastrowid
+    kid_target = db.add_keyword("Warbler", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'nonascii.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # Photo currently carries `Éclair`.
+    db.tag_photo(pid, kid_upper)
+    # Stale species_highlights row keyed to the DIFFERENT species `éclair`
+    # — SQLite treats it as unrelated to the tagged `Éclair`. The photo
+    # has no `éclair` tag, so this row must stay under `éclair` after a
+    # relabel of its actual (Éclair) tag.
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'éclair', ?, 0)",
+        (ws_id, pid),
+    )
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Warbler"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    # The lowercase `éclair` highlight is STALE — the photo doesn't carry
+    # that species — so it must remain under `éclair`, not migrate to the
+    # relabel target.
+    remaining = db.conn.execute(
+        "SELECT species FROM species_highlights "
+        "WHERE workspace_id = ? AND photo_id = ?",
+        (ws_id, pid),
+    ).fetchall()
+    remaining_species = {r["species"] for r in remaining}
+    assert "éclair" in remaining_species, (
+        "stale non-ASCII-case-variant curation row must not be folded "
+        "onto the relabel target"
+    )
+    assert "Warbler" not in remaining_species
+
+
 def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
     """Undoing a relabel that moved a secondary representative must
     restore it at its original ``selected_order`` — otherwise
