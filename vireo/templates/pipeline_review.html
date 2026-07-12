@@ -5973,17 +5973,52 @@ function buildPipelinePhotoContextMenu(photoId) {
   );
 }
 
-/* --- Right-click menu ---
- * Catches contextmenu on photo cards (main grid) and grm-cards (group review
- * modal). Browse opens in a new tab (browser) or navigates in place (Tauri app
- * window) via openInBrowse, so the user reaches the photo either way. */
-document.addEventListener('contextmenu', function(e) {
+function pipelineContextPhotoIdFromEvent(e) {
   var card = e.target.closest('.photo-card[data-photo-id], .grm-card[data-photo-id]');
-  if (!card) return;
-  var pid = parseInt(card.dataset.photoId, 10);
-  if (!pid) return;
+  if (card) {
+    var cardPid = parseInt(card.dataset.photoId, 10);
+    if (cardPid) {
+      return {
+        photoId: cardPid,
+        card: card,
+      };
+    }
+  }
+
+  // The burst-review loupe is an image too, but it is not nested in a
+  // data-photo-id card. Resolve it through the modal's current selection so
+  // the same context menu actions work on the large preview.
+  var loupe = e.target.closest('#grmLoupeImg, #grmLoupePhoto');
+  var overlay = document.getElementById('grmOverlay');
+  if (
+    loupe &&
+    overlay &&
+    overlay.classList.contains('open') &&
+    typeof grmState !== 'undefined' &&
+    grmState &&
+    grmState.selected
+  ) {
+    return {
+      photoId: parseInt(grmState.selected, 10),
+      card: null,
+    };
+  }
+
+  return null;
+}
+
+/* --- Right-click menu ---
+ * Catches contextmenu on photo cards (main grid), grm-cards (group review
+ * modal), and the group-review loupe preview. Browse opens in a new tab
+ * (browser) or navigates in place (Tauri app window) via openInBrowse, so the
+ * user reaches the photo either way. */
+document.addEventListener('contextmenu', function(e) {
+  var target = pipelineContextPhotoIdFromEvent(e);
+  if (!target) return;
+  var pid = target.photoId;
+  var card = target.card;
   e.preventDefault();
-  if (card.classList.contains('grm-card') && typeof grmState !== 'undefined' && grmState) {
+  if (card && card.classList.contains('grm-card') && typeof grmState !== 'undefined' && grmState) {
     var prevSelected = grmState.selected;
     grmState.selected = pid;
     if (!grmState.selectedIds) grmState.selectedIds = new Set();
