@@ -362,24 +362,13 @@ jobs:
           npx tauri build --target ${{ matrix.rust-target }} --bundles deb,appimage 2>&1
           echo "=== Tauri build finished at $(date -u) ==="
 
-      # Manual artifact builds remain unsigned unless a signed release candidate
-      # is requested. Tagged releases and signed candidates use the split
-      # build/sign/bundle flow below so the app and sidecar are signed before
-      # they are embedded in either installer.
-      - name: Build Tauri app (Windows internal artifact)
-        id: build_windows
-        if: runner.os == 'Windows' && !(startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tauriScript: npx tauri
-          args: --target ${{ matrix.rust-target }}
-
-      - name: Validate SignPath signing configuration
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+      # Decide whether this Windows build is signed. A tagged release or an
+      # explicitly requested candidate is a "release build" that we sign — but
+      # only when every SignPath value is present. Missing config downgrades to
+      # an unsigned build (with a warning) instead of failing the release.
+      - name: Determine Windows signing mode
+        id: win_signing
+        if: runner.os == 'Windows'
         shell: bash
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -389,26 +378,64 @@ jobs:
           SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
           WINDOWS_SIGNING_PUBLISHER: ${{ vars.WINDOWS_SIGNING_PUBLISHER }}
         run: |
+          # A tagged release or requested candidate is a signable release build.
+          release_build=false
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ] || [ -n "${{ inputs.tag_name }}" ] || [ "${{ inputs.sign_windows_candidate }}" = "true" ]; then
+            release_build=true
+          fi
+
+          # Signed release candidates may only be built from protected main.
           if [ "${{ inputs.sign_windows_candidate }}" = "true" ] && [ -z "${{ inputs.tag_name }}" ] && [ "$GITHUB_REF" != "refs/heads/main" ]; then
             echo "::error::Signed Windows release candidates may only be built from the protected main branch"
             exit 1
           fi
+
+          # Signing is available only when every SignPath value is present.
+          signing_configured=true
           for name in SIGNPATH_API_TOKEN SIGNPATH_ORGANIZATION_ID SIGNPATH_PROJECT_SLUG SIGNPATH_POLICY_SLUG SIGNPATH_ARTIFACT_CONFIGURATION_SLUG WINDOWS_SIGNING_PUBLISHER; do
             if [ -z "${!name}" ]; then
-              echo "::error::$name is required for a signed Windows release or release candidate"
-              exit 1
+              signing_configured=false
             fi
           done
 
+          if [ "$release_build" = "true" ] && [ "$signing_configured" = "true" ]; then
+            echo "should_sign=true" >> "$GITHUB_OUTPUT"
+            echo "Windows release build: SignPath is configured — producing a SIGNED build."
+          elif [ "$release_build" = "true" ]; then
+            echo "should_sign=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::SignPath is not configured; producing an UNSIGNED Windows release. Windows will show an 'unknown publisher' warning. Populate the SIGNPATH_* secret/variables to enable signing."
+          else
+            echo "should_sign=false" >> "$GITHUB_OUTPUT"
+            echo "Non-release Windows build — producing an unsigned internal artifact."
+          fi
+
+      # Windows signing is best-effort: a tagged release or requested candidate
+      # is signed via the split build/sign/bundle flow below ONLY when SignPath
+      # is configured (see "Determine Windows signing mode"). When it isn't, the
+      # release falls back to this unsigned internal-artifact path so releases
+      # are never blocked on signing config — Windows just shows an "unknown
+      # publisher" warning until SignPath secrets/variables are populated.
+      - name: Build Tauri app (Windows internal artifact)
+        id: build_windows
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign != 'true'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tauriScript: npx tauri
+          args: --target ${{ matrix.rust-target }}
+
       - name: Build Windows application binaries for signing
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         shell: bash
         run: |
           cd src-tauri
           npx tauri build --target ${{ matrix.rust-target }} --no-bundle
 
       - name: Stage unsigned Windows application binaries
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force windows-binaries-unsigned | Out-Null
@@ -417,7 +444,7 @@ jobs:
 
       - name: Upload Windows application binaries for signing
         id: upload_windows_binaries
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: vireo-windows-binaries-unsigned
@@ -425,7 +452,7 @@ jobs:
           retention-days: 1
 
       - name: Sign Windows application binaries with SignPath
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -438,7 +465,7 @@ jobs:
           output-artifact-directory: windows-binaries-signed
 
       - name: Install and verify signed Windows application binaries
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           ./scripts/verify_windows_signatures.ps1 -Root windows-binaries-signed -ExpectedPublisher '${{ vars.WINDOWS_SIGNING_PUBLISHER }}'
@@ -449,7 +476,7 @@ jobs:
           Copy-Item $sidecar "src-tauri/binaries/vireo-server-${{ matrix.rust-target }}.exe" -Force
 
       - name: Bundle signed Windows application
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -487,7 +514,7 @@ jobs:
           done
 
       - name: Smoke-test unsigned Windows internal artifact
-        if: runner.os == 'Windows' && !(startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign != 'true'
         shell: pwsh
         run: |
           $installer = Get-ChildItem "src-tauri/target/${{ matrix.rust-target }}/release/bundle" -Recurse -Filter "*-setup.exe" | Select-Object -First 1 -ExpandProperty FullName
@@ -495,7 +522,7 @@ jobs:
           ./scripts/windows_package_smoke.ps1 -Installer $installer
 
       - name: Stage unsigned Windows installers
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force windows-installers-unsigned | Out-Null
@@ -505,7 +532,7 @@ jobs:
 
       - name: Upload unsigned Windows signing input
         id: upload_windows_installers
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: vireo-windows-installers-unsigned
@@ -513,7 +540,7 @@ jobs:
           retention-days: 1
 
       - name: Sign Windows installers with SignPath
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -526,7 +553,7 @@ jobs:
           output-artifact-directory: signed-windows
 
       - name: Verify signed Windows artifacts
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           ./scripts/verify_windows_signatures.ps1 -Root signed-windows -ExpectedPublisher '${{ vars.WINDOWS_SIGNING_PUBLISHER }}'
@@ -534,7 +561,7 @@ jobs:
       # Authenticode changes the installer bytes, invalidating the updater
       # signatures Tauri created before SignPath. Sign the final bytes again.
       - name: Sign final Windows updater artifacts
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -552,7 +579,7 @@ jobs:
             }
 
       - name: Smoke-test signed Windows artifact
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         shell: pwsh
         run: |
           $installer = Get-ChildItem signed-windows -Recurse -Filter "*-setup.exe" | Select-Object -First 1 -ExpandProperty FullName
@@ -590,7 +617,7 @@ jobs:
           retention-days: 7
 
       - name: Upload unsigned Windows CI artifacts
-        if: runner.os == 'Windows' && !(startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: vireo-${{ matrix.label }}
@@ -603,7 +630,7 @@ jobs:
           retention-days: 7
 
       - name: Upload signed Windows artifacts
-        if: runner.os == 'Windows' && (startsWith(github.ref, 'refs/tags/v') || inputs.tag_name != '' || inputs.sign_windows_candidate)
+        if: runner.os == 'Windows' && steps.win_signing.outputs.should_sign == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.sign_windows_candidate && inputs.tag_name == '' && 'vireo-windows-x86_64-signed-candidate' || 'vireo-windows-x86_64' }}
