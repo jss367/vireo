@@ -5884,6 +5884,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ).fetchone()
             if stored and stored["name"]:
                 name = stored["name"]
+
+        # Treat any normalized-equivalent peer already on the photo as
+        # already-tagged: without this, adding clean `Cardinal` to a photo
+        # that carries a legacy `‘Cardinal` variant stacks the clean row on
+        # top of the legacy one, leaving duplicate in-app tags and a
+        # duplicate <rdf:li> after sync. Mirrors the peer expansion in
+        # api_batch_keyword / api_batch_keyword_remove; scoped to same
+        # (parent_id, type) so cross-type same-name keywords stay distinct.
+        target_row = db.conn.execute(
+            "SELECT id, name, parent_id, type FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        variant_ids = [kid]
+        if target_row is not None and keyword_match_key(target_row["name"]):
+            target_norm = normalize_keyword_display(target_row["name"])
+            parent_id = target_row["parent_id"]
+            if parent_id is None:
+                peer_rows = db.conn.execute(
+                    """SELECT id FROM keywords
+                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
+                         AND parent_id IS NULL
+                         AND type = ?
+                         AND id != ?""",
+                    (target_norm, target_row["type"], kid),
+                ).fetchall()
+            else:
+                peer_rows = db.conn.execute(
+                    """SELECT id FROM keywords
+                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
+                         AND parent_id = ?
+                         AND type = ?
+                         AND id != ?""",
+                    (target_norm, parent_id, target_row["type"], kid),
+                ).fetchall()
+            variant_ids.extend(row["id"] for row in peer_rows)
+
+        id_placeholders = ",".join("?" for _ in variant_ids)
+        already_tagged = db.conn.execute(
+            f"""SELECT 1 FROM photo_keywords
+                WHERE photo_id = ? AND keyword_id IN ({id_placeholders})
+                LIMIT 1""",
+            [photo_id] + variant_ids,
+        ).fetchone()
+        if already_tagged is not None:
+            return jsonify({"ok": True, "keyword_id": kid})
+
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),

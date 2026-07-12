@@ -78,6 +78,78 @@ def test_api_add_keyword_accepts_existing_keyword_id(app_and_db):
     assert "Cardinal" in names
 
 
+def test_api_add_keyword_skips_normalized_peer_variant(app_and_db):
+    """Single-photo add treats a normalized peer variant as already tagged.
+
+    Regression for Codex thread r3565300310. `api_selection_keyword_suggestions`
+    collapses normalized variants into one representative id; the Browse UI
+    reuses that id for its single-photo Add action. If the photo already
+    carries a legacy edge-quote peer (`‘Cardinal`) and the caller adds the
+    clean `Cardinal` row, the route must not stack the clean row on top or
+    queue a phantom clean `keyword_add` — that leaves duplicate in-app tags
+    and duplicate <rdf:li> entries after sync. Mirrors the batch behavior
+    covered by test_batch_keyword_route_skips_normalized_peer_variants.
+    """
+    app, db = app_and_db
+    photo_row = db.conn.execute(
+        "SELECT id FROM photos WHERE filename = 'bird1.jpg'"
+    ).fetchone()
+    photo_id = photo_row["id"]
+
+    clean_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 0, 'general')",
+        ("‘Cardinal",),
+    ).lastrowid
+    # Untag the fixture clean link so bird1 carries only the LEGACY variant;
+    # the endpoint's peer expansion is what should make it look "already
+    # tagged" rather than a stray exact-id match.
+    db.conn.execute(
+        "DELETE FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (photo_id, clean_id),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (photo_id, legacy_id),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/photos/{photo_id}/keywords",
+        json={"keyword_id": clean_id},
+    )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["ok"] is True
+    # The canonical id is returned even though nothing new was tagged, so
+    # callers that store keyword_id from the response still get the clean
+    # row for subsequent operations.
+    assert body["keyword_id"] == clean_id
+
+    # bird1 should still carry ONLY the legacy variant — no clean row
+    # stacked on top.
+    tags = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id IN (?, ?)",
+        (photo_id, clean_id, legacy_id),
+    ).fetchall()
+    assert sorted(row["keyword_id"] for row in tags) == [legacy_id]
+
+    # No pending clean-name add should be queued — the sidecar already
+    # carries a normalized-equivalent entry.
+    pending = db.conn.execute(
+        """SELECT COUNT(*) AS n FROM pending_changes
+           WHERE change_type = 'keyword_add' AND value = 'Cardinal'
+             AND photo_id = ?""",
+        (photo_id,),
+    ).fetchone()
+    assert pending["n"] == 0
+
+
 def test_help_static_assets_served(app_and_db):
     """The help modal's JS, JSON, and vendored Fuse library must be served.
 
