@@ -10507,6 +10507,13 @@ class Database:
         are no longer eligible for the Highlights page. Stored rows are kept
         intact so un-rejecting a photo restores its selection.
 
+        Eligibility mirrors :meth:`get_highlights_candidates` at
+        ``min_quality=0.0``: unscored photos are admitted (matching the
+        ``_photo_can_be_highlights_preference`` gate used to accept
+        highlight writes), so a highlight saved on an unscored pick or
+        representative surfaces here instead of silently disappearing until
+        analysis runs.
+
         Result shape is ``{species: {photo_id: rank}}``.
         """
         ws = self._ws_id()
@@ -10520,7 +10527,6 @@ class Database:
                    JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')"""
             eligibility_filter = """
-                 AND p.quality_score IS NOT NULL
                  AND COALESCE(p.flag, 'none') != 'rejected'
                  AND sh.species = COALESCE(
                      (

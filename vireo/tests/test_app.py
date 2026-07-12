@@ -5017,6 +5017,67 @@ def test_bucket_unanalyzed_count_ignores_non_trailing_unscored():
     assert _bucket_unanalyzed_count(photos) == 0
 
 
+def test_species_highlights_eligible_only_admits_unscored_pick(app_and_db):
+    """A highlight saved on an unscored photo must survive eligible_only=True.
+
+    ``_photo_can_be_highlights_preference`` now admits unscored candidates at
+    ``min_quality=0`` (matching ``get_highlights_candidates``), so
+    ``/api/species-highlights`` and the representative-promotion path both
+    accept writes on unscored picks. If the eligibility filter here still
+    required ``quality_score IS NOT NULL``, the row would be created but
+    immediately dropped by every render/order pass — the card would not be
+    marked as a highlight and the highlight-selection filter would classify
+    the species as "no highlights chosen" until analysis ran. Aligning this
+    with the candidate rule keeps the write and the read consistent.
+    """
+    _app, db = app_and_db
+    fid, ids = _seed_anianiau_bucket(db)
+    unscored_pick = ids["unscored_pickA"]
+
+    db.add_species_highlight("Anianiau", unscored_pick)
+
+    stored = db.get_species_highlights(eligible_only=True)
+    assert stored.get("Anianiau") == {unscored_pick: 1}
+    # Rejecting the photo still drops it — eligibility only widens on the
+    # quality axis, the rejected-flag filter is untouched.
+    db.conn.execute(
+        "UPDATE photos SET flag = 'rejected' WHERE id = ?", (unscored_pick,),
+    )
+    db.conn.commit()
+    assert db.get_species_highlights(eligible_only=True) == {}
+
+
+def test_highlights_payload_marks_unscored_highlight_selection(app_and_db):
+    """The /api/highlights payload must mark an unscored highlight as chosen.
+
+    End-to-end pin for the eligibility fix: POST a highlight on an unscored
+    pick, then GET /api/highlights and verify the bucket's card is flagged
+    ``is_highlighted``, ``highlight_count`` reflects it, and
+    ``has_highlight_selection`` is true — the signals the
+    ``highlight_selection`` filter (yes/no) reads.
+    """
+    app, db = app_and_db
+    fid, ids = _seed_anianiau_bucket(db)
+    unscored_pick = ids["unscored_pickA"]
+
+    client = app.test_client()
+    resp = client.post("/api/species-highlights", json={
+        "species": "Anianiau",
+        "photo_id": unscored_pick,
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    resp = client.get("/api/highlights", query_string={"folder_id": fid})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    bucket = next(b for b in data["buckets"] if b["species"] == "Anianiau")
+    assert bucket["has_highlight_selection"] is True
+    assert bucket["highlight_count"] >= 1
+    card = next(p for p in bucket["photos"] if p["id"] == unscored_pick)
+    assert card["is_highlighted"] is True
+    assert card["highlight_rank"] == 1
+
+
 def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):
     """Renaming an unrelated same-name keyword must not rewrite species prefs."""
     app, db = app_and_db
