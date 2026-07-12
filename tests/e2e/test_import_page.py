@@ -884,3 +884,81 @@ def test_import_folder_browser_escape_closes_modal(live_server, page):
 
     expect(page.locator("[data-testid='import-folder-browser']")).not_to_have_class(
         re.compile(r"\bopen\b"))
+
+
+def test_import_destination_structure_hides_when_folder_browser_picks_destination(
+    live_server, page
+):
+    # Selecting a destination via the folder browser assigns destInput.value
+    # programmatically — input/change never fire — so the rendered structure
+    # preview must be invalidated by the code path itself. Complements the
+    # existing DOM-event and addSourcePath coverage with the fallback picker.
+    url = live_server["url"]
+
+    def folder_preview(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"files": [{"path": "/tmp/card-a/IMG_0001.jpg"}]}),
+        )
+
+    def check_duplicates(route):
+        frame = (
+            "data: " + json.dumps({
+                "done": True, "duplicate_count": 0, "checked": 1, "total": 1,
+            }) + "\n\n"
+        )
+        route.fulfill(status=200, content_type="text/event-stream", body=frame)
+
+    def destination_preview(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "folders": [{
+                    "path": "2026/07/11",
+                    "full_path": "/archive/2026/07/11",
+                    "count": 1,
+                    "exists": False,
+                }],
+                "total_photos": 1,
+                "total_folders": 1,
+                "new_folders": 1,
+                "existing_folders": 0,
+                "managed_archive": None,
+            }),
+        )
+
+    def browse(route):
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "path": "/new-archive",
+                "dirs": [{"name": "child", "path": "/new-archive/child"}],
+            }),
+        )
+
+    page.route("**/api/import/folder-preview", folder_preview)
+    page.route("**/api/import/check-duplicates", check_duplicates)
+    page.route("**/api/import/destination-preview", destination_preview)
+    page.route("**/api/browse**", browse)
+    page.goto(f"{url}/import")
+    # Force the folder-browser fallback (no native picker) so the Select
+    # button assigns destInput.value directly.
+    page.evaluate("window.pickDirectory = async () => null")
+
+    page.locator("#modeCopy").check()
+    page.locator("#sourceInput").fill("/tmp/card-a")
+    page.locator("#btnAddSource").click()
+    page.locator("#destInput").fill("/archive")
+    page.locator("#btnPreview").click()
+    expect(page.locator("#destStructure")).to_be_visible()
+
+    page.locator("[data-testid='import-destination-browse-btn']").click()
+    expect(page.locator("[data-testid='import-folder-browser']")).to_have_class(
+        re.compile(r"\bopen\b"))
+    page.locator("#folderBrowserSelectBtn").click()
+
+    expect(page.locator("#destInput")).to_have_value("/new-archive")
+    expect(page.locator("#destStructure")).to_be_hidden()
