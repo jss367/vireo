@@ -5318,7 +5318,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error("collection not found", 404)
         return db.get_collection_photo_ids(collection_id), None
 
-    def _bulk_gps_location_payload(db, body):
+    def _bulk_gps_location_payload(db, body, cancel_check=None):
         """Build preview/apply data for resolving locations from EXIF GPS."""
         photo_ids, error = _bulk_gps_location_source_ids(db, body)
         if error is not None:
@@ -5352,7 +5352,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         unresolved = []
         skipped = []
         ordered_group_keys = []
+        cancelled = False
         for pid in photo_ids:
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                break
             photo = photos_map[pid]
             if pid in assigned_ids:
                 skipped.append({
@@ -5400,7 +5404,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "sample_filenames": group["sample_filenames"],
             })
 
-        return {
+        result = {
             "total": len(photo_ids),
             "resolvable": sum(group["count"] for group in group_list),
             "updated": 0,
@@ -5408,7 +5412,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "unresolved": unresolved,
             "skipped": skipped,
             "_details_by_place_id": {k: v["details"] for k, v in groups.items()},
-        }, None
+        }
+        if cancelled:
+            result["cancelled"] = True
+        return result, None
 
     def _validate_import_tag_options(body):
         """Normalize optional tags attached to a photo import request."""
@@ -5494,10 +5501,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "errors": [],
         }
         result["tagging"] = summary
-        if result.get("cancelled") or (
-            job is not None and runner is not None
-            and runner.is_cancelled(job["id"])
-        ):
+
+        def cancel_requested():
+            return result.get("cancelled") or (
+                job is not None and runner is not None
+                and runner.is_cancelled(job["id"])
+            )
+
+        if cancel_requested():
             summary["skipped"] = "import cancelled"
             return
         if not photo_ids:
@@ -5524,6 +5535,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         tagged_photo_ids = set()
 
         for requested_name in tags:
+            if cancel_requested():
+                summary["skipped"] = "import cancelled"
+                break
             try:
                 keyword_id = thread_db.add_keyword(
                     requested_name, kw_type="general", _commit=False,
@@ -5537,6 +5551,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 items = []
                 for photo_id in photo_ids:
+                    if cancel_requested():
+                        break
                     exists = thread_db.conn.execute(
                         "SELECT 1 FROM photo_keywords "
                         "WHERE photo_id = ? AND keyword_id = ?",
@@ -5548,12 +5564,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     _queue_import_keyword_add(
                         thread_db, photo_id, keyword_name, workspace_id,
                     )
-                    tagged_photo_ids.add(photo_id)
                     items.append({
                         "photo_id": photo_id,
                         "old_value": "",
                         "new_value": str(keyword_id),
                     })
+                if cancel_requested():
+                    thread_db.conn.rollback()
+                    summary["skipped"] = "import cancelled"
+                    break
                 if items:
                     thread_db.record_edit(
                         "keyword_add",
@@ -5562,6 +5581,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         str(keyword_id), items, is_batch=True, _commit=False,
                     )
                 thread_db.conn.commit()
+                tagged_photo_ids.update(item["photo_id"] for item in items)
             except Exception as exc:
                 thread_db.conn.rollback()
                 log.exception("Failed to add import tag %r", requested_name)
@@ -5570,26 +5590,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
         summary["tagged_photos"] = len(tagged_photo_ids)
 
-        if location_from_gps:
+        if location_from_gps and not cancel_requested():
             unresolved = 0
             skipped = 0
             added = 0
+            cancelled_during_gps = False
             # The public bulk endpoint caps a request at 10,000 IDs. Imports
             # can exceed that, so reuse its resolution logic in bounded
             # chunks while sharing the persistent ~110 m geocode cache.
             for photo_chunk in _gps_location_chunks(photo_ids, size=10000):
+                if cancel_requested():
+                    cancelled_during_gps = True
+                    break
                 try:
                     payload, error = _bulk_gps_location_payload(
                         thread_db, {"photo_ids": photo_chunk},
+                        cancel_check=cancel_requested,
                     )
                     if error is not None:
                         raise RuntimeError("location resolution was rejected")
+                    if payload.pop("cancelled", False) or cancel_requested():
+                        cancelled_during_gps = True
+                        break
                     details_by_place_id = payload.pop(
                         "_details_by_place_id", {}
                     )
                     unresolved += len(payload["unresolved"])
                     skipped += len(payload["skipped"])
                     for group in payload["groups"]:
+                        if cancel_requested():
+                            cancelled_during_gps = True
+                            break
                         details = details_by_place_id.get(group["place_id"])
                         if not details:
                             unresolved += len(group["photo_ids"])
@@ -5610,6 +5641,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             continue
                         location_items = []
                         for photo_id in group["photo_ids"]:
+                            if cancel_requested():
+                                cancelled_during_gps = True
+                                break
                             thread_db.set_photo_location(photo_id, leaf_id)
                             _queue_import_location_sync(
                                 thread_db, photo_id, workspace_id,
@@ -5629,6 +5663,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 is_batch=True, _commit=False,
                             )
                     thread_db.conn.commit()
+                    if cancelled_during_gps:
+                        break
                 except Exception as exc:
                     thread_db.conn.rollback()
                     log.exception("Failed to add GPS locations during import")
@@ -5639,6 +5675,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             summary["locations_added"] = added
             summary["locations_unresolved"] = unresolved
             summary["locations_skipped"] = skipped
+            if cancelled_during_gps:
+                summary["skipped"] = "import cancelled"
+        elif location_from_gps:
+            summary["skipped"] = "import cancelled"
         thread_db.conn.close()
 
     # -- Edit API routes --

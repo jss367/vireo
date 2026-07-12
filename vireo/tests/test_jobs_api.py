@@ -3370,6 +3370,60 @@ def test_cancelled_import_does_not_apply_requested_tags(
     ).fetchone() is None
 
 
+def test_import_gps_tagging_stops_when_cancelled_during_resolution(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    runner = app._job_runner
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.clear_photo_location(photo_id)
+
+    def imported_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": True,
+            "cancelled": False,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 1,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": True,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    original_get = Database.get_photos_by_ids
+
+    def cancel_during_resolution(self, photo_ids):
+        running_ids = [
+            job_id for job_id, job in runner._jobs.items()
+            if job["type"] == "import" and job["status"] == "running"
+        ]
+        assert len(running_ids) == 1
+        assert runner.cancel_job(running_ids[0]) is True
+        return original_get(self, photo_ids)
+
+    monkeypatch.setattr(import_job, "run_import_job", imported_result)
+    monkeypatch.setattr(Database, "get_photos_by_ids", cancel_during_resolution)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "cancelled", job
+    assert job["result"]["tagging"]["skipped"] == "import cancelled"
+    assert db.get_assigned_photo_location(photo_id) is None
+
+
 @pytest.mark.parametrize("field,value,error", [
     ("tags", "Trip", "tags must be a list"),
     ("tags", ["Trip", 4], "only strings"),
