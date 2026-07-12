@@ -3292,6 +3292,7 @@ def test_import_photos_happy_path(app_and_db, tmp_path):
         "sources": [card],
         "destination": dest,
         "after_import": cull_ready_id,
+        "trust_likely_duplicates": True,
     })
     assert resp.status_code == 200, resp.get_json()
     job_id = resp.get_json()["job_id"]
@@ -3302,6 +3303,7 @@ def test_import_photos_happy_path(app_and_db, tmp_path):
     assert config["destination"] == dest
     assert config["folder_template"] == "%Y/%Y-%m-%d"
     assert config["after_import"] == cull_ready_id
+    assert config["trust_likely_duplicates"] is True
 
     job = wait_for_job_via_client(client, job_id)
     assert job["status"] == "completed", job

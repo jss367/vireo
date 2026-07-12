@@ -616,6 +616,67 @@ def test_key_match_with_different_bytes_imports_as_distinct(tmp_path):
     assert result["safe_to_format"] is True
 
 
+def test_trust_likely_duplicates_skips_metadata_match_without_byte_check(
+    tmp_path,
+):
+    """Fast mode deliberately trusts filename + size + capture second.
+
+    A same-metadata, different-bytes twin is skipped, reported separately
+    as unverified, and must keep the safe-to-format result false.
+    """
+    from import_job import ImportParams, run_import_job
+    from PIL.ExifTags import Base as ExifBase
+
+    dt = datetime(2026, 5, 1, 10, 15, 30)
+    card = tmp_path / "card"
+    card.mkdir()
+    card_file = card / "IMG_0400.jpg"
+    img = Image.new("RGB", (16, 16), "red")
+    exif = img.getexif()
+    exif[ExifBase.DateTimeOriginal] = dt.strftime("%Y:%m:%d %H:%M:%S")
+    img.save(str(card_file), exif=exif)
+    card_bytes = card_file.read_bytes()
+
+    library = tmp_path / "library"
+    library.mkdir()
+    twin_file = library / "IMG_0400.jpg"
+    twin_file.write_bytes(
+        card_bytes[:-1] + bytes([card_bytes[-1] ^ 0xFF])
+    )
+    assert twin_file.stat().st_size == card_file.stat().st_size
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES (?, ?, 'ok')",
+        (str(library), "library"),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, extension, file_size,"
+        " timestamp) VALUES (?, ?, '.jpg', ?, ?)",
+        (fid, "IMG_0400.jpg", len(card_bytes), "2026-05-01T10:15:30"),
+    )
+    db.conn.commit()
+
+    archive = tmp_path / "archive"
+    result = run_import_job(
+        _make_job(), FakeRunner(), db_path, ws_id,
+        ImportParams(
+            sources=[str(card)],
+            destination=str(archive),
+            trust_likely_duplicates=True,
+        ),
+    )
+
+    assert result["copied"] == 0
+    assert result["skipped_duplicate"] == 1
+    assert result["unverified_duplicate"] == 1
+    assert result["unverified_duplicates_only"] is True
+    assert result["safe_to_format"] is False
+    assert not list(archive.rglob("IMG_0400.jpg"))
+
+
 def test_intra_run_key_collision_across_cards_imports_second_as_fresh(tmp_path):
     """Two cards can hold different bytes at the same filename+size+
     capture-second (say, an IMG_XXXX rollover after a firmware reset).
