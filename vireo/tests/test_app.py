@@ -3907,6 +3907,55 @@ def test_rename_keyword_merges_into_normalized_peer_toplevel(app_and_db):
     assert ("keyword_add", "‘apapane") not in actions
 
 
+def test_api_update_keyword_returns_effective_id_and_merged_flag_on_peer_merge(
+    app_and_db,
+):
+    """When ``db.update_keyword`` merges the requested row into a
+    normalized-equal peer, the requested keyword id is deleted server-side.
+    The route must respond with the surviving peer id and a ``merged`` flag
+    so the keywords UI (``keywords.html`` ``renameKeyword`` / ``updateType`` /
+    ``kwBulkApply``) can refetch instead of mutating a stale entry in place
+    — otherwise ``allKeywords`` keeps a phantom row pointing at the deleted
+    id and subsequent rename/type/delete actions on that visible entry
+    silently affect nothing. Plain renames (no merge) must still report
+    ``merged: false`` and the original id so the local optimistic update
+    path stays a no-op refetch."""
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Merge case: rename an unrelated keyword to a name that already belongs
+    # to another top-level peer. update_keyword deletes ``other_id`` and
+    # returns ``apapane_id`` as the survivor.
+    apapane_id = db.add_keyword("apapane")
+    other_id = db.add_keyword("Other")
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["merged"] is True
+    assert payload["effective_id"] == apapane_id
+    # Verify the DB matches the response so the client can trust
+    # ``effective_id`` as the row to switch its selection onto.
+    assert db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone() is None
+    survivor = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (apapane_id,)
+    ).fetchone()
+    assert survivor is not None
+
+    # Plain rename (no peer): merged=false, effective_id matches the
+    # requested id so the client's local update remains correct.
+    plain_id = db.add_keyword("Solo")
+    resp = client.put(f"/api/keywords/{plain_id}", json={"name": "SoloRenamed"})
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["ok"] is True
+    assert payload["merged"] is False
+    assert payload["effective_id"] == plain_id
+
+
 def test_rename_keyword_merges_into_normalized_peer_child(app_and_db):
     """Same guard for child keywords: without the peer check, two rows under
     the same parent with normalized-equal names would violate

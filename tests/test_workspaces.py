@@ -1302,6 +1302,122 @@ def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename
     ]
 
 
+def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_into_clean_survivor(db):
+    """When the SURVIVOR is already clean (so ``_normalize_keyword_row_name``
+    no-ops) and a legacy source with its own species curation gets merged
+    into it, ``_merge_keyword_into`` must retarget ``species_highlights``,
+    ``photo_preferences``, and ``species_representatives`` from the source
+    spelling onto the survivor's spelling. Without this the tag itself
+    moves to the surviving row but the curation rows stay keyed to a
+    keyword name the DB no longer has -- the eligible highlight/life-list
+    queries compare ``sh.species``/``sr.species`` exact against
+    ``keywords.name``, so the user's curated picks drop out of the UI
+    even though the tag was retained.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_survivor = db.add_photo(folder_id=fid, filename="s.jpg", extension=".jpg",
+                                file_size=100, file_mtime=1.0)
+    pid_legacy = db.add_photo(folder_id=fid, filename="l.jpg", extension=".jpg",
+                              file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Survivor is already clean; a separate legacy taxonomy row will be
+    # merged into it. The pass sorts (is_dirty, id) so ``apapane`` wins as
+    # the keep row while ``‘apapane`` becomes the source of the merge.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("apapane",),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("‘apapane",),
+    )
+    db.conn.commit()
+    survivor_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("apapane",)
+    ).fetchone()[0]
+    legacy_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
+    ).fetchone()[0]
+    db.tag_photo(pid_survivor, survivor_id)
+    db.tag_photo(pid_legacy, legacy_id)
+
+    # Curation keyed on the legacy source spelling for the photo tagged with
+    # the legacy row. After the merge the tag moves to ``survivor_id`` /
+    # ``apapane`` but the highlight/life-list queries only match rows whose
+    # species text equals the surviving ``keywords.name`` -- so without the
+    # retarget these rows silently drop out of the UI.
+    db.conn.execute(
+        """INSERT INTO species_highlights
+              (workspace_id, species, photo_id, rank,
+               created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws, "‘apapane", pid_legacy),
+    )
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+              (workspace_id, purpose, species, photo_id,
+               created_at, updated_at)
+           VALUES (?, 'life_list', ?, ?, datetime('now'), datetime('now'))""",
+        (ws, "‘apapane", pid_legacy),
+    )
+    db.conn.execute(
+        """INSERT INTO species_representatives
+              (species, photo_id, selected_order,
+               created_at, updated_at)
+           VALUES (?, ?, 1, datetime('now'), datetime('now'))""",
+        ("‘apapane", pid_legacy),
+    )
+    db.conn.commit()
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 1
+    # Survivor keeps its clean name; the legacy source row was deleted.
+    kw_rows = db.conn.execute(
+        "SELECT id, name FROM keywords WHERE name LIKE '%apapane' ORDER BY id"
+    ).fetchall()
+    assert [(row["id"], row["name"]) for row in kw_rows] == [
+        (survivor_id, "apapane"),
+    ]
+    # The legacy photo's species tag moved onto the surviving id. The photo
+    # also carries an auto-added Wildlife genre from tag_photo's
+    # auto-Wildlife trigger (only-species-on-photo path); check membership
+    # rather than equality so that unrelated tag isn't hard-coded.
+    tag_ids = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
+            (pid_legacy,),
+        ).fetchall()
+    }
+    assert survivor_id in tag_ids
+    assert legacy_id not in tag_ids
+
+    # All three curation tables are now keyed on the surviving clean
+    # spelling. Nothing left under the legacy source spelling.
+    hl = db.conn.execute(
+        "SELECT species, photo_id FROM species_highlights"
+    ).fetchall()
+    assert [(row["species"], row["photo_id"]) for row in hl] == [
+        ("apapane", pid_legacy),
+    ]
+    pref = db.conn.execute(
+        "SELECT species, purpose, photo_id FROM photo_preferences"
+    ).fetchall()
+    assert [(row["species"], row["purpose"], row["photo_id"]) for row in pref] == [
+        ("apapane", "life_list", pid_legacy),
+    ]
+    rep = db.conn.execute(
+        "SELECT species, photo_id FROM species_representatives"
+    ).fetchall()
+    assert [(row["species"], row["photo_id"]) for row in rep] == [
+        ("apapane", pid_legacy),
+    ]
+
+
 def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
     """When one workspace runs keyword cleanup, curation rows keyed on the
     legacy spelling in a DIFFERENT workspace whose photos are not tagged with

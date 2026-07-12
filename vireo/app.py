@@ -6149,7 +6149,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
                 _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
-        return jsonify({"ok": True})
+        # Signal the surviving id when update_keyword merged this row into a
+        # normalized-equal peer. Without this, the keywords UI keeps mutating
+        # the requested keyword_id in place (see keywords.html renameKeyword /
+        # updateType / kwBulkApply), leaving allKeywords pointed at a keyword
+        # row the DB just deleted; subsequent rename/type/delete actions for
+        # that stale entry silently affect nothing. Callers refetch when
+        # `merged` is true.
+        return jsonify({
+            "ok": True,
+            "effective_id": effective_id,
+            "merged": effective_id != keyword_id,
+        })
 
     @app.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
     def api_delete_keyword(keyword_id):

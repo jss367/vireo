@@ -9559,12 +9559,13 @@ class Database:
         """
         merged = 1
         src = self.conn.execute(
-            "SELECT name, is_species, latitude, longitude, taxon_id "
+            "SELECT name, is_species, latitude, longitude, taxon_id, type "
             "FROM keywords WHERE id = ?",
             (src_id,),
         ).fetchone()
         dst = self.conn.execute(
-            "SELECT name FROM keywords WHERE id = ?", (dst_id,),
+            "SELECT name, is_species, type FROM keywords WHERE id = ?",
+            (dst_id,),
         ).fetchone()
         if src is not None:
             self.conn.execute(
@@ -9633,6 +9634,53 @@ class Database:
                                   AND value = ?
                                   AND photo_id IN ({placeholders})""",
                             [dst_name, src_name, *chunk],
+                        )
+                # Retarget species curation rows keyed to the deleted source
+                # name onto the surviving destination name when either row is
+                # a species/taxonomy keyword. Without this, cleanup that
+                # merges a legacy source (e.g. `‘apapane`) into a clean
+                # survivor (`apapane`) leaves species_highlights /
+                # photo_preferences / species_representatives keyed to the
+                # source spelling; the eligible curation queries compare
+                # those strings exact against the surviving `keywords.name`,
+                # so the user's curated highlights/representatives silently
+                # disappear after cleanup even though the tag itself was
+                # retained. Mirrors the scoped rename that
+                # ``_normalize_keyword_row_name`` runs on the survivor.
+                #
+                # Scope to (photo, workspace) pairs that carried either row
+                # through workspace_folders so a same-species curation row in
+                # an unrelated workspace whose keyword tag was not part of
+                # this merge is not retargeted onto a canonical name it
+                # doesn't have tagged. The rename helpers no-op when no rows
+                # exist under ``src_name`` so this is safe to run
+                # unconditionally within the species-merge branch.
+                is_species_merge = (
+                    src["is_species"] == 1 or src["type"] == "taxonomy"
+                    or dst["is_species"] == 1 or dst["type"] == "taxonomy"
+                )
+                if is_species_merge:
+                    tag_rows = self.conn.execute(
+                        """SELECT DISTINCT pk.photo_id, wf.workspace_id
+                           FROM photo_keywords pk
+                           JOIN photos p ON p.id = pk.photo_id
+                           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                           WHERE pk.keyword_id IN (?, ?)""",
+                        (src_id, dst_id),
+                    ).fetchall()
+                    photo_workspace_pairs = [
+                        (r["photo_id"], r["workspace_id"]) for r in tag_rows
+                    ]
+                    if photo_workspace_pairs:
+                        self.rename_species_highlights_species(
+                            src_name, dst_name,
+                            photo_workspace_pairs=photo_workspace_pairs,
+                            _commit=False,
+                        )
+                        self.rename_photo_preferences_species(
+                            src_name, dst_name,
+                            photo_workspace_pairs=photo_workspace_pairs,
+                            _commit=False,
                         )
         # Move photo associations (ignore if already exists for dst_id),
         # then drop the leftovers.

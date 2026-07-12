@@ -503,11 +503,20 @@
 
   async function updateType(kwId, newType) {
     try {
-      await fetch('/api/keywords/' + kwId, {
+      const resp = await fetch('/api/keywords/' + kwId, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({type: newType})
       });
+      // Retyping to a slot that already has a normalized-equal peer
+      // deletes this keyword row and merges it into the peer's id. Refetch
+      // instead of the local optimistic update, or allKeywords keeps a
+      // phantom entry pointing at a deleted id.
+      const data = await resp.json().catch(() => ({}));
+      if (data && data.merged) {
+        await loadKeywords();
+        return;
+      }
       const kw = allKeywords.find(k => k.id === kwId);
       if (kw) kw.type = newType;
       render();
@@ -559,11 +568,20 @@
 
   async function renameKeyword(kwId, newName) {
     try {
-      await fetch('/api/keywords/' + kwId, {
+      const resp = await fetch('/api/keywords/' + kwId, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: newName})
       });
+      // Renaming to a spelling that already belongs to a normalized-equal
+      // peer merges this row into the peer server-side. The requested id is
+      // deleted; refetch so allKeywords/parentMap drop the stale entry and
+      // pick up the peer's canonical name.
+      const data = await resp.json().catch(() => ({}));
+      if (data && data.merged) {
+        await loadKeywords();
+        return;
+      }
       const kw = allKeywords.find(k => k.id === kwId);
       if (kw) { kw.name = newName; parentMap[kw.id] = newName; }
     } catch(e) { console.error('Failed to rename', e); }
@@ -577,20 +595,32 @@
     const ids = Array.from(selectedIds);
     if (!ids.length) return;
 
+    let anyMerged = false;
     for (const id of ids) {
       try {
-        await fetch('/api/keywords/' + id, {
+        const resp = await fetch('/api/keywords/' + id, {
           method: 'PUT',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({type: newType})
         });
+        const data = await resp.json().catch(() => ({}));
+        if (data && data.merged) {
+          // Row was merged into a normalized-equal peer -- can't update in
+          // place, will refetch after the loop rather than 100+ round trips.
+          anyMerged = true;
+          continue;
+        }
         const kw = allKeywords.find(k => k.id === id);
         if (kw) kw.type = newType;
       } catch(e) { console.error('Failed to update', id, e); }
     }
     selectedIds.clear();
     document.getElementById('kwBulkType').value = '';
-    render();
+    if (anyMerged) {
+      await loadKeywords();
+    } else {
+      render();
+    }
   });
 
   // -- Bulk delete --
