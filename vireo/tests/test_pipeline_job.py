@@ -6687,9 +6687,8 @@ def _make_photo_dir(tmp_path, n):
     return photo_dir
 
 
-def test_thumbnail_failures_flip_stage_status_to_failed(tmp_path, monkeypatch):
-    """If any thumbnail fails, the stage status must be 'failed' (not 'completed'),
-    even when some thumbnails succeeded. Mixed-outcome rollups are 'failed'."""
+def test_thumbnail_failures_complete_stage_with_repair_warnings(tmp_path, monkeypatch):
+    """Per-photo gaps warn without invalidating successful thumbnails."""
     import config as cfg
     from db import Database
 
@@ -6723,12 +6722,7 @@ def test_thumbnail_failures_flip_stage_status_to_failed(tmp_path, monkeypatch):
     job = _make_job()
     runner = FakeRunner()
 
-    pipeline_result = None
-    try:
-        pipeline_result = run_pipeline_job(job, runner, db_path, ws_id, params)
-    except RuntimeError:
-        # Expected: pipeline raises when a stage ends up in 'failed'.
-        pipeline_result = job.get("result")
+    pipeline_result = run_pipeline_job(job, runner, db_path, ws_id, params)
 
     thumb_result = pipeline_result["stages"]["thumbnails"]
     assert thumb_result["failed"] > 0, (
@@ -6744,15 +6738,20 @@ def test_thumbnail_failures_flip_stage_status_to_failed(tmp_path, monkeypatch):
         if step == "thumbnails" and kwargs.get("status")
     ]
     final_status = final_thumb_updates[-1]["status"]
-    assert final_status == "failed", (
-        f"Mixed-outcome rollup must report 'failed', got {final_status!r}. "
+    assert final_status == "completed", (
+        f"Mixed-outcome rollup must report 'completed', got {final_status!r}. "
         f"Result: {thumb_result}"
     )
+    assert final_thumb_updates[-1]["error_count"] == thumb_result["failed"]
+    assert len(thumb_result["failed_photos"]) == thumb_result["failed"]
+    assert all(item["filename"] for item in thumb_result["failed_photos"])
+    assert pipeline_result["warnings"] == [
+        f"[thumbnails] {thumb_result['failed']} of 4 thumbnails need attention"
+    ]
 
 
-def test_thumbnail_failures_append_rollup_error(tmp_path, monkeypatch):
-    """Per-file thumbnail failures must surface as exactly one rollup entry
-    in the pipeline errors list — not N per-file entries."""
+def test_thumbnail_failures_append_rollup_warning_not_job_error(tmp_path, monkeypatch):
+    """Coverage gaps surface once as warnings without failing the job."""
     import config as cfg
     from db import Database
 
@@ -6779,18 +6778,47 @@ def test_thumbnail_failures_append_rollup_error(tmp_path, monkeypatch):
     )
     job = _make_job()
 
-    with contextlib.suppress(RuntimeError):
-        run_pipeline_job(job, FakeRunner(), db_path, ws_id, params)
+    result = run_pipeline_job(job, FakeRunner(), db_path, ws_id, params)
 
-    errors = job["errors"]
-    thumb_errors = [e for e in errors if "thumbnail" in e.lower()]
-    assert len(thumb_errors) == 1, (
-        f"Expected exactly one rollup entry for thumbnail failures, got "
-        f"{len(thumb_errors)}: {thumb_errors}"
+    assert job["errors"] == []
+    assert result["warnings"] == [
+        "[thumbnails] 3 of 3 thumbnails need attention"
+    ]
+    assert len(result["stages"]["thumbnails"]["failed_photos"]) == 3
+
+
+def test_pipeline_thumbnail_retry_uses_near_full_working_copy(tmp_path):
+    from PIL import Image
+    from pipeline_job import _retry_thumbnail_with_working_copy
+
+    vireo_dir = tmp_path / "vireo"
+    working_dir = vireo_dir / "working"
+    working_dir.mkdir(parents=True)
+    wc_path = working_dir / "7.jpg"
+    Image.new("RGB", (5392, 3592), "red").save(wc_path)
+    photo = {
+        "id": 7,
+        "filename": "photo.NEF",
+        "width": 5408,
+        "height": 3608,
+        "working_copy_path": "working/7.jpg",
+        "file_mtime": None,
+    }
+    calls = []
+
+    def generate(photo_id, source_path, cache_dir, **kwargs):
+        calls.append((photo_id, source_path, kwargs))
+        return str(tmp_path / "thumbs" / "7.jpg")
+
+    result = _retry_thumbnail_with_working_copy(
+        object(), generate, photo, 7, str(tmp_path / "photo.NEF"),
+        str(tmp_path / "thumbs"), 300,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+        str(vireo_dir),
     )
-    assert "3" in thumb_errors[0], (
-        f"Rollup should mention the failure count (3), got: {thumb_errors[0]!r}"
-    )
+
+    assert result.endswith("7.jpg")
+    assert os.path.normpath(calls[0][1]) == os.path.normpath(str(wc_path))
 
 
 def test_thumbnail_progress_counter_includes_failed(tmp_path, monkeypatch):
@@ -10390,8 +10418,12 @@ def test_pipeline_scan_thumbnails_honor_raw_marker_after_source_selection(
     )
 
     thumbnails_stage = result["stages"]["thumbnails"]
-    assert thumbnails_stage["failed"] == 0
-    assert thumbnails_stage["skipped"] == 1
+    assert thumbnails_stage["failed"] == 1
+    assert thumbnails_stage["skipped"] == 0
+    assert thumbnails_stage["failed_photos"][0]["filename"] == "source.NEF"
+    assert result["warnings"] == [
+        "[thumbnails] 1 of 1 thumbnails need attention"
+    ]
 
 
 # ---------------------------------------------------------------------------

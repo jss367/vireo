@@ -50,6 +50,9 @@ from render_source import (
 from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
+from render_source import (
+    working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
+)
 
 log = logging.getLogger(__name__)
 
@@ -315,6 +318,47 @@ def _retry_thumbnail_with_companion(
         cache_dir,
         size=thumb_size,
         **recipe_kwargs,
+    )
+
+
+def _retry_thumbnail_with_working_copy(
+    thread_db, generate_thumbnail, photo, photo_id, raw_source_path,
+    cache_dir, thumb_size, recipe, vireo_dir,
+):
+    """Retry an edited RAW thumbnail from a near-full local JPEG copy."""
+    if not photo or not recipe or not vireo_dir:
+        return None
+    if os.path.splitext(raw_source_path or "")[1].lower() not in _RAW_EXTENSIONS:
+        return None
+    wc_path = _working_copy_path_if_satisfies(
+        photo, recipe, thumb_size, vireo_dir, thumbnail_tolerance=True,
+    )
+    if not wc_path or os.path.abspath(wc_path) == os.path.abspath(raw_source_path):
+        return None
+    log.info(
+        "Pipeline thumbnail RAW decode failed for photo %s; "
+        "falling back to near-full JPEG working copy",
+        photo_id,
+    )
+    file_mtime = _photo_value(photo, "file_mtime")
+    if file_mtime is not None:
+        with contextlib.suppress(Exception):
+            thread_db.conn.execute(
+                "UPDATE photos SET"
+                " working_copy_failed_at=datetime('now'),"
+                " working_copy_failed_mtime=?,"
+                " working_copy_failed_source='source'"
+                " WHERE id=?",
+                (file_mtime, photo_id),
+            )
+            commit_with_retry(thread_db.conn)
+    return generate_thumbnail(
+        photo_id,
+        wc_path,
+        cache_dir,
+        size=thumb_size,
+        recipe=recipe,
+        native_size=_recipe_source_dimensions(photo),
     )
 
 
@@ -2264,6 +2308,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 generated = 0
                 skipped = 0
                 failed = 0
+                failed_photos = []
+                failure_detail_limit = 100
+
+                def _record_failure(photo_id, photo_path, reason):
+                    if len(failed_photos) >= failure_detail_limit:
+                        return
+                    failed_photos.append({
+                        "id": photo_id,
+                        "filename": os.path.basename(photo_path or ""),
+                        "reason": reason,
+                    })
 
                 # Mark photos.thumb_path so the dashboard's coverage query
                 # (`thumb_path IS NOT NULL`) reflects each freshly-generated or
@@ -2323,7 +2378,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         folder_path=folders.get(detail_photo["folder_id"]),
                                     )
                                 ):
-                                    skipped += 1
+                                    failed += 1
+                                    _record_failure(
+                                        photo_id, photo_path,
+                                        "RAW decode previously failed and no "
+                                        "acceptable fallback is available",
+                                    )
+                                    stages["thumbnails"]["count"] = (
+                                        generated + skipped + failed
+                                    )
                                     continue
                         recipe_kwargs = {"recipe": recipe} if recipe else {}
                         if recipe:
@@ -2355,8 +2418,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 photo_id, photo_path, cache_dir, thumb_size,
                                 recipe, folders.get(detail_photo["folder_id"]),
                             )
+                        if (
+                            result_path is None
+                            and detail_photo is not None
+                            and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                        ):
+                            result_path = _retry_thumbnail_with_working_copy(
+                                thread_db, generate_thumbnail, detail_photo,
+                                photo_id, photo_path, cache_dir, thumb_size,
+                                recipe, effective_vireo_dir,
+                            )
                         if result_path is None:
                             failed += 1
+                            _record_failure(
+                                photo_id, photo_path,
+                                "No acceptable thumbnail render source",
+                            )
                         elif already_exists:
                             skipped += 1
                             pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
@@ -2365,9 +2442,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
                         if len(pending_thumb_paths) >= THUMB_PATH_BATCH:
                             _flush_thumb_paths()
-                    except Exception:
+                    except Exception as exc:
                         failed += 1
-                        log.debug("Thumbnail failed for photo %s", photo_id)
+                        _record_failure(photo_id, photo_path, str(exc))
+                        log.debug(
+                            "Thumbnail failed for photo %s", photo_id,
+                            exc_info=True,
+                        )
                     # Include failed in the progress counter so the dashboard
                     # reflects all work attempted, not just successes. Mixed
                     # success/failure must not hide behind a 0/N progress bar.
@@ -2430,7 +2511,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         folder_path=folders.get(detail_photo["folder_id"]),
                                     )
                                 ):
-                                    skipped += 1
+                                    failed += 1
+                                    _record_failure(
+                                        photo_id, photo_path,
+                                        "RAW decode previously failed and no "
+                                        "acceptable fallback is available",
+                                    )
+                                    stages["thumbnails"]["count"] = (
+                                        generated + skipped + failed
+                                    )
                                     continue
                             recipe_kwargs = {"recipe": recipe} if recipe else {}
                             if recipe:
@@ -2462,8 +2551,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     photo_id, photo_path, cache_dir, thumb_size,
                                     recipe, folder_path,
                                 )
+                            if (
+                                result_path is None
+                                and detail_photo is not None
+                                and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                            ):
+                                result_path = _retry_thumbnail_with_working_copy(
+                                    thread_db, generate_thumbnail, detail_photo,
+                                    photo_id, photo_path, cache_dir, thumb_size,
+                                    recipe, effective_vireo_dir,
+                                )
                             if result_path is None:
                                 failed += 1
+                                _record_failure(
+                                    photo_id, photo_path,
+                                    "No acceptable thumbnail render source",
+                                )
                             elif already_exists:
                                 skipped += 1
                                 pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
@@ -2472,9 +2575,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
                             if len(pending_thumb_paths) >= THUMB_PATH_BATCH:
                                 _flush_thumb_paths()
-                        except Exception:
+                        except Exception as exc:
                             failed += 1
-                            log.debug("Thumbnail failed for photo %s", photo_id)
+                            _record_failure(photo_id, photo_path, str(exc))
+                            log.debug(
+                                "Thumbnail failed for photo %s", photo_id,
+                                exc_info=True,
+                            )
                         stages["thumbnails"]["count"] = generated + skipped + failed
                         stages["thumbnails"]["total"] = total
                         processed = generated + skipped + failed
@@ -2495,20 +2602,33 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 _flush_thumb_paths()
 
                 from thumbnails import format_summary as thumb_summary
-                thumb_result = {"generated": generated, "skipped": skipped, "failed": failed}
+                thumb_result = {
+                    "generated": generated,
+                    "skipped": skipped,
+                    "failed": failed,
+                }
+                if failed_photos:
+                    thumb_result["failed_photos"] = failed_photos
+                if failed > len(failed_photos):
+                    thumb_result["failed_photos_truncated"] = (
+                        failed - len(failed_photos)
+                    )
                 processed = generated + skipped + failed
-                # Mixed-outcome rollup: any failure flips status to 'failed'.
-                # The summary still shows both counts so partial success is visible,
-                # but status surfaces the problem on the job history list.
-                final_status = "failed" if failed > 0 else "completed"
-                stages["thumbnails"]["status"] = final_status
+                # Per-photo failures leave coverage gaps but do not invalidate
+                # thumbnails that were generated successfully. Keep the stage
+                # terminal and expose the affected photos as repair details;
+                # fatal setup/runtime exceptions still take the except path.
+                stages["thumbnails"]["status"] = "completed"
+                stages["thumbnails"]["error_count"] = failed
                 thumb_rollup = (
-                    f"[thumbnails] {failed} of {processed} thumbnails failed to generate"
+                    f"{failed} of {processed} thumbnails need attention"
                     if failed > 0 else None
                 )
                 if thumb_rollup:
-                    errors.append(thumb_rollup)
-                runner.update_step(job["id"], "thumbnails", status=final_status,
+                    result.setdefault("warnings", []).append(
+                        f"[thumbnails] {thumb_rollup}"
+                    )
+                runner.update_step(job["id"], "thumbnails", status="completed",
                                    summary=thumb_summary(thumb_result),
                                    error_count=failed,
                                    error=thumb_rollup,

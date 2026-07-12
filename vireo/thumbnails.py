@@ -12,11 +12,11 @@ from image_loader import (
     load_image,
 )
 from render_source import (
-    image_is_smaller_than_expected,
-    recipe_render_source,
+    photo_value as _photo_value,
 )
 from render_source import (
-    photo_value as _photo_value,
+    recipe_render_source,
+    thumbnail_source_dimensions_are_acceptable,
 )
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
@@ -132,7 +132,7 @@ def _retry_thumbnail_with_working_copy(
     if os.path.splitext(source_path or "")[1].lower() not in RAW_EXTENSIONS:
         return None
     wc_path = _working_copy_path_if_satisfies(
-        photo, recipe, size, vireo_dir, rel_slack=0.01,
+        photo, recipe, size, vireo_dir, thumbnail_tolerance=True,
     )
     if not wc_path or os.path.abspath(wc_path) == os.path.abspath(source_path):
         return None
@@ -209,7 +209,9 @@ def generate_thumbnail(
         return None
     if min_source_size:
         expected_w, expected_h = min_source_size
-        if image_is_smaller_than_expected(img, expected_w, expected_h):
+        if not thumbnail_source_dimensions_are_acceptable(
+            img.size[0], img.size[1], expected_w, expected_h,
+        ):
             log.info(
                 "Thumbnail source for photo %s is undersized (%dx%d, "
                 "expected %dx%d): %s",
