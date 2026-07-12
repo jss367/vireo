@@ -400,7 +400,7 @@ async function loadStoragePanel() {
   } catch(e) {
     document.getElementById('storageGrid').innerHTML = '<span style="color:var(--danger);font-size:12px;">Failed to load storage info</span>';
   }
-  await loadMasksCard();
+  await loadMasksCard(s.masks);
 }
 
 async function refreshStoragePage() {
@@ -445,10 +445,10 @@ async function openStorageFolder(locationId) {
 
 var _masksData = null;
 
-async function loadMasksCard() {
+async function loadMasksCard(storageData) {
   var card = document.getElementById('masksCard');
   try {
-    var data = await safeFetch('/api/storage/masks', {}, { toast: false });
+    var data = storageData || await safeFetch('/api/storage/masks', {}, { toast: false });
     _masksData = data;
     var variants = data.variants || [];
     var totalBytes = data.total_bytes || 0;
@@ -584,7 +584,7 @@ async function deleteMaskVariant(variant) {
     _showMasksModalError(String(e));
     return;
   }
-  await loadMasksCard();
+  await loadStoragePanel();
   if (_masksData && (_masksData.variants || []).length > 0) renderMasksModalRows();
   else closeMasksModal();
 }
@@ -597,8 +597,7 @@ async function deleteInactiveMasks() {
       headers: {'Content-Type': 'application/json'},
     });
   } catch(e) {}
-  loadMasksCard();
-  loadStoragePanel();
+  await loadStoragePanel();
 }
 
 async function deleteStaleMasks() {
@@ -609,8 +608,7 @@ async function deleteStaleMasks() {
       headers: {'Content-Type': 'application/json'},
     });
   } catch(e) {}
-  loadMasksCard();
-  loadStoragePanel();
+  await loadStoragePanel();
 }
 
 var _modalType = '';

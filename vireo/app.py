@@ -12292,6 +12292,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify({"opened": len(file_paths)})
 
+    def _storage_masks_data(db):
+        """Build the shared mask-storage payload once per storage refresh."""
+        import config as cfg
+
+        # This is a global view, so use the most permissive confidence floor
+        # across workspaces. The stale set must not change with active workspace.
+        min_detector_conf = db.min_detector_confidence_across_workspaces(
+            cfg.load()
+        )
+        variants = db.mask_variants_summary()
+        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
+        return {
+            "variants": variants,
+            "total_bytes": sum(v["bytes"] for v in variants),
+            "stale_count": len(stale),
+            "path": os.path.join(os.path.dirname(db_path), "masks"),
+        }
+
     @app.route("/api/storage")
     def api_storage():
         """Comprehensive storage info for the storage management panel."""
@@ -12330,7 +12348,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         offline_count_row = db.conn.execute(
             "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
         ).fetchone()
-        masks_size = sum(v["bytes"] for v in db.mask_variants_summary())
+        masks = _storage_masks_data(db)
+        masks_size = masks["total_bytes"]
 
         # HuggingFace cache — only count Vireo-relevant models
         hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
@@ -12454,7 +12473,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "size": offline_size,
                     "path": os.path.join(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "offline"),
                 },
-                "masks": {"size": masks_size},
+                "masks": {"size": masks_size, **masks},
             }
         )
 
@@ -12462,28 +12481,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_storage_masks():
         """Per-variant SAM mask summary (counts, bytes, active counts)
         plus stale-mask count for the storage dashboard."""
-        import config as cfg
-
-        db = _get_db()
-        # Storage is global across all workspaces, so the stale floor
-        # must be too. Using the active workspace's detector_confidence
-        # would make stale_count flip when the user switches workspaces
-        # and let masks valid under another workspace's lower floor
-        # show up as stale. The minimum across workspaces is the most
-        # permissive view: only mark a mask stale when no workspace
-        # would still consider it fresh.
-        min_detector_conf = db.min_detector_confidence_across_workspaces(
-            cfg.load()
-        )
-        variants = db.mask_variants_summary()
-        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
-        masks_dir = os.path.join(os.path.dirname(db_path), "masks")
-        return jsonify({
-            "variants": variants,
-            "total_bytes": sum(v["bytes"] for v in variants),
-            "stale_count": len(stale),
-            "path": masks_dir,
-        })
+        return jsonify(_storage_masks_data(_get_db()))
 
     @app.route("/api/storage/masks/delete-variant", methods=["POST"])
     def api_storage_masks_delete_variant():

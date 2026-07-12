@@ -627,6 +627,7 @@ def test_storage_page_has_health_cleanup_and_location_controls(app_and_db):
         b'storageFreeSize', b'storageReclaimableSize', b'clearSafeCaches',
         b'openStorageFolder', b'refreshStoragePage', b'Safe to clear',
         b'Download again', b'cannot currently be reclaimed separately',
+        b'loadMasksCard(s.masks)',
     ):
         assert marker in page.data
     assert page.data.count(b"{name: 'Database'") == 1
@@ -652,6 +653,8 @@ def test_api_storage_reports_volume_reclaimable_and_masks(
 
     data = app.test_client().get('/api/storage').get_json()
     assert data["masks"]["size"] == 450
+    assert data["masks"]["total_bytes"] == 450
+    assert len(data["masks"]["variants"]) == 2
     assert data["reclaimable"] == sum(
         data[name]["size"] for name in ("thumbnails", "previews", "embeddings")
     )
