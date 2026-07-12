@@ -9594,14 +9594,46 @@ class Database:
                         r for r in generals
                         if normalize_keyword_display(r["name"]) == r["name"]
                     ]
-                    subgroups[0] += plain_variant_generals
-                    if species_variant_generals:
-                        if specific_types[0] == "taxonomy":
+                    # Variant generals fold into a taxonomy peer when one
+                    # exists — that mirrors add_keyword's runtime
+                    # general→taxonomy auto-promotion (a variant `‘apapane`
+                    # add would already promote to the taxonomy `apapane`
+                    # row), and the merge is semantically safe: the
+                    # destination is species-bearing, so `_merge_keyword_into`
+                    # doesn't strip species metadata off the survivor's
+                    # existing photos. Across non-taxonomy type boundaries
+                    # (individual / genre / location) the same fold is a
+                    # cross-type retag — a legacy `‘Robin` general would
+                    # migrate every generic-Robin photo tag onto an
+                    # unrelated individual `Robin`. In that case merge
+                    # variants with any clean-general homonym (same slot,
+                    # same tag intent) but keep the whole general group
+                    # separate from the specific-typed peer. Split by
+                    # is_species so a legacy `type='general', is_species=1`
+                    # row does not collapse onto a plain general and take
+                    # its is_species flag along.
+                    if specific_types[0] == "taxonomy":
+                        subgroups[0] += plain_variant_generals
+                        if species_variant_generals:
                             subgroups[0] += species_variant_generals
-                        else:
-                            subgroups.append(species_variant_generals)
-                    if clean_generals:
-                        subgroups.append(clean_generals)
+                        if clean_generals:
+                            subgroups.append(clean_generals)
+                    else:
+                        combined_generals = (
+                            plain_variant_generals
+                            + species_variant_generals
+                            + clean_generals
+                        )
+                        non_species_generals = [
+                            r for r in combined_generals if r["is_species"] != 1
+                        ]
+                        species_generals = [
+                            r for r in combined_generals if r["is_species"] == 1
+                        ]
+                        if non_species_generals:
+                            subgroups.append(non_species_generals)
+                        if species_generals:
+                            subgroups.append(species_generals)
                 else:
                     # No specific-type peer: the generals still can't be
                     # collapsed indiscriminately. A legacy species-bearing

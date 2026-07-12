@@ -244,10 +244,11 @@ def test_migration_keeps_clean_general_homonym_of_specific_type(tmp_path):
 
 
 def test_migration_folds_general_variant_alongside_clean_general_homonym(tmp_path):
-    """A variant 'general' still folds into the specific-type peer even
-    when a clean 'general' homonym exists at the same slot: the variant
-    would collide with the peer's clean name after normalization, so it
-    must be resolved; the clean general homonym stays put."""
+    """A variant 'general' merges into its clean-general homonym at the
+    same slot (same tag intent, just a spelling variant) — but does NOT
+    cross into a non-taxonomy specific-typed peer. Folding the variant
+    onto the individual would silently retype the variant's photos across
+    the general/individual slot boundary."""
     db, _ws_id, p1, p2 = _make_db(tmp_path)
     try:
         clean_general_id = _insert_keyword(db, "Robin", "general")
@@ -275,8 +276,8 @@ def test_migration_folds_general_variant_alongside_clean_general_homonym(tmp_pat
             (clean_general_id, "general"),
             (individual_id, "individual"),
         ]
-        # Variant's tag migrated onto the individual (top-priority
-        # specific type wins the fold at this slot).
+        # Variant's tag moved onto the clean general (same slot / same tag
+        # intent), NOT onto the individual peer.
         individual_tags = {
             r["photo_id"] for r in db.conn.execute(
                 "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
@@ -289,8 +290,8 @@ def test_migration_folds_general_variant_alongside_clean_general_homonym(tmp_pat
                 (clean_general_id,),
             )
         }
-        assert individual_tags == {p1}
-        assert clean_general_tags == {p2}
+        assert individual_tags == set()
+        assert clean_general_tags == {p1, p2}
     finally:
         db.close()
 
