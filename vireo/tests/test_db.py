@@ -13907,6 +13907,145 @@ def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
         db.close()
 
 
+def test_merge_keyword_into_preserves_preexisting_survivor_for_keyword_remove(tmp_path):
+    """A `keyword_remove(src_id)` edit retargeted onto dst_id must not let
+    redo strip a pre-existing survivor tag. undo of keyword_remove tags on
+    entry.new_value (INSERT OR IGNORE — no-op if dst pre-existed), but
+    redo calls untag_photo(pid, entry.new_value); if entry.new_value was
+    retargeted to dst_id and pid already carried dst_id, redo removes
+    the user's survivor tag.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid_had_both, keep_id)
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # Record a keyword_remove edit for the variant on both photos.
+        # keyword_remove convention: item.old_value = str(kid), new_value = ''.
+        eid = db.record_edit(
+            "keyword_remove", "Removed variant from 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": str(merge_id),
+                 "new_value": ""},
+                {"photo_id": pid_only_src, "old_value": str(merge_id),
+                 "new_value": ""},
+            ],
+            is_batch=True,
+        )
+        # Simulate the untag the original edit performed.
+        db.untag_photo(pid_had_both, merge_id)
+        db.untag_photo(pid_only_src, merge_id)
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        remaining_pids = [
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (eid,),
+            ).fetchall()
+        ]
+        assert pid_had_both not in remaining_pids, (
+            "keyword_remove item for a photo that pre-existingly held the "
+            "survivor tag should be dropped so redo does not remove it"
+        )
+        assert pid_only_src in remaining_pids
+
+        # Undo (tags with entry.new_value=dst_id; no-op for pid_had_both
+        # because survivor was already there).
+        db.undo_last_edit()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }
+        # Redo (would untag survivor from pid_had_both without the fix).
+        db.redo_last_undo()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }, "redo of keyword_remove stripped the pre-existing survivor tag"
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept(tmp_path):
+    """A `prediction_accept(src_id)` edit retargeted onto dst_id must not
+    let undo strip a pre-existing survivor tag. prediction_accept shares
+    the keyword_add branch in _apply_undo — the untag_photo call would
+    remove the survivor. The migration drops such items; prediction-
+    status restoration for those specific items is intentionally
+    sacrificed to preserve the user's tag (see _merge_keyword_into).
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid_had_both, keep_id)
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # prediction_accept convention:
+        # entry.new_value = str(kid), item.old_value = str(pred_id),
+        # item.new_value = str(kid).
+        eid = db.record_edit(
+            "prediction_accept", "Accepted prediction for 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": "42",
+                 "new_value": str(merge_id)},
+                {"photo_id": pid_only_src, "old_value": "43",
+                 "new_value": str(merge_id)},
+            ],
+            is_batch=True,
+        )
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        remaining_pids = [
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (eid,),
+            ).fetchall()
+        ]
+        assert pid_had_both not in remaining_pids, (
+            "prediction_accept item for a photo that pre-existingly held "
+            "the survivor tag should be dropped so undo does not untag it"
+        )
+        assert pid_only_src in remaining_pids
+
+        db.undo_last_edit()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }, "undo of prediction_accept stripped the pre-existing survivor tag"
+    finally:
+        db.close()
+
+
 def test_add_photo_retries_on_database_is_locked(tmp_path):
     """The INSERT inside add_photo must retry transient 'database is locked'.
 

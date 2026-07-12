@@ -9993,18 +9993,35 @@ class Database:
         src_str = str(src_id)
         dst_str = str(dst_id)
         _kw_placeholders = ",".join("?" * len(_kw_id_actions))
-        # Pre-existing survivor tags: for a `keyword_add` recorded against
-        # src_id, an item whose photo already carried dst_id at merge time
-        # can't be retargeted honestly — the UPDATE OR IGNORE on
-        # photo_keywords below leaves the survivor row untouched and drops
-        # the src row, so an undo of the retargeted entry would call
-        # untag_photo(pid, dst_id) and remove the user's survivor tag,
-        # which was never part of this add. Drop those items before
-        # retargeting so undo iterates 0 (or the still-legitimate) items
-        # only. Scoped to `keyword_add` because that's the action whose
-        # undo untags entry['new_value'] per item (see _apply_undo); the
-        # keyword_remove/species_replace undo paths tag on the survivor
-        # instead, which INSERT OR IGNOREs to a no-op when dst pre-existed.
+        # Pre-existing survivor tags: for an edit recorded against src_id,
+        # an item whose photo already carried dst_id at merge time can't
+        # be retargeted honestly — the UPDATE OR IGNORE on photo_keywords
+        # below leaves the survivor row untouched and drops the src row,
+        # so an undo/redo of the retargeted entry would touch the user's
+        # pre-existing survivor tag that was never part of that edit.
+        # Drop those items before retargeting so undo/redo iterates 0 (or
+        # the still-legitimate) items only. Covers three action types:
+        #   * `keyword_add`: undo calls untag_photo(pid, entry.new_value)
+        #     per item; the retargeted entry.new_value = dst_id would
+        #     remove the survivor.
+        #   * `prediction_accept`: shares the keyword_add branch in
+        #     _apply_undo — the same untag_photo(pid, entry.new_value)
+        #     runs. Trade-off: dropping the item also loses that item's
+        #     prediction-status restoration on undo. Accepted because the
+        #     alternative silently removes a legitimate user tag; the
+        #     prediction row itself remains and the user can re-manage
+        #     it. Only affects the narrow case of a legacy DB merging a
+        #     src that was ever prediction-accepted onto a photo that
+        #     already held the survivor.
+        #   * `keyword_remove`: undo tags on the survivor (INSERT OR
+        #     IGNORE — no-op if dst pre-existed), BUT redo calls
+        #     untag_photo(pid, entry.new_value); the retargeted
+        #     entry.new_value = dst_id would strip the survivor on redo.
+        # species_replace is not covered here: it operates on
+        # item.new_value directly (per-swap ids) and its
+        # `_edit_old_value_meta` JSON payload carries its own list of
+        # source ids that the JSON rewriter below already dedupes when
+        # dst appears twice.
         preexisting_dst_photos = [
             r["photo_id"] for r in self.conn.execute(
                 "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
@@ -10013,6 +10030,7 @@ class Database:
         ]
         for chunk in _chunks(preexisting_dst_photos):
             ph = ",".join("?" for _ in chunk)
+            # keyword_add + prediction_accept: item.new_value = str(kid).
             self.conn.execute(
                 f"""DELETE FROM edit_history_items
                     WHERE new_value = ?
@@ -10020,7 +10038,21 @@ class Database:
                       AND edit_id IN (
                           SELECT id FROM edit_history
                           WHERE new_value = ?
-                            AND action_type = 'keyword_add'
+                            AND action_type IN ('keyword_add', 'prediction_accept')
+                      )""",
+                [src_str, *chunk, src_str],
+            )
+            # keyword_remove: item.new_value is '' by convention (see
+            # record_edit call sites in app.py); the keyword id lives in
+            # item.old_value.
+            self.conn.execute(
+                f"""DELETE FROM edit_history_items
+                    WHERE old_value = ?
+                      AND photo_id IN ({ph})
+                      AND edit_id IN (
+                          SELECT id FROM edit_history
+                          WHERE new_value = ?
+                            AND action_type = 'keyword_remove'
                       )""",
                 [src_str, *chunk, src_str],
             )
