@@ -6255,7 +6255,7 @@ def test_get_active_subject_types_workspace_override_wins(app_and_db, tmp_path, 
 
 
 def test_workspace_page_no_scan_button(app_and_db):
-    """Workspace page should not have a Scan & Add button — folders are added via Pipeline."""
+    """Workspace page should not expose the retired Scan & Add action."""
     app, _ = app_and_db
     with app.test_client() as c:
         resp = c.get('/workspace')
@@ -6265,15 +6265,15 @@ def test_workspace_page_no_scan_button(app_and_db):
         assert 'scanAndAddFolder' not in html
 
 
-def test_workspace_page_has_add_folder_link(app_and_db):
-    """Workspace page should have an Add Folder button linking to Pipeline."""
+def test_workspace_page_has_import_photos_link(app_and_db):
+    """Workspace page should send users to Import when they need photos."""
     app, _ = app_and_db
     with app.test_client() as c:
         resp = c.get('/workspace')
         assert resp.status_code == 200
         html = resp.data.decode()
-        assert 'href="/pipeline"' in html
-        assert 'Add Folder' in html
+        assert 'href="/import"' in html
+        assert 'Import Photos' in html
 
 
 # -- Missing folder API tests --
@@ -11707,6 +11707,7 @@ def test_process_page_has_no_import_source(app_and_db):
     assert 'id="radioNewImages"' in html
     assert 'id="strategySelect"' in html
     assert "folder_ids" in html
+    assert "Open Import to add photos" in html
     assert "<title>Vireo - Process</title>" in html
 
 

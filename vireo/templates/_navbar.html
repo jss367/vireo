@@ -2237,7 +2237,7 @@ function sendReport() {
       <select id="rescanFolderSelect" style="margin-left:26px;max-width:100%;padding:6px 8px;" disabled></select>
     </div>
     <div id="rescanEmptyNote" style="display:none;color:var(--text-secondary);font-size:13px;margin-bottom:10px;">
-      This workspace has no folders yet. Add one from the Workspace page first.
+      This workspace has no folders yet. Open Import to add photos first.
     </div>
     <div class="modal-actions">
       <button class="modal-btn" id="rescanRunBtn" onclick="runRescan()">Rescan</button>
@@ -10721,7 +10721,7 @@ async function openRescanModal() {
     const active = await safeFetch('/api/workspaces/active', {}, { toast: false });
     const folders = await safeFetch('/api/workspaces/' + active.id + '/folders', {}, { toast: false });
     if (!folders || folders.length === 0) {
-      emptyNote.textContent = 'This workspace has no folders yet. Add one from the Workspace page first.';
+      emptyNote.textContent = 'This workspace has no folders yet. Open Import to add photos first.';
       emptyNote.style.display = 'block';
       if (folderRadio) folderRadio.disabled = true;
       return;

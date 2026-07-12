@@ -1329,6 +1329,11 @@ async function loadFolderScopeList() {
       });
     }
     list.innerHTML = '';
+    if (folders.length === 0) {
+      list.innerHTML = 'No photos are in this workspace yet. '
+        + '<a href="/import" style="color:var(--accent);">Open Import to add photos</a>.';
+      return;
+    }
     folders.forEach(function(f) {
       // Only offer top-level entries: children are covered by the
       // server-side subtree expansion, and listing every dated folder
