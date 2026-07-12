@@ -9632,7 +9632,6 @@ def test_pipeline_regroup_per_run_eye_optin_reaches_scoring_config(
     """
     import config as cfg
     import pipeline as pipeline_mod
-    import pipeline_job as pj
     from db import Database
 
     monkeypatch.setenv("HOME", str(tmp_path))
