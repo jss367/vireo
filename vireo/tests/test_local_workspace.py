@@ -291,6 +291,37 @@ def test_stage_rejects_case_colliding_source_paths(local_workspace_env, monkeypa
     assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
 
 
+def test_stage_rejects_unicode_normalization_colliding_source_paths(local_workspace_env, monkeypatch):
+    # macOS (HFS+/APFS) and Windows also fold canonically equivalent Unicode
+    # forms — e.g. NFC "é" ("é") and NFD "é" ("é") — to the same
+    # destination name. A source that holds both forms would silently
+    # overwrite one copy while the manifest still recorded both entries,
+    # leading to false deletes/overwrites on sync. Regression for review
+    # thread PRRT_kwDORn8c-s6QQGcc.
+    env = local_workspace_env
+    if not _source_fs_preserves_case(env["child"]):
+        pytest.skip("source tmp_path is on a case-insensitive filesystem")
+    nfc = env["child"] / "é-bird.jpg"
+    nfd = env["child"] / "é-bird.jpg"
+    if nfc == nfd or nfc.exists() or nfd.exists():
+        pytest.skip("source tmp_path collapses Unicode normalization forms")
+    try:
+        nfc.write_bytes(b"nfc")
+        nfd.write_bytes(b"nfd")
+    except OSError:
+        pytest.skip("source tmp_path rejects distinct NFC/NFD filenames")
+    if not (nfc.exists() and nfd.exists()):
+        pytest.skip("source tmp_path collapses Unicode normalization forms")
+
+    monkeypatch.setattr(local_workspace, "_dest_case_insensitive", lambda _base: True)
+
+    with pytest.raises(LocalWorkspaceError, match="Unicode normalization"):
+        stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    # Catalog untouched, managed tree cleaned up.
+    assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
+    assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
+
+
 def test_stage_accepts_case_variants_on_case_sensitive_destination(local_workspace_env, monkeypatch):
     # The check must not fire when the destination truly preserves case,
     # or every source with a case-only pair becomes unstageable.

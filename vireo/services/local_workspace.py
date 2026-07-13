@@ -28,6 +28,7 @@ import stat
 import tempfile
 import threading
 import time
+import unicodedata
 from contextlib import suppress
 from pathlib import Path
 
@@ -371,11 +372,20 @@ def _collect_source_entries(roots: list[dict], local_base: Path) -> tuple[dict[i
             else:
                 raise LocalWorkspaceError(f"Unsupported special file in workspace: {full}")
             if case_insensitive_target and rel:
-                key = rel.casefold()
+                # Normalize Unicode form before folding case: macOS
+                # (HFS+/APFS) and Windows also collapse canonically
+                # equivalent codepoint sequences (e.g. NFC/NFD forms of
+                # "é"), so two source paths that look different but
+                # canonicalize to the same destination name would
+                # otherwise pass this probe and let the second copy
+                # silently overwrite the first while the manifest still
+                # records both entries.
+                key = unicodedata.normalize("NFC", rel).casefold()
                 prior = folded_seen.get(key)
                 if prior is not None and prior != rel:
                     raise LocalWorkspaceError(
-                        "Source paths only differ in case and would collide on the local "
+                        "Source paths only differ in case or Unicode "
+                        "normalization and would collide on the local "
                         f"filesystem: {os.path.join(source, prior)} vs {full}"
                     )
                 folded_seen[key] = rel
