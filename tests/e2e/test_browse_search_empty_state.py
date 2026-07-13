@@ -38,7 +38,17 @@ def test_clearing_keyword_search_keeps_selected_photo_in_place(live_server, page
     page.evaluate("updateThumbSize(400)")
 
     search = page.locator("#searchInput")
-    search.fill("American Robin")
+    # A different filter can apply the text before its debounce fires. The
+    # applied-search tracker must still learn about that active query so the
+    # later clear takes the anchor-preserving path.
+    page.evaluate(
+        """() => {
+          const input = document.getElementById('searchInput');
+          input.value = 'American Robin';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          applyFilters();
+        }"""
+    )
     page.wait_for_function("() => photos.length === 1")
     selected = page.locator(f'.grid-card[data-id="{selected_id}"]')
     selected.wait_for(state="visible")

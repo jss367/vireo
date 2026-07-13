@@ -3662,6 +3662,11 @@ async function resetAndLoad(options) {
   var preserveAnchor = !!(options && options.preserveAnchor);
   var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
+  // Any non-collection reload also applies the current text box through
+  // buildCurrentBrowseParams(). Keep the tracker aligned when another control
+  // (sort/date/color/etc.) beats the search debounce to this reset.
+  var searchInput = document.getElementById('searchInput');
+  appliedKeywordSearch = searchInput ? searchInput.value.trim() : '';
   if (clipSearchActive) {
     clipSearchActive = false;
     document.getElementById('clipSearchInput').value = '';
