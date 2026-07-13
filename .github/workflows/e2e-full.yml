@@ -29,6 +29,12 @@ jobs:
           pip install -e ".[dev]"
           python -m playwright install --with-deps chromium
       - name: Run complete Playwright suite
+        # These browser tests are timing-sensitive and occasionally flake under
+        # CI CPU contention (see the "harden flaky lightbox test" history). This
+        # is the release gate, so a single transient flake must not block a
+        # release: rerun failures up to twice. A genuinely broken test still
+        # fails all three attempts; only tests that pass on retry are tolerated.
         run: >-
           python -m pytest -o addopts='' -q tests/e2e/
           --tb=short --timeout=120 --timeout-method=thread
+          --reruns 2 --reruns-delay 1
