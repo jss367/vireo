@@ -1521,7 +1521,15 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
         page.wait_for_timeout(25)
     assert "route" in held_original
 
-    native_zoom_before = page.evaluate("window._lbNativeZoom")
+    # Stash the pre-resize native zoom in a page variable rather than reading it
+    # into Python and interpolating it back. During the deferred /original swap
+    # _lbNativeZoom can be transiently unset; a Python None then formats into the
+    # wait expression as the literal `None`, which throws "None is not defined"
+    # in JS. Guard that it is a finite number first, then compare in-page.
+    page.wait_for_function(
+        "typeof window._lbNativeZoom === 'number' && isFinite(window._lbNativeZoom)"
+    )
+    page.evaluate("window._lbNativeZoomBaseline = window._lbNativeZoom")
 
     # Resize while the high-res source is still loading. The image is 4000px
     # wide so _lbFitScale (hence _lbNativeZoom) is width-constrained; shrinking
@@ -1531,7 +1539,7 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
     # signal that the debounced handler has actually executed — no fixed sleep.
     page.set_viewport_size({"width": 640, "height": 800})
     page.wait_for_function(
-        "Math.abs(window._lbNativeZoom - %r) > 0.1" % native_zoom_before
+        "Math.abs(window._lbNativeZoom - window._lbNativeZoomBaseline) > 0.1"
     )
 
     # The resize handler has now run while /original is still held. Pre-fix it
@@ -2117,7 +2125,15 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
     assert waiting["currentSource"] == "full"
     assert waiting["desiredSource"] in ("2560", "3840")
 
-    native_zoom_before = page.evaluate("window._lbNativeZoom")
+    # Stash the pre-resize native zoom in a page variable rather than reading it
+    # into Python and interpolating it back. While the fallback tier is loading
+    # _lbNativeZoom can be transiently unset; a Python None then formats into the
+    # wait expression as the literal `None`, which throws "None is not defined"
+    # in JS. Guard that it is a finite number first, then compare in-page.
+    page.wait_for_function(
+        "typeof window._lbNativeZoom === 'number' && isFinite(window._lbNativeZoom)"
+    )
+    page.evaluate("window._lbNativeZoomBaseline = window._lbNativeZoom")
 
     # Resize while the fallback tier is still held. _lbRecomputeNativeZoom runs
     # unconditionally at the top of the resize handler (before any pending-state
@@ -2125,7 +2141,7 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
     # signal that the debounced handler actually executed — no fixed sleep.
     page.set_viewport_size({"width": 640, "height": 800})
     page.wait_for_function(
-        "Math.abs(window._lbNativeZoom - %r) > 0.1" % native_zoom_before
+        "Math.abs(window._lbNativeZoom - window._lbNativeZoomBaseline) > 0.1"
     )
 
     # The resize handler has now run while the fallback tier is still loading.
