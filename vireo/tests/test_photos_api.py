@@ -7290,6 +7290,44 @@ def test_batch_location_from_exif_preview_groups_without_linking(
     ).fetchone()[0] == 0
 
 
+def test_batch_location_from_exif_accepts_more_than_ten_thousand_photos(
+    app_and_db,
+):
+    """Large libraries are not rejected by the old arbitrary request cap."""
+    app, db = app_and_db
+    folder_id = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", ("/photos/2024",),
+    ).fetchone()["id"]
+    db.conn.executemany(
+        "INSERT INTO photos "
+        "(folder_id, filename, extension, file_size, file_mtime) "
+        "VALUES (?, ?, '.jpg', 1, 1)",
+        [
+            (folder_id, f"large-library-{index}.jpg")
+            for index in range(10_001)
+        ],
+    )
+    db.conn.commit()
+    photo_ids = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE filename LIKE 'large-library-%' "
+            "ORDER BY id"
+        ).fetchall()
+    ]
+
+    resp = app.test_client().post(
+        "/api/batch/location/from-exif",
+        json={"photo_ids": photo_ids, "apply": False},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    body = resp.get_json()
+    assert body["total"] == 10_001
+    assert body["resolvable"] == 0
+    assert len(body["unresolved"]) == 10_001
+    assert {item["reason"] for item in body["unresolved"]} == {"missing_gps"}
+
+
 def test_batch_location_from_exif_apply_assigns_per_photo_places(
     app_and_db, monkeypatch,
 ):
