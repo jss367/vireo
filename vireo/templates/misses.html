@@ -661,6 +661,7 @@ function syncMissFilterUrl() {
 function applyMissFilters() {
   if (missFilterTimer) clearTimeout(missFilterTimer);
   missFilterTimer = null;
+  invalidateMissPreview();
   syncMissFilterUrl();
   selection.clear();
   focusedCategory = null;
@@ -855,7 +856,7 @@ async function previewMisses() {
 async function recomputeMisses() {
   if (!missConfigLoaded) return;
   invalidateMissPreview();
-  missLoadRequestId++;
+  var requestId = ++missLoadRequestId;
   var btn = document.getElementById('missRecomputeBtn');
   var body = collectMissThresholds();
   addMissFiltersToBody(body);
@@ -872,8 +873,16 @@ async function recomputeMisses() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    if (requestId !== missLoadRequestId) {
+      setMissTuningStatus('Recompute finished for previous filters');
+      return;
+    }
     if (!r.ok) throw new Error('http ' + r.status);
     var data = await r.json();
+    if (requestId !== missLoadRequestId) {
+      setMissTuningStatus('Recompute finished for previous filters');
+      return;
+    }
     previewActive = false;
     previewPayload = null;
     applyMissesPayload(data);

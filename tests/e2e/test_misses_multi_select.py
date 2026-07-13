@@ -71,6 +71,73 @@ def test_collection_and_rating_filters_limit_visible_misses(live_server, page):
     ).to_be_visible()
 
 
+def test_filter_change_ignores_older_threshold_preview(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(5)
+    page.evaluate("""() => {
+      const realFetch = window.fetch.bind(window);
+      let held = false;
+      window.fetch = (url, options) => {
+        if (!held && String(url).includes('/api/misses/preview')) {
+          held = true;
+          return new Promise(resolve => {
+            window.releaseHeldPreview = () => realFetch(url, options).then(resolve);
+          });
+        }
+        return realFetch(url, options);
+      };
+    }""")
+    page.locator("#missCfgNoSubject").evaluate("""el => {
+      el.value = String(Number(el.value) + 1);
+      el.dispatchEvent(new Event('input', {bubbles: true}));
+    }""")
+    page.wait_for_function("window.releaseHeldPreview != null")
+
+    page.locator("#missRatingFilter").select_option("4")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    page.evaluate("window.releaseHeldPreview()")
+    page.wait_for_timeout(400)
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+
+
+def test_filter_change_ignores_older_recompute_response(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(5)
+    page.evaluate("""() => {
+      const realFetch = window.fetch.bind(window);
+      let held = false;
+      window.fetch = (url, options) => {
+        if (!held && String(url).includes('/api/misses/recompute')) {
+          held = true;
+          return new Promise(resolve => {
+            window.releaseHeldRecompute = () => realFetch(url, options).then(resolve);
+          });
+        }
+        return realFetch(url, options);
+      };
+    }""")
+    page.locator("#missRecomputeBtn").click()
+    page.wait_for_function("window.releaseHeldRecompute != null")
+
+    page.locator("#missRatingFilter").select_option("4")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    page.evaluate("window.releaseHeldRecompute()")
+    expect(page.locator("#missTuningStatus")).to_have_text(
+        "Recompute finished for previous filters"
+    )
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+
+
 def test_ctrl_click_toggles_selection(live_server, page):
     url = live_server["url"]
     db = live_server["db"]
