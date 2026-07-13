@@ -869,7 +869,9 @@ async function recomputeMisses() {
   invalidateMissPreview();
   var requestId = ++missLoadRequestId;
   var btn = document.getElementById('missRecomputeBtn');
-  var requestedFilters = missFilterParams();
+  // Recompute the photos that produced the cards the user is looking at.
+  // Live controls may already represent a newer filter whose load is pending.
+  var requestedFilters = new URLSearchParams(appliedMissFilters.toString());
   var body = collectMissThresholds();
   addFilterParamsToBody(body, requestedFilters);
   var since = getSinceParam();
@@ -893,6 +895,11 @@ async function recomputeMisses() {
     var data = await r.json();
     if (requestId !== missLoadRequestId) {
       setMissTuningStatus('Recompute finished for previous filters');
+      return;
+    }
+    if (missFilterParams().toString() !== requestedFilters.toString()) {
+      setMissTuningStatus('Recomputed visible photos; refreshing filters');
+      loadMisses();
       return;
     }
     appliedMissFilters = new URLSearchParams(requestedFilters.toString());
