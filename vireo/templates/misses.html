@@ -894,18 +894,13 @@ async function recomputeMisses() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (requestId !== missLoadRequestId) {
-      if (r.ok) {
-        setMissTuningStatus('Recomputed previous filters; refreshing current view');
-        loadMisses();
-      } else {
-        setMissTuningStatus('Recompute finished for previous filters');
-      }
-      return;
-    }
     if (!r.ok) throw new Error('http ' + r.status);
     var data = await r.json();
     if (requestId !== missLoadRequestId) {
+      if (data.config && data.saved_defaults) {
+        missConfig = data.config;
+        originalMissConfig = Object.assign({}, data.config);
+      }
       setMissTuningStatus('Recomputed previous filters; refreshing current view');
       loadMisses();
       return;

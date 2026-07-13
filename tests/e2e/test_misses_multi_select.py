@@ -133,6 +133,10 @@ def test_filter_change_ignores_older_recompute_response(live_server, page):
         return realFetch(url, options);
       };
     }""")
+    saved_threshold = page.locator("#missCfgNoSubject").evaluate("""el => {
+      el.value = String(Number(el.value) + 1);
+      return Number(el.value) / 100;
+    }""")
     page.locator("#missRecomputeBtn").click()
     page.wait_for_function("window.releaseHeldRecompute != null")
 
@@ -152,6 +156,7 @@ def test_filter_change_ignores_older_recompute_response(live_server, page):
         f"window.missesFetchCalls.filter(u => u.startsWith('/api/misses') && !u.includes('/recompute') && !u.includes('/preview')).length > {calls_before_release}",
         timeout=3000,
     )
+    assert page.evaluate("originalMissConfig.miss_det_confidence") == saved_threshold
 
 
 def test_bulk_reject_uses_filters_that_rendered_visible_cards(live_server, page):
