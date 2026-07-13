@@ -906,6 +906,10 @@ async function recomputeMisses() {
       return;
     }
     if (missFilterParams().toString() !== requestedFilters.toString()) {
+      if (data.config && data.saved_defaults) {
+        missConfig = data.config;
+        originalMissConfig = Object.assign({}, data.config);
+      }
       setMissTuningStatus('Recomputed visible photos; refreshing filters');
       loadMisses();
       return;
