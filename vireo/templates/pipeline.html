@@ -97,6 +97,10 @@ body { padding-bottom: 36px; }
   background: var(--danger, #E74C3C);
   color: #fff;
 }
+.stage-status-pill.warning {
+  background: color-mix(in srgb, var(--warning, #F0A030) 20%, transparent);
+  color: var(--warning, #F0A030);
+}
 .stage-status-pill.blocked {
   background: color-mix(in srgb, var(--danger, #E74C3C) 18%, transparent);
   color: var(--danger, #E74C3C);
@@ -716,16 +720,25 @@ body { padding-bottom: 36px; }
   </div>
 
   <div class="stage-section-header">AI processing<span class="stage-section-sub">optional &mdash; toggle to include</span>
-    <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);">
-      Strategy
-      <select id="strategySelect" onchange="applyStrategyPreset()" style="font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 6px;">
-        <option value="__custom__" selected>Custom (use toggles)</option>
-        <option value="identify">Identify birds</option>
-        <option value="quick_look">Quick look</option>
-        <option value="full" data-advanced-strategy>Full pipeline</option>
-        <option value="cull_ready" data-advanced-strategy>Cull-ready</option>
+    <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);flex-wrap:wrap;justify-content:flex-end;">
+      Saved process
+      <select id="strategySelect" onchange="onProcessSelect()" style="font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 6px;">
+        <option value="__custom__" selected>Custom (unsaved)</option>
       </select>
+      <span id="processModifiedTag" style="color:var(--warning,#e0a030);display:none;">&bull; modified (unsaved)</span>
+      <button type="button" id="btnProcessSave" onclick="saveProcess()" title="Overwrite the selected process with the current toggles" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Save</button>
+      <button type="button" id="btnProcessSaveNew" onclick="saveProcessAsNew()" title="Save the current toggles as a new process" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Save as new&hellip;</button>
+      <button type="button" id="btnProcessRename" onclick="renameProcess()" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Rename</button>
+      <button type="button" id="btnProcessDelete" onclick="deleteProcess()" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Delete</button>
     </span>
+  </div>
+  <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--text-secondary);margin:2px 0 6px;">
+    <label id="lblEnableMisses" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;" title="Flag likely-missed keepers (no subject, clipped, out of focus) after grouping. Needs Classify and Group.">
+      <input type="checkbox" id="enableMisses" checked onchange="onPostOptToggle()" style="accent-color:var(--accent);"> Find misses
+    </label>
+    <label id="lblEnableSpeciesReview" style="display:none;align-items:center;gap:6px;cursor:pointer;" title="Write lightweight species-review results instead of full encounter grouping (the Identify-birds path).">
+      <input type="checkbox" id="enableSpeciesReview" onchange="onPostOptToggle()" style="accent-color:var(--accent);"> Write species review results
+    </label>
   </div>
 
   <!-- Card 4: Classify -->
@@ -847,7 +860,7 @@ body { padding-bottom: 36px; }
   <div class="stage-card" id="card-eyekeypoints" data-testid="stage-card" data-advanced-stage>
     <div class="stage-header" onclick="toggleCard('eyekeypoints')">
       <span class="stage-num" id="numEyeKeypoints">6</span>
-      <input type="checkbox" class="stage-enable" id="enableEyeKeypoints" checked
+      <input type="checkbox" class="stage-enable" id="enableEyeKeypoints"
              onchange="onStageToggle('eyekeypoints')" onclick="event.stopPropagation()">
       <span class="stage-name">Eye Keypoints (optional)</span>
       <span class="stage-status-pill" id="pillEyeKeypoints"></span>
@@ -1001,6 +1014,13 @@ body { padding-bottom: 36px; }
 
 <script>
 // -- Page init: fetch pipeline data from API and populate the page --
+// Signals that /api/pipeline/page-init's success/failure handler has run,
+// so tests (and any other code that races the initial load) can wait
+// before touching stage-enable checkboxes. The handler assigns
+// enableEyeKeypoints.checked from cfg.eye_detect_enabled; interacting
+// with the checkbox while this is still true risks having that
+// assignment silently overwrite the interaction.
+window._pageInitPending = true;
 function initPipelinePage() {
   fetch('/api/pipeline/page-init')
     .then(function(r) { return r.json(); })
@@ -1027,15 +1047,16 @@ function initPipelinePage() {
       }
 
       // Eye keypoints stage default tracks the global eye_detect_enabled
-      // config so users who turned it off in Settings see it unchecked here
-      // by default. The checkbox is the per-run override.
+      // config. Missing config defaults off; the checkbox is the per-run
+      // override.
       var ekCb = document.getElementById('enableEyeKeypoints');
-      if (ekCb) ekCb.checked = cfg.eye_detect_enabled !== false;
+      if (ekCb) ekCb.checked = cfg.eye_detect_enabled === true;
 
       // Update saved config defaults from server
       _savedModelConfig.sam2_variant = cfg.sam2_variant;
       _savedModelConfig.dinov2_variant = cfg.dinov2_variant;
       _savedModelConfig.proxy_longest_edge = cfg.proxy_longest_edge;
+      _savedModelConfig.eye_detect_enabled = cfg.eye_detect_enabled === true;
 
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
@@ -1049,6 +1070,9 @@ function initPipelinePage() {
     })
     .catch(function(e) {
       console.error('Failed to load pipeline page data:', e);
+    })
+    .finally(function() {
+      window._pageInitPending = false;
     });
 
   // Load collections, models, and labels in parallel
@@ -1278,13 +1302,32 @@ document.addEventListener('DOMContentLoaded', initNewImagesCard);
 
 // -- Collection picker --
 async function loadCollections() {
+  var sel = document.getElementById('collectionPicker');
   try {
     var collections = await safeFetch('/api/collections', {}, { toast: false });
-    var sel = document.getElementById('collectionPicker');
+    if (!Array.isArray(collections)) return;
     collections.forEach(function(c) {
-      sel.innerHTML += '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
+      // count_error means /api/collections couldn't resolve this collection's
+      // rules — selecting it would 500 the downstream /photos endpoint and
+      // leave the pipeline advertising a source it can't actually run. Show
+      // it disabled with a hint so the user knows to edit the rules instead.
+      var disabled = c.count_error ? ' disabled' : '';
+      var label = c.count_error
+        ? escapeHtml(c.name) + ' (unavailable — edit rules to fix)'
+        : escapeHtml(c.name);
+      var title = c.count_error
+        ? ' title="This collection\'s rules could not be resolved. Edit it in Browse to make it usable."'
+        : '';
+      sel.innerHTML += '<option value="' + c.id + '"' + disabled + title + '>' + label + '</option>';
     });
-  } catch(e) {}
+  } catch(e) {
+    // Don't fail silently: an empty picker used to look like "no collections"
+    // even when the endpoint was 500ing. Surface it so the cause is visible.
+    console.error('Failed to load collections:', e);
+    if (typeof showToast === 'function') {
+      showToast('Could not load collections — see console for details', 'error');
+    }
+  }
 }
 
 // -- Card 1: Source --
@@ -1329,6 +1372,11 @@ async function loadFolderScopeList() {
       });
     }
     list.innerHTML = '';
+    if (folders.length === 0) {
+      list.innerHTML = 'No photos are in this workspace yet. '
+        + '<a href="/import" style="color:var(--accent);">Open Import to add photos</a>.';
+      return;
+    }
     folders.forEach(function(f) {
       // Only offer top-level entries: children are covered by the
       // server-side subtree expansion, and listing every dated folder
@@ -1384,55 +1432,237 @@ function updateSourceSummary() {
   }
 }
 
-function applyStrategyPreset() {
-  // Mirror process_strategies.py so the visible toggles always tell the
-  // truth about what the preset will run (transparency rule) — the
-  // explicit flags sent alongside body.strategy agree with the expansion.
-  var sel = document.getElementById('strategySelect');
-  if (!sel || sel.value === '__custom__') { refreshPipelineUI(); return; }
-  var presets = {
-    identify:   { classify: true,  extract: false, eyes: false, group: false },
-    full:       { classify: true,  extract: true,  eyes: true,  group: true  },
-    cull_ready: { classify: true,  extract: false, eyes: false, group: true  },
-    quick_look: { classify: false, extract: false, eyes: false, group: false },
-  };
-  var p = presets[sel.value];
-  if (!p) return;
-  document.getElementById('enableClassify').checked = p.classify;
-  document.getElementById('enableExtract').checked = p.extract;
-  document.getElementById('enableEyeKeypoints').checked = p.eyes;
-  document.getElementById('enableGroup').checked = p.group;
-  ['classify', 'extract', 'eyekeypoints', 'group'].forEach(function(st) {
-    try { onStageToggle(st); } catch (e) { /* stage rows update below */ }
-  });
-  // cull_ready enables group without extract (regroup is cheap and cull
-  // review needs encounters — see process_strategies.py), but the
-  // onStageToggle chain treats group as downstream of extract and would
-  // have unchecked+disabled Group when we cascaded extract=false above.
-  // Re-force the preset value for any stage the preset said should be on
-  // so startPipeline sends skip_regroup=false for cull_ready instead of
-  // overriding the server-side expansion.
-  if (p.group) {
-    var gCb = document.getElementById('enableGroup');
-    gCb.checked = true;
-    gCb.disabled = false;
-  }
-  refreshPipelineUI();
-}
+// ---- Saved processes (the process page IS the editor) --------------------
+// A saved process is a named snapshot of the stage toggles below. The picker
+// loads/saves them; Run always uses the CURRENT toggle values (a one-off
+// tweak never mutates a saved process until you Save).
+var _processesById = {};        // id -> process dict (from /api/processes)
+var _selectedProcessId = null;  // currently-loaded process, or null (Custom)
+var _processDirty = false;      // toggles diverge from the loaded process
+var _applyingProcess = false;   // guard: programmatic toggle changes
 
-function updateAdvancedPipelineOptions() {
+async function loadSavedProcesses(selectId) {
   var sel = document.getElementById('strategySelect');
   if (!sel) return;
-  var advanced = !!(window.isAdvancedMode && window.isAdvancedMode());
-  sel.querySelectorAll('[data-advanced-strategy]').forEach(function(opt) {
-    opt.hidden = !advanced;
-    opt.disabled = !advanced;
-  });
-  if (!advanced && sel.selectedOptions.length && sel.selectedOptions[0].disabled) {
-    sel.value = 'identify';
-  }
-  applyStrategyPreset();
+  try {
+    var resp = await fetch('/api/processes');
+    if (!resp.ok) return;
+    var procs = await resp.json();
+    _processesById = {};
+    sel.innerHTML = '<option value="__custom__">Custom (unsaved)</option>';
+    (procs || []).forEach(function(p) {
+      _processesById[p.id] = p;
+      var opt = document.createElement('option');
+      opt.value = String(p.id);
+      opt.textContent = p.name;
+      sel.appendChild(opt);
+    });
+    if (selectId != null && _processesById[selectId]) {
+      sel.value = String(selectId);
+      onProcessSelect();
+    } else {
+      sel.value = '__custom__';
+      _selectedProcessId = null;
+      _processDirty = false;
+      updateDerivedProcessControls();
+      updateProcessEditorUI();
+    }
+  } catch (e) { /* leave with Custom only */ }
 }
+
+function currentProcessFields() {
+  return {
+    skip_classify: !document.getElementById('enableClassify').checked,
+    skip_extract_masks: !document.getElementById('enableExtract').checked,
+    skip_eye_keypoints: !document.getElementById('enableEyeKeypoints').checked,
+    skip_regroup: !document.getElementById('enableGroup').checked,
+    miss_enabled: !!document.getElementById('enableMisses').checked,
+    review_mode:
+      document.getElementById('enableSpeciesReview').checked ? 'species' : null,
+  };
+}
+
+function applyProcessToToggles(proc) {
+  _applyingProcess = true;
+  try {
+    document.getElementById('enableClassify').checked = !proc.skip_classify;
+    document.getElementById('enableExtract').checked = !proc.skip_extract_masks;
+    document.getElementById('enableEyeKeypoints').checked = !proc.skip_eye_keypoints;
+    document.getElementById('enableGroup').checked = !proc.skip_regroup;
+    document.getElementById('enableMisses').checked = !!proc.miss_enabled;
+    document.getElementById('enableSpeciesReview').checked =
+      (proc.review_mode === 'species');
+    // Re-run the cascade so downstream enable/disable state is consistent,
+    // then force back on any stage the process says should run (the cascade
+    // would otherwise disable e.g. Group when Extract is off).
+    ['classify', 'extract', 'eyekeypoints', 'group'].forEach(function(st) {
+      try { onStageToggle(st); } catch (e) {}
+    });
+    if (!proc.skip_regroup) {
+      var g = document.getElementById('enableGroup'); g.checked = true; g.disabled = false;
+    }
+    if (!proc.skip_eye_keypoints) {
+      var ek = document.getElementById('enableEyeKeypoints'); ek.checked = true; ek.disabled = false;
+    }
+  } finally {
+    _applyingProcess = false;
+  }
+  updateDerivedProcessControls();
+  updateStartButton();
+  refreshPipelineUI();
+  schedulePlanRefresh();
+}
+
+function onProcessSelect() {
+  var sel = document.getElementById('strategySelect');
+  if (!sel) return;
+  if (sel.value === '__custom__') {
+    _selectedProcessId = null;
+    _processDirty = false;
+    updateProcessEditorUI();
+    return;
+  }
+  var proc = _processesById[parseInt(sel.value, 10)];
+  if (!proc) {
+    _selectedProcessId = null;
+    _processDirty = false;
+    updateProcessEditorUI();
+    return;
+  }
+  _selectedProcessId = proc.id;
+  _processDirty = false;
+  applyProcessToToggles(proc);
+  updateProcessEditorUI();
+}
+
+// Called by the two post-processing toggles (Find misses / Species review).
+function onPostOptToggle() {
+  updateDerivedProcessControls();
+  if (!_applyingProcess) markProcessModified();
+  updateStartButton();
+  refreshPipelineUI();
+  schedulePlanRefresh();
+}
+
+function markProcessModified() {
+  _processDirty = true;
+  updateProcessEditorUI();
+}
+
+function updateProcessEditorUI() {
+  var sel = document.getElementById('strategySelect');
+  var tag = document.getElementById('processModifiedTag');
+  var hasSel = _selectedProcessId != null;
+  // Keep the select pointing at the selected process even while modified,
+  // so Save knows which process to overwrite.
+  if (sel) sel.value = hasSel ? String(_selectedProcessId) : '__custom__';
+  if (tag) tag.style.display = _processDirty ? 'inline' : 'none';
+  var save = document.getElementById('btnProcessSave');
+  var rename = document.getElementById('btnProcessRename');
+  var del = document.getElementById('btnProcessDelete');
+  if (save) save.disabled = !(hasSel && _processDirty);
+  if (rename) rename.disabled = !hasSel;
+  if (del) del.disabled = !hasSel;
+}
+
+// Keep Find misses / Species review honest about when they actually apply,
+// mirroring the server-side stage gates.
+function updateDerivedProcessControls() {
+  var classifyOn = document.getElementById('enableClassify').checked;
+  var groupOn = document.getElementById('enableGroup').checked;
+  // Find misses only runs when both Classify and Group ran.
+  var missCb = document.getElementById('enableMisses');
+  var missLbl = document.getElementById('lblEnableMisses');
+  var missOk = classifyOn && groupOn;
+  if (missCb) {
+    missCb.disabled = !missOk;
+    if (!missOk) missCb.checked = false;
+  }
+  if (missLbl) missLbl.style.opacity = missOk ? '1' : '0.5';
+  // Species review only applies when Classify is on and Group is off (the
+  // Identify-birds shape). Hidden otherwise, and force-off so it can't leak
+  // into a run where it means nothing.
+  var srLbl = document.getElementById('lblEnableSpeciesReview');
+  var srCb = document.getElementById('enableSpeciesReview');
+  var srApplies = classifyOn && !groupOn;
+  if (srLbl) srLbl.style.display = srApplies ? 'inline-flex' : 'none';
+  if (srCb && !srApplies) srCb.checked = false;
+}
+
+async function _postProcessJSON(url, method, body) {
+  var opts = { method: method };
+  if (body !== undefined) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(body);
+  }
+  var resp = await fetch(url, opts);
+  if (!resp.ok) {
+    var e = await resp.json().catch(function() { return {}; });
+    throw new Error(e.error || ('HTTP ' + resp.status));
+  }
+  return resp.status === 204 ? null : resp.json();
+}
+
+async function saveProcess() {
+  if (_selectedProcessId == null) return;
+  try {
+    var updated = await _postProcessJSON(
+      '/api/processes/' + _selectedProcessId, 'PUT', currentProcessFields());
+    _processesById[updated.id] = updated;
+    _processDirty = false;
+    updateProcessEditorUI();
+  } catch (e) { alert('Save failed: ' + e.message); }
+}
+
+async function saveProcessAsNew() {
+  var name = prompt('Name this process:');
+  if (name == null) return;
+  name = name.trim();
+  if (!name) return;
+  var body = currentProcessFields();
+  body.name = name;
+  try {
+    var created = await _postProcessJSON('/api/processes', 'POST', body);
+    await loadSavedProcesses(created.id);
+  } catch (e) { alert('Save failed: ' + e.message); }
+}
+
+async function renameProcess() {
+  if (_selectedProcessId == null) return;
+  var cur = _processesById[_selectedProcessId];
+  var name = prompt('Rename process:', cur ? cur.name : '');
+  if (name == null) return;
+  name = name.trim();
+  if (!name) return;
+  try {
+    await _postProcessJSON(
+      '/api/processes/' + _selectedProcessId, 'PUT', { name: name });
+    await loadSavedProcesses(_selectedProcessId);
+  } catch (e) { alert('Rename failed: ' + e.message); }
+}
+
+async function deleteProcess() {
+  if (_selectedProcessId == null) return;
+  var cur = _processesById[_selectedProcessId];
+  if (!confirm('Delete process "' + (cur ? cur.name : '') +
+               '"? Any workspace defaulting to it falls back to import-only.')) {
+    return;
+  }
+  var id = _selectedProcessId;
+  try {
+    await _postProcessJSON('/api/processes/' + id, 'DELETE');
+    _selectedProcessId = null;
+    _processDirty = false;
+    await loadSavedProcesses(null);
+  } catch (e) { alert('Delete failed: ' + e.message); }
+}
+
+// Saved processes have no advanced tier, so there's nothing to hide/show.
+// Kept for the advancedmodechange/devmodechange listeners it's wired to.
+function updateAdvancedPipelineOptions() {
+  updateDerivedProcessControls();
+}
+document.addEventListener('DOMContentLoaded', function() { loadSavedProcesses(null); });
 
 var _sourceMode = 'folders'; // 'folders', 'collection', or 'new_images'
 
@@ -1981,6 +2211,8 @@ function onStageToggle(stage) {
     }
   }
 
+  updateDerivedProcessControls();
+  if (!_applyingProcess) markProcessModified();
   updateStartButton();
   refreshPipelineUI();
   schedulePlanRefresh();
@@ -2147,16 +2379,9 @@ async function startPipeline() {
     }
   }
 
-  // Named strategy preset: when one is active the run is described by
-  // the preset name; the stage checkboxes were synced to it by
-  // applyStrategyPreset so the explicit flags below agree with the
-  // expansion (and miss_enabled comes from the preset server-side).
-  var strategySel = document.getElementById('strategySelect');
-  if (strategySel && strategySel.value !== '__custom__') {
-    body.strategy = strategySel.value;
-  }
-
-  // Optional stages
+  // The process page sends explicit stage flags: Run always uses the CURRENT
+  // toggle values (whether or not a saved process is selected), including
+  // miss_enabled and review_mode which used to be preset-only server-side.
   var classifyEnabled = document.getElementById('enableClassify').checked;
   var extractEnabled = document.getElementById('enableExtract').checked;
   var eyeKeypointsEnabled = document.getElementById('enableEyeKeypoints').checked;
@@ -2166,6 +2391,23 @@ async function startPipeline() {
   body.skip_extract_masks = !extractEnabled;
   body.skip_eye_keypoints = !eyeKeypointsEnabled;
   body.skip_regroup = !groupEnabled;
+  body.miss_enabled = !!document.getElementById('enableMisses').checked;
+  body.review_mode =
+    document.getElementById('enableSpeciesReview').checked ? 'species' : null;
+
+  // Only send ``eye_detect_override`` when the checkbox is CHECKED — an
+  // explicit per-run opt-in that forces ``pipeline_cfg["eye_detect_enabled"]``
+  // on for the run. An unchecked box is not an explicit eye-scoring
+  // opt-out: on a workspace with Settings ``eye_detect_enabled=true``, the
+  // user may simply want to skip the (expensive) stage while still scoring
+  // against existing ``eye_tenengrad``. Sending ``false`` here would
+  // silently disable eye-based scoring on such workspaces and produce
+  // different KEEP/REJECT results than the same server-side strategy /
+  // API path would (which leaves the override ``None``). When unset, the
+  // backend falls back to workspace Settings.
+  if (eyeKeypointsEnabled) {
+    body.eye_detect_override = true;
+  }
 
   // Classification options (only if enabled)
   if (classifyEnabled) {
@@ -2349,18 +2591,22 @@ function _updatePipelineStageUI(p) {
   // substages reach a terminal state. Resolving each substage event in
   // isolation made the pill flash 'Done' as soon as the first substage
   // finished, even though more work was pending.
-  var cardAgg = {};  // cardSuffix -> {running, failed, completed, skipped, present}
+  var cardAgg = {};  // cardSuffix -> aggregate substage outcomes
   for (var stageName in stages) {
     var cardSuffix = _stageToCard[stageName];
     if (!cardSuffix) continue;
     var agg = cardAgg[cardSuffix] || (cardAgg[cardSuffix] = {
-      running: false, failed: false, completed: 0, skipped: 0, present: 0,
+      running: false, failed: false, warning: false,
+      completed: 0, skipped: 0, present: 0,
     });
     agg.present += 1;
     var st = stages[stageName].status;
     if (st === 'running') agg.running = true;
     else if (st === 'failed') agg.failed = true;
-    else if (st === 'completed') agg.completed += 1;
+    else if (st === 'completed') {
+      agg.completed += 1;
+      if ((stages[stageName].error_count || 0) > 0) agg.warning = true;
+    }
     else if (st === 'skipped') agg.skipped += 1;
   }
 
@@ -2412,8 +2658,8 @@ function _updatePipelineStageUI(p) {
       numEl.className = 'stage-num complete';
       delete _runningStages[cardSuffix2];
       if (a.completed > 0) {
-        _stageOutcomes[cardSuffix2] = 'done';
-        _setPill(cardSuffix2, 'done');
+        _stageOutcomes[cardSuffix2] = a.warning ? 'warning' : 'done';
+        _setPill(cardSuffix2, a.warning ? 'warning' : 'done');
         if (cardSuffix2 === 'Source') _showSourceEjectSafe(stages['ingest']);
       } else {
         // Every substage was skipped. Backend 'skipped' covers both
@@ -3419,6 +3665,7 @@ function _currentModelConfigFromDom() {
     sam2_variant: samEl ? samEl.value : '',
     dinov2_variant: dinoEl ? dinoEl.value : '',
     proxy_longest_edge: proxyEl ? parseInt(proxyEl.value, 10) : 0,
+    eye_detect_enabled: false,
   };
 }
 
@@ -3450,6 +3697,7 @@ function onModelConfigChange() {
     sam2_variant: document.getElementById('cfgSam2').value,
     dinov2_variant: document.getElementById('cfgDinov2').value,
     proxy_longest_edge: parseInt(document.getElementById('cfgProxy').value),
+    eye_detect_enabled: _savedModelConfig.eye_detect_enabled === true,
   };
 
   // Save to server
@@ -3813,6 +4061,7 @@ function _formatPillLabel(stage, planEntry, state) {
   // labels — counts during a run come from a separate channel.
   if (state === 'running')   return 'Running…';
   if (state === 'done')      return 'Done';
+  if (state === 'warning')   return 'Completed with warnings';
   if (state === 'failed')    return 'Failed';
   if (state === 'cancelled') return 'Cancelled';
   if (state === 'will-skip') return 'Will skip';
@@ -4057,14 +4306,22 @@ function _buildPlanBody() {
   body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
   body.skip_regroup        = !document.getElementById('enableGroup').checked;
 
-  // Mirror the strategy field startPipeline() sends so /api/pipeline/plan
-  // expands the preset with the same rules /api/jobs/pipeline does. The
-  // identify preset sets skip_regroup=true but flags review_mode="species";
-  // without the strategy the plan reports Group as "Disabled" even though
-  // the actual run prepares species review results.
-  var planStrategySel = document.getElementById('strategySelect');
-  if (planStrategySel && planStrategySel.value && planStrategySel.value !== '__custom__') {
-    body.strategy = planStrategySel.value;
+  // Send review_mode so the plan describes the species-review path correctly:
+  // with skip_regroup=true + review_mode="species" the run prepares species
+  // review results, and without this the plan would report Group as
+  // "Disabled" and imply no grouping work at all.
+  body.review_mode =
+    document.getElementById('enableSpeciesReview').checked ? 'species' : null;
+
+  // Only send ``eye_detect_override`` when the checkbox is CHECKED. An
+  // unchecked box means "skip the eye stage" and does NOT imply "disable eye
+  // scoring" — on a workspace with Settings ``eye_detect_enabled=true`` the
+  // plan must still reflect Settings for regroup, otherwise the plan would
+  // show a different outcome (e.g. no ``eye_override_differs``) than the
+  // workspace would produce via any non-Process-page path. Sending ``false``
+  // here caused the plan to silently disable eye scoring on such workspaces.
+  if (document.getElementById('enableEyeKeypoints').checked) {
+    body.eye_detect_override = true;
   }
 
   // Preview size is a workspace/library setting. Omit preview_max_size so

@@ -44,9 +44,45 @@ body { display: flex; flex-direction: column; height: 100vh; }
   font-size: 11px; color: var(--text-secondary); overflow-wrap: anywhere;
   margin-top: 4px; width: 100%;
 }
+.recent-destinations { margin: -2px 0 8px 0; }
+.recent-destinations-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+.recent-destination-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.recent-destination-list .btn { font-size: 11px; padding: 2px 8px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .input-fixed { max-width: 240px; flex: 0 1 240px; }
 .preview-summary { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
-.dest-structure { margin-top: 8px; }
+.import-preview-grid { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; max-height: 520px; overflow-y: auto; }
+.import-preview-folder { display: flex; flex-direction: column; gap: 6px; }
+.import-preview-folder-header { font-size: 12px; font-weight: 600; color: var(--text-secondary); overflow-wrap: anywhere; }
+.import-preview-thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+.import-preview-thumb {
+  position: relative; min-width: 0; overflow: hidden; border-radius: 6px;
+  background: var(--bg-tertiary); border: 1px solid var(--border-primary);
+}
+.import-preview-thumb.duplicate { opacity: 0.55; }
+.import-preview-thumb-img { aspect-ratio: 1; background: var(--bg-primary); overflow: hidden; }
+.import-preview-thumb-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.import-preview-thumb.skeleton .import-preview-thumb-img::after {
+  content: ''; display: block; width: 100%; height: 100%;
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--border-primary) 50%, var(--bg-tertiary) 75%);
+  background-size: 200% 100%; animation: import-shimmer 1.5s infinite;
+}
+@keyframes import-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.import-preview-badge {
+  position: absolute; top: 6px; left: 6px; border-radius: 3px; padding: 2px 5px;
+  background: rgba(0,0,0,0.72); color: #fff; font-size: 9px; font-weight: 700;
+  letter-spacing: 0; text-transform: uppercase;
+}
+.import-preview-meta { padding: 6px; display: flex; flex-direction: column; gap: 2px; min-height: 54px; }
+.import-preview-name { font-size: 11px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.import-preview-dest { font-size: 10px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dest-structure {
+  width: 100%; margin: 4px 0 8px; padding: 10px;
+  background: var(--bg-tertiary); border: 1px solid var(--border-primary);
+  border-radius: 6px;
+}
 .dest-structure .structure-headline { font-size: 12px; color: var(--text-primary); font-weight: 600; }
 .managed-archive-callout {
   font-size: 12px; color: var(--text-secondary); margin-top: 6px;
@@ -55,7 +91,14 @@ body { display: flex; flex-direction: column; height: 100vh; }
   border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
 }
 .structure-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
-.structure-table td { padding: 3px 8px; border-bottom: 1px solid var(--border-primary); color: var(--text-primary); }
+.structure-table th {
+  padding: 3px 8px; border-bottom: 1px solid var(--border-primary);
+  color: var(--text-secondary); font-weight: 500; text-align: left;
+}
+.structure-table th.num { text-align: right; }
+.structure-table th.tag { text-align: right; }
+.structure-table td { padding: 5px 8px; border-bottom: 1px solid var(--border-primary); color: var(--text-primary); }
+.structure-table td.path { font-family: monospace; overflow-wrap: anywhere; }
 .structure-table td.num { text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .structure-table td.tag { text-align: right; white-space: nowrap; }
 .tag-new { color: var(--success, #2da44e); }
@@ -68,6 +111,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 12px; padding: 3px 10px; font-size: 12px; font-weight: 600; }
 .pill-ok { background: color-mix(in srgb, var(--success, #2da44e) 18%, transparent); color: var(--success, #2da44e); }
 .pill-bad { background: color-mix(in srgb, var(--danger, #cf222e) 18%, transparent); color: var(--danger, #cf222e); }
+.pill-warn { background: color-mix(in srgb, var(--warning, #bf8700) 18%, transparent); color: var(--warning, #9a6700); }
 .unsafe-list { margin: 6px 0 0 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }
 .result-links a { color: var(--accent); font-size: 12px; }
 #importError { color: var(--danger); font-size: 12px; margin-top: 6px; display: none; }
@@ -105,13 +149,31 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .folder-browser-item {
   padding: 8px 10px; font-size: 12px; color: var(--text-primary);
   cursor: pointer; border-bottom: 1px solid color-mix(in srgb, var(--border-primary) 60%, transparent);
+  display: flex; align-items: center; gap: 8px;
 }
 .folder-browser-item:hover { background: var(--bg-hover, rgba(255,255,255,0.05)); }
 .folder-browser-item.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.folder-browser-item-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.folder-browser-count {
+  color: var(--text-secondary); font-size: 11px; font-variant-numeric: tabular-nums;
+  flex-shrink: 0; white-space: nowrap;
+}
 .folder-browser-empty { padding: 14px; font-size: 12px; color: var(--text-secondary); }
 .folder-browser-actions {
   display: flex; gap: 8px; justify-content: flex-end;
   padding: 12px 16px; border-top: 1px solid var(--border-primary);
+}
+.import-tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.import-tag-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 7px; border: 1px solid var(--border-primary);
+  border-radius: 999px; background: var(--bg-tertiary); font-size: 12px;
+}
+.import-tag-chip button {
+  border: 0; background: transparent; color: var(--text-secondary);
+  cursor: pointer; padding: 0; line-height: 1;
 }
 </style>
 </head>
@@ -196,6 +258,29 @@ body { display: flex; flex-direction: column; height: 100vh; }
       </div>
     </div>
 
+    <div class="card" id="tagsCard">
+      <h3>Tags</h3>
+      <div class="row">
+        <input type="text" id="importTagInput" placeholder="Add a tag"
+               aria-label="Tag to add to imported photos"
+               onkeydown="handleImportTagKeydown(event)">
+        <button class="btn" type="button" id="btnAddImportTag"
+                onclick="addImportTagFromInput()">Add tag</button>
+      </div>
+      <div class="import-tag-list" id="importTagList"></div>
+      <div class="section-divider">
+        <label>
+          <input type="checkbox" id="chkLocationFromGps">
+          Add a location tag from each photo's GPS
+        </label>
+        <div class="hint" id="locationGpsHint">
+          Vireo resolves each GPS coordinate to a saved place. Photos without
+          GPS or a confident match remain untagged; existing locations are kept.
+        </div>
+      </div>
+      <div class="hint">Tags above are added to every photo included in this import.</div>
+    </div>
+
     <div class="card" id="destCard">
       <h3>Destination</h3>
       <div class="row">
@@ -207,10 +292,15 @@ body { display: flex; flex-direction: column; height: 100vh; }
       <div id="destLocalRows">
       <div class="row">
         <button class="btn btn-primary" id="btnBrowseDestination" data-testid="import-destination-browse-btn" onclick="browseForDestination()">Browse...</button>
-        <input type="text" id="destInput" list="recentDestinations"
+        <input type="text" id="destInput" list="recentDestinationOptions"
                placeholder="Archive folder"
                value="">
-        <datalist id="recentDestinations"></datalist>
+        <datalist id="recentDestinationOptions"></datalist>
+      </div>
+      <div id="recentDestinations" class="recent-destinations" style="display:none;"
+           data-testid="recent-destinations">
+        <div class="recent-destinations-label">Recent destinations</div>
+        <div id="recentDestinationList" class="recent-destination-list"></div>
       </div>
       </div>
       <div id="destRemoteRows" style="display:none;">
@@ -221,14 +311,26 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <div class="remote-preview" id="remoteDestPreview"></div>
       </div>
       <div class="row">
-        <label>Folder template</label>
-        <input type="text" id="folderTemplate" value="%Y/%Y-%m-%d" style="max-width:200px;flex:0 1 auto;">
-        <span class="hint">strftime of each photo's capture time, e.g. %Y/%Y-%m-%d</span>
+        <label for="folderTemplatePreset">Folder template</label>
+        <select id="folderTemplatePreset" class="input-fixed" onchange="updateFolderTemplateControls()">
+          <option value="%Y/%Y-%m-%d" selected>%Y/%Y-%m-%d — 2026/2026-07-12</option>
+          <option value="%Y/%m/%d">%Y/%m/%d — 2026/07/12</option>
+          <option value="%Y/%m">%Y/%m — 2026/07</option>
+          <option value="%Y">%Y — 2026</option>
+          <option value="%Y-%m-%d">%Y-%m-%d — 2026-07-12</option>
+          <option value="__custom__">Custom…</option>
+        </select>
+        <input type="text" id="folderTemplate" value="" placeholder="Enter a strftime format"
+               aria-label="Custom folder template" style="display:none;max-width:240px;flex:0 1 240px;">
       </div>
+      <div id="destStructure" class="dest-structure" data-testid="resulting-folders" style="display:none;"></div>
       <div class="section-divider">
         <div class="option-stack">
           <label><input type="checkbox" id="chkSkipDuplicates" checked> Skip duplicates</label>
-          <label><input type="checkbox" id="chkVerifyByHash"> Verify copied files with full content hashes</label>
+          <label><input type="radio" name="duplicateVerification" id="chkTrustLikelyDuplicates" checked> Trust likely duplicates</label>
+          <div class="hint">Fast — matches filename, byte size, and EXIF capture time to the second. Existing files are not read again.</div>
+          <label><input type="radio" name="duplicateVerification" id="chkVerifyByHash"> Verify duplicates byte-for-byte</label>
+          <div class="hint">Slower — reads the complete source and existing archive copy to confirm their contents are identical.</div>
         </div>
       </div>
     </div>
@@ -239,10 +341,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <select id="afterImportSelect" style="max-width:280px;">
           <option id="afterImportHiddenDefault" value="__hidden_default__" hidden disabled></option>
           <option value="__none__">None — import only</option>
-          <option value="identify">Identify birds</option>
-          <option value="quick_look">Quick look (thumbnails + previews)</option>
-          <option value="cull_ready" data-advanced-strategy>Cull-ready (+ quality review)</option>
-          <option value="full" data-advanced-strategy>Full pipeline (everything)</option>
+          <!-- Saved processes are appended here by loadAfterImportProcesses(). -->
         </select>
       </div>
       <div class="hint">Processing runs as its own job when the import finishes — a processing failure never touches imported photos.</div>
@@ -254,7 +353,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <button class="btn btn-primary" id="btnStart" onclick="startImport()">Start import</button>
       </div>
       <div class="preview-summary" id="previewSummary"></div>
-      <div id="destStructure" class="dest-structure" style="display:none;"></div>
+      <div id="importPreviewGrid" class="import-preview-grid" style="display:none;"></div>
       <div id="importError"></div>
     </div>
 
@@ -274,6 +373,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
       <div id="resultSummary" class="hint" style="margin-top:6px;"></div>
       <table class="folder-progress" id="resultFolders"></table>
       <div id="chainInfo" class="hint" style="margin-top:8px;"></div>
+      <div id="taggingInfo" class="hint" style="margin-top:8px;"></div>
       <div id="modelWarning" class="warn" style="display:none;"></div>
       <div class="result-links" style="margin-top:8px;">
         <a href="/browse">Open Browse</a> &nbsp;·&nbsp; <a href="/jobs">Open Jobs</a>
@@ -320,6 +420,8 @@ let browserMode = 'source';
 let browserPath = '';
 let browserHomePath = '';
 let browserSeq = 0;
+let browserCountsAbort = null;
+let browserCountCache = {};
 let browserEscHandler = null;
 let browserSelectedPaths = [];
 let browserSelectAnchorPath = '';
@@ -332,6 +434,55 @@ let destStructureSeq = 0;
 // or trigger a folder-structure render on top of a newer preview's
 // results. Incremented at the top of previewImport().
 let importPreviewSeq = 0;
+let importPreviewTimer = null;
+let importThumbSchedulerCancel = null;
+let importTags = [];
+
+function normalizedImportTag(name) {
+  return String(name || '').trim().replace(/\s+/g, ' ');
+}
+
+function renderImportTags() {
+  const list = document.getElementById('importTagList');
+  list.innerHTML = '';
+  importTags.forEach((name, index) => {
+    const chip = document.createElement('span');
+    chip.className = 'import-tag-chip';
+    const label = document.createElement('span');
+    label.textContent = name;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.setAttribute('aria-label', 'Remove tag ' + name);
+    remove.textContent = '×';
+    remove.onclick = () => {
+      importTags.splice(index, 1);
+      renderImportTags();
+    };
+    chip.append(label, remove);
+    list.appendChild(chip);
+  });
+}
+
+function addImportTag(name) {
+  const clean = normalizedImportTag(name);
+  if (!clean) return false;
+  if (!importTags.some(tag => tag.toLocaleLowerCase() === clean.toLocaleLowerCase())) {
+    importTags.push(clean);
+    renderImportTags();
+  }
+  return true;
+}
+
+function addImportTagFromInput() {
+  const input = document.getElementById('importTagInput');
+  if (addImportTag(input.value)) input.value = '';
+}
+
+function handleImportTagKeydown(event) {
+  if (event.key !== 'Enter' && event.key !== ',') return;
+  event.preventDefault();
+  addImportTagFromInput();
+}
 
 function selectedImportMode() {
   const checked = document.querySelector('input[name="importMode"]:checked');
@@ -347,11 +498,13 @@ function updateImportMode() {
     copyMode ? 'Check for duplicates' : 'Preview import';
   document.getElementById('previewSummary').textContent = '';
   hideDestStructure();
+  clearImportPreviewGrid();
   showError('');
   updateFileTypeControls();
   updateWorkspaceMode();
   onImportDestModeChange();
   refreshSourceCounts();
+  scheduleImportPreview();
 }
 
 function selectedFileTypes() {
@@ -368,18 +521,83 @@ function updateFileTypeControls() {
   custom.style.display = preset.value === 'custom' ? '' : 'none';
 }
 
+function selectedFolderTemplate() {
+  const preset = document.getElementById('folderTemplatePreset');
+  if (preset.value !== '__custom__') return preset.value;
+  return (document.getElementById('folderTemplate').value || '').trim();
+}
+
+function updateFolderTemplateControls() {
+  const preset = document.getElementById('folderTemplatePreset');
+  const custom = document.getElementById('folderTemplate');
+  if (!preset || !custom) return;
+  custom.style.display = preset.value === '__custom__' ? '' : 'none';
+  if (preset.value === '__custom__') custom.focus();
+}
+
+function setFolderTemplate(template) {
+  const preset = document.getElementById('folderTemplatePreset');
+  const custom = document.getElementById('folderTemplate');
+  const commonOption = Array.from(preset.options)
+    .some((option) => option.value === template && option.value !== '__custom__');
+  preset.value = commonOption ? template : '__custom__';
+  custom.value = commonOption ? '' : template;
+  updateFolderTemplateControls();
+}
+
+function recentDestinationLabel(path) {
+  const trimmed = path.replace(/[\\/]+$/, '');
+  const parts = trimmed.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+function selectRecentDestination(path) {
+  const destination = document.getElementById('destInput');
+  destination.value = path;
+  // Match a manually entered destination so an already-rendered preview
+  // cannot remain visible for the previous folder.
+  destination.dispatchEvent(new Event('input', { bubbles: true }));
+  destination.focus();
+}
+
+function renderRecentDestinations(recents) {
+  const section = document.getElementById('recentDestinations');
+  const list = document.getElementById('recentDestinationList');
+  if (!section || !list) return;
+  list.replaceChildren();
+  recents.forEach((path) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn';
+    button.textContent = recentDestinationLabel(path);
+    button.title = path;
+    button.setAttribute('aria-label', 'Use ' + path);
+    button.addEventListener('click', () => selectRecentDestination(path));
+    list.appendChild(button);
+  });
+  section.style.display = recents.length ? '' : 'none';
+}
+
 function wireDestStructureInvalidation() {
   [
     'chkRecursive', 'fileTypePreset', 'destMode', 'remoteSubpath',
-    'chkSkipDuplicates', 'chkVerifyByHash', 'destInput', 'folderTemplate',
+    'chkSkipDuplicates', 'chkTrustLikelyDuplicates', 'chkVerifyByHash', 'destInput',
+    'folderTemplatePreset', 'folderTemplate',
   ].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
-    el.addEventListener('change', hideDestStructure);
-    el.addEventListener('input', hideDestStructure);
+    const onPreviewOptionChange = () => {
+      hideDestStructure();
+      scheduleImportPreview();
+    };
+    el.addEventListener('change', onPreviewOptionChange);
+    el.addEventListener('input', onPreviewOptionChange);
   });
   document.querySelectorAll('.file-ext').forEach((el) => {
-    el.addEventListener('change', hideDestStructure);
+    el.addEventListener('change', () => {
+      hideDestStructure();
+      scheduleImportPreview();
+    });
   });
 }
 
@@ -542,7 +760,12 @@ function renderSources() {
       sources.splice(i, 1);
       delete sourceCounts[s];
       hideDestStructure();
+      if (!sources.length) {
+        clearImportPreviewGrid();
+        document.getElementById('previewSummary').textContent = '';
+      }
       renderSources();
+      scheduleImportPreview();
     };
     div.appendChild(span);
     div.appendChild(meta);
@@ -569,7 +792,7 @@ function sourceCountKey(path, options) {
 
 function formatPhotoCount(n) {
   const count = Number(n || 0);
-  return count + ' photo' + (count === 1 ? '' : 's');
+  return count.toLocaleString() + ' photo' + (count === 1 ? '' : 's');
 }
 
 async function refreshSourceCount(path) {
@@ -631,6 +854,7 @@ function addSourcePath(path) {
     hideDestStructure();
     renderSources();
     refreshSourceCount(v);
+    scheduleImportPreview();
     return true;
   }
   return false;
@@ -671,6 +895,7 @@ async function browseForDestination() {
       if (path) {
         document.getElementById('destInput').value = path;
         hideDestStructure();
+        scheduleImportPreview();
       }
       return;
     }
@@ -711,6 +936,10 @@ function openImportFolderBrowser(mode, opts = {}) {
 
 function closeImportFolderBrowser() {
   document.getElementById('importFolderBrowser').classList.remove('open');
+  if (browserCountsAbort) {
+    browserCountsAbort.abort();
+    browserCountsAbort = null;
+  }
   if (browserEscHandler) {
     document.removeEventListener('keydown', browserEscHandler);
     browserEscHandler = null;
@@ -720,6 +949,10 @@ function closeImportFolderBrowser() {
 
 async function browseImportFolderTo(path) {
   const seq = ++browserSeq;
+  if (browserCountsAbort) {
+    browserCountsAbort.abort();
+    browserCountsAbort = null;
+  }
   // Clear stale selection while this async navigation is pending. Without
   // this, clicking "Select This Folder" during a slow or failing fetch
   // submits the previous folder instead of the one the user requested —
@@ -795,11 +1028,13 @@ function renderImportFolderBrowser(data, opts) {
     parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
   }
   if (data.path && data.path !== '/' && parent && parent !== data.path) {
-    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(parent) + '" data-parent-link="1">&#128193; ..</div>';
+    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(parent) + '" data-parent-link="1">' +
+      '<span class="folder-browser-item-name">&#128193; ..</span></div>';
   }
   dirs.forEach((d) => {
-    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(d.path) + '" data-folder-path="' + importEscapeAttr(d.path) + '">&#128193; ' +
-      importEscapeHtml(d.name || d.path) + '</div>';
+    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(d.path) + '" data-folder-path="' + importEscapeAttr(d.path) + '">' +
+      '<span class="folder-browser-item-name">&#128193; ' + importEscapeHtml(d.name || d.path) + '</span>' +
+      '<span class="folder-browser-count" data-count-path="' + importEscapeAttr(d.path) + '"></span></div>';
   });
   if (!html) {
     html = '<div class="folder-browser-empty">' +
@@ -822,6 +1057,60 @@ function renderImportFolderBrowser(data, opts) {
     }
   };
   updateImportBrowserSelection();
+  if (browserMode === 'source') refreshImportBrowserCounts(dirs, browserSeq);
+}
+
+function importBrowserCountKey(path, fileTypes) {
+  const normalized = Array.isArray(fileTypes)
+    ? fileTypes.slice().sort().join(',')
+    : String(fileTypes || 'both');
+  return path + '\n' + normalized;
+}
+
+function applyImportBrowserCount(path, count) {
+  if (!count) return;
+  document.querySelectorAll('#folderBrowserList .folder-browser-count').forEach((badge) => {
+    if (badge.getAttribute('data-count-path') === path) {
+      badge.textContent = formatPhotoCount(count);
+    }
+  });
+}
+
+async function refreshImportBrowserCounts(dirs, seq) {
+  if (!dirs.length || seq !== browserSeq) return;
+  const fileTypes = selectedSourceCountOptions().file_types;
+  const uncached = [];
+  dirs.forEach((dir) => {
+    const key = importBrowserCountKey(dir.path, fileTypes);
+    if (Object.prototype.hasOwnProperty.call(browserCountCache, key)) {
+      applyImportBrowserCount(dir.path, browserCountCache[key]);
+    } else {
+      uncached.push(dir.path);
+    }
+  });
+  if (!uncached.length) return;
+
+  browserCountsAbort = new AbortController();
+  try {
+    const resp = await fetch('/api/browse/photo-counts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: uncached, file_types: fileTypes }),
+      signal: browserCountsAbort.signal,
+    });
+    if (!resp.ok || seq !== browserSeq) return;
+    const data = await resp.json();
+    if (seq !== browserSeq) return;
+    const counts = data.counts || {};
+    Object.keys(counts).forEach((path) => {
+      browserCountCache[importBrowserCountKey(path, fileTypes)] = counts[path];
+      applyImportBrowserCount(path, counts[path]);
+    });
+  } catch (e) {
+    if (e.name !== 'AbortError') { /* Counts are helpful but non-blocking. */ }
+  } finally {
+    if (seq === browserSeq) browserCountsAbort = null;
+  }
 }
 
 function selectImportBrowserListItem(item, event) {
@@ -891,6 +1180,7 @@ function selectImportBrowserFolder() {
     if (!browserPath) return;
     document.getElementById('destInput').value = browserPath;
     hideDestStructure();
+    scheduleImportPreview();
   } else {
     const paths = browserSelectedPaths.length
       ? browserSelectedPaths
@@ -901,12 +1191,35 @@ function selectImportBrowserFolder() {
   closeImportFolderBrowser();
 }
 
+// Populate the After Import dropdown from the saved-process library. Keeps
+// the two static options (hidden default + None) and appends one option per
+// saved process, value = its id.
+async function loadAfterImportProcesses() {
+  const sel = document.getElementById('afterImportSelect');
+  if (!sel) return;
+  try {
+    const resp = await fetch('/api/processes');
+    if (!resp.ok) return;
+    const procs = await resp.json();
+    Array.from(sel.querySelectorAll('option[data-process]')).forEach(
+      (o) => o.remove());
+    (procs || []).forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = String(p.id);
+      opt.textContent = p.name;
+      opt.dataset.process = '1';
+      sel.appendChild(opt);
+    });
+  } catch (e) { /* leave with just "None — import only" */ }
+}
+
 function selectedAfterImport() {
   const v = document.getElementById('afterImportSelect').value;
   // __hidden_default__ is a display-only placeholder — the request path
   // omits after_import in that state, so callers never read this value.
   if (v === '__none__' || v === '__hidden_default__') return null;
-  return v;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 function retireHiddenDefaultOption(sel) {
@@ -919,23 +1232,23 @@ function retireHiddenDefaultOption(sel) {
   if (sel && sel.value === '__hidden_default__') sel.value = '__none__';
 }
 
-function afterImportOptionLabel(strategy) {
+function afterImportOptionLabel(processId) {
   const sel = document.getElementById('afterImportSelect');
-  const value = strategy || '__none__';
-  if (!sel) return strategy || 'None — import only';
+  const value = processId == null ? '__none__' : String(processId);
+  const fallback = processId == null ? 'None — import only' : String(processId);
+  if (!sel) return fallback;
   const opt = Array.from(sel.options).find(
     (o) => o.value === value && o.id !== 'afterImportHiddenDefault');
-  return opt ? (opt.textContent || '').trim() : (strategy || 'None — import only');
+  return opt ? (opt.textContent || '').trim() : fallback;
 }
 
+// Keep the After Import display honest about what a Start Import will do.
+// (Named for the advanced-mode listener it's still wired to; saved processes
+// no longer have an "advanced" tier, so there's nothing to hide/show — the
+// only remaining job is the new-workspace default placeholder.)
 function updateAdvancedImportOptions() {
   const sel = document.getElementById('afterImportSelect');
   if (!sel) return;
-  const advanced = !!(window.isAdvancedMode && window.isAdvancedMode());
-  sel.querySelectorAll('[data-advanced-strategy]').forEach((opt) => {
-    opt.hidden = !advanced;
-    opt.disabled = !advanced;
-  });
   const placeholder = document.getElementById('afterImportHiddenDefault');
   if (!placeholder) return;
 
@@ -954,13 +1267,13 @@ function updateAdvancedImportOptions() {
   // inherits the GLOBAL default, since a brand-new workspace has no
   // overrides yet). The visible dropdown, prefilled from the currently-
   // active workspace's default, would otherwise lie about what the
-  // server is going to do — show a placeholder that names the real
-  // target strategy.
+  // server is going to do — show a placeholder that names the real target.
   if (newMode && _afterImportConfigLoaded) {
-    const label = afterImportOptionLabel(_globalDefaultStrategy);
+    const label = afterImportOptionLabel(_globalDefaultProcessId);
     placeholder.textContent =
       'New workspace default: ' + label + ' (applied to the new workspace)';
-    placeholder.dataset.maskedValue = _globalDefaultStrategy || '';
+    placeholder.dataset.maskedValue =
+      _globalDefaultProcessId == null ? '' : String(_globalDefaultProcessId);
     placeholder.hidden = false;
     placeholder.disabled = false;
     _afterImportHidingDefault = true;
@@ -968,47 +1281,18 @@ function updateAdvancedImportOptions() {
     return;
   }
 
-  // Not new-workspace mode: the visible selection should track the
-  // workspace's own default (or the HTML fallback if config didn't
-  // load). Re-derive it every call so switching workspaceNew off
-  // restores the workspace default rather than sticking on whatever
-  // placeholder we were showing.
+  // Not new-workspace mode: track the workspace's own default (or the HTML
+  // fallback if config didn't load). Re-derive it every call so switching
+  // workspaceNew off restores the workspace default rather than sticking on
+  // whatever placeholder we were showing.
   const wsDef = _afterImportConfigLoaded
-    ? (_workspaceDefaultStrategy || '__none__')
+    ? (_workspaceDefaultProcessId == null
+        ? '__none__' : String(_workspaceDefaultProcessId))
     : '__none__';
   sel.value = wsDef;
   if (sel.selectedIndex === -1) sel.value = '__none__';
-
-  if (advanced) {
-    retireHiddenDefaultOption(sel);
-    _afterImportHidingDefault = false;
-    return;
-  }
-
-  const current = sel.selectedOptions[0];
-  const currentIsHiddenAdvanced =
-    !!(current && current.disabled && current.hasAttribute('data-advanced-strategy'));
-  if (currentIsHiddenAdvanced) {
-    // The workspace's default is an advanced-only strategy (full,
-    // cull_ready) but advanced mode is off. If we silently fell the
-    // display back to __none__, startImport() would omit after_import so
-    // the server still runs the hidden default while the dropdown reads
-    // "None — import only" — the exact mismatch the reviewer flagged.
-    // Instead, surface an honest placeholder that names the masked
-    // strategy so the visible selection tells the truth about what a
-    // Start Import will do.
-    const maskedLabel = (current.textContent || '').trim();
-    placeholder.textContent =
-      'Workspace default: ' + maskedLabel + ' (enable Advanced mode to change)';
-    placeholder.dataset.maskedValue = current.value;
-    placeholder.hidden = false;
-    placeholder.disabled = false;
-    _afterImportHidingDefault = true;
-    sel.value = '__hidden_default__';
-  } else {
-    retireHiddenDefaultOption(sel);
-    _afterImportHidingDefault = false;
-  }
+  retireHiddenDefaultOption(sel);
+  _afterImportHidingDefault = false;
 }
 
 window.addEventListener('advancedmodechange', updateAdvancedImportOptions);
@@ -1019,7 +1303,7 @@ window.addEventListener('devmodechange', updateAdvancedImportOptions);
 // initial value (__none__), which selectedAfterImport() would surface as
 // an explicit null. Posting `after_import: null` tells the import
 // endpoint to run import-only and skip the workspace's
-// pipeline.default_strategy — the exact race the reviewer flagged.
+// pipeline.default_process_id — the exact race the reviewer flagged.
 // Guarding the body key with this flag makes an unresolved default
 // fall back to the endpoint's "key omitted → apply workspace default"
 // branch, which is what the user actually expects.
@@ -1047,22 +1331,22 @@ let _afterImportHidingDefault = false;
 // verbatim.
 let _afterImportUserTouched = false;
 
-// The unscoped global pipeline.default_strategy from /api/config, captured
+// The unscoped global pipeline.default_process_id from /api/config, captured
 // during initImportPage. A brand-new workspace has no config_overrides yet,
 // so this is the strategy the server will apply when the new-workspace
 // import path omits `after_import`. Used to populate the honest "New
 // workspace default: X" placeholder so the visible dropdown selection
 // isn't misled by whatever was prefilled from the currently-active
 // workspace's (possibly-overridden) default.
-let _globalDefaultStrategy = null;
+let _globalDefaultProcessId = null;
 
-// The effective pipeline.default_strategy for the CURRENTLY-active
+// The effective pipeline.default_process_id for the CURRENTLY-active
 // workspace (global config merged with the workspace's overrides). Used
 // so updateAdvancedImportOptions() can re-derive the visible dropdown
 // selection when the user toggles "New workspace" off without touching
 // the dropdown — the underlying target reverts to the current workspace's
 // default rather than sticking on whatever placeholder was showing.
-let _workspaceDefaultStrategy = null;
+let _workspaceDefaultProcessId = null;
 
 function showError(msg) {
   const el = document.getElementById('importError');
@@ -1244,6 +1528,7 @@ function useStagingAsImportSource(result) {
   sources = [result.source_root];
   hideDestStructure();
   renderSources();
+  refreshSourceCount(result.source_root);
   // Staging recovery must copy the temporary staging tree into the archive.
   // In-place would catalog paths that disappear once staging is cleaned,
   // leaving missing-folder rows, so force Copy to archive here.
@@ -1256,6 +1541,7 @@ function useStagingAsImportSource(result) {
     document.getElementById('destInput').value = result.inferred_destination;
     hideDestStructure();
   }
+  scheduleImportPreview();
   document.getElementById('sourceCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -1265,6 +1551,175 @@ function hideDestStructure() {
   if (!el) return;
   el.style.display = 'none';
   el.innerHTML = '';
+}
+
+function clearScheduledImportPreview() {
+  if (importPreviewTimer) {
+    clearTimeout(importPreviewTimer);
+    importPreviewTimer = null;
+  }
+}
+
+function scheduleImportPreview() {
+  clearScheduledImportPreview();
+  showError('');
+  if (!sources.length) return;
+  importPreviewTimer = setTimeout(() => {
+    importPreviewTimer = null;
+    previewImport({ automatic: true });
+  }, 350);
+}
+
+function clearImportPreviewGrid() {
+  if (importThumbSchedulerCancel) {
+    importThumbSchedulerCancel();
+    importThumbSchedulerCancel = null;
+  }
+  const grid = document.getElementById('importPreviewGrid');
+  if (!grid) return;
+  grid.style.display = 'none';
+  grid.innerHTML = '';
+}
+
+function importDestinationMap(destinationFiles) {
+  const map = {};
+  (destinationFiles || []).forEach((f) => {
+    if (f && f.path) map[f.path] = f.folder || '.';
+  });
+  return map;
+}
+
+function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
+  const grid = document.getElementById('importPreviewGrid');
+  if (!grid) return;
+  if (importThumbSchedulerCancel) {
+    importThumbSchedulerCancel();
+    importThumbSchedulerCancel = null;
+  }
+  grid.innerHTML = '';
+  const dupes = new Set(duplicatePaths || []);
+  const destMap = importDestinationMap(destinationFiles);
+  if (!files || !files.length) {
+    grid.style.display = 'none';
+    return;
+  }
+
+  const groups = {};
+  files.forEach((f) => {
+    const key = f.subfolder || 'Source';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(f);
+  });
+
+  Object.keys(groups).sort().forEach((subfolder) => {
+    const groupEl = document.createElement('div');
+    groupEl.className = 'import-preview-folder';
+    const header = document.createElement('div');
+    header.className = 'import-preview-folder-header';
+    header.textContent = subfolder + ' (' + groups[subfolder].length + ')';
+    groupEl.appendChild(header);
+
+    const thumbsEl = document.createElement('div');
+    thumbsEl.className = 'import-preview-thumbs';
+    groups[subfolder].forEach((f) => {
+      const isDuplicate = dupes.has(f.path);
+      const card = document.createElement('div');
+      card.className = 'import-preview-thumb skeleton' + (isDuplicate ? ' duplicate' : '');
+      card.dataset.path = f.path || '';
+      if (f.thumb_url) card.dataset.thumbUrl = f.thumb_url;
+      card.title = f.path || f.filename || '';
+
+      const imgWrap = document.createElement('div');
+      imgWrap.className = 'import-preview-thumb-img';
+      const img = document.createElement('img');
+      img.alt = f.filename || '';
+      imgWrap.appendChild(img);
+      card.appendChild(imgWrap);
+
+      if (isDuplicate) {
+        const badge = document.createElement('div');
+        badge.className = 'import-preview-badge';
+        badge.textContent = 'Duplicate';
+        card.appendChild(badge);
+      }
+
+      const meta = document.createElement('div');
+      meta.className = 'import-preview-meta';
+      const name = document.createElement('div');
+      name.className = 'import-preview-name';
+      name.textContent = f.filename || f.path || '';
+      meta.appendChild(name);
+      const dest = document.createElement('div');
+      dest.className = 'import-preview-dest';
+      const folder = destMap[f.path];
+      dest.textContent = folder ? ('To: ' + (folder === '.' ? '(archive root)' : folder)) : (f.subfolder || '');
+      meta.appendChild(dest);
+      card.appendChild(meta);
+
+      thumbsEl.appendChild(card);
+    });
+    groupEl.appendChild(thumbsEl);
+    grid.appendChild(groupEl);
+  });
+  grid.style.display = '';
+  setupImportThumbnailScheduler();
+}
+
+function setupImportThumbnailScheduler() {
+  const grid = document.getElementById('importPreviewGrid');
+  if (!grid) return;
+  const pendingQueue = Array.from(grid.querySelectorAll('.import-preview-thumb.skeleton'));
+  const visibleSet = new Set();
+  let inFlight = 0;
+  let cancelled = false;
+  const concurrency = 4;
+  let observer = null;
+
+  importThumbSchedulerCancel = function() {
+    cancelled = true;
+    pendingQueue.length = 0;
+    if (observer) observer.disconnect();
+  };
+
+  function dispatch(el) {
+    const path = el.dataset.path;
+    const img = el.querySelector('img');
+    if (!img) return;
+    inFlight += 1;
+    const done = function() {
+      el.classList.remove('skeleton');
+      inFlight -= 1;
+      if (!cancelled) pump();
+    };
+    img.onload = done;
+    img.onerror = done;
+    img.src = el.dataset.thumbUrl || ('/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path));
+  }
+
+  function pump() {
+    while (inFlight < concurrency && pendingQueue.length > 0) {
+      let idx = 0;
+      for (let i = 0; i < pendingQueue.length; i += 1) {
+        if (visibleSet.has(pendingQueue[i])) { idx = i; break; }
+      }
+      dispatch(pendingQueue.splice(idx, 1)[0]);
+    }
+  }
+
+  if (!('IntersectionObserver' in window)) {
+    pump();
+    return;
+  }
+
+  observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) visibleSet.add(entry.target);
+      else visibleSet.delete(entry.target);
+    });
+    if (!cancelled) pump();
+  }, { root: grid, rootMargin: '200px' });
+  pendingQueue.forEach((thumb) => observer.observe(thumb));
+  setTimeout(() => { if (!cancelled) pump(); }, 0);
 }
 
 // Resolve the absolute local path files will be cataloged at, for the
@@ -1290,11 +1745,12 @@ function destStructureSignature(destination, fileTypes, recursive, excludePaths)
   return JSON.stringify({
     sources: sources.slice(),
     destination: destination,
-    folder_template: (document.getElementById('folderTemplate').value || '').trim(),
+    folder_template: selectedFolderTemplate(),
     file_types: fileTypes,
     recursive: recursive,
     skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
     verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
     exclude_paths: (excludePaths || []).slice().sort(),
   });
 }
@@ -1308,6 +1764,7 @@ function importPreviewSignature() {
     recursive: document.getElementById('chkRecursive').checked,
     skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
     verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
   });
 }
 
@@ -1325,7 +1782,7 @@ function importPreviewSignatureChanged(signature) {
 async function renderDestStructure(excludePaths) {
   hideDestStructure();
   const destination = resolvedCopyDestination();
-  if (!destination) return;
+  if (!destination) return null;
   const fileTypes = selectedFileTypes();
   const recursive = document.getElementById('chkRecursive').checked;
   const requestSeq = destStructureSeq;
@@ -1339,16 +1796,16 @@ async function renderDestStructure(excludePaths) {
       body: JSON.stringify({
         sources: sources,
         destination: destination,
-        folder_template: (document.getElementById('folderTemplate').value || '').trim(),
+        folder_template: selectedFolderTemplate(),
         file_types: fileTypes,
         recursive: recursive,
         exclude_paths: excludePaths || [],
       }),
     });
-    if (!resp.ok) return;
+    if (!resp.ok) return null;
     data = await resp.json();
   } catch (e) {
-    return;  // structure preview is optional; keep the summary intact
+    return null;  // structure preview is optional; keep the summary intact
   }
   const el = document.getElementById('destStructure');
   if (
@@ -1360,12 +1817,13 @@ async function renderDestStructure(excludePaths) {
     return;
   }
   const folders = data.folders || [];
-  if (!folders.length && !data.managed_archive) return;
+  if (!folders.length && !data.managed_archive) return data;
 
   const headline = document.createElement('div');
   headline.className = 'structure-headline';
-  headline.textContent = data.total_photos + ' photos → ' + data.total_folders +
-    ' folder' + (data.total_folders === 1 ? '' : 's') +
+  headline.textContent = 'Resulting folders: ' + data.total_photos +
+    ' file' + (data.total_photos === 1 ? '' : 's') + ' split into ' +
+    data.total_folders + ' folder' + (data.total_folders === 1 ? '' : 's') +
     ' (' + data.new_folders + ' new, ' + data.existing_folders + ' existing)';
   el.appendChild(headline);
 
@@ -1387,13 +1845,28 @@ async function renderDestStructure(excludePaths) {
 
   const table = document.createElement('table');
   table.className = 'structure-table';
+  const header = document.createElement('tr');
+  const folderHeading = document.createElement('th');
+  folderHeading.scope = 'col';
+  folderHeading.textContent = 'Exact folder';
+  const countHeading = document.createElement('th');
+  countHeading.scope = 'col';
+  countHeading.className = 'num';
+  countHeading.textContent = 'Files';
+  const statusHeading = document.createElement('th');
+  statusHeading.scope = 'col';
+  statusHeading.className = 'tag';
+  statusHeading.textContent = 'Status';
+  header.append(folderHeading, countHeading, statusHeading);
+  table.appendChild(header);
   folders.forEach((f) => {
     const tr = document.createElement('tr');
     const name = document.createElement('td');
-    name.textContent = f.path === '.' ? '(archive root)' : f.path;
+    name.className = 'path';
+    name.textContent = f.full_path || (f.path === '.' ? '(archive root)' : f.path);
     const count = document.createElement('td');
     count.className = 'num';
-    count.textContent = f.count + ' photo' + (f.count === 1 ? '' : 's');
+    count.textContent = String(f.count);
     const tag = document.createElement('td');
     tag.className = 'tag ' + (f.exists ? 'tag-existing' : 'tag-new');
     tag.textContent = f.exists ? 'existing' : 'new';
@@ -1402,22 +1875,32 @@ async function renderDestStructure(excludePaths) {
   });
   el.appendChild(table);
   el.style.display = '';
+  return data;
 }
 
-async function previewImport() {
+async function previewImport(opts) {
+  clearScheduledImportPreview();
   showError('');
   hideDestStructure();
-  if (!sources.length) { showError('Add at least one source folder.'); return; }
+  clearImportPreviewGrid();
+  importPreviewSeq += 1;
+  const requestSeq = importPreviewSeq;
+  const summary = document.getElementById('previewSummary');
+  if (!sources.length) {
+    summary.textContent = '';
+    showError('Add at least one source folder.');
+    return;
+  }
   const copyMode = selectedImportMode() === 'copy';
   const fileTypes = copyMode ? selectedFileTypes() : 'both';
   if (copyMode && Array.isArray(fileTypes) && !fileTypes.length) {
+    summary.textContent = '';
     showError('Choose at least one file extension.');
     return;
   }
-  importPreviewSeq += 1;
-  const requestSeq = importPreviewSeq;
   const requestSignature = importPreviewSignature();
-  const summary = document.getElementById('previewSummary');
+  const btnPreview = document.getElementById('btnPreview');
+  if (btnPreview) btnPreview.disabled = true;
   summary.textContent = 'Discovering files…';
   try {
     const resp = await fetch('/api/import/folder-preview', {
@@ -1440,7 +1923,12 @@ async function previewImport() {
       return;
     }
     const files = data.files || [];
-    if (!files.length) { summary.textContent = 'No importable files found.'; return; }
+    if (!files.length) {
+      summary.textContent = 'No importable files found.';
+      clearImportPreviewGrid();
+      return;
+    }
+    renderImportPreviewGrid(files, [], null);
     if (!copyMode) {
       summary.textContent = files.length + ' files found · originals will stay in place';
       return;
@@ -1449,7 +1937,10 @@ async function previewImport() {
       summary.textContent = files.length + ' files found · duplicates will be copied';
       // No dedup gate, so every discovered file lands — pass no exclusions
       // so the folder-structure counts match the full copy set.
-      await renderDestStructure([]);
+      const destData = await renderDestStructure([]);
+      if (requestSeq !== importPreviewSeq) return;
+      if (importPreviewSignatureChanged(requestSignature)) return;
+      if (destData && destData.files) renderImportPreviewGrid(files, [], destData.files);
       return;
     }
     summary.textContent = files.length + ' files found — checking for duplicates…';
@@ -1496,16 +1987,25 @@ async function previewImport() {
     summary.textContent = files.length + ' files found · ' + dupCount +
       ' already in your library (will be skipped) · ' +
       (files.length - dupCount) + ' to copy';
+    renderImportPreviewGrid(files, duplicatePaths, null);
     // Skipped duplicates aren't copied, so exclude them from the
     // folder-structure preview — the new/existing folder counts must
     // reflect the files that will actually land in the archive.
-    await renderDestStructure(duplicatePaths);
+    const destData = await renderDestStructure(duplicatePaths);
+    if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) return;
+    if (destData && destData.files) renderImportPreviewGrid(files, duplicatePaths, destData.files);
   } catch (e) {
     // Don't let a stale run's error clobber a newer preview's summary
     // or surface a stale error banner — the newer run owns the UI.
     if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) return;
     summary.textContent = '';
     showError(String(e.message || e));
+  } finally {
+    if (requestSeq === importPreviewSeq && btnPreview) {
+      btnPreview.disabled = false;
+    }
   }
 }
 
@@ -1533,12 +2033,17 @@ function renderFolderTable(el, folders) {
 
 async function startImport() {
   showError('');
+  addImportTagFromInput();
   if (!sources.length) { showError('Add at least one source folder.'); return; }
   const copyMode = selectedImportMode() === 'copy';
   const body = {
     sources: sources,
     recursive: document.getElementById('chkRecursive').checked,
   };
+  if (importTags.length) body.tags = importTags.slice();
+  if (document.getElementById('chkLocationFromGps').checked) {
+    body.location_from_gps = true;
+  }
   if (document.getElementById('workspaceNew').checked) {
     const name = (document.getElementById('newWorkspaceName').value || '').trim();
     if (!name) { showError('Name the new workspace.'); return; }
@@ -1564,10 +2069,12 @@ async function startImport() {
       if (!destination) { showError('Choose a destination folder.'); return; }
       body.destination = destination;
     }
-    body.folder_template = (document.getElementById('folderTemplate').value || '').trim();
+    body.folder_template = selectedFolderTemplate();
     body.file_types = fileTypes;
     body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
     body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
+    body.trust_likely_duplicates =
+      document.getElementById('chkTrustLikelyDuplicates').checked;
   }
   // For new-workspace imports where the user hasn't touched the After
   // Import dropdown, the visible selection was prefilled from the
@@ -1673,6 +2180,7 @@ function renderResult(res, status) {
       (status && status !== 'completed' ? ' · job ' + status : '');
     document.getElementById('resultFolders').innerHTML = '';
     renderChainInfo(res);
+    renderTaggingInfo(res);
     renderModelWarning(res);
     return;
   }
@@ -1680,6 +2188,25 @@ function renderResult(res, status) {
     pill.className = 'pill pill-ok';
     pill.textContent = 'Safe to format the card — every file is verified in the archive';
     unsafe.style.display = 'none';
+  } else if (
+    res.unverified_duplicates_only
+    && (!status || status === 'completed')
+  ) {
+    pill.className = 'pill pill-warn';
+    pill.textContent = 'Import complete — keep the card until likely duplicates are verified';
+    const files = res.unsafe_files || [];
+    unsafe.style.display = '';
+    if (!files.length) {
+      const li = document.createElement('li');
+      li.textContent = res.unverified_duplicate +
+        ' likely duplicates matched by filename, byte size, and capture time, but were not compared byte-for-byte.';
+      unsafe.appendChild(li);
+    }
+    files.forEach((u) => {
+      const item = document.createElement('li');
+      item.textContent = u.path + ' — ' + u.reason;
+      unsafe.appendChild(item);
+    });
   } else {
     pill.className = 'pill pill-bad';
     pill.textContent = 'Do NOT format the card yet';
@@ -1704,7 +2231,39 @@ function renderResult(res, status) {
   renderFolderTable(document.getElementById('resultFolders'), res.folders || {});
 
   renderChainInfo(res);
+  renderTaggingInfo(res);
   renderModelWarning(res);
+}
+
+function renderTaggingInfo(res) {
+  const el = document.getElementById('taggingInfo');
+  const tagging = res.tagging;
+  if (!tagging) {
+    el.textContent = '';
+    return;
+  }
+  const parts = [];
+  if ((tagging.requested_tags || []).length) {
+    parts.push(
+      'Tags added to ' + (tagging.tagged_photos || 0) + ' photo' +
+      ((tagging.tagged_photos || 0) === 1 ? '' : 's')
+    );
+  }
+  if (tagging.location_requested) {
+    parts.push((tagging.locations_added || 0) + ' GPS location' +
+      ((tagging.locations_added || 0) === 1 ? '' : 's') + ' added');
+    if (tagging.locations_unresolved) {
+      parts.push(tagging.locations_unresolved + ' could not be resolved');
+    }
+    if (tagging.locations_skipped) {
+      parts.push(tagging.locations_skipped + ' already had a location');
+    }
+  }
+  if ((tagging.errors || []).length) {
+    parts.push(tagging.errors.join(' '));
+  }
+  if (tagging.skipped) parts.push('Tagging skipped: ' + tagging.skipped);
+  el.textContent = parts.join(' · ');
 }
 
 function renderChainInfo(res) {
@@ -1788,31 +2347,47 @@ async function initImportPage() {
   const pipelineCfg = Object.assign(
     {}, cfg.pipeline || {}, (overrides || {}).pipeline || {},
   );
+  const gpsCheckbox = document.getElementById('chkLocationFromGps');
+  const gpsHint = document.getElementById('locationGpsHint');
+  if (cfgOk && !String(cfg.google_maps_api_key || '').trim()) {
+    gpsCheckbox.disabled = true;
+    gpsHint.textContent =
+      'Add a Google Maps API key in Settings to resolve GPS coordinates into location tags.';
+  }
 
-  const recents = ingestCfg.recent_destinations || [];
-  const dl = document.getElementById('recentDestinations');
+  const recents = Array.isArray(ingestCfg.recent_destinations)
+    ? ingestCfg.recent_destinations.filter((destination) => typeof destination === 'string')
+    : [];
+  const dl = document.getElementById('recentDestinationOptions');
   recents.forEach((d) => {
     const opt = document.createElement('option');
     opt.value = d;
     dl.appendChild(opt);
   });
-  if (ingestCfg.folder_template) {
-    document.getElementById('folderTemplate').value = ingestCfg.folder_template;
+  renderRecentDestinations(recents);
+  if (typeof ingestCfg.folder_template === 'string') {
+    setFolderTemplate(ingestCfg.folder_template);
   }
 
-  // Preselect the workspace's default strategy (null -> import only).
+  // Populate the dropdown from the saved-process library before resolving
+  // any default id into a selected option.
+  await loadAfterImportProcesses();
+
+  // Preselect the workspace's default process (null -> import only).
   const sel = document.getElementById('afterImportSelect');
-  const def = pipelineCfg.default_strategy;
-  sel.value = def ? def : '__none__';
+  const def = pipelineCfg.default_process_id;
+  sel.value = (def != null) ? String(def) : '__none__';
   if (sel.selectedIndex === -1) sel.value = '__none__';
   // Capture the unscoped global default so the "New workspace default"
-  // placeholder can name the strategy the server will actually apply
+  // placeholder can name the process the server will actually apply
   // to a freshly-created workspace (which starts with no overrides).
-  _globalDefaultStrategy = (cfg && cfg.pipeline && cfg.pipeline.default_strategy) || null;
+  _globalDefaultProcessId =
+    (cfg && cfg.pipeline && cfg.pipeline.default_process_id != null)
+      ? cfg.pipeline.default_process_id : null;
   // Capture the effective (workspace-scoped) default so switching out of
   // "New workspace" mode without touching the dropdown restores this
   // value rather than sticking on the placeholder.
-  _workspaceDefaultStrategy = def || null;
+  _workspaceDefaultProcessId = (def != null) ? def : null;
   // updateAdvancedImportOptions() may flip _afterImportHidingDefault
   // when the resolved default is an advanced-only strategy the current
   // mode hides. Wire the change listener first so a user-driven change
@@ -1830,9 +2405,9 @@ async function initImportPage() {
   // Only mark the resolved default as trustworthy when BOTH config
   // fetches actually succeeded. Otherwise the select value reflects the
   // HTML placeholder rather than the workspace default, and startImport
-  // should omit the key so the server applies pipeline.default_strategy.
+  // should omit the key so the server applies pipeline.default_process_id.
   // Set this BEFORE the initial updateAdvancedImportOptions() call so
-  // that call can use _workspaceDefaultStrategy to derive the visible
+  // that call can use _workspaceDefaultProcessId to derive the visible
   // dropdown value.
   _afterImportConfigLoaded = cfgOk && overridesOk;
   updateAdvancedImportOptions();

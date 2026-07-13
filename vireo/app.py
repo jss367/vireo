@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,7 @@ import uuid
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlsplit
 
 import places
 from db import (
@@ -323,17 +324,41 @@ def _highlight_score_bucket(photos, picked_first=False):
         }
         p["reasons"] = reasons[:3]
 
-    photos.sort(
-        key=lambda p: (
-            (1 if p.get("flag") == "flagged" else 0) if picked_first else 0,
-            p.get("highlight_score") or 0,
-            p.get("predicted_confidence") or 0,
-            p.get("quality_score") or 0,
-            p.get("rating") or 0,
-            -p.get("id", 0),
-        ),
-        reverse=True,
-    )
+    if picked_first:
+        # Highlights page ordering: three contiguous regions —
+        #   1. picks (flagged): analyzed first (by score desc), then
+        #      unanalyzed picks in capture order;
+        #   2. analyzed non-picks: by highlight_score desc;
+        #   3. unanalyzed non-picks: capture order (earliest first).
+        # The analyzed-before-unanalyzed tier separates the groups so the
+        # score term only reorders analyzed rows and the timestamp term only
+        # reorders unanalyzed rows — they never compete. Timestamps are ISO
+        # text, so lexicographic order is chronological; missing timestamps
+        # sort to the end of their group. This is an ascending sort (no
+        # reverse), negating the score to rank analyzed rows high-first.
+        def _bucket_sort_key(p):
+            analyzed = p.get("quality_score") is not None
+            ts = p.get("timestamp")
+            return (
+                0 if p.get("flag") == "flagged" else 1,
+                0 if analyzed else 1,
+                -(p.get("highlight_score") or 0) if analyzed else 0.0,
+                (ts is None, ts),
+                p.get("id", 0),
+            )
+
+        photos.sort(key=_bucket_sort_key)
+    else:
+        photos.sort(
+            key=lambda p: (
+                p.get("highlight_score") or 0,
+                p.get("predicted_confidence") or 0,
+                p.get("quality_score") or 0,
+                p.get("rating") or 0,
+                -p.get("id", 0),
+            ),
+            reverse=True,
+        )
 
 
 def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
@@ -396,6 +421,32 @@ def _canonicalize_species_rank_maps(db, species_map):
     return result
 
 
+def _bucket_unanalyzed_count(photos):
+    """Length of the trailing "Not yet analyzed" tail of a bucket.
+
+    Counts only the contiguous run of unscored non-pick photos at the END of
+    ``photos``. This is what the divider labels, so callers can trust that a
+    non-zero value marks a real tail below the divider.
+
+    Only the trailing run is counted (not every unscored non-pick in the
+    bucket) so that curated ordering — where
+    :func:`_apply_ordered_highlights` or :func:`_apply_highlight_preferences`
+    can promote an unscored, non-flagged photo to the front as a species
+    highlight or representative — doesn't inflate the count with photos that
+    now live above the divider. Unscored picks are excluded because they
+    stay grouped with the other picks at the front regardless.
+    """
+    if not photos:
+        return 0
+    tail = 0
+    for p in reversed(photos):
+        if p.get("quality_score") is None and p.get("flag") != "flagged":
+            tail += 1
+        else:
+            break
+    return tail
+
+
 def _apply_highlight_preferences(db, buckets):
     preferences = _canonicalize_species_photo_lists(
         db, db.get_species_representative_lists(eligible_only=True)
@@ -438,6 +489,10 @@ def _apply_highlight_preferences(db, buckets):
         # photos.
         bucket["best_score"] = _bucket_best_score(bucket["photos"])
         bucket["best_timestamp"] = top.get("timestamp")
+        # Run last so curated promotion (an unscored rep pushed to the front)
+        # doesn't leave a stale tail count that anchors the divider above
+        # analyzed content.
+        bucket["unanalyzed_count"] = _bucket_unanalyzed_count(bucket.get("photos"))
 
 
 def _apply_ordered_highlights(db, buckets):
@@ -478,6 +533,9 @@ def _apply_ordered_highlights(db, buckets):
         bucket["highlight_count"] = sum(
             1 for p in bucket.get("photos") or [] if p.get("is_highlighted")
         )
+        # unanalyzed_count is assigned in _apply_highlight_preferences instead:
+        # that runs after this pass and can still reorder photos, so anchoring
+        # the tail count here would be stale under curated ordering.
         bucket["best_quality"] = best.get("quality_score")
         bucket["best_score"] = best.get("highlight_score")
         bucket["best_timestamp"] = best.get("timestamp")
@@ -594,6 +652,7 @@ def _collect_highlight_buckets(
             "rating": r.get("rating") or 0,
             "flag": r.get("flag") or "none",
             "quality_score": r.get("quality_score"),
+            "is_analyzed": r.get("quality_score") is not None,
             "subject_sharpness": r.get("subject_sharpness"),
             "subject_size": r.get("subject_size"),
             "sharpness": r.get("sharpness"),
@@ -1247,6 +1306,26 @@ def _compute_time_range(photos_by_id, photo_ids):
     return [min(timestamps), max(timestamps)]
 
 
+def _rebuild_encounter_species_label(results, photo_ids, fallback=None):
+    """Return the encounter-level species label for exactly photo_ids."""
+    from encounters import encounter_species_label
+
+    id_set = set(photo_ids or [])
+    photos = [p for p in results.get("photos", []) if p.get("id") in id_set]
+    name, confidence = encounter_species_label(photos)
+    if name is None and fallback is not None:
+        return list(fallback)
+    return [name, confidence]
+
+
+def _candidate_species_override(species_label):
+    """Convert a derived species label into an unconfirmed burst candidate."""
+    species = species_label[0] if species_label else None
+    if not species:
+        return None
+    return {"species": species, "confirmed": False}
+
+
 def _find_merge_target(encounters, detached_range, target_species):
     """Find an encounter index whose confirmed species matches target_species and
     whose time range is adjacent to detached_range (no other encounter sits in
@@ -1359,6 +1438,9 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         enc["photo_count"] = len(remaining)
         enc["burst_count"] = len(bursts)
         enc["species_predictions"] = rebuild_species_predictions(results, remaining)
+        enc["species"] = _rebuild_encounter_species_label(
+            results, remaining, fallback=enc.get("species")
+        )
         for b in bursts:
             b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
         enc["time_range"] = _compute_time_range(photos_by_id, remaining)
@@ -1379,6 +1461,9 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         target["species_predictions"] = rebuild_species_predictions(
             results, target["photo_ids"]
         )
+        target["species"] = _rebuild_encounter_species_label(
+            results, target["photo_ids"], fallback=target.get("species")
+        )
         # Same reason as above — target's trace no longer matches its photo set.
         target.pop("trace", None)
         t_min, t_max = target.get("time_range") or [None, None]
@@ -1390,8 +1475,11 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
             max(maxs) if maxs else None,
         ]
     else:
+        detached_species = _rebuild_encounter_species_label(
+            results, detached_ids, fallback=enc.get("species")
+        )
         encounters.append({
-            "species": enc.get("species"),
+            "species": detached_species,
             "confirmed_species": new_species,
             "species_predictions": detached["species_predictions"],
             "species_confirmed": True,
@@ -2700,16 +2788,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     init_db.migrate_default_subject_collection()
     init_db.migrate_default_needs_identification_collection()
     init_db.migrate_default_location_collections()
+    # One-shot keyword-name normalization backfill. Database.__init__ only
+    # runs it when initialize_schema=True, and every file-backed connection
+    # this app opens — including this startup init_db and every per-request
+    # connection at `_get_db` — passes initialize_schema=False. Without an
+    # explicit run here, an upgraded DB can serve requests with `‘apapane`-
+    # style variant rows still present until some background job happens
+    # to construct a full `Database()` (initialize_schema=True); in that
+    # window an add/rename can miss the legacy row and create duplicate
+    # tags or stale XMP. The method is idempotent (db_meta-gated) so
+    # subsequent boots are a cheap SELECT.
+    init_db.normalize_keyword_data()
     # One-time rewrite of the previous miss-threshold defaults (0.25 / 0.15)
     # to the new defaults (0.20 / 0.12) in both ~/.vireo/config.json and
     # workspace overrides. Gated by a marker so it runs once; re-saved
     # legacy values are preserved on subsequent boots.
     cfg.migrate_legacy_miss_thresholds(init_db)
+    # One-time rewrite of the previous eye-focus detection default from on to
+    # off in both global config and workspace overrides.
+    cfg.migrate_eye_detect_default_off(init_db)
     # One-time resolution of the browse.toggle_ui="h" default clashing with
     # any pre-existing browse binding on ``h``. Writes an explicit "" so the
     # user's existing action keeps working; they can re-bind toggle_ui from
     # the shortcuts editor.
     cfg.migrate_toggle_ui_h_conflict()
+    # One-time rewrite of the global pipeline.default_strategy (legacy
+    # hardcoded strategy name) to pipeline.default_process_id (saved_processes
+    # id). The workspace-side rewrite happens inside Database(); this covers
+    # the global config file so workspaces that inherit the global default
+    # don't silently fall back to import-only after upgrade.
+    #
+    # init_db uses initialize_schema=False for boot perf, so on the first
+    # boot after upgrade the saved_processes table isn't guaranteed to
+    # exist yet on this connection — the migration would silently defer
+    # and any import in this session that would inherit the legacy global
+    # default falls back to import-only until the *next* boot. Open a
+    # short-lived schema-initializing handle so the migration completes on
+    # the very first boot instead. Only pay the schema-init cost if the
+    # migration hasn't been stamped yet; subsequent boots short-circuit
+    # inside the function and pass ``init_db`` (whose schema state is
+    # irrelevant because the marker check runs first).
+    if (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID
+        not in cfg._migrations_applied(cfg._read_raw())
+    ):
+        _default_strategy_migration_db = Database(db_path)
+        try:
+            cfg.migrate_default_strategy_to_process_id(
+                _default_strategy_migration_db,
+            )
+        finally:
+            _default_strategy_migration_db.close()
+    else:
+        cfg.migrate_default_strategy_to_process_id(init_db)
     init_db.create_default_collections_for_all_workspaces()
 
     # Wildlife backfill timing:
@@ -3300,12 +3431,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_dicts = []
         for c in collections:
             d = dict(c)
+            # Flag degraded rules at first paint so a fast click on the
+            # sidebar row can't fall into the 400 /photos path before
+            # loadCollectionCounts() lands. Only validate the rules — do
+            # not run COUNT(DISTINCT p.id) per collection here; that
+            # N+1 is what the async loadCollectionCounts() call in
+            # bootstrapBrowse() was designed to avoid, and re-adding it
+            # to the critical first-paint path makes opening Browse wait
+            # on every smart-collection query. Malformed JSON is treated
+            # as degraded too — those rules would 400 downstream just
+            # like an unresolvable rule.
             try:
-                d["can_add_photos"] = _collection_accepts_manual_photos(
-                    json.loads(c["rules"])
-                )
+                parsed_rules = json.loads(c["rules"])
             except (TypeError, ValueError):
                 d["can_add_photos"] = False
+                d["count_error"] = True
+                collection_dicts.append(d)
+                continue
+            if not db.rules_resolvable(parsed_rules):
+                app.logger.warning(
+                    "Collection %s (%s) has unresolvable rules; marking degraded",
+                    c["id"],
+                    c["name"],
+                )
+                d["count_error"] = True
+                # Same reasoning as /api/collections: an unresolvable rule
+                # cannot be safely merged into via add-photos, so keep it
+                # out of the add-to-collection modal.
+                d["can_add_photos"] = False
+            else:
+                d["can_add_photos"] = _collection_accepts_manual_photos(parsed_rules)
             collection_dicts.append(d)
 
         return jsonify(
@@ -3471,7 +3626,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "sam2_variant": sam2_variant,
                 "dinov2_variant": dinov2_variant,
                 "proxy_longest_edge": proxy_longest_edge,
-                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", True),
+                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", False),
                 "preview_max_size": effective_cfg.get("preview_max_size", 1920),
             },
             "mask_variant_coverage": db.mask_variant_coverage(),
@@ -3533,6 +3688,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(
                 "import/archive fields are no longer accepted by the "
                 "process planner; use the Import page for photo imports",
+                400,
+            )
+        # Reject the previous strategy-name shape so the plan endpoint's
+        # contract matches /api/jobs/pipeline: an old caller that still
+        # sends {"strategy": "quick_look"} must fail here rather than
+        # silently planning a full-pipeline run the job route would then
+        # reject too.
+        if "strategy" in body:
+            return json_error(
+                "strategy is no longer accepted; send process_id (a "
+                "saved_processes id) or explicit stage flags",
                 400,
             )
         # hash_duplicate_paths is the frontend's pre-computed set of source
@@ -3615,39 +3781,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         tuple(chunk),
                     )
                 )
-        # Expand a named strategy the same way /api/jobs/pipeline does so
-        # the plan describes the run the same job body would produce.
-        # Without this, the identify preset (skip_regroup=True + species
-        # review) shows Group as "Disabled" in the plan even though the
-        # actual run prepares species review results — the exact "plan
-        # summary is wrong for the default workflow" transparency failure
-        # the review flagged. Strategy expansion supplies *defaults*;
-        # explicitly-present body keys still win, so an Advanced/Custom
-        # caller can pin one flag on top of a preset (mirrors the merge
-        # /api/jobs/pipeline runs). Copying only ``review_mode`` from
-        # the expansion, as the previous shape did, left ``skip_* =
-        # False`` in ``PipelinePlanParams`` when a caller sent only
-        # ``{"strategy": "identify"}`` (or ``"quick_look"``), so the plan
-        # promised Classify/Extract/Group work the actual strategy job
-        # would skip.
-        if "strategy" in body and body.get("strategy"):
-            strategy_name = body.get("strategy")
-            if not isinstance(strategy_name, str):
+        # Expand a saved-process id the same way /api/jobs/pipeline does so
+        # the plan describes the run the same job body would produce. Without
+        # this, the Identify-birds process (skip_regroup=True + species review)
+        # shows Group as "Disabled" in the plan even though the actual run
+        # prepares species review results — the exact "plan summary is wrong
+        # for the default workflow" transparency failure the review flagged.
+        # Expansion supplies *defaults*; explicitly-present body keys still
+        # win, so a Custom caller can pin one flag on top of a process
+        # (mirrors the merge /api/jobs/pipeline runs). The process page's Run
+        # sends explicit stage flags (including miss_enabled/review_mode), so
+        # process_id is optional here.
+        # Key presence — not truthiness — decides whether a process was
+        # requested, matching /api/jobs/pipeline: a present-but-null process_id
+        # must 400 (not be treated as omitted), so previewing and starting the
+        # same body agree instead of the plan describing a run the job route
+        # would reject.
+        if "process_id" in body:
+            pid = body.get("process_id")
+            if not isinstance(pid, int) or isinstance(pid, bool):
+                kind = "null" if pid is None else type(pid).__name__
                 return json_error(
-                    "strategy must be a string, got "
-                    f"{type(strategy_name).__name__}", 400,
+                    f"process_id must be an integer, got {kind}", 400
                 )
-            from process_strategies import resolve_strategy
             try:
-                expanded = resolve_strategy(strategy_name)
+                expanded = _get_db().resolve_process(pid)
             except ValueError as e:
-                return json_error(str(e), 400)
+                return json_error(str(e), 404)
             body = {**expanded, **body}
+            # Mirror the job path: a process with Eye Keypoints on opts into
+            # eye scoring, so the plan reflects the eye stage running rather
+            # than deferring to the workspace eye_detect_enabled default.
+            if (
+                not body.get("skip_eye_keypoints")
+                and body.get("eye_detect_override") is None
+            ):
+                body["eye_detect_override"] = True
         review_mode = body.get("review_mode")
         if review_mode is not None and not isinstance(review_mode, str):
             return json_error(
                 "review_mode must be a string or null, got "
                 f"{type(review_mode).__name__}", 400,
+            )
+        # ``eye_detect_override`` is tri-state (None/True/False); accept
+        # only bool or missing so the plan matches what /api/jobs/pipeline
+        # would do.
+        eye_detect_override_body = body.get("eye_detect_override")
+        if (
+            eye_detect_override_body is not None
+            and not isinstance(eye_detect_override_body, bool)
+        ):
+            return json_error(
+                f"eye_detect_override must be boolean, got "
+                f"{type(eye_detect_override_body).__name__}", 400,
             )
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
@@ -3656,6 +3842,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_classify=bool(body.get("skip_classify")),
             skip_extract_masks=bool(body.get("skip_extract_masks")),
             skip_eye_keypoints=bool(body.get("skip_eye_keypoints")),
+            eye_detect_override=eye_detect_override_body,
             skip_regroup=bool(body.get("skip_regroup")),
             model_ids=body.get("model_ids") or (
                 [body["model_id"]] if body.get("model_id") else []
@@ -5015,50 +5202,55 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/keywords/duplicates")
     def api_keyword_duplicates():
-        """Find normalized duplicate keywords within current workspace."""
+        """Find case-insensitive duplicate keywords within current workspace.
+
+        Groups by the same slot key as merge_duplicate_keywords()
+        — (LOWER(name), parent_id, type, species-bearing) — so the UI does
+        not report legitimate same-name-different-slot rows (a taxonomy
+        `Robin` and an individual `Robin`, a legacy species-bearing general
+        and an ordinary general homonym, or leaves under different parents)
+        as duplicates the cleanup endpoint can never actually merge.
+        """
         db = _get_db()
         ws = db._active_workspace_id
-        rows = db.conn.execute(
-            """SELECT k.id, k.name, k.parent_id, k.type,
-                      COUNT(DISTINCT pk.photo_id) as photo_count
+        dupes = db.conn.execute(
+            """SELECT LOWER(k.name) as lname, GROUP_CONCAT(k.id) as ids,
+                      GROUP_CONCAT(k.name, ' | ') as names, COUNT(DISTINCT k.id) as cnt
                FROM keywords k
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?
-               GROUP BY k.id, k.name, k.parent_id, k.type""",
+               GROUP BY LOWER(k.name), k.parent_id, k.type,
+                        CASE WHEN k.type = 'taxonomy' OR k.is_species = 1
+                             THEN 1 ELSE 0 END
+               HAVING COUNT(DISTINCT k.id) > 1""",
             (ws,),
         ).fetchall()
-        grouped = {}
-        for row in rows:
-            key = keyword_match_key(row["name"])
-            if not key:
-                continue
-            grouped.setdefault((key, row["parent_id"], row["type"]), []).append(row)
         results = []
-        for group in grouped.values():
-            variants = [
-                {
-                    "id": row["id"],
-                    "name": row["name"],
-                    "photo_count": row["photo_count"],
-                }
-                for row in sorted(
-                    group,
-                    key=lambda row: (
-                        normalize_keyword_display(row["name"]) != row["name"],
-                        row["id"],
-                    ),
-                )
-                if row["photo_count"] > 0
-            ]
+        for d in dupes:
+            ids = list(set(int(x) for x in d["ids"].split(",")))
+            # Count photos per variant within this workspace
+            variants = []
+            for kid in ids:
+                row = db.conn.execute(
+                    """SELECT k.name, COUNT(pk.photo_id) as cnt
+                       FROM keywords k
+                       JOIN photo_keywords pk ON pk.keyword_id = k.id
+                       JOIN photos p ON p.id = pk.photo_id
+                       JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                       WHERE k.id = ? AND wf.workspace_id = ?""",
+                    (kid, ws),
+                ).fetchone()
+                if row and row["cnt"] > 0:
+                    variants.append({"id": kid, "name": row["name"], "photo_count": row["cnt"]})
             if len(variants) > 1:
                 results.append({"variants": variants, "keep": variants[0]["name"]})
         return jsonify(results)
 
     @app.route("/api/keywords/clean", methods=["POST"])
     def api_clean_keywords():
-        """Merge normalized duplicate keywords."""
+        """Merge case-insensitive duplicate keywords."""
         db = _get_db()
         merged = db.merge_duplicate_keywords()
         log.info("Keyword cleanup: merged %d duplicates", merged)
@@ -5066,6 +5258,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _queue_keyword_add(photo_id, keyword_name, workspace_id=None, _commit=True):
         """Queue a keyword add unless it cancels a pending removal."""
+        # Normalize before the cancellation lookup: queue_change normalizes
+        # on insert, so pending values are stored in clean form and an
+        # exact-match cancel against a raw variant would miss its pair.
+        keyword_name = normalize_keyword_display(keyword_name)
+        if not keyword_name:
+            return
         db = _get_db()
         removed = db.remove_pending_changes(
             photo_id, "keyword_remove", keyword_name,
@@ -5079,6 +5277,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _queue_keyword_remove(photo_id, keyword_name, workspace_id=None, _commit=True):
         """Queue a keyword removal unless it cancels a pending add."""
+        # See _queue_keyword_add: keep the cancellation lookup in the same
+        # normalized form queue_change stores.
+        keyword_name = normalize_keyword_display(keyword_name)
+        if not keyword_name:
+            return
         db = _get_db()
         removed = db.remove_pending_changes(
             photo_id, "keyword_add", keyword_name,
@@ -5260,7 +5463,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error("collection not found", 404)
         return db.get_collection_photo_ids(collection_id), None
 
-    def _bulk_gps_location_payload(db, body):
+    def _bulk_gps_location_payload(db, body, cancel_check=None):
         """Build preview/apply data for resolving locations from EXIF GPS."""
         photo_ids, error = _bulk_gps_location_source_ids(db, body)
         if error is not None:
@@ -5294,7 +5497,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         unresolved = []
         skipped = []
         ordered_group_keys = []
+        cancelled = False
         for pid in photo_ids:
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                break
             photo = photos_map[pid]
             if pid in assigned_ids:
                 skipped.append({
@@ -5342,7 +5549,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "sample_filenames": group["sample_filenames"],
             })
 
-        return {
+        result = {
             "total": len(photo_ids),
             "resolvable": sum(group["count"] for group in group_list),
             "updated": 0,
@@ -5350,7 +5557,281 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "unresolved": unresolved,
             "skipped": skipped,
             "_details_by_place_id": {k: v["details"] for k, v in groups.items()},
-        }, None
+        }
+        if cancelled:
+            result["cancelled"] = True
+        return result, None
+
+    def _validate_import_tag_options(body):
+        """Normalize optional tags attached to a photo import request."""
+        raw_tags = body.get("tags", [])
+        if not isinstance(raw_tags, list):
+            return None, None, json_error("tags must be a list of names")
+        if len(raw_tags) > 50:
+            return None, None, json_error("at most 50 import tags are allowed")
+
+        tags = []
+        seen = set()
+        for raw in raw_tags:
+            if not isinstance(raw, str):
+                return None, None, json_error(
+                    "tags must contain only strings"
+                )
+            name = normalize_keyword_display(raw)
+            if not name:
+                return None, None, json_error("import tags must not be empty")
+            if len(name) > 200:
+                return None, None, json_error(
+                    "import tags must be 200 characters or fewer"
+                )
+            match_key = keyword_match_key(name) or name.casefold()
+            if match_key not in seen:
+                seen.add(match_key)
+                tags.append(name)
+
+        location_from_gps = body.get("location_from_gps", False)
+        if not isinstance(location_from_gps, bool):
+            return None, None, json_error(
+                "location_from_gps must be a boolean"
+            )
+        return tags, location_from_gps, None
+
+    def _queue_import_keyword_add(
+        db, photo_id, keyword_name, workspace_id, *, commit=False,
+    ):
+        """Thread-safe equivalent of _queue_keyword_add for import jobs."""
+        removed = db.remove_pending_changes(
+            photo_id, "keyword_remove", keyword_name,
+            workspace_id=workspace_id, _commit=commit,
+        )
+        if removed == 0:
+            db.queue_change(
+                photo_id, "keyword_add", keyword_name,
+                workspace_id=workspace_id, _commit=commit,
+            )
+
+    def _queue_import_location_sync(
+        db, photo_id, workspace_id, *, commit=False,
+    ):
+        """Thread-safe equivalent of _queue_location_sync_if_enabled."""
+        db.remove_pending_changes(
+            photo_id, "location", workspace_id=workspace_id, _commit=commit,
+        )
+        db.queue_change(
+            photo_id, "location", "effective",
+            workspace_id=workspace_id, _commit=commit,
+        )
+
+    def _apply_import_tags(
+        workspace_id, photo_ids, tags, location_from_gps, result,
+        *, job=None, runner=None,
+    ):
+        """Apply requested common tags and per-photo GPS locations.
+
+        Tagging is deliberately post-import: ``photo_ids`` is the importer's
+        authoritative set of successfully cataloged photos, so skipped
+        archive duplicates never gain tags. Failures here do not change the
+        copy/verification result; they are reported separately in the job.
+        """
+        if not tags and not location_from_gps:
+            return
+
+        summary = {
+            "requested_tags": list(tags),
+            "tagged_photos": 0,
+            "location_requested": bool(location_from_gps),
+            "locations_added": 0,
+            "locations_unresolved": 0,
+            "locations_skipped": 0,
+            "errors": [],
+        }
+        result["tagging"] = summary
+
+        def cancel_requested():
+            cancelled = result.get("cancelled") or (
+                job is not None and runner is not None
+                and runner.is_cancelled(job["id"])
+            )
+            if cancelled:
+                # The cancellation may arrive after the importer itself has
+                # returned a successful result. Persist it on the shared
+                # result so downstream after-import chaining also stops.
+                result["cancelled"] = True
+            return cancelled
+
+        if cancel_requested():
+            summary["skipped"] = "import cancelled"
+            return
+        if not photo_ids:
+            summary["skipped"] = "no new photos"
+            return
+
+        if job is not None and runner is not None:
+            phase = (
+                "Adding tags and GPS locations"
+                if tags and location_from_gps
+                else "Adding GPS locations"
+                if location_from_gps
+                else "Adding tags"
+            )
+            runner.push_event(job["id"], "progress", {
+                "current": job["progress"].get("current", 0),
+                "total": job["progress"].get("total", 0),
+                "current_file": "",
+                "phase": phase,
+            })
+
+        thread_db = Database(db_path)
+        thread_db.set_active_workspace(workspace_id)
+        tagged_photo_ids = set()
+
+        for requested_name in tags:
+            if cancel_requested():
+                summary["skipped"] = "import cancelled"
+                break
+            try:
+                keyword_id = thread_db.add_keyword(
+                    requested_name, kw_type="general", _commit=False,
+                )
+                stored = thread_db.conn.execute(
+                    "SELECT name, parent_id, type FROM keywords WHERE id = ?",
+                    (keyword_id,),
+                ).fetchone()
+                keyword_name = (
+                    stored["name"] if stored and stored["name"]
+                    else requested_name
+                )
+                items = []
+                for photo_id in photo_ids:
+                    if cancel_requested():
+                        break
+                    exists = thread_db.conn.execute(
+                        "SELECT 1 FROM photo_keywords "
+                        "WHERE photo_id = ? AND keyword_id = ?",
+                        (photo_id, keyword_id),
+                    ).fetchone()
+                    if exists is not None:
+                        continue
+                    thread_db.tag_photo(photo_id, keyword_id, _commit=False)
+                    _queue_import_keyword_add(
+                        thread_db, photo_id, keyword_name, workspace_id,
+                    )
+                    items.append({
+                        "photo_id": photo_id,
+                        "old_value": "",
+                        "new_value": str(keyword_id),
+                    })
+                if cancel_requested():
+                    thread_db.conn.rollback()
+                    summary["skipped"] = "import cancelled"
+                    break
+                if items:
+                    thread_db.record_edit(
+                        "keyword_add",
+                        f'Added "{keyword_name}" during import to '
+                        f"{len(items)} photos",
+                        str(keyword_id), items, is_batch=True, _commit=False,
+                    )
+                thread_db.conn.commit()
+                tagged_photo_ids.update(item["photo_id"] for item in items)
+            except Exception as exc:
+                thread_db.conn.rollback()
+                log.exception("Failed to add import tag %r", requested_name)
+                summary["errors"].append(
+                    f'Could not add tag "{requested_name}": {exc}'
+                )
+        summary["tagged_photos"] = len(tagged_photo_ids)
+
+        if location_from_gps and not cancel_requested():
+            unresolved = 0
+            skipped = 0
+            added = 0
+            cancelled_during_gps = False
+            # The public bulk endpoint caps a request at 10,000 IDs. Imports
+            # can exceed that, so reuse its resolution logic in bounded
+            # chunks while sharing the persistent ~110 m geocode cache.
+            for photo_chunk in _gps_location_chunks(photo_ids, size=10000):
+                if cancel_requested():
+                    cancelled_during_gps = True
+                    break
+                try:
+                    payload, error = _bulk_gps_location_payload(
+                        thread_db, {"photo_ids": photo_chunk},
+                        cancel_check=cancel_requested,
+                    )
+                    if error is not None:
+                        raise RuntimeError("location resolution was rejected")
+                    if payload.pop("cancelled", False) or cancel_requested():
+                        cancelled_during_gps = True
+                        break
+                    details_by_place_id = payload.pop(
+                        "_details_by_place_id", {}
+                    )
+                    unresolved += len(payload["unresolved"])
+                    skipped += len(payload["skipped"])
+                    for group in payload["groups"]:
+                        if cancel_requested():
+                            cancelled_during_gps = True
+                            break
+                        details = details_by_place_id.get(group["place_id"])
+                        if not details:
+                            unresolved += len(group["photo_ids"])
+                            continue
+                        try:
+                            leaf_id = thread_db.upsert_place_chain(details)
+                        except Exception as exc:
+                            log.exception(
+                                "Failed to create GPS import location %s",
+                                group["place_id"],
+                            )
+                            summary["errors"].append(
+                                f"Could not create location "
+                                f"{group.get('summary') or group['place_id']}: "
+                                f"{exc}"
+                            )
+                            unresolved += len(group["photo_ids"])
+                            continue
+                        location_items = []
+                        for photo_id in group["photo_ids"]:
+                            if cancel_requested():
+                                cancelled_during_gps = True
+                                break
+                            thread_db.set_photo_location(photo_id, leaf_id)
+                            _queue_import_location_sync(
+                                thread_db, photo_id, workspace_id,
+                            )
+                            location_items.append({
+                                "photo_id": photo_id,
+                                "old_value": "",
+                                "new_value": str(leaf_id),
+                            })
+                        added += len(location_items)
+                        if location_items:
+                            thread_db.record_edit(
+                                "location_set",
+                                f"Added GPS location during import to "
+                                f"{len(location_items)} photos",
+                                "from_exif", location_items,
+                                is_batch=True, _commit=False,
+                            )
+                    thread_db.conn.commit()
+                    if cancelled_during_gps:
+                        break
+                except Exception as exc:
+                    thread_db.conn.rollback()
+                    log.exception("Failed to add GPS locations during import")
+                    summary["errors"].append(
+                        f"Could not add GPS locations: {exc}"
+                    )
+                    unresolved += len(photo_chunk)
+            summary["locations_added"] = added
+            summary["locations_unresolved"] = unresolved
+            summary["locations_skipped"] = skipped
+            if cancelled_during_gps:
+                summary["skipped"] = "import cancelled"
+        elif location_from_gps:
+            summary["skipped"] = "import cancelled"
+        thread_db.conn.close()
 
     # -- Edit API routes --
 
@@ -5892,11 +6373,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kid = keyword_row["id"]
             name = keyword_row["name"]
         else:
-            # Reject empty after normalization too, so input like `"'"` — which
-            # passes `not name` before stripping edge quotes — doesn't 500 out
-            # of add_keyword's ValueError; it should look like the plain
-            # empty-name case to the caller.
-            if not name or not normalize_keyword_display(name):
+            if not name:
                 return json_error("name required")
             # Validate kw_type at the boundary (isinstance guard against
             # non-hashable JSON; membership against the canonical enum).
@@ -5911,68 +6388,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
                 else None
             )
-            kid = db.add_keyword(name, kw_type=kw_type)
-            # Re-read the stored keyword name so the pending-change and
-            # history entries match the row actually tagged. Without this
-            # step, a request like `‘apapane` would tag the normalized
-            # `apapane` row (or match a legacy edge-quote row via the
-            # add_keyword UDF fallback) while still queuing the raw
-            # request string, so a later delete — which reads k.name from
-            # the DB — queues a differently-spelled entry and pending
-            # changes no longer cancel; XMP sync would then persist the
-            # stray-quote spelling even though the in-app keyword is
-            # normalized. Using the stored name also picks up any species
-            # casing convention applied inside add_keyword.
+            try:
+                kid = db.add_keyword(name, kw_type=kw_type)
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Queue/record the stored spelling: add_keyword normalizes
+            # punctuation and applies the species casing convention, so it
+            # can differ from the raw request name.
             stored = db.conn.execute(
                 "SELECT name FROM keywords WHERE id = ?", (kid,)
             ).fetchone()
-            if stored and stored["name"]:
+            if stored:
                 name = stored["name"]
-
-        # Treat any normalized-equivalent peer already on the photo as
-        # already-tagged: without this, adding clean `Cardinal` to a photo
-        # that carries a legacy `‘Cardinal` variant stacks the clean row on
-        # top of the legacy one, leaving duplicate in-app tags and a
-        # duplicate <rdf:li> after sync. Mirrors the peer expansion in
-        # api_batch_keyword / api_batch_keyword_remove; scoped to same
-        # (parent_id, type) so cross-type same-name keywords stay distinct.
-        target_row = db.conn.execute(
-            "SELECT id, name, parent_id, type FROM keywords WHERE id = ?", (kid,)
-        ).fetchone()
-        variant_ids = [kid]
-        if target_row is not None and keyword_match_key(target_row["name"]):
-            target_norm = normalize_keyword_display(target_row["name"])
-            parent_id = target_row["parent_id"]
-            if parent_id is None:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id IS NULL
-                         AND type = ?
-                         AND id != ?""",
-                    (target_norm, target_row["type"], kid),
-                ).fetchall()
-            else:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id = ?
-                         AND type = ?
-                         AND id != ?""",
-                    (target_norm, parent_id, target_row["type"], kid),
-                ).fetchall()
-            variant_ids.extend(row["id"] for row in peer_rows)
-
-        id_placeholders = ",".join("?" for _ in variant_ids)
+        # tag_photo is INSERT OR IGNORE, so a repeated Add click on a
+        # keyword the photo already carries would still queue a
+        # keyword_add sidecar change and record a keyword_add edit whose
+        # undo calls untag_photo — removing the pre-existing tag. Skip
+        # the pending/history bookkeeping when the row already exists, so
+        # the second click is a true no-op (mirrors the batch route's
+        # already_tagged precheck).
         already_tagged = db.conn.execute(
-            f"""SELECT 1 FROM photo_keywords
-                WHERE photo_id = ? AND keyword_id IN ({id_placeholders})
-                LIMIT 1""",
-            [photo_id] + variant_ids,
-        ).fetchone()
-        if already_tagged is not None:
+            "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+            (photo_id, kid),
+        ).fetchone() is not None
+        if already_tagged:
             return jsonify({"ok": True, "keyword_id": kid})
-
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
@@ -6030,7 +6470,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             chunk = photo_ids[i:i + batch_size]
             placeholders = ",".join("?" for _ in chunk)
             rows.extend(db.conn.execute(
-                f"""SELECT pk.photo_id, k.id, k.name, k.parent_id, k.type
+                f"""SELECT pk.photo_id, k.id, k.name, k.type
                     FROM photo_keywords pk
                     JOIN keywords k ON k.id = pk.keyword_id
                     WHERE pk.photo_id IN ({placeholders})
@@ -6041,27 +6481,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         selected_count = len(photo_ids)
         by_keyword = {}
         for row in rows:
-            match_key = keyword_match_key(row["name"])
-            if not match_key:
-                continue
-            key = (match_key, row["parent_id"], row["type"])
-            display_name = normalize_keyword_display(row["name"]) or row["name"]
-            variant_rank = (row["name"] != display_name, row["id"])
             entry = by_keyword.setdefault(
-                key,
+                row["id"],
                 {
                     "id": row["id"],
-                    "name": display_name,
+                    "name": row["name"],
                     "type": row["type"],
-                    "_rank": variant_rank,
                     "photo_ids": set(),
                 },
             )
-            if variant_rank < entry["_rank"]:
-                entry["id"] = row["id"]
-                entry["name"] = display_name
-                entry["type"] = row["type"]
-                entry["_rank"] = variant_rank
             entry["photo_ids"].add(row["photo_id"])
 
         keywords = []
@@ -6098,49 +6526,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_update_keyword(keyword_id):
         db = _get_db()
         body = request.get_json(silent=True) or {}
-        # Capture old name before update for sidecar queuing
-        new_name = body.get("name")
-        old_name = None
-        old_is_species_keyword = False
-        # Capture the pre-update stored name whenever the request could
-        # trigger a rename OR a same-slot merge. Explicit `name` submissions
-        # are the obvious case: db.update_keyword() normalizes the rename
-        # target, so a PUT of `{"name": "‘apapane"}` against an upgraded
-        # row still stored as `‘apapane` rewrites the row to `apapane` and
-        # the earlier raw-string guard would have left sidecars/curation
-        # keyed to the legacy spelling. But a TYPE-ONLY PUT can also
-        # change source-tagged photos' effective keyword name: when
-        # update_keyword finds a normalized-equal peer at the same
-        # (parent_id, effective_type), _merge_keyword_into retargets the
-        # source row's photo tags onto the peer's stored spelling and
-        # deletes the source row. Without capturing the source's
-        # pre-update state on that path too, no sidecar keyword_remove/
-        # keyword_add pair is queued for those photos and their XMP keeps
-        # exporting the source's legacy spelling indefinitely. The post-
-        # update guard below (`if old_name == new_name: old_name = None`)
-        # uses the resolved stored name, so a plain type-only PUT that
-        # doesn't hit the merge path still no-ops.
-        if 'name' in body or 'type' in body:
-            old_row = db.conn.execute(
-                """SELECT name, is_species, type
-                   FROM keywords WHERE id = ?""",
-                (keyword_id,),
-            ).fetchone()
-            if old_row:
-                old_name = old_row["name"]
-                old_is_species_keyword = (
-                    old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
-                )
-        # Snapshot the photo/workspace pairs that carry this keyword before
-        # the update. When the rename target collides with an existing peer
-        # keyword, update_keyword merges this row's photo_keywords into the
-        # peer and deletes the source, so a post-update query for pk.keyword_id
-        # = keyword_id would return nothing and the sidecar remove/add pair
-        # would never queue. Grabbing the pairs up front works for both the
-        # plain-rename and merged paths.
-        pre_affected = []
-        if old_name:
-            pre_affected = db.conn.execute(
+        # Capture old identity and tagged photos BEFORE the update: a rename
+        # or retype can merge this row into a normalized same-slot peer, in
+        # which case the original id and its photo_keywords rows are gone
+        # afterwards (update_keyword returns the surviving id).
+        old_row = db.conn.execute(
+            """SELECT name, is_species, type
+               FROM keywords WHERE id = ?""",
+            (keyword_id,),
+        ).fetchone()
+        affected = []
+        # Capture affected photos whenever a rename OR a retype is being
+        # requested: update_keyword's merge-into-peer path can move photo
+        # tags for either kind of change (a type-only PUT with an existing
+        # same-name peer under the new type moves the tagged photos onto the
+        # peer's stored spelling), and without the snapshot the
+        # keyword_remove/keyword_add sidecar queueing below iterates an
+        # empty list and XMP keeps exporting the old spelling until another
+        # edit occurs.
+        if body.get("name") or body.get("type"):
+            affected = db.conn.execute(
                 """SELECT pk.photo_id, wf.workspace_id
                    FROM photo_keywords pk
                    JOIN photos p ON p.id = pk.photo_id
@@ -6153,36 +6558,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             effective_id = db.update_keyword(keyword_id, **body)
         except ValueError as e:
             return json_error(str(e), 400)
-        # `effective_id` is the surviving keyword row: the input `keyword_id`
-        # for a plain rename, or the peer's id when update_keyword merged this
-        # row into an existing normalized-equal peer.
-        if effective_id is None:
-            effective_id = keyword_id
-        # Re-read the stored name so sidecar queue/history and highlights
-        # rename use the normalized value that update_keyword actually
-        # wrote. Without this, a rename to `‘apapane` would store the
-        # normalized `apapane` but queue the raw stray-quote value to
-        # sidecars, defeating the same-name invariant enforced on the
-        # add path.
-        if old_name:
-            stored = db.conn.execute(
-                "SELECT name FROM keywords WHERE id = ?", (effective_id,)
-            ).fetchone()
-            if stored and stored["name"]:
-                new_name = stored["name"]
-            if old_name == new_name:
-                old_name = None
-        # Queue sidecar updates only after successful DB update, for all affected workspaces
-        if old_name:
-            affected = pre_affected
-            new_row = db.conn.execute(
-                """SELECT is_species, type
-                   FROM keywords WHERE id = ?""",
-                (effective_id,),
-            ).fetchone()
+        # Queue sidecar updates only after a successful DB update, using the
+        # STORED spelling of the surviving row — update_keyword normalizes
+        # the requested name, so it can differ from the raw request value.
+        new_row = db.conn.execute(
+            """SELECT name, is_species, type
+               FROM keywords WHERE id = ?""",
+            (effective_id,),
+        ).fetchone()
+        if (
+            old_row is not None and new_row is not None
+            and old_row["name"] != new_row["name"]
+        ):
+            old_name = old_row["name"]
+            new_name = new_row["name"]
+            old_is_species_keyword = (
+                old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
+            )
             new_is_species_keyword = (
-                new_row is not None
-                and (new_row["is_species"] == 1 or new_row["type"] == "taxonomy")
+                new_row["is_species"] == 1 or new_row["type"] == "taxonomy"
             )
             if old_is_species_keyword and new_is_species_keyword:
                 pairs = [
@@ -6201,47 +6595,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
                 _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
-        # When update_keyword merged this row into a normalized-equal peer
-        # AND canonicalized the peer's stored spelling (upgraded legacy row
-        # like `‘apapane` rewritten to `apapane`), photos that were already
-        # tagged with the PEER before the merge still have sidecars keyed to
-        # the peer's legacy spelling. _normalize_keyword_row_name retargeted
-        # their pending_changes and species curation, but no new sidecar
-        # remove/add is queued for photos whose XMP was already synced —
-        # the pre_affected block above only covers photos originally tagged
-        # with the source row (keyword_id), and specifically only fires when
-        # the request included a `name` field. A type-only PUT that hits
-        # the merge path (e.g. flipping a clean general `apapane` to
-        # taxonomy while a legacy taxonomy `‘apapane` peer exists) skips
-        # that block entirely, so without this the peer's pre-existing
-        # tagged photos keep exporting the quoted spelling indefinitely.
-        peer_pre_name = getattr(effective_id, "peer_pre_name", None)
-        peer_pre_photos = getattr(effective_id, "peer_pre_photos", ())
-        if peer_pre_name and peer_pre_photos:
-            peer_new_row = db.conn.execute(
-                "SELECT name FROM keywords WHERE id = ?", (int(effective_id),)
-            ).fetchone()
-            peer_new_name = peer_new_row["name"] if peer_new_row else None
-            if peer_new_name and peer_new_name != peer_pre_name:
-                for photo_id, workspace_id in peer_pre_photos:
-                    _queue_keyword_remove(
-                        photo_id, peer_pre_name, workspace_id=workspace_id,
-                    )
-                    _queue_keyword_add(
-                        photo_id, peer_new_name, workspace_id=workspace_id,
-                    )
-        # Signal the surviving id when update_keyword merged this row into a
-        # normalized-equal peer. Without this, the keywords UI keeps mutating
-        # the requested keyword_id in place (see keywords.html renameKeyword /
-        # updateType / kwBulkApply), leaving allKeywords pointed at a keyword
-        # row the DB just deleted; subsequent rename/type/delete actions for
-        # that stale entry silently affect nothing. Callers refetch when
-        # `merged` is true.
-        return jsonify({
-            "ok": True,
-            "effective_id": effective_id,
-            "merged": effective_id != keyword_id,
-        })
+        # keywords.html's updateType/renameKeyword/bulk-apply handlers refetch
+        # only when `merged` is truthy; without it the UI keeps the deleted
+        # source id and its next edit/delete would 404 or hit the wrong row.
+        merged = effective_id != keyword_id
+        return jsonify({"ok": True, "keyword_id": effective_id, "merged": merged})
 
     @app.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
     def api_delete_keyword(keyword_id):
@@ -7179,8 +7537,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kid = keyword_row["id"]
             name = keyword_row["name"]
         else:
-            # Reject empty after normalization — see api_add_keyword.
-            if not name or not normalize_keyword_display(name):
+            if not name:
                 return json_error("photo_ids and name required")
             # Route kw_type through add_keyword so its type-reconciliation logic
             # runs (preserves existing user-typed rows; only upgrades 'general').
@@ -7191,63 +7548,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
                 else None
             )
-            kid = db.add_keyword(name, kw_type=kw_type)
-            # Re-read the stored keyword name so queue/history entries
-            # match the row actually tagged; see api_add_keyword for the
-            # full rationale (pending-change cancellation and XMP sync).
+            try:
+                kid = db.add_keyword(name, kw_type=kw_type)
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Queue/record the stored spelling (see api_add_keyword).
             stored = db.conn.execute(
                 "SELECT name FROM keywords WHERE id = ?", (kid,)
             ).fetchone()
-            if stored and stored["name"]:
+            if stored:
                 name = stored["name"]
-
-        # Expand the "already tagged" check to include every legacy row that
-        # normalizes to the same (name, parent_id, type). Mirrors the peer
-        # expansion in api_batch_keyword_remove. api_selection_keyword_suggestions
-        # collapses variants that share a match key and returns a single
-        # representative id, so an "Add to N missing" click can hit here with
-        # that one id even when some of the selected photos are tagged with a
-        # legacy peer (e.g. `‘Cardinal` alongside clean `Cardinal`). Without
-        # this expansion, tag_photo stacks the clean row on top of the legacy
-        # variant instead of canonicalizing to a single tag.
-        target_row = db.conn.execute(
-            "SELECT id, name, parent_id, type FROM keywords WHERE id = ?", (kid,)
-        ).fetchone()
-        variant_ids = [kid]
-        if target_row is not None and keyword_match_key(target_row["name"]):
-            target_norm = normalize_keyword_display(target_row["name"])
-            parent_id = target_row["parent_id"]
-            if parent_id is None:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id IS NULL
-                         AND type = ?
-                         AND id != ?""",
-                    (target_norm, target_row["type"], kid),
-                ).fetchall()
-            else:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id = ?
-                         AND type = ?
-                         AND id != ?""",
-                    (target_norm, parent_id, target_row["type"], kid),
-                ).fetchall()
-            variant_ids.extend(row["id"] for row in peer_rows)
 
         already_tagged = set()
         batch_size = 800
         for i in range(0, len(photo_ids), batch_size):
             chunk = list(photo_ids[i:i + batch_size])
-            id_placeholders = ",".join("?" for _ in variant_ids)
-            photo_placeholders = ",".join("?" for _ in chunk)
+            placeholders = ",".join("?" for _ in chunk)
             existing_rows = db.conn.execute(
-                f"""SELECT DISTINCT photo_id FROM photo_keywords
-                    WHERE keyword_id IN ({id_placeholders})
-                      AND photo_id IN ({photo_placeholders})""",
-                list(variant_ids) + chunk,
+                f"""SELECT photo_id FROM photo_keywords
+                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
+                [kid] + chunk,
             ).fetchall()
             already_tagged.update(row["photo_id"] for row in existing_rows)
         added_ids = [pid for pid in photo_ids if pid not in already_tagged]
@@ -7284,7 +7604,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("photo_ids required")
 
         keyword_row = db.conn.execute(
-            "SELECT id, name, parent_id, type FROM keywords WHERE id = ?", (keyword_id,)
+            "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
         ).fetchone()
         if keyword_row is None:
             return json_error("keyword not found", 404)
@@ -7295,83 +7615,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     f"Photo {pid} does not belong to the active workspace", 403
                 )
 
-        # Expand the target to include every legacy row that normalizes to
-        # the same (name, parent_id, type). add_keyword() collapses those to
-        # a single canonical row on new inserts, but an upgraded DB can still
-        # carry legacy variants (e.g. `‘apapane` alongside clean `apapane`).
-        # `api_selection_keyword_suggestions` groups by the same match key and
-        # returns a single representative id for the group, so a "Remove from
-        # N" click hits this endpoint with that one id even when some of the
-        # selected photos are tagged with a peer variant instead. Without
-        # this expansion, only photos carrying the exact representative id
-        # get untagged and the others keep the legacy variant.
-        target_key = keyword_match_key(keyword_row["name"])
-        variant_ids = [keyword_id]
-        if target_key:
-            parent_id = keyword_row["parent_id"]
-            if parent_id is None:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id IS NULL
-                         AND type = ?
-                         AND id != ?""",
-                    (normalize_keyword_display(keyword_row["name"]),
-                     keyword_row["type"], keyword_id),
-                ).fetchall()
-            else:
-                peer_rows = db.conn.execute(
-                    """SELECT id FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id = ?
-                         AND type = ?
-                         AND id != ?""",
-                    (normalize_keyword_display(keyword_row["name"]),
-                     parent_id, keyword_row["type"], keyword_id),
-                ).fetchall()
-            variant_ids.extend(row["id"] for row in peer_rows)
-
-        # Look up each variant's stored name so pending-change cancellation
-        # matches on the legacy value the queue was recorded under (e.g. a
-        # `keyword_add` queued as `‘Cardinal` needs a `keyword_remove` with
-        # the same spelling to cancel, not the canonical `Cardinal`).
-        variant_names = {}
-        for row in db.conn.execute(
-            f"""SELECT id, name FROM keywords
-                WHERE id IN ({",".join("?" for _ in variant_ids)})""",
-            variant_ids,
-        ).fetchall():
-            variant_names[row["id"]] = row["name"]
-
-        # Photo_ids tagged with ANY variant get an untag+remove pair. Track
-        # which specific variant each photo carried so we untag the right row.
-        tagged_by_pid = {}
+        tagged_ids = []
         batch_size = 800
         for i in range(0, len(clean_ids), batch_size):
             chunk = clean_ids[i:i + batch_size]
-            id_placeholders = ",".join("?" for _ in variant_ids)
-            photo_placeholders = ",".join("?" for _ in chunk)
+            placeholders = ",".join("?" for _ in chunk)
             rows = db.conn.execute(
-                f"""SELECT photo_id, keyword_id FROM photo_keywords
-                    WHERE keyword_id IN ({id_placeholders})
-                      AND photo_id IN ({photo_placeholders})""",
-                list(variant_ids) + chunk,
+                f"""SELECT photo_id FROM photo_keywords
+                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
+                [keyword_id] + chunk,
             ).fetchall()
-            for row in rows:
-                tagged_by_pid.setdefault(row["photo_id"], []).append(row["keyword_id"])
+            tagged_ids.extend(row["photo_id"] for row in rows)
 
-        removed_ids = [pid for pid in clean_ids if pid in tagged_by_pid]
+        tagged_set = set(tagged_ids)
+        removed_ids = [pid for pid in clean_ids if pid in tagged_set]
         name = keyword_row["name"]
         for pid in removed_ids:
-            queued_names = set()
-            for kid in tagged_by_pid[pid]:
-                db.untag_photo(pid, kid)
-                variant_name = variant_names.get(kid, name)
-                if variant_name not in queued_names:
-                    _queue_keyword_remove(pid, variant_name)
-                    queued_names.add(variant_name)
-            if name not in queued_names:
-                _queue_keyword_remove(pid, name)
+            db.untag_photo(pid, keyword_id)
+            _queue_keyword_remove(pid, name)
 
         items = [
             {"photo_id": pid, "old_value": str(keyword_id), "new_value": ""}
@@ -8110,13 +8371,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = []
         for c in collections:
             d = dict(c)
-            d["photo_count"] = db.count_collection_photos(c["id"])
+            # A single collection with an unresolvable rule must not 500 the
+            # whole list — that blanks every collection dropdown in the UI.
+            # Degrade to an unknown count and flag it so the client can show
+            # the collection instead of hiding all of them.
+            #
+            # Only rule-validation failures degrade to count_error: the pickers
+            # tell users to fix the rule, so labelling a locked/corrupt DB or a
+            # bad generated query as count_error would send them to edit rules
+            # that aren't the actual problem. ValueError covers both malformed
+            # rules (raised by _build_query_from_rules) and malformed JSON in
+            # the rules column (json.JSONDecodeError is a ValueError subclass).
+            # Anything else bubbles up as a 500 so real infra failures surface.
             try:
-                d["can_add_photos"] = _collection_accepts_manual_photos(
-                    json.loads(c["rules"])
+                d["photo_count"] = db.count_collection_photos(c["id"])
+            except ValueError:
+                app.logger.exception(
+                    "Failed to count photos for collection %s (%s)",
+                    c["id"],
+                    c["name"],
                 )
-            except (TypeError, ValueError):
+                d["photo_count"] = None
+                d["count_error"] = True
+            # Degraded rows must never advertise manual-add support: the
+            # add-to-collection modal filters only on can_add_photos, and
+            # /api/collections/<id>/add-photos calls set(ids_rule["value"])
+            # on the existing rule — which 500s on any malformed photo_ids
+            # payload (non-scalar entries, non-list value, etc.). If the
+            # rule is bad enough to fail count, it isn't safe to merge into.
+            if d.get("count_error"):
                 d["can_add_photos"] = False
+            else:
+                try:
+                    d["can_add_photos"] = _collection_accepts_manual_photos(
+                        json.loads(c["rules"])
+                    )
+                except (TypeError, ValueError):
+                    d["can_add_photos"] = False
             result.append(d)
         return jsonify(result)
 
@@ -8301,8 +8592,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
-        photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
-        total = db.count_collection_photos(collection_id)
+        # If the saved rules can't be resolved (e.g. an unknown field/op left
+        # over from an older schema), surface a 400 instead of a 500 so
+        # callers can render a real error — this is the same collection state
+        # that /api/collections flags with count_error=True.
+        try:
+            photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
+            total = db.count_collection_photos(collection_id)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
         photo_dicts = [dict(p) for p in photos]
         _attach_species(db, photo_dicts)
         _attach_species_representatives(db, photo_dicts)
@@ -8321,7 +8622,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_collection_photo_ids(collection_id):
         """Return every photo ID matching a collection."""
         db = _get_db()
-        photo_ids = db.get_collection_photo_ids(collection_id)
+        try:
+            photo_ids = db.get_collection_photo_ids(collection_id)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
         return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
 
     # -- Highlights --
@@ -8731,6 +9038,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "photos": unidentified_limited,
                 "loaded_count": len(unidentified_limited),
                 "has_more": len(unidentified_photos) > len(unidentified_limited),
+                "unanalyzed_count": _bucket_unanalyzed_count(unidentified_photos),
             },
             "folders": [
                 {"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]}
@@ -9260,247 +9568,286 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(error)
         species = body.get("species", "")
         species = species.strip() if isinstance(species, str) else ""
-        if not species:
-            return json_error("species required")
-        # Normalize species BEFORE snapshotting existing highlight/preference
-        # rows for the undo payload. add_keyword() below normalizes on insert
-        # (see line ~8255), and rename_* helpers below use the normalized
-        # name, so the "did a target-species row already exist?" queries at
-        # `WHERE species = ?` must compare on the same normalized value.
-        # Without this, a request like `‘apapane` snapshots against the raw
-        # spelling, misses an existing clean `apapane` highlight/preference
-        # row, records `dst_existed=False`, and undo then deletes the
-        # pre-existing curation row it never created. Reject inputs that
-        # normalize to empty for the same reason api_add_keyword does.
+        # Normalize up front: the curation snapshots below compare this
+        # value against stored species strings, and add_keyword would
+        # normalize on insert anyway — one spelling throughout the route.
         species = normalize_keyword_display(species)
         if not species:
             return json_error("species required")
+        # Canonicalize the submitted spelling to the final stored keyword
+        # name BEFORE the snapshot passes below. resolve_species_display_name
+        # mirrors add_keyword's two branches: preserve an existing NOCASE
+        # match, otherwise apply the species casing convention (`black
+        # phoebe` → `Black Phoebe`). Without this, the `row["species"] ==
+        # species` snapshots (hl_dst_preexisting, pref_dst_taken,
+        # rep_dst_preexisting, plus the source-side skips in the
+        # preference/rep passes) would miss pre-existing target rows for
+        # the destination species — from another keyword row, or from
+        # prediction-seeded curation with no keyword row — and record
+        # dst_existed=false; undo would then delete the user's
+        # pre-existing highlight/preference/rep.
+        species = db.resolve_species_display_name(species)
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)
 
         top_predictions = _highlight_top_predictions(db, photo_ids)
-        # Snapshot the top-prediction species per photo (lowercase). Used
-        # below in the current_species-empty filter branch to accept only
+        # Snapshot the top-prediction species per photo, keyed by
+        # keyword_match_key (SQLite's ASCII-only NOCASE fold). Used below
+        # in the current_species-empty filter branch to accept only
         # curation whose old species matches an active prediction — see
         # the prediction-only relabel scenario in
         # test_highlights_relabel_prediction_only_undo_restores_curation.
+        # keyword_match_key (not Python's str.lower()) matches
+        # add_keyword's SQLite dedupe, so `Éclair` vs `éclair` — which
+        # SQLite/add_keyword keep distinct — stay distinct here too;
+        # otherwise a stale curation row for one would fold onto the
+        # other on relabel.
         predicted_species_by_pid = {}
         for pid_pred, pred_row in top_predictions.items():
             pred_species = pred_row["species"] if pred_row else None
             if pred_species:
-                predicted_species_by_pid.setdefault(pid_pred, set()).add(
-                    keyword_match_key(pred_species)
-                )
+                key = keyword_match_key(pred_species)
+                if key:
+                    predicted_species_by_pid.setdefault(pid_pred, set()).add(key)
         ws_id = db._ws_id()
+        # Chunk both lookups: photo_ids has no upstream cap
+        # (_parse_highlight_photo_ids just parses the list), so a bulk
+        # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
+        # on the legacy builds this file already guards against.
+
+        # Snapshot each photo's current taxonomy keywords before the relabel
+        # touches them. Used to skip stale curation rows for species the
+        # photo no longer carries across all three curation tables
+        # (species_highlights, photo_preferences, species_representatives):
+        # untag_photo does not clear any of them, so a photo can retain a
+        # curation row for species A after that keyword was removed. Without
+        # this filter, relabeling the photo's current species B→C would
+        # sweep the stale A rows into A→C renames — losing the preserved A
+        # state and making C look manually selected.
+        current_species_by_pid = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT pk.photo_id, k.name
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE pk.photo_id IN ({placeholders})
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                key = keyword_match_key(row["name"])
+                if key:
+                    current_species_by_pid.setdefault(row["photo_id"], set()).add(key)
+
+        def _accept_curation_source(pid, old_species_name):
+            """Shared filter for the highlight, preference, and rep passes.
+
+            With any current taxonomy keywords, only migrate curation for
+            species the photo currently carries. Without any taxonomy —
+            the prediction-only relabel path (``keyword_add`` instead of
+            ``species_replace``) — only migrate curation whose species
+            matches an active prediction on the photo. That preserves the
+            legitimate prediction-species migration exercised by
+            ``test_highlights_relabel_prediction_only_undo_restores_curation``
+            while blocking stale curation rows for species that were
+            tagged and later untagged.
+
+            Keyed by keyword_match_key (see the snapshot above): SQLite's
+            ASCII-only NOCASE keeps `Éclair` and `éclair` distinct as
+            separate keyword rows, and str.lower() folds them together —
+            which would let a stale `éclair` curation row migrate onto a
+            photo still carrying `Éclair`.
+            """
+            old_key = keyword_match_key(old_species_name)
+            if not old_key:
+                return False
+            current = current_species_by_pid.get(pid)
+            if current:
+                return old_key in current
+            predicted = predicted_species_by_pid.get(pid) or set()
+            return old_key in predicted
+
+        highlight_renames = {}
+        hl_prev_by_pid = {}
+        # Photos that already had a `(species=<target>, photo_id)` row in
+        # species_highlights before the relabel. rename_species_highlights_species
+        # skips inserting a duplicate for these, so the destination row is
+        # pre-existing and undo must not delete it.
+        hl_dst_preexisting = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id, rank FROM species_highlights
+                    WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
+                (ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    hl_dst_preexisting.add(row["photo_id"])
+                    continue
+                if not _accept_curation_source(
+                    row["photo_id"], old_species_name
+                ):
+                    continue
+                highlight_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                # Snapshot the original rank so undo can restore each
+                # highlighted photo at its original position instead of
+                # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
+                hl_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "species": old_species_name,
+                    "rank": row["rank"],
+                })
+        # Backfill dst_existed onto each entry now that the target-species
+        # pass has finished (row order within the query is unspecified).
+        for pid, entries in hl_prev_by_pid.items():
+            dst = pid in hl_dst_preexisting
+            for entry in entries:
+                entry["dst_existed"] = dst
+        preference_renames = {}
+        pref_prev_by_pid = {}
+        # Purposes that already have a row at (new_species, purpose) — for
+        # any photo. rename_photo_preferences_species uses INSERT OR IGNORE,
+        # so when the destination slot is already taken (either by this
+        # photo or a different one), the relabel does not create a new
+        # destination row for this photo and undo must not attempt to
+        # delete it. Un-gating the old-species restore from a destination
+        # row lookup lets undo recover representatives even when the
+        # relabel collided with another photo holding the slot.
+        pref_dst_taken = {
+            r["purpose"] for r in db.conn.execute(
+                """SELECT purpose FROM photo_preferences
+                   WHERE workspace_id = ? AND species = ?
+                     AND purpose IN (
+                         'species_representative', 'life_list', 'highlights'
+                     )""",
+                (ws_id, species),
+            ).fetchall()
+        }
+        # Photos that already had a (species=<target>, photo_id) row in
+        # species_representatives before the relabel.
+        # rename_species_representatives_species uses INSERT OR IGNORE, so
+        # when the destination rep row is already present the relabel does
+        # not create a new one and undo must not delete it. Applies to
+        # both preference-covered moves (via pref_prev.rep_dst_existed
+        # below) and rep-only moves (via rep_prev.dst_existed).
+        rep_dst_preexisting = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT photo_id FROM species_representatives
+                    WHERE species = ? AND photo_id IN ({placeholders})""",
+                (species, *chunk),
+            ).fetchall():
+                rep_dst_preexisting.add(row["photo_id"])
+        # Snapshot the original selected_order for every existing
+        # species_representatives row on the retagged photos. Undo restores
+        # each row at its captured order rather than the fresh MAX+1 that
+        # _set_global_species_representative would assign — so undoing a
+        # relabel of a secondary representative does not promote it above
+        # the pre-existing primary for that species.
+        rep_selected_order_by_pid_species = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT species, photo_id, selected_order
+                    FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall():
+                rep_selected_order_by_pid_species[
+                    (row["photo_id"], row["species"])
+                ] = row["selected_order"]
+        pref_covered_by_pid_species = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id, purpose FROM photo_preferences
+                    WHERE workspace_id = ?
+                      AND photo_id IN ({placeholders})
+                      AND purpose IN (
+                          'species_representative', 'life_list', 'highlights'
+                      )""",
+                (ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    continue
+                if not _accept_curation_source(
+                    row["photo_id"], old_species_name
+                ):
+                    continue
+                preference_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                pref_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "purpose": row["purpose"],
+                    "species": old_species_name,
+                    "dst_existed": row["purpose"] in pref_dst_taken,
+                    "rep_dst_existed": row["photo_id"] in rep_dst_preexisting,
+                    "rep_selected_order": rep_selected_order_by_pid_species.get(
+                        (row["photo_id"], old_species_name)
+                    ),
+                })
+                pref_covered_by_pid_species.add(
+                    (row["photo_id"], old_species_name)
+                )
+        # Global species_representatives moves. Representatives are global
+        # (no workspace column), so a photo can carry a
+        # (species, photo_id) row picked from a different workspace with
+        # no matching photo_preferences row in the active workspace. In
+        # that case the preference-rename pass above would miss it, and
+        # the retag would strand the representative under the old species
+        # name — leaving both species without a representative. Query
+        # species_representatives directly and enqueue any rep-only moves
+        # the preference pass didn't already cover. The same
+        # current-species filter applies here (see the snapshot comment
+        # above).
+        representative_renames = {}
+        rep_prev_by_pid = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                pid = row["photo_id"]
+                if old_species_name == species:
+                    continue
+                # rename_photo_preferences_species already migrates
+                # species_representatives for pids in preference_renames,
+                # so skip anything the preference pass will cover.
+                if (pid, old_species_name) in pref_covered_by_pid_species:
+                    continue
+                if not _accept_curation_source(pid, old_species_name):
+                    continue
+                representative_renames.setdefault(old_species_name, []).append(pid)
+                rep_prev_by_pid.setdefault(pid, []).append({
+                    "species": old_species_name,
+                    "dst_existed": pid in rep_dst_preexisting,
+                    "selected_order": rep_selected_order_by_pid_species.get(
+                        (pid, old_species_name)
+                    ),
+                })
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
-            # Re-read the stored keyword name so subsequent queue/history
-            # entries, highlight/preference renames, the curation snapshots
-            # below, and the "did this photo already carry the target
-            # species?" comparison all reflect the row actually tagged.
-            # Without this, `‘apapane` from the request tags the normalized
-            # `apapane` row but queues the raw stray-quote value for XMP
-            # sync, and the old-name comparison below spuriously sees
-            # `apapane` (stored on the photo) as different from `‘apapane`
-            # (request), producing a remove/add pair that rewrites the
-            # sidecar to the stray-quote spelling. Same rationale as
-            # api_add_keyword / api_batch_keyword.
+            # Use the stored spelling from here on: add_keyword applies the
+            # species casing convention, so it can differ from the request
+            # value, and the queued sidecar changes / curation renames /
+            # history payload must match the row actually tagged.
             stored = db.conn.execute(
                 "SELECT name FROM keywords WHERE id = ?", (kid,)
             ).fetchone()
             if stored and stored["name"]:
                 species = stored["name"]
-            # Chunk both lookups: photo_ids has no upstream cap
-            # (_parse_highlight_photo_ids just parses the list), so a bulk
-            # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
-            # on the legacy builds this file already guards against.
-            # Snapshots MUST run after the stored-name resolution above so
-            # `hl_dst_preexisting` / `pref_dst_taken` compare against the
-            # same species name the rename_* helpers will insert under.
-            # Without this ordering, add_keyword resolving to a legacy
-            # edge-quote row (stored name `‘apapane` when the request was
-            # `apapane`) would leave the snapshots computed under the
-            # normalized `apapane`, mark `dst_existed=False` for photos
-            # that already carry a `‘apapane` highlight/preference row,
-            # and the undo path would then delete those pre-existing rows
-            # as if this relabel had created them.
-            # Snapshot each photo's current taxonomy keywords before the
-            # relabel touches them. Used to skip stale curation rows for
-            # species the photo no longer carries across all three curation
-            # tables (species_highlights, photo_preferences,
-            # species_representatives). Compare with the normalized keyword
-            # key so legacy edge-quote spellings line up with normalized DB
-            # species names.
-            current_species_by_pid = {}
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                rows = db.conn.execute(
-                    f"""SELECT pk.photo_id, k.name
-                        FROM photo_keywords pk
-                        JOIN keywords k ON k.id = pk.keyword_id
-                        WHERE pk.photo_id IN ({placeholders})
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')""",
-                    chunk,
-                ).fetchall()
-                for row in rows:
-                    current_species_by_pid.setdefault(row["photo_id"], set()).add(
-                        keyword_match_key(row["name"])
-                    )
-
-            def _accept_curation_source(pid, old_species_name):
-                """Return whether old curation should move to the new species."""
-                old_key = keyword_match_key(old_species_name)
-                current = current_species_by_pid.get(pid)
-                if current:
-                    return old_key in current
-                predicted = predicted_species_by_pid.get(pid) or set()
-                return old_key in predicted
-
-            highlight_renames = {}
-            hl_prev_by_pid = {}
-            # Photos that already had a `(species=<target>, photo_id)` row in
-            # species_highlights before the relabel. rename_species_highlights_species
-            # skips inserting a duplicate for these, so the destination row is
-            # pre-existing and undo must not delete it.
-            hl_dst_preexisting = set()
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                rows = db.conn.execute(
-                    f"""SELECT species, photo_id, rank FROM species_highlights
-                        WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
-                    (ws_id, *chunk),
-                ).fetchall()
-                for row in rows:
-                    old_species_name = row["species"]
-                    if old_species_name == species:
-                        hl_dst_preexisting.add(row["photo_id"])
-                        continue
-                    if not _accept_curation_source(row["photo_id"], old_species_name):
-                        continue
-                    highlight_renames.setdefault(old_species_name, []).append(
-                        row["photo_id"]
-                    )
-                    # Snapshot the original rank so undo can restore each
-                    # highlighted photo at its original position instead of
-                    # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
-                    hl_prev_by_pid.setdefault(row["photo_id"], []).append({
-                        "species": old_species_name,
-                        "rank": row["rank"],
-                    })
-            # Backfill dst_existed onto each entry now that the target-species
-            # pass has finished (row order within the query is unspecified).
-            for pid, entries in hl_prev_by_pid.items():
-                dst = pid in hl_dst_preexisting
-                for entry in entries:
-                    entry["dst_existed"] = dst
-            preference_renames = {}
-            pref_prev_by_pid = {}
-            # Purposes that already have a row at (new_species, purpose) — for
-            # any photo. rename_photo_preferences_species uses INSERT OR IGNORE,
-            # so when the destination slot is already taken (either by this
-            # photo or a different one), the relabel does not create a new
-            # destination row for this photo and undo must not attempt to
-            # delete it. Un-gating the old-species restore from a destination
-            # row lookup lets undo recover representatives even when the
-            # relabel collided with another photo holding the slot.
-            pref_dst_taken = {
-                r["purpose"] for r in db.conn.execute(
-                    """SELECT purpose FROM photo_preferences
-                       WHERE workspace_id = ? AND species = ?
-                         AND purpose IN (
-                             'species_representative', 'life_list', 'highlights'
-                         )""",
-                    (ws_id, species),
-                ).fetchall()
-            }
-            # Photos that already had a (species=<target>, photo_id) row in
-            # species_representatives before the relabel.
-            rep_dst_preexisting = set()
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                for row in db.conn.execute(
-                    f"""SELECT photo_id FROM species_representatives
-                        WHERE species = ? AND photo_id IN ({placeholders})""",
-                    (species, *chunk),
-                ).fetchall():
-                    rep_dst_preexisting.add(row["photo_id"])
-            # Snapshot original representative order so undo restores
-            # secondary representatives without promoting them.
-            rep_selected_order_by_pid_species = {}
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                for row in db.conn.execute(
-                    f"""SELECT species, photo_id, selected_order
-                        FROM species_representatives
-                        WHERE photo_id IN ({placeholders})""",
-                    chunk,
-                ).fetchall():
-                    rep_selected_order_by_pid_species[
-                        (row["photo_id"], row["species"])
-                    ] = row["selected_order"]
-            pref_covered_by_pid_species = set()
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                rows = db.conn.execute(
-                    f"""SELECT species, photo_id, purpose FROM photo_preferences
-                        WHERE workspace_id = ?
-                          AND photo_id IN ({placeholders})
-                          AND purpose IN (
-                              'species_representative', 'life_list', 'highlights'
-                          )""",
-                    (ws_id, *chunk),
-                ).fetchall()
-                for row in rows:
-                    old_species_name = row["species"]
-                    if old_species_name == species:
-                        continue
-                    if not _accept_curation_source(row["photo_id"], old_species_name):
-                        continue
-                    preference_renames.setdefault(old_species_name, []).append(
-                        row["photo_id"]
-                    )
-                    pref_prev_by_pid.setdefault(row["photo_id"], []).append({
-                        "purpose": row["purpose"],
-                        "species": old_species_name,
-                        "dst_existed": row["purpose"] in pref_dst_taken,
-                        "rep_dst_existed": row["photo_id"] in rep_dst_preexisting,
-                        "rep_selected_order": rep_selected_order_by_pid_species.get(
-                            (row["photo_id"], old_species_name)
-                        ),
-                    })
-                    pref_covered_by_pid_species.add(
-                        (row["photo_id"], old_species_name)
-                    )
-            # Global species_representatives moves can exist without matching
-            # active-workspace photo_preferences rows, so migrate rep-only
-            # rows separately under the same curation-source filter.
-            representative_renames = {}
-            rep_prev_by_pid = {}
-            for chunk in _chunked(photo_ids):
-                placeholders = ",".join("?" for _ in chunk)
-                rows = db.conn.execute(
-                    f"""SELECT species, photo_id FROM species_representatives
-                        WHERE photo_id IN ({placeholders})""",
-                    chunk,
-                ).fetchall()
-                for row in rows:
-                    old_species_name = row["species"]
-                    pid = row["photo_id"]
-                    if old_species_name == species:
-                        continue
-                    if (pid, old_species_name) in pref_covered_by_pid_species:
-                        continue
-                    if not _accept_curation_source(pid, old_species_name):
-                        continue
-                    representative_renames.setdefault(old_species_name, []).append(pid)
-                    rep_prev_by_pid.setdefault(pid, []).append({
-                        "species": old_species_name,
-                        "dst_existed": pid in rep_dst_preexisting,
-                        "selected_order": rep_selected_order_by_pid_species.get(
-                            (pid, old_species_name)
-                        ),
-                    })
             items = []
             rejected_prediction_ids = []
             has_old_species = False
@@ -9524,12 +9871,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     has_old_species = True
                 for old in old_rows:
                     db.untag_photo(pid, old["id"], _commit=False)
-                    # Compare by id: the untagged row is the SAME keyword as
-                    # the target when a photo already carries the new
-                    # species (e.g. a re-confirm). Comparing names would
-                    # miss a case where `species` normalized to the stored
-                    # name but the comparison is now against a different
-                    # spelling; comparing ids is exact.
+                    # Compare by keyword id: SQLite's NOCASE is ASCII-only,
+                    # so `Éclair` and `éclair` live as distinct rows with
+                    # distinct ids, but Python `.lower()` folds them equal.
+                    # A name-based skip would suppress the remove for a
+                    # different SQLite row and leave the old spelling in
+                    # the sidecar after the next XMP sync (add_keyword above
+                    # normalized `species` to the row it will tag, so `kid`
+                    # is authoritative).
                     if old["id"] != kid:
                         _queue_keyword_remove(
                             pid, old["name"], workspace_id=ws_id, _commit=False,
@@ -9737,37 +10086,158 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result["folders"] = [dict(f) for f in db.get_workspace_folder_roots(ws["id"])]
         return jsonify(result)
 
-    def _validate_workspace_config_overrides(overrides):
+    # ---- Saved processes (user-editable process presets) ----------------
+
+    def _coerce_process_fields(body, *, require_name):
+        """Return ``(kwargs, error_string)`` for create/update.
+
+        Only keys present in ``body`` are returned (so the update path treats
+        an omitted key as "leave unchanged"). Flags must be real booleans and
+        ``review_mode`` must be ``None`` or ``"species"`` — a bad value 400s
+        here rather than being silently coerced.
+        """
+        kwargs = {}
+        if require_name or "name" in body:
+            name = body.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return None, "name is required"
+            kwargs["name"] = name
+        for key in (
+            "skip_classify", "skip_extract_masks", "skip_eye_keypoints",
+            "skip_regroup", "miss_enabled",
+        ):
+            if key in body:
+                if not isinstance(body[key], bool):
+                    return None, f"{key} must be a boolean"
+                kwargs[key] = body[key]
+        if "review_mode" in body:
+            rm = body["review_mode"]
+            if rm is not None and rm != "species":
+                return None, "review_mode must be 'species' or null"
+            kwargs["review_mode"] = rm
+        return kwargs, None
+
+    @app.route("/api/processes")
+    def api_list_processes():
+        """List all saved processes (global; ordered for the pickers)."""
+        db = _get_db()
+        return jsonify(db.get_saved_processes())
+
+    @app.route("/api/processes", methods=["POST"])
+    def api_create_process():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        kwargs, err = _coerce_process_fields(body, require_name=True)
+        if err is not None:
+            return json_error(err)
+        try:
+            pid = db.create_saved_process(**kwargs)
+        except ValueError as e:
+            return json_error(str(e))
+        return jsonify(db.get_saved_process(pid))
+
+    @app.route("/api/processes/<int:process_id>", methods=["PUT"])
+    def api_update_process(process_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        kwargs, err = _coerce_process_fields(body, require_name=False)
+        if err is not None:
+            return json_error(err)
+        try:
+            existed = db.update_saved_process(process_id, **kwargs)
+        except ValueError as e:
+            return json_error(str(e))
+        if not existed:
+            return json_error("process not found", 404)
+        return jsonify(db.get_saved_process(process_id))
+
+    @app.route("/api/processes/<int:process_id>", methods=["DELETE"])
+    def api_delete_process(process_id):
+        db = _get_db()
+        if not db.delete_saved_process(process_id):
+            return json_error("process not found", 404)
+        # Per-workspace default pointers are nulled inside the DB call. Clear
+        # the app-wide default too if it pointed here (config-file I/O the DB
+        # layer intentionally leaves to the caller). Use the *raw* on-disk
+        # config (not ``cfg.load()``) so we don't fossilize every current
+        # DEFAULTS value as an explicit user override — a future change to
+        # DEFAULTS would otherwise be invisible on this install.
+        import config as cfg
+
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            pipeline_raw = raw.get("pipeline")
+            if (
+                isinstance(pipeline_raw, dict)
+                and pipeline_raw.get("default_process_id") == process_id
+            ):
+                pipeline_raw["default_process_id"] = None
+                cfg.save(raw)
+        return jsonify({"ok": True})
+
+    def _validate_workspace_config_overrides(overrides, db):
         """Validate ``config_overrides`` before persist. Returns an error
         response (from ``json_error``) on rejection, or None on success.
 
         Shared by POST /api/workspaces and PUT /api/workspaces/<id> so a
-        workspace created with a bogus ``pipeline.default_strategy`` can't
-        later feed the import/process settings or chaining hook an unknown
-        strategy — the update path already rejects it and the create path
+        workspace created with a bogus ``pipeline.default_process_id`` can't
+        later feed the import/process settings or chaining hook a nonexistent
+        process — the update path already rejects it and the create path
         must too, otherwise the create endpoint becomes a validation bypass.
         """
         # Anything else would be persisted as-is and crash the labels
         # accessors that expect a JSON object (or NULL) in this column.
         if overrides is not None and not isinstance(overrides, dict):
             return json_error("config_overrides must be an object or null")
-        # pipeline.default_strategy: None means "no automatic processing
-        # after import" (the chaining hook short-circuits on it) and is
-        # accepted as-is; a string must name a real strategy. The string
-        # "none" is NOT the null sentinel — one vocabulary with
-        # /api/jobs/pipeline, which also rejects it.
         pipeline_overrides = (overrides or {}).get("pipeline")
+        # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
+        # name) to ``pipeline.default_process_id`` before existence checks.
+        # An older client (or a workspace payload restored from a pre-migration
+        # backup) that still sends the legacy key would otherwise fall through
+        # this validator — non-schema pipeline keys are stored as-is — and
+        # `get_effective_config()` would then see `default_process_id: null`,
+        # so imports read only the new key and silently run import-only
+        # instead of the requested after-import process. Mirror the
+        # /api/settings/import translation exactly: unknown/removed names map
+        # to null (import only). If both keys are present the new one wins
+        # and the legacy key is dropped so it can't resurface on a later read.
         if (
             isinstance(pipeline_overrides, dict)
             and "default_strategy" in pipeline_overrides
-            and pipeline_overrides["default_strategy"] is not None
         ):
-            from process_strategies import resolve_strategy
+            import process_strategies as ps
 
-            try:
-                resolve_strategy(pipeline_overrides["default_strategy"])
-            except ValueError as e:
-                return json_error(str(e))
+            legacy = pipeline_overrides.pop("default_strategy")
+            if "default_process_id" not in pipeline_overrides:
+                seed_name = (
+                    ps.LEGACY_STRATEGY_NAMES.get(legacy)
+                    if isinstance(legacy, str) else None
+                )
+                translated_pid = None
+                if seed_name is not None:
+                    match = next(
+                        (
+                            p for p in db.get_saved_processes()
+                            if p["name"] == seed_name
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        translated_pid = match["id"]
+                pipeline_overrides["default_process_id"] = translated_pid
+        # pipeline.default_process_id: None means "no automatic processing
+        # after import" (the chaining hook short-circuits on it) and is
+        # accepted as-is; a non-null value must name a real saved_processes
+        # row so the chaining hook never fails hours later on a dangling id.
+        if (
+            isinstance(pipeline_overrides, dict)
+            and pipeline_overrides.get("default_process_id") is not None
+        ):
+            pid = pipeline_overrides["default_process_id"]
+            if not isinstance(pid, int) or isinstance(pid, bool):
+                return json_error("default_process_id must be an integer or null")
+            if db.get_saved_process(pid) is None:
+                return json_error(f"unknown process id: {pid}")
         return None
 
     @app.route("/api/workspaces", methods=["POST"])
@@ -9778,7 +10248,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name:
             return json_error("Name is required")
         config_overrides = body.get("config_overrides")
-        err = _validate_workspace_config_overrides(config_overrides)
+        err = _validate_workspace_config_overrides(config_overrides, db)
         if err is not None:
             return err
         try:
@@ -9817,7 +10287,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kwargs["name"] = body["name"]
         if "config_overrides" in body:
             overrides = body["config_overrides"]
-            err = _validate_workspace_config_overrides(overrides)
+            err = _validate_workspace_config_overrides(overrides, db)
             if err is not None:
                 return err
             kwargs["config_overrides"] = overrides
@@ -10885,12 +11355,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             if species:
                 kid = db.add_keyword(species, is_species=True)
-                # Re-read the stored keyword name so the sidecar queue and
-                # history record the row actually tagged. See api_add_keyword
-                # for the full rationale: a request like `‘apapane` tags the
-                # normalized `apapane` row but would otherwise queue the raw
-                # stray-quote spelling for XMP, and a later delete of the
-                # stored keyword wouldn't cancel the pending add.
+                # Queue/record the stored spelling (see api_add_keyword).
                 stored = db.conn.execute(
                     "SELECT name FROM keywords WHERE id = ?", (kid,)
                 ).fetchone()
@@ -11498,7 +11963,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if key in ("keyboard_shortcuts", "remote_targets"):
                     continue
                 if key in cfg.DEFAULTS:
-                    current[key] = body[key]
+                    # Deep-merge for nested-dict config sections so a curated
+                    # payload that only ships a subset of keys (settings.html's
+                    # saveConfig posts a ``pipeline`` block with just the
+                    # weights/miss/eye sliders it renders) doesn't wipe the
+                    # keys it didn't include. Without this, the global
+                    # ``pipeline.default_process_id`` would silently reset to
+                    # null on every autosave and workspaces inheriting it
+                    # would go back to import-only.
+                    if (
+                        isinstance(cfg.DEFAULTS[key], dict)
+                        and isinstance(body[key], dict)
+                        and isinstance(current.get(key), dict)
+                    ):
+                        current[key] = cfg._deep_merge(current[key], body[key])
+                    else:
+                        current[key] = body[key]
+            # default_process_id points into saved_processes; the deep-merge
+            # above can carry a stale or foreign id into the global config.
+            # Reject it here like the settings PATCH/import paths, else
+            # workspaces inheriting this global default hit "unknown process
+            # id" in _validate_after_import on their next import instead of
+            # starting it.
+            pipeline_current = current.get("pipeline")
+            if isinstance(pipeline_current, dict):
+                pid = pipeline_current.get("default_process_id")
+                if pid is not None:
+                    if not isinstance(pid, int) or isinstance(pid, bool):
+                        return json_error(
+                            "pipeline.default_process_id must be an integer "
+                            "or null", status=400,
+                        )
+                    if _get_db().get_saved_process(pid) is None:
+                        return json_error(
+                            f"unknown process id: {pid}", status=400
+                        )
             # Apply HF token to environment immediately
             hf_token = current.get("hf_token", "")
             if hf_token:
@@ -11518,11 +12017,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Return the SCHEMA dict and the ordered category list.
 
         Consumed by the schema-rendered settings UI to generate widgets.
+
+        ``pipeline.default_process_id`` is stored/validated as an ``int``
+        (config_schema is DB-agnostic), but the widget should be a picker over
+        the live saved-process list. Present it here as a dynamic ``enum``
+        without mutating the module-level SCHEMA: shallow-copy the dict, swap
+        that one entry, and inject the current processes as enum/enum_labels.
         """
         import config_schema as schema
 
+        db = _get_db()
+        out = dict(schema.SCHEMA)
+        spec = dict(out.get("pipeline.default_process_id", {}))
+        if spec:
+            procs = db.get_saved_processes()
+            spec["type"] = "enum"
+            # Return numeric ids so the settings renderer, which selects the
+            # active option via strict equality against the effective value,
+            # matches. The stored/effective value is an ``int`` (validated by
+            # the static ``int`` spec), so string-typed enum values would
+            # never match and the picker would silently fall through to the
+            # nullable "Import only" option, misrepresenting an active
+            # default and resetting it on the next save. <option> values in
+            # the DOM still serialize to strings; the PATCH endpoint coerces
+            # them back to int via the static int spec on the way in.
+            spec["enum"] = [p["id"] for p in procs]
+            spec["enum_labels"] = {p["id"]: p["name"] for p in procs}
+            out["pipeline.default_process_id"] = spec
         return jsonify({
-            "schema": schema.SCHEMA,
+            "schema": out,
             "categories": list(schema.CATEGORIES),
         })
 
@@ -11655,6 +12178,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except schema.ValidationError as e:
             return json_error(str(e), status=400)
 
+        # default_process_id points into saved_processes; config_schema only
+        # int-coerces it, so validate existence here too (mirrors the
+        # workspace PATCH and _validate_workspace_config_overrides). Without
+        # this, a stale global default lets workspaces that inherit it hit the
+        # import endpoints' "unknown process id" wall and fail to auto-process.
+        if (
+            key == "pipeline.default_process_id"
+            and value is not None
+            and _get_db().get_saved_process(value) is None
+        ):
+            return json_error(f"unknown process id: {value}", status=400)
+
         with _settings_write_lock:
             raw = _read_raw_config_file()
             schema.set_dotted(raw, key, value)
@@ -11721,6 +12256,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), status=400)
 
         db = _get_db()
+        # default_process_id is a pointer into saved_processes: config_schema
+        # only coerces it to int/null, so existence is checked here against the
+        # DB (mirrors _validate_workspace_config_overrides).
+        if (
+            key == "pipeline.default_process_id"
+            and value is not None
+            and db.get_saved_process(value) is None
+        ):
+            return json_error(f"unknown process id: {value}", status=400)
         with _settings_write_lock:
             overrides = _read_workspace_overrides(db)
             schema.set_dotted(overrides, key, value)
@@ -11753,6 +12297,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         raw = _read_raw_config_file()
         raw.pop("_migrations_applied", None)
+        # ``pipeline.default_process_id`` points into ``saved_processes``,
+        # whose rows are DB-local — the ids don't transfer across databases.
+        # If the same integer id happens to exist in the target DB it points
+        # at a different process; the seed ids 1-4 make this collision
+        # common. Emit the current process name AND its full flag snapshot
+        # alongside the id as a portable identity so ``/api/settings/import``
+        # can verify the target DB's same-named row means the same thing.
+        # Name alone is not enough — process names are user-editable and two
+        # databases can end up with matching names on rows that differ in
+        # flags (renamed customs, edited seeds, unrelated customs that just
+        # happen to share a label). Importing a foreign backup would then
+        # silently repoint the after-import default at a divergent process.
+        # The extra keys live in the exported JSON only; the raw config file
+        # itself is never rewritten with them.
+        pipeline_raw = raw.get("pipeline")
+        if isinstance(pipeline_raw, dict):
+            pid = pipeline_raw.get("default_process_id")
+            if isinstance(pid, int):
+                match = _get_db().get_saved_process(pid)
+                if match is not None:
+                    import process_strategies as ps
+
+                    pipeline_raw["default_process_name"] = match["name"]
+                    pipeline_raw["default_process_flags"] = {
+                        k: match[k] for k in ps.FLAG_FIELDS
+                    }
         body = json.dumps(raw, indent=2)
         today = _datetime.date.today().isoformat()
         resp = make_response(body)
@@ -11787,6 +12357,88 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(payload, dict):
             return json_error("payload must be a JSON object", status=400)
 
+        # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
+        # name) to the current ``pipeline.default_process_id`` before schema
+        # validation runs. Startup migration does the same for
+        # ~/.vireo/config.json, but importing an older settings backup would
+        # otherwise write the legacy key through as a non-schema value (the
+        # import endpoints only read ``default_process_id``) and silently fall
+        # back to import-only until a restart. Mirror the migration's mapping
+        # exactly: unknown/removed legacy names -> null (import only). If both
+        # keys are present (e.g. a hand-edited backup), the new key wins and
+        # the legacy key is dropped so it can't reappear on a later export.
+        pipeline_payload = payload.get("pipeline")
+        if (
+            isinstance(pipeline_payload, dict)
+            and "default_strategy" in pipeline_payload
+        ):
+            import process_strategies as ps
+
+            legacy = pipeline_payload.pop("default_strategy")
+            if "default_process_id" not in pipeline_payload:
+                seed_name = (
+                    ps.LEGACY_STRATEGY_NAMES.get(legacy)
+                    if isinstance(legacy, str) else None
+                )
+                translated_pid = None
+                if seed_name is not None:
+                    match = next(
+                        (
+                            p for p in _get_db().get_saved_processes()
+                            if p["name"] == seed_name
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        translated_pid = match["id"]
+                pipeline_payload["default_process_id"] = translated_pid
+
+        # Translate the portable ``pipeline.default_process_name`` (emitted by
+        # /api/settings/export alongside the id) to the target DB's id.
+        # ``saved_processes`` rows are DB-local — the raw id doesn't transfer
+        # across databases (seed ids 1-4 collide, custom ids collide by
+        # chance), so a foreign backup that only carried ``default_process_id``
+        # would silently point at whatever unrelated row happens to share that
+        # id. Match by name AND by full flag snapshot when the exporter emits
+        # ``default_process_flags``: the name alone is not a stable identity
+        # (users rename processes, unrelated custom processes across DBs can
+        # share a label, and even a seed named "Full" may have been edited on
+        # one side). If the exporter didn't ship flags (older backup), fall
+        # back to name-only match. Any mismatch — no name row, no flag-equal
+        # row, or the flags entry is malformed — resolves to null (import
+        # only) instead of silently activating a divergent process. The name
+        # and flag fields are stripped from the payload so they don't persist
+        # to ~/.vireo/config.json as non-schema keys.
+        if isinstance(pipeline_payload, dict) and (
+            "default_process_name" in pipeline_payload
+            or "default_process_flags" in pipeline_payload
+        ):
+            import process_strategies as ps
+
+            name_val = pipeline_payload.pop("default_process_name", None)
+            flags_val = pipeline_payload.pop("default_process_flags", None)
+            if name_val is None:
+                pipeline_payload["default_process_id"] = None
+            elif isinstance(name_val, str):
+                candidates = [
+                    p for p in _get_db().get_saved_processes()
+                    if p["name"] == name_val
+                ]
+                translated_pid = None
+                if isinstance(flags_val, dict):
+                    for cand in candidates:
+                        if all(
+                            cand.get(k) == flags_val.get(k)
+                            for k in ps.FLAG_FIELDS
+                        ):
+                            translated_pid = cand["id"]
+                            break
+                elif candidates:
+                    translated_pid = candidates[0]["id"]
+                pipeline_payload["default_process_id"] = translated_pid
+            else:
+                pipeline_payload["default_process_id"] = None
+
         # Iterate the schema directly rather than relying on flatten() — empty
         # objects at schema leaves (e.g. {"classification_threshold": {}}) flatten
         # to nothing and would otherwise be written as-is, replacing a numeric
@@ -11816,6 +12468,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 schema.set_dotted(payload, schema_key, coerced)
             except schema.ValidationError as e:
                 errors[schema_key] = str(e)
+
+        # default_process_id points into saved_processes; config_schema only
+        # coerces it to int/null. An imported config carrying an id from
+        # another DB — or a stale id after a process was deleted — would
+        # silently write through here and then hit the "unknown process id"
+        # 400 at every import that inherits this global default. Mirror the
+        # global PATCH check so the failure surfaces at the import layer.
+        pid_key = "pipeline.default_process_id"
+        if pid_key not in errors:
+            pid_val = schema.get_dotted(payload, pid_key, default=_MISSING)
+            if (
+                pid_val is not _MISSING
+                and pid_val is not None
+                and _get_db().get_saved_process(pid_val) is None
+            ):
+                errors[pid_key] = f"unknown process id: {pid_val}"
 
         # Structured non-schema keys still need shape validation, otherwise a
         # malformed payload would write through to the file and crash
@@ -12312,6 +12980,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return jsonify({"opened": len(file_paths)})
 
+    def _storage_masks_data(db):
+        """Build the shared mask-storage payload once per storage refresh."""
+        import config as cfg
+
+        # This is a global view, so use the most permissive confidence floor
+        # across workspaces. The stale set must not change with active workspace.
+        min_detector_conf = db.min_detector_confidence_across_workspaces(
+            cfg.load()
+        )
+        variants = db.mask_variants_summary()
+        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
+        return {
+            "variants": variants,
+            "total_bytes": sum(v["bytes"] for v in variants),
+            "stale_count": len(stale),
+            "path": os.path.join(os.path.dirname(db_path), "masks"),
+        }
+
     @app.route("/api/storage")
     def api_storage():
         """Comprehensive storage info for the storage management panel."""
@@ -12350,6 +13036,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         offline_count_row = db.conn.execute(
             "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
         ).fetchone()
+        masks = _storage_masks_data(db)
+        masks_size = masks["total_bytes"]
 
         # HuggingFace cache — only count Vireo-relevant models
         hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
@@ -12378,11 +13066,90 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + models_size
             + hf_size
             + offline_size
+            + masks_size
         )
+        reclaimable = thumb["size"] + preview["size"] + emb["size"]
+
+        storage_root = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def _volume_for_path(path):
+            usage_path = os.path.abspath(path)
+            while not os.path.exists(usage_path):
+                parent = os.path.dirname(usage_path)
+                if parent == usage_path:
+                    break
+                usage_path = parent
+            try:
+                usage = shutil.disk_usage(usage_path)
+                free_bytes = usage.free
+                capacity_bytes = usage.total
+            except OSError:
+                free_bytes = None
+                capacity_bytes = None
+
+            mount_path = usage_path
+            while not os.path.ismount(mount_path):
+                parent = os.path.dirname(mount_path)
+                if parent == mount_path:
+                    break
+                mount_path = parent
+            if sys.platform.startswith("win"):
+                name = os.path.splitdrive(mount_path)[0] or mount_path
+            elif mount_path == os.path.sep:
+                name = "System volume"
+            else:
+                name = os.path.basename(mount_path.rstrip(os.path.sep)) or mount_path
+            return {
+                "name": name,
+                "mount_path": mount_path,
+                "free": free_bytes,
+                "capacity": capacity_bytes,
+            }
+
+        raw_locations = [
+            ("catalog", "Catalog and masks", os.path.dirname(db_path)),
+            (
+                "generated",
+                "Thumbnails, previews, and offline originals",
+                storage_root,
+            ),
+        ]
+        if emb["size"]:
+            raw_locations.append(("embeddings", "Label embeddings", EMB_CACHE_DIR))
+        if models_size:
+            raw_locations.append(("models", "Downloaded models", DEFAULT_MODELS_DIR))
+        if hf_size:
+            raw_locations.append(("hf_cache", "Hugging Face cache", hf_cache))
+
+        locations_by_path = {}
+        for location_id, label, path in raw_locations:
+            normalized = os.path.abspath(path)
+            if normalized not in locations_by_path:
+                locations_by_path[normalized] = {
+                    "id": location_id,
+                    "path": normalized,
+                    "labels": [],
+                    "volume": _volume_for_path(normalized),
+                }
+            locations_by_path[normalized]["labels"].append(label)
+        locations = list(locations_by_path.values())
+
+        volumes_by_mount = {}
+        for location in locations:
+            volume = location["volume"]
+            mount = volume["mount_path"]
+            if mount not in volumes_by_mount:
+                volumes_by_mount[mount] = dict(volume)
+                volumes_by_mount[mount]["location_ids"] = []
+            volumes_by_mount[mount]["location_ids"].append(location["id"])
 
         return jsonify(
             {
                 "total": total,
+                "reclaimable": reclaimable,
+                "storage_root": storage_root,
+                "locations": locations,
+                "volumes": list(volumes_by_mount.values()),
                 "database": {"size": db_size, "path": db_path},
                 "thumbnails": thumb,
                 "previews": preview,
@@ -12394,6 +13161,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "size": offline_size,
                     "path": os.path.join(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "offline"),
                 },
+                "masks": {"size": masks_size, **masks},
             }
         )
 
@@ -12401,28 +13169,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_storage_masks():
         """Per-variant SAM mask summary (counts, bytes, active counts)
         plus stale-mask count for the storage dashboard."""
-        import config as cfg
-
-        db = _get_db()
-        # Storage is global across all workspaces, so the stale floor
-        # must be too. Using the active workspace's detector_confidence
-        # would make stale_count flip when the user switches workspaces
-        # and let masks valid under another workspace's lower floor
-        # show up as stale. The minimum across workspaces is the most
-        # permissive view: only mark a mask stale when no workspace
-        # would still consider it fresh.
-        min_detector_conf = db.min_detector_confidence_across_workspaces(
-            cfg.load()
-        )
-        variants = db.mask_variants_summary()
-        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
-        masks_dir = os.path.join(os.path.dirname(db_path), "masks")
-        return jsonify({
-            "variants": variants,
-            "total_bytes": sum(v["bytes"] for v in variants),
-            "stale_count": len(stale),
-            "path": masks_dir,
-        })
+        return jsonify(_storage_masks_data(_get_db()))
 
     @app.route("/api/storage/masks/delete-variant", methods=["POST"])
     def api_storage_masks_delete_variant():
@@ -12547,14 +13294,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "limit": limit,
         })
 
-    @app.route("/api/storage/clear", methods=["POST"])
-    def api_storage_clear():
-        """Clear a specific cache."""
-        import shutil
-
-        body = request.get_json(silent=True) or {}
-        cache_type = body.get("type", "")
-
+    def _clear_storage_cache(cache_type):
         if cache_type == "previews":
             preview_dir = os.path.join(
                 os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
@@ -12597,6 +13337,70 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"ok": True})
         else:
             return json_error("Unknown cache type")
+
+    @app.route("/api/storage/clear", methods=["POST"])
+    def api_storage_clear():
+        """Clear a specific cache."""
+        body = request.get_json(silent=True) or {}
+        return _clear_storage_cache(body.get("type", ""))
+
+    @app.route("/api/storage/clear-safe", methods=["POST"])
+    def api_storage_clear_safe():
+        """Clear every regenerable cache without touching models or originals."""
+        for cache_type in ("thumbnails", "previews", "embeddings"):
+            _clear_storage_cache(cache_type)
+        return jsonify({
+            "ok": True,
+            "cleared": ["thumbnails", "previews", "embeddings"],
+        })
+
+    @app.route("/api/storage/open-folder", methods=["POST"])
+    def api_storage_open_folder():
+        """Open one of Vireo's server-selected storage paths."""
+        from classifier import CACHE_DIR as EMB_CACHE_DIR
+        from models import DEFAULT_MODELS_DIR
+
+        location_id = (request.get_json(silent=True) or {}).get(
+            "location", "generated"
+        )
+        locations = {
+            "catalog": os.path.dirname(db_path),
+            "generated": os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            "embeddings": EMB_CACHE_DIR,
+            "models": DEFAULT_MODELS_DIR,
+            "hf_cache": os.path.expanduser("~/.cache/huggingface/hub"),
+        }
+        path = locations.get(location_id)
+        if path is None:
+            return json_error("Unknown storage location")
+        path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            return jsonify({"ok": False, "reason": "storage folder not found"})
+        try:
+            if sys.platform == "darwin":
+                proc = subprocess.run(
+                    ["open", "--", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            elif sys.platform.startswith("win"):
+                proc = subprocess.run(
+                    ["explorer", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            else:
+                proc = subprocess.run(
+                    ["xdg-open", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            if not sys.platform.startswith("win") and proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or "").strip()
+                return jsonify({
+                    "ok": False,
+                    "reason": reason or f"open command exited {proc.returncode}",
+                })
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            return jsonify({"ok": False, "reason": str(exc)})
+        return jsonify({"ok": True})
 
     @app.route("/api/storage/delete-files", methods=["POST"])
     def api_storage_delete_files():
@@ -13451,7 +14255,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("collection_id required", 400)
 
         db = _get_db()
-        photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
+        try:
+            photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
 
         folder_rows = db.conn.execute("SELECT id, path, name FROM folders").fetchall()
         folder_map = {r["id"]: dict(r) for r in folder_rows}
@@ -14272,26 +15082,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = pred["species"] if pred else ""
         scientific = pred["scientific_name"] if pred else ""
 
-        # Percent-encode every value: scientific names contain spaces, and an
-        # unencoded space makes the URL invalid, so the desktop opener plugin
-        # rejects it and nothing opens.
-        params = []
-        if scientific:
-            params.append(("taxon_name", scientific))
-        elif species:
-            params.append(("taxon_name", species))
-        if photo["timestamp"]:
-            params.append(("observed_on", photo["timestamp"][:10]))
         loc = db.get_effective_photo_location(photo_id)
         lat = loc["latitude"] if loc else None
         lng = loc["longitude"] if loc else None
-        if lat is not None and lng is not None:
-            params.append(("lat", str(lat)))
-            params.append(("lng", str(lng)))
-
+        # The browser uploader does not document query parameters for
+        # pre-filling an observation. In particular, taxon_name is an
+        # observation-search parameter, not an uploader parameter. Open the
+        # generic uploader and keep the prepared metadata in this response for
+        # Vireo's authenticated direct-upload flow.
         upload_url = "https://www.inaturalist.org/observations/upload"
-        if params:
-            upload_url += "?" + urlencode(params)
 
         # Check submission history
         subs = db.get_inat_submissions([photo_id])
@@ -17671,28 +18470,58 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except Exception as e:
             return None, None, json_error(str(e))
 
-    def _validate_after_import(value):
+    def _validate_after_import(value, db):
         """Return a JSON error response for a bad after_import spec, else None.
 
-        Shared by both import endpoints: the type check rejects non-string,
-        non-null bodies and resolve_strategy() rejects unknown names, so
-        chained processing can't fail hours later on a typo the enqueue
-        step could have caught.
+        Shared by both import endpoints: null means import-only; a non-null
+        value must be a saved-process id that exists, so chained processing
+        can't fail hours later on a dangling id the enqueue step could have
+        caught.
         """
         if value is None:
             return None
-        if not isinstance(value, str):
+        if not isinstance(value, int) or isinstance(value, bool):
             return json_error(
-                "after_import must be a strategy name or null, got "
+                "after_import must be a process id or null, got "
                 f"{type(value).__name__}"
             )
-        from process_strategies import resolve_strategy
-
-        try:
-            resolve_strategy(value)
-        except ValueError as e:
-            return json_error(str(e))
+        if db.get_saved_process(value) is None:
+            return json_error(f"unknown process id: {value}")
         return None
+
+    def _create_import_collection(thread_db, photo_ids):
+        """Create the static collection that records one completed import.
+
+        Collection creation belongs to the import itself, not to optional
+        after-import processing.  Keeping it separate ensures "Import only"
+        runs remain discoverable in Browse while processed imports can reuse
+        the exact same scope for their chained pipeline job.
+        """
+        collection_name = "Import " + datetime.now().strftime("%Y-%m-%d %H:%M")
+        collection_id = thread_db.add_collection(
+            collection_name,
+            json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+        )
+        return collection_id, collection_name
+
+    def _record_import_collection(result, workspace_id):
+        """Attach a collection to a complete, successful import result."""
+        photo_ids = result.get("photo_ids") or []
+        if not result.get("ok") or result.get("cancelled") or not photo_ids:
+            return None, None
+        try:
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+            collection_id, collection_name = _create_import_collection(
+                thread_db, photo_ids,
+            )
+            result["collection_id"] = collection_id
+            result["collection_name"] = collection_name
+            return thread_db, collection_id
+        except Exception as e:
+            log.exception("import collection creation failed")
+            result["collection_error"] = str(e)
+            return None, None
 
     @app.route("/api/jobs/import-in-place", methods=["POST"])
     def api_job_import_in_place():
@@ -17723,6 +18552,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error(f"source directory not found: {s}")
 
         recursive = bool(body.get("recursive", True))
+        import_tags, location_from_gps, tag_options_err = (
+            _validate_import_tag_options(body)
+        )
+        if tag_options_err is not None:
+            return tag_options_err
         db = _get_db()
         # Preflight an explicit after_import before creating a workspace so
         # a bad value doesn't leave an orphan Card Import behind. The
@@ -17731,7 +18565,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         explicit_after_import = "after_import" in body
         if explicit_after_import:
             after_import = body.get("after_import")
-            err = _validate_after_import(after_import)
+            err = _validate_after_import(after_import, db)
             if err is not None:
                 return err
 
@@ -17742,24 +18576,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return workspace_err
 
         # Resolve the omitted-default AFTER the workspace switch. Reading
-        # pipeline.default_strategy off the previously-active workspace
+        # pipeline.default_process_id off the previously-active workspace
         # would leak that workspace's override into a new-workspace import.
         if not explicit_after_import:
             import config as cfg
 
             effective_cfg = db.get_effective_config(cfg.load())
             after_import = (
-                effective_cfg.get("pipeline", {}).get("default_strategy")
+                effective_cfg.get("pipeline", {}).get("default_process_id")
             )
-            err = _validate_after_import(after_import)
+            err = _validate_after_import(after_import, db)
             if err is not None:
                 return err
+
+        # Snapshot the chosen saved process's stage flags at enqueue time
+        # so a mid-import edit or delete can't silently change (or void)
+        # the after-import run the user already accepted. An in-place
+        # import can take many minutes on a full card, and until the
+        # chain hook fires the pipeline_job's actual toggles are still up
+        # for grabs — resolving here freezes them.
+        after_import_snapshot = None
+        if after_import is not None:
+            try:
+                after_import_snapshot = db.resolve_process(after_import)
+            except ValueError as e:
+                return json_error(str(e), 404)
 
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_cache_dir)
 
         def _chain_after_import(job, result):
+            photo_ids = result.get("photo_ids") or []
+            thread_db, col_id = _record_import_collection(result, active_ws)
+
             if after_import is None:
                 result["after_import_skipped"] = "import-only"
                 return
@@ -17769,26 +18619,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if result.get("cancelled"):
                 result["after_import_skipped"] = "import cancelled"
                 return
-            photo_ids = result.get("photo_ids") or []
             if not photo_ids:
                 result["after_import_skipped"] = "no photos"
                 return
-            try:
-                from datetime import datetime as _dt
-
-                thread_db = Database(db_path)
-                thread_db.set_active_workspace(active_ws)
-                col_id = thread_db.add_collection(
-                    "Import " + _dt.now().strftime("%Y-%m-%d %H:%M"),
-                    json.dumps(
-                        [{"field": "photo_ids", "value": photo_ids}]
-                    ),
+            if col_id is None:
+                result["after_import_skipped"] = (
+                    "failed to create import collection"
                 )
+                return
+            try:
                 process_job_id, model_warning = _enqueue_process_job(
                     thread_db, runner, active_ws,
                     collection_id=col_id,
-                    strategy_name=after_import,
+                    process_id=after_import,
                     chained_from=job["id"],
+                    expanded=after_import_snapshot,
                 )
                 result["process_job_id"] = process_job_id
                 if model_warning:
@@ -17943,7 +18788,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     job["id"], "scan", status="cancelled",
                     summary=f"{indexed} photos (cancelled)",
                 )
-                return {
+                result = {
                     "mode": "in_place",
                     "ok": False,
                     "cancelled": True,
@@ -17953,6 +18798,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "errors": root_errors,
                     "photo_ids": photo_ids,
                 }
+                _apply_import_tags(
+                    active_ws, photo_ids, import_tags, location_from_gps,
+                    result, job=job, runner=runner,
+                )
+                return result
 
             metadata_warning = _scan_metadata_warning()
             summary = f"{indexed} photos"
@@ -17974,6 +18824,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "errors": root_errors,
                 "photo_ids": photo_ids,
             }
+            _apply_import_tags(
+                active_ws, photo_ids, import_tags, location_from_gps, result,
+                job=job, runner=runner,
+            )
             _chain_after_import(job, result)
             return result
 
@@ -17982,6 +18836,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "destination": None,
             "recursive": recursive,
             "after_import": after_import,
+            "tags": import_tags,
+            "location_from_gps": location_from_gps,
             "mode": "in_place",
             "workspace_id": active_ws,
             "created_workspace": created_workspace,
@@ -18187,7 +19043,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # After-import strategy: validated at enqueue (failing the chain
         # hours later is the old pipeline's mistake). Key present -> null
         # means import-only, a string must name a real strategy. Key
-        # omitted -> default from the workspace's pipeline.default_strategy
+        # omitted -> default from the workspace's pipeline.default_process_id
         # (nullable, same vocabulary). Stored in the job config for the
         # PR 3 chaining hook; the import job itself never reads it.
         # Preflight an explicit value before creating a workspace so a bad
@@ -18195,14 +19051,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         explicit_after_import = "after_import" in body
         if explicit_after_import:
             after_import = body.get("after_import")
-            err = _validate_after_import(after_import)
+            err = _validate_after_import(after_import, db)
             if err is not None:
                 return err
 
         file_types = body.get("file_types", "both")
         skip_duplicates = bool(body.get("skip_duplicates", True))
         verify_by_hash = bool(body.get("verify_by_hash", False))
+        trust_likely_duplicates = bool(
+            body.get("trust_likely_duplicates", False)
+        ) and not verify_by_hash
         recursive = bool(body.get("recursive", True))
+        import_tags, location_from_gps, tag_options_err = (
+            _validate_import_tag_options(body)
+        )
+        if tag_options_err is not None:
+            return tag_options_err
 
         active_ws, created_workspace, workspace_err = (
             _prepare_import_workspace(db, body)
@@ -18211,18 +19075,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return workspace_err
 
         # Resolve the omitted-default AFTER the workspace switch. Reading
-        # pipeline.default_strategy off the previously-active workspace
+        # pipeline.default_process_id off the previously-active workspace
         # would leak that workspace's override into a new-workspace import.
         if not explicit_after_import:
             import config as cfg
 
             effective_cfg = db.get_effective_config(cfg.load())
             after_import = (
-                effective_cfg.get("pipeline", {}).get("default_strategy")
+                effective_cfg.get("pipeline", {}).get("default_process_id")
             )
-            err = _validate_after_import(after_import)
+            err = _validate_after_import(after_import, db)
             if err is not None:
                 return err
+
+        # Snapshot the chosen saved process's stage flags at enqueue time
+        # so a mid-import edit or delete can't silently change (or void)
+        # the after-import run the user already accepted. An archive-copy
+        # import from a full card can take many minutes, and until the
+        # chain hook fires the pipeline_job's actual toggles are still up
+        # for grabs — resolving here freezes them (mirrors the remote-
+        # transport snapshot below).
+        after_import_snapshot = None
+        if after_import is not None:
+            try:
+                after_import_snapshot = db.resolve_process(after_import)
+            except ValueError as e:
+                return json_error(str(e), 404)
 
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
@@ -18255,8 +19133,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "file_types": file_types,
             "skip_duplicates": skip_duplicates,
             "verify_by_hash": verify_by_hash,
+            "trust_likely_duplicates": trust_likely_duplicates,
             "recursive": recursive,
             "after_import": after_import,
+            "tags": import_tags,
+            "location_from_gps": location_from_gps,
             "remote_target_id": remote_target_id or None,
             "remote_subpath": remote_subpath or None,
             "workspace_id": active_ws,
@@ -18264,15 +19145,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
 
         def _chain_after_import(job, result):
-            """Enqueue the after-import process job, or record why not.
+            """Create the import collection and optionally enqueue processing.
 
             Every skip is written to the result as ``after_import_skipped``
-            so the jobs panel shows exactly what happened and why
-            (transparency rule). Guards, in order: import-only choice,
-            failed import (a green processing run must not hide a failed
-            import — rollup convention), cancelled import, and
-            duplicates-only imports with nothing new to process.
+            so the jobs panel shows exactly why processing did not run.  The
+            collection is independent: every successful import with new
+            photos gets one, including the import-only choice.
             """
+            photo_ids = result.get("photo_ids") or []
+            thread_db, col_id = _record_import_collection(result, active_ws)
+
             if after_import is None:
                 result["after_import_skipped"] = "import-only"
                 return
@@ -18282,28 +19164,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if result.get("cancelled"):
                 result["after_import_skipped"] = "import cancelled"
                 return
-            photo_ids = result.get("photo_ids") or []
             if not photo_ids:
                 result["after_import_skipped"] = "no new photos"
                 return
-            try:
-                from datetime import datetime as _dt
-
-                from db import Database
-
-                thread_db = Database(db_path)
-                thread_db.set_active_workspace(active_ws)
-                col_id = thread_db.add_collection(
-                    "Import " + _dt.now().strftime("%Y-%m-%d %H:%M"),
-                    json.dumps(
-                        [{"field": "photo_ids", "value": photo_ids}]
-                    ),
+            if col_id is None:
+                result["after_import_skipped"] = (
+                    "failed to create import collection"
                 )
+                return
+            try:
                 process_job_id, model_warning = _enqueue_process_job(
                     thread_db, runner, active_ws,
                     collection_id=col_id,
-                    strategy_name=after_import,
+                    process_id=after_import,
                     chained_from=job["id"],
+                    expanded=after_import_snapshot,
                 )
                 result["process_job_id"] = process_job_id
                 if model_warning:
@@ -18328,6 +19203,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 file_types=file_types,
                 skip_duplicates=skip_duplicates,
                 verify_by_hash=verify_by_hash,
+                trust_likely_duplicates=trust_likely_duplicates,
                 recursive=recursive,
                 after_import=after_import,
                 remote_target=remote_target,
@@ -18337,6 +19213,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 result = run_import_job(
                     job, runner, db_path, active_ws, params,
+                )
+                _apply_import_tags(
+                    active_ws, result.get("photo_ids") or [], import_tags,
+                    location_from_gps, result, job=job, runner=runner,
                 )
                 _chain_after_import(job, result)
                 return result
@@ -19545,16 +20425,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
         label = body.get("label", "").strip()
-        if not photo_ids or not label or not normalize_keyword_display(label):
+        if not photo_ids or not label:
             return json_error("photo_ids and label required")
 
-        kid = db.add_keyword(label)
-        # Re-read the stored keyword name so the queued sidecar change and
-        # history entry match the row actually tagged. Without this, a
-        # request like `‘juvenile` tags the normalized `juvenile` row but
-        # queues the raw stray-quote value, so XMP sync writes the wrong
-        # spelling and a later removal of the stored keyword does not
-        # cancel the pending add. Same reasoning as api_add_keyword.
+        try:
+            kid = db.add_keyword(label)
+        except ValueError as exc:
+            return json_error(str(exc))
+        # Queue/record the stored spelling (see api_add_keyword).
         stored = db.conn.execute(
             "SELECT name FROM keywords WHERE id = ?", (kid,)
         ).fetchone()
@@ -20281,21 +21159,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
 
     def _enqueue_process_job(thread_db, runner, workspace_id, *,
-                             collection_id, strategy_name,
-                             chained_from=None):
-        """Enqueue a collection-scoped process run for a named strategy.
+                             collection_id, process_id,
+                             chained_from=None, expanded=None):
+        """Enqueue a collection-scoped process run for a saved-process id.
 
         The after-import chaining hook's path into the pipeline. Runs on a
         job thread — no request context: takes an explicit thread-local
         ``Database`` and never touches ``request``/``_get_db``. Applies the
-        same strategy expansion and no-model auto-skip as
-        ``api_job_pipeline`` so a chained run degrades identically to a
-        manual one. Returns ``(job_id, model_warning)``.
+        same process expansion and no-model auto-skip as ``api_job_pipeline``
+        so a chained run degrades identically to a manual one. Returns
+        ``(job_id, model_warning)``.
+
+        ``expanded`` is the pre-resolved flag snapshot the import endpoint
+        captured at enqueue-request time. Pass it through so a saved-process
+        edit or delete while the import copies photos (a card copy can take
+        many minutes) can't silently swap in different toggles — or fail
+        the chain outright — after the user has already accepted the choice.
+        Falls back to a live resolve for callers that don't pre-capture.
         """
         from pipeline_job import PipelineParams, run_pipeline_job
-        from process_strategies import resolve_strategy
 
-        expanded = resolve_strategy(strategy_name)
+        if expanded is None:
+            expanded = thread_db.resolve_process(process_id)
         params = PipelineParams(
             collection_id=collection_id,
             skip_classify=expanded["skip_classify"],
@@ -20304,6 +21189,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skip_regroup=expanded["skip_regroup"],
             miss_enabled=expanded["miss_enabled"],
             review_mode=expanded["review_mode"],
+            # A saved process's Eye Keypoints toggle is an explicit opt-in
+            # (the Process-page checkbox sends eye_detect_override alongside
+            # it). When the process runs the eye stage, opt into eye scoring
+            # too so a chained/by-id run matches running the same toggles on
+            # the page, instead of silently deferring to the workspace's
+            # eye_detect_enabled default and skipping eye detection.
+            eye_detect_override=(
+                None if expanded["skip_eye_keypoints"] else True
+            ),
         )
         model_warning = _apply_no_model_auto_skip(params)
 
@@ -20340,12 +21234,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
             "destination": None,
             "local_processing": False,
-            "strategy": strategy_name,
+            "process_id": process_id,
             "skip_classify": params.skip_classify,
             "skip_extract_masks": params.skip_extract_masks,
             "skip_regroup": params.skip_regroup,
             "review_mode": params.review_mode,
             "miss_enabled": params.miss_enabled,
+            "eye_detect_override": params.eye_detect_override,
         }
         if chained_from:
             # Provenance for the jobs panel: this run was started by an
@@ -20371,34 +21266,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         body = request.get_json(silent=True) or {}
 
-        # Named process strategy: expand server-side into stage flags so the
-        # import page, the process page, and import→process chaining share
-        # one vocabulary (process_strategies.py). Key presence — not
-        # truthiness — decides whether a strategy was requested: a
-        # present-but-null strategy must 400 rather than silently fall
+        # Reject the previous strategy-name shape ({"strategy": "quick_look"},
+        # "identify", "full", "cull_ready"). That vocabulary was replaced by
+        # saved-process ids; without an explicit 400 here, an old caller's
+        # `strategy` field is silently dropped and the request falls through
+        # to a default full-pipeline run — silently reclassifying/regrouping
+        # the whole collection when the caller meant a quick-look scan.
+        if "strategy" in body:
+            return json_error(
+                "strategy is no longer accepted; send process_id (a "
+                "saved_processes id) or explicit stage flags",
+                400,
+            )
+
+        # Saved process: expand a process id server-side into stage flags so
+        # the import page, the process page, and import→process chaining share
+        # one vocabulary (a saved_processes row). Key presence — not
+        # truthiness — decides whether a process was requested: a
+        # present-but-null process_id must 400 rather than silently fall
         # through to default processing for a caller who thought null meant
         # "no processing" (that case is expressed by not calling this
-        # endpoint at all).
-        strategy_name = None
-        if "strategy" in body:
-            strategy_name = body.get("strategy")
-            if not isinstance(strategy_name, str):
-                kind = (
-                    "null" if strategy_name is None
-                    else type(strategy_name).__name__
-                )
-                return json_error(f"strategy must be a string, got {kind}")
-            from process_strategies import resolve_strategy
-
-            try:
-                expanded = resolve_strategy(strategy_name)
-            except ValueError as e:
-                return json_error(str(e))
-            # Expansion supplies *defaults*; explicitly-present body keys
-            # win, so a caller can pin one flag on top of a preset.
-            body = {**expanded, **body}
-
+        # endpoint at all). The process page's Run instead sends explicit
+        # stage flags (including miss_enabled/review_mode), so process_id is
+        # optional.
         db = _get_db()
+        process_id = None
+        if "process_id" in body:
+            process_id = body.get("process_id")
+            if not isinstance(process_id, int) or isinstance(process_id, bool):
+                kind = (
+                    "null" if process_id is None
+                    else type(process_id).__name__
+                )
+                return json_error(f"process_id must be an integer, got {kind}")
+            try:
+                expanded = db.resolve_process(process_id)
+            except ValueError as e:
+                return json_error(str(e), 404)
+            # Expansion supplies *defaults*; explicitly-present body keys
+            # win, so a caller can pin one flag on top of a process.
+            body = {**expanded, **body}
+            # The process's Eye Keypoints toggle is an explicit opt-in (the
+            # Process-page checkbox sends eye_detect_override with it). Mirror
+            # that for a by-id run so the eye stage runs instead of deferring
+            # to the workspace eye_detect_enabled default; an explicit caller
+            # override still wins.
+            if (
+                not body.get("skip_eye_keypoints")
+                and body.get("eye_detect_override") is None
+            ):
+                body["eye_detect_override"] = True
+
         source = body.get("source")
         sources = body.get("sources")
         collection_id = body.get("collection_id")
@@ -20838,6 +21756,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f"{type(miss_enabled_body).__name__}"
             )
 
+        # ``eye_detect_override`` mirrors ``miss_enabled`` as a tri-state
+        # per-run switch (None = defer to workspace config). Same validation
+        # rationale: a string "false" would flow through as truthy and force
+        # eye detection on for a caller expecting the workspace default.
+        eye_detect_override_body = body.get("eye_detect_override")
+        if (
+            eye_detect_override_body is not None
+            and not isinstance(eye_detect_override_body, bool)
+        ):
+            return json_error(
+                f"eye_detect_override must be boolean, got "
+                f"{type(eye_detect_override_body).__name__}"
+            )
+
         # Validate ``model_id`` / ``model_ids`` shape BEFORE the folder-scope
         # collection is materialized. The auto-skip-classify block further
         # down calls ``list(params.model_ids or [])`` and ``by_id.get(mid, ...)``
@@ -20900,6 +21832,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             download_taxonomy=body.get("download_taxonomy", True),
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_eye_keypoints=body.get("skip_eye_keypoints", False),
+            eye_detect_override=eye_detect_override_body,
             skip_regroup=body.get("skip_regroup", False),
             # ``review_mode`` reaches ``body`` only through the strategy
             # expansion at the top of this handler (identify sets it to
@@ -21022,12 +21955,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "collection_name": collection_name,
             "destination": destination,
             "local_processing": local_processing,
-            "strategy": strategy_name,
+            "process_id": process_id,
             "skip_classify": params.skip_classify,
             "skip_extract_masks": params.skip_extract_masks,
             "skip_regroup": params.skip_regroup,
             "review_mode": params.review_mode,
             "miss_enabled": params.miss_enabled,
+            "eye_detect_override": params.eye_detect_override,
         }
         # Preserve the caller's original folder_ids alongside the derived
         # ad-hoc collection_id so the Jobs page can show both what the user
@@ -21078,11 +22012,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_ids = body.get("photo_ids", [])
         burst_index = body.get("burst_index")
 
-        # Reject empty-after-normalization inputs (e.g. `"'"`, `"""`) up front
-        # so add_keyword's ValueError doesn't escape the surrounding try/except
-        # as a 500 — this matches the client-visible 400 behavior of
-        # api_add_keyword and api_label_cluster for the same input class.
-        if not species or not normalize_keyword_display(species):
+        # Normalize up front: this route compares the requested species
+        # against stored keyword rows and previous_species cache values
+        # below, and add_keyword would normalize on insert anyway — keep one
+        # spelling throughout. Rejects quote-only input as empty.
+        species = normalize_keyword_display(species)
+        if not species:
             return json_error("species is required")
         if not photo_ids:
             return json_error("photo_ids is required")
@@ -21171,7 +22106,61 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             else:
                 previous_species = target_enc.get("confirmed_species")
 
+        # previous_species comes from the pipeline cache on disk, which the
+        # v5 DB migration does not touch — a pre-normalization cache can
+        # still carry a quoted spelling like `‘Apapane`. Normalize before
+        # comparing/looking up against stored keyword rows, which are always
+        # clean.
+        if previous_species is not None:
+            previous_species = normalize_keyword_display(previous_species)
+            if not previous_species:
+                previous_species = None
+
         ws_id = db._ws_id()
+
+        old_kid = None
+        # Compare using the ASCII-only fold SQLite's `COLLATE NOCASE` (which
+        # add_keyword's dedupe relies on) uses — Python's str.lower() folds
+        # non-ASCII letters that SQLite treats as distinct. Without this, a
+        # cache-recorded confirmed species `Éclair` and a user-submitted
+        # `éclair` would match here, the replacement path would be skipped,
+        # yet add_keyword's NOCASE lookup would still create/tag a separate
+        # `éclair` row — leaving the photo with both taxonomy tags and no
+        # remove queued for the old one.
+        is_replacement = (
+            previous_species is not None
+            and keyword_match_key(previous_species) != keyword_match_key(species)
+        )
+        if is_replacement:
+            # Match add_keyword's write path: species keywords live as root
+            # keywords (parent_id IS NULL). Looking up by name alone could
+            # collide with a non-species homonym nested under another keyword
+            # (schema allows UNIQUE(name, parent_id)). Accept taxonomy-typed
+            # rows with is_species=0 too: update_keyword with an explicit
+            # type='taxonomy' (the Keywords type dropdown) doesn't set the
+            # legacy is_species column, and the rest of the app treats
+            # (is_species = 1 OR type = 'taxonomy') as species.
+            old_kid_row = db.conn.execute(
+                """SELECT id, name FROM keywords
+                   WHERE name = ? COLLATE NOCASE
+                     AND parent_id IS NULL
+                     AND (is_species = 1 OR type = 'taxonomy')""",
+                (previous_species,),
+            ).fetchone()
+            # Track the stored keyword row's spelling separately so the
+            # keyword_remove queued below cancels an unsynced keyword_add
+            # written under the DB's canonical case. Cached
+            # confirmed_species can legitimately differ from the stored
+            # row only by case (SQLite NOCASE keeps them together, but
+            # pending_changes.value is exact-match), so queueing the
+            # cache spelling would leave an add(<stored>) alongside a
+            # remove(<cache>) that sync_to_xmp treats as a paired rename
+            # and rewrites the removed spelling back into the sidecar.
+            old_species_stored = previous_species
+            if old_kid_row:
+                old_kid = old_kid_row["id"]
+                if old_kid_row["name"]:
+                    old_species_stored = old_kid_row["name"]
 
         # Run all mutations in a single transaction so that a mid-loop failure
         # (SQLite lock, disk error, etc.) can't leave half the photos retagged
@@ -21181,26 +22170,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # which photos already carry it. add_keyword is idempotent and
             # returns the existing id when the species already exists.
             kid = db.add_keyword(species, is_species=True, _commit=False)
-            # Re-read the stored keyword name so the sidecar queue, response,
-            # and cache override reflect the row actually tagged. Without
-            # this, a request like `‘apapane` tags the normalized `apapane`
-            # row but would queue the raw stray-quote value for XMP sync,
-            # and the pipeline cache's `confirmed_species` would be written
-            # with a spelling that no longer matches the DB keyword. Same
-            # rationale as api_add_keyword.
+            # Queue/record the stored spelling (see api_add_keyword).
             stored = db.conn.execute(
                 "SELECT name FROM keywords WHERE id = ?", (kid,)
             ).fetchone()
             if stored and stored["name"]:
                 species = stored["name"]
 
-            # Precheck which submitted photos already carry a given keyword.
-            # Only photos that get a *new* tag should generate edit-history
-            # items and sidecar adds — otherwise confirming an already-tagged
-            # photo would push a no-op onto the undo stack, and undoing it
-            # would destructively remove the pre-existing keyword. Mirrors
-            # the precheck pattern in api_batch_keyword. Chunked so the
-            # IN-clause stays under SQLite's bound-parameter cap.
+            # Precheck which submitted photos already carry the new species
+            # keyword. Only photos that get a *new* tag should generate
+            # edit-history items and sidecar adds — otherwise confirming an
+            # already-tagged photo would push a no-op onto the undo stack, and
+            # undoing it would destructively remove the pre-existing keyword.
+            # Mirrors the precheck pattern in api_batch_keyword. Chunked so
+            # the IN-clause stays under SQLite's bound-parameter cap.
             def _photos_with_keyword(keyword_id):
                 hits = set()
                 for chunk in _chunked(photo_ids):
@@ -21215,90 +22198,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
                 return hits
 
-            # Canonicalize any legacy species-keyword rows that normalize to
-            # the same species we just resolved. On an upgraded DB a photo
-            # can still carry a quoted variant like `‘apapane` under a
-            # different keyword_id than the clean `apapane` above. Without
-            # this pass, when `previous_species` matches (normalized) — so
-            # the replacement path below is skipped — `_photos_with_keyword(kid)`
-            # treats those photos as missing the tag and adds kid alongside
-            # the legacy row, leaving duplicate taxonomy tags for the same
-            # normalized species. Untag the legacy row and queue a sidecar
-            # remove for its stored name; the normal tagging path below then
-            # adds the clean row and queues the clean sidecar entry.
-            canonical_target = normalize_keyword_display(species)
-            # Track legacy species-keyword ids untagged per photo by the
-            # canonicalization pass below. When the confirm is not a
-            # replacement (same normalized species as previous_species) but
-            # still removed one or more legacy variants, the edit needs to
-            # carry those ids so undo can retag them -- otherwise undoing a
-            # same-species confirm leaves those photos with no species tag.
-            canonicalized_by_pid: dict[int, list[int]] = {}
-            if canonical_target:
-                # Species membership here matches the rest of the endpoint's
-                # semantics: a row is a species tag if is_species=1 OR
-                # type='taxonomy'. An upgraded row that carries taxonomy typing
-                # but hasn't had is_species flipped (e.g. legacy edge-quote
-                # `‘apapane` promoted via the type dropdown) would otherwise
-                # slip past this lookup, so photos tagged only with that
-                # legacy row would keep the stray-quote tag and also gain the
-                # clean one below.
-                legacy_rows = db.conn.execute(
-                    """SELECT id, name FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id IS NULL
-                         AND (is_species = 1 OR type = 'taxonomy')
-                         AND id != ?""",
-                    (canonical_target, kid),
-                ).fetchall()
-                for legacy_row in legacy_rows:
-                    legacy_id = legacy_row["id"]
-                    legacy_name = legacy_row["name"]
-                    for pid in _photos_with_keyword(legacy_id):
-                        db.untag_photo(pid, legacy_id, _commit=False)
-                        canonicalized_by_pid.setdefault(pid, []).append(legacy_id)
-                        if legacy_name:
-                            _queue_keyword_remove(
-                                pid, legacy_name,
-                                workspace_id=ws_id, _commit=False,
-                            )
-
-            # Compare previous vs new species with a normalized match key so
-            # a legacy cache/sidecar spelling like `‘apapane` is recognized
-            # as the same species as a new `apapane` and doesn't spuriously
-            # trigger the replacement path (which would remove the
-            # already-correct tag and queue a stray-quote add).
-            old_kid = None
-            is_replacement = (
-                previous_species is not None
-                and keyword_match_key(previous_species) != keyword_match_key(species)
-            )
-            if is_replacement:
-                # Match add_keyword's write path: species keywords live as
-                # root keywords (parent_id IS NULL) with is_species=1.
-                # Compare via vireo_normalize_keyword so a legacy row whose
-                # stored spelling still carries edge quotes is also found.
-                old_kid_row = db.conn.execute(
-                    """SELECT id, name FROM keywords
-                       WHERE vireo_normalize_keyword(name) = ? COLLATE NOCASE
-                         AND parent_id IS NULL
-                         AND (is_species = 1 OR type = 'taxonomy')""",
-                    (normalize_keyword_display(previous_species),),
-                ).fetchone()
-                if old_kid_row:
-                    old_kid = old_kid_row["id"]
-                    # Use the stored keyword name (not the raw cached
-                    # `previous_species`) for the sidecar remove queue so
-                    # pending-change cancellation lines up with the pending
-                    # `keyword_add` written under the normalized spelling.
-                    # A legacy pipeline cache can still hold `‘apapane` while
-                    # the DB keyword row is stored as clean `apapane`; queuing
-                    # the raw quoted value would leave a stale add un-cancelled
-                    # and a quoted remove that the next XMP sync writes back to
-                    # the sidecar.
-                    if old_kid_row["name"]:
-                        previous_species = old_kid_row["name"]
-
             already_has_new = _photos_with_keyword(kid)
             newly_tagged = [pid for pid in photo_ids if pid not in already_has_new]
 
@@ -21312,7 +22211,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         continue
                     db.untag_photo(pid, old_kid, _commit=False)
                     _queue_keyword_remove(
-                        pid, previous_species,
+                        pid, old_species_stored,
                         workspace_id=ws_id, _commit=False,
                     )
 
@@ -21322,44 +22221,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     pid, species, workspace_id=ws_id, _commit=False,
                 )
 
-            def _species_old_value(pid, include_old_kid):
-                # Build the edit-history `old_value` for one photo, folding
-                # in any legacy species-keyword ids the canonicalization
-                # pass untagged. Uses the JSON payload shape recognized by
-                # `_edit_old_value_meta` so `species_replace` undo can
-                # re-tag every removed row (not just the primary old_kid).
-                ids: list[int] = []
-                if include_old_kid and old_kid is not None:
-                    ids.append(old_kid)
-                ids.extend(canonicalized_by_pid.get(pid, []))
-                if not ids:
-                    return ""
-                if len(ids) == 1:
-                    return str(ids[0])
-                return json.dumps(
-                    {"keyword_id": str(ids[0]), "keyword_ids": ids},
-                    sort_keys=True,
-                )
-
-            newly_set = set(newly_tagged)
             if is_replacement and old_kid is not None and had_old:
                 # Photos that actually changed: had the old keyword (so the
-                # remove side fired), newly gained the new one, or had a
-                # legacy same-species variant untagged by canonicalization
-                # above. Use the union so undo restores the exact state we
-                # mutated.
+                # remove side fired) and/or newly gained the new one. Use the
+                # union so undo restores the exact state we mutated.
+                newly_set = set(newly_tagged)
                 changed = [
-                    pid for pid in photo_ids
-                    if pid in had_old
-                    or pid in newly_set
-                    or pid in canonicalized_by_pid
+                    pid for pid in photo_ids if pid in had_old or pid in newly_set
                 ]
                 items = [
                     {
                         "photo_id": pid,
-                        "old_value": _species_old_value(
-                            pid, include_old_kid=pid in had_old,
-                        ),
+                        "old_value": str(old_kid) if pid in had_old else "",
                         "new_value": str(kid) if pid in newly_set else "",
                     }
                     for pid in changed
@@ -21367,35 +22240,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 db.record_edit(
                     "species_replace",
                     f'Replaced species "{previous_species}" with "{species}" on {len(changed)} photos',
-                    str(kid),
-                    items,
-                    is_batch=len(changed) > 1,
-                    _commit=False,
-                )
-            elif canonicalized_by_pid:
-                # Same normalized species as before but a legacy variant row
-                # was untagged (e.g. cache/DB carried `‘apapane` and the
-                # request was `apapane`). Route through species_replace so
-                # undo restores the legacy tag(s); recording this as
-                # `keyword_add` would only untag the clean kid on undo and
-                # leave the photos with no species tag at all.
-                changed = [
-                    pid for pid in photo_ids
-                    if pid in newly_set or pid in canonicalized_by_pid
-                ]
-                items = [
-                    {
-                        "photo_id": pid,
-                        "old_value": _species_old_value(
-                            pid, include_old_kid=False,
-                        ),
-                        "new_value": str(kid) if pid in newly_set else "",
-                    }
-                    for pid in changed
-                ]
-                db.record_edit(
-                    "species_replace",
-                    f'Canonicalized species "{species}" on {len(changed)} photos',
                     str(kid),
                     items,
                     is_batch=len(changed) > 1,
@@ -21433,13 +22277,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Auto-detach if burst's confirmed species differs from its
                 # encounter — splits it out and merges into an adjacent
                 # encounter of the same confirmed species when one exists.
+                # Compare with keyword_match_key so a cached pre-normalization
+                # spelling (e.g. ‘Apapane) does not trigger a needless split
+                # against the stored species (Apapane); the DB write already
+                # normalized to the canonical form.
                 enc_species = target_enc.get("confirmed_species") or (
                     target_enc["species"][0] if target_enc.get("species") else None
                 )
-                # Compare via keyword_match_key so a legacy cache spelling
-                # like `‘apapane` isn't treated as a different species from
-                # the normalized `apapane` we just tagged (which would
-                # spuriously detach and re-merge bursts on every confirm).
                 if (
                     enc_species is not None
                     and keyword_match_key(enc_species) != keyword_match_key(species)
@@ -21453,12 +22297,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 target_enc["confirmed_species"] = species
             save_results_raw(cached, cache_dir, db._active_workspace_id)
 
-        replaced = (
-            previous_species
-            if previous_species
-            and keyword_match_key(previous_species) != keyword_match_key(species)
-            else None
-        )
+        # Report `replaced` consistent with the actual replacement decision
+        # (is_replacement, which uses keyword_match_key to match SQLite's
+        # ASCII-only NOCASE). Python's `.lower()` folds non-ASCII pairs like
+        # `Éclair`/`éclair` — which SQLite/add_keyword keep as distinct
+        # keyword rows — so a `.lower()` comparison here would report
+        # replaced=None on a request that actually untagged the previous
+        # species row and tagged a new one.
+        replaced = previous_species if is_replacement else None
         response = {
             "ok": True,
             "species": species,
@@ -21958,6 +22804,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # too-wide range that would misplace this encounter under time sorts.
             enc["time_range"] = _compute_time_range(photos_by_id, enc["photo_ids"])
             enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
+            # No fallback: if the remaining photos have no predictions the
+            # source encounter's stale label was likely inherited from the
+            # burst we just detached, so keeping it would advertise the
+            # detached burst's species as a one-click candidate on an
+            # unrelated group of photos.
+            enc["species"] = _rebuild_encounter_species_label(
+                results, enc["photo_ids"]
+            )
             # Pair indices in trace reference the original photo composition;
             # drop it so the algorithm-trace panel renders an honest "needs
             # recompute" state instead of stale rows.
@@ -21968,13 +22822,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Create new encounter from detached burst
         new_enc_predictions = rebuild_species_predictions(results, detached_ids)
+        # No fallback: predictionless detached photos must not inherit the
+        # parent encounter's species — that is exactly the stale-label bug
+        # the surrounding PR is fixing.
+        new_enc_species = _rebuild_encounter_species_label(
+            results, detached_ids
+        )
         # Also refresh the detached burst's own predictions
         detached["species_predictions"] = new_enc_predictions
+        detached_override = detached.get("species_override") or {}
+        detached_confirmed = bool(detached_override.get("confirmed"))
         new_enc = {
-            "species": enc.get("species"),
-            "confirmed_species": detached.get("species_override", {}).get("species") if detached.get("species_override") else None,
+            "species": new_enc_species,
+            "confirmed_species": detached_override.get("species") if detached_confirmed else None,
             "species_predictions": new_enc_predictions,
-            "species_confirmed": bool(detached.get("species_override", {}).get("confirmed")) if detached.get("species_override") else False,
+            "species_confirmed": detached_confirmed,
             "photo_count": len(detached_ids),
             "burst_count": 1,
             # Compute from the detached photos' timestamps. A [None, None] range
@@ -22028,6 +22890,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         burst = bursts[burst_idx]
         if photo_id not in burst["photo_ids"]:
             return json_error("photo_id not in burst")
+        source_override = burst.get("species_override") or {}
 
         # Remove photo from burst
         burst["photo_ids"].remove(photo_id)
@@ -22040,10 +22903,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             burst["species_predictions"] = rebuild_species_predictions(results, burst["photo_ids"])
 
         # Create new single-photo burst in the same encounter
+        new_burst_predictions = rebuild_species_predictions(results, [photo_id])
+        new_burst_species = _rebuild_encounter_species_label(results, [photo_id])
+        if source_override.get("confirmed") and source_override.get("species"):
+            new_burst_override = {
+                "species": source_override["species"],
+                "confirmed": True,
+            }
+        elif enc.get("confirmed_species"):
+            # Inherit the encounter's prior confirmed species by leaving the
+            # override empty. Also covers the mixed/partial state where
+            # species_confirmed is False but confirmed_species records the
+            # dominant prior species (pipeline.py builds encounter payloads
+            # this way for encounters whose photos disagree on confirmed
+            # species). A classifier-guess override here would mask that
+            # prior tag: the confirm endpoint reads species_override.species
+            # without inspecting the confirmed flag, so a later burst confirm
+            # would target the guess as previous_species instead of the real
+            # prior species and leave both keywords on the photo.
+            new_burst_override = None
+        else:
+            new_burst_override = _candidate_species_override(new_burst_species)
         new_burst = {
             "photo_ids": [photo_id],
-            "species_predictions": rebuild_species_predictions(results, [photo_id]),
-            "species_override": None,
+            "species_predictions": new_burst_predictions,
+            "species_override": new_burst_override,
         }
         bursts.append(new_burst)
         enc["burst_count"] = len(bursts)

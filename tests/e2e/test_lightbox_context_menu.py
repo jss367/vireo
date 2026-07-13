@@ -152,9 +152,9 @@ def test_lightbox_menu_adds_species_highlight(live_server, page):
 def test_lightbox_overlay_toggles_persist_and_context_restores(live_server, page):
     """Lightbox overlay visibility toggles persist and stay recoverable.
 
-    Defaults with no stored preference: boxes/eye/info/chrome visible, masks
-    hidden (PR #1083). One click on each toggle therefore flips boxes, eye,
-    info and chrome OFF but flips masks ON.
+    Defaults with no stored preference: boxes/eye/masks hidden, info/chrome
+    visible. One click on each toggle therefore flips boxes, eye, and masks ON
+    but flips info and chrome OFF.
     """
     url = live_server["url"]
     page.goto(f"{url}/browse")
@@ -191,9 +191,9 @@ def test_lightbox_overlay_toggles_persist_and_context_restores(live_server, page
         "document.getElementById('lightboxOverlay').classList.contains('lb-hide-chrome')",
         timeout=2000,
     )
-    assert page.evaluate("localStorage.getItem('vireo.lb.boxesVisible')") == "0"
+    assert page.evaluate("localStorage.getItem('vireo.lb.boxesVisible')") == "1"
     assert page.evaluate("localStorage.getItem('vireo.lb.masksVisible')") == "1"
-    assert page.evaluate("localStorage.getItem('vireo.lb.eyeVisible')") == "0"
+    assert page.evaluate("localStorage.getItem('vireo.lb.eyeVisible')") == "1"
     assert page.evaluate("localStorage.getItem('vireo.lb.infoVisible')") == "0"
     assert page.evaluate("localStorage.getItem('vireo.lb.chromeVisible')") == "0"
 
@@ -234,9 +234,9 @@ def test_lightbox_overlay_toggles_persist_and_context_restores(live_server, page
         "document.getElementById('lightboxOverlay').classList.contains('lb-hide-info')",
         timeout=2000,
     )
-    assert page.locator("#lightboxToggleBoxes").inner_text() == "Show Boxes"
+    assert page.locator("#lightboxToggleBoxes").inner_text() == "Hide Boxes"
     assert page.locator("#lightboxToggleMasks").inner_text() == "Hide Masks"
-    assert page.locator("#lightboxToggleEye").inner_text() == "Show Eye"
+    assert page.locator("#lightboxToggleEye").inner_text() == "Hide Eye"
 
 
 def test_lightbox_right_click_does_not_toggle_zoom(live_server, page):

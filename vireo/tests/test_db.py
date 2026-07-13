@@ -5130,6 +5130,47 @@ def test_accept_prediction_tags_photo(tmp_path):
     assert any(k["name"] == "Elk" for k in kws)
 
 
+def test_accept_prediction_queues_normalized_species(tmp_path):
+    """When the prediction's species carries stray edge quotes (e.g.
+    `‘apapane`), accept_prediction must tag the photo with the normalized
+    row AND queue the pending sidecar keyword_add / return the payload
+    using the stored (clean) spelling. Without this, the DB tag points to
+    `apapane` while pending changes and the response payload use
+    `‘apapane`, so a later delete queues the clean name, pending changes
+    stop cancelling, and XMP sync persists the stray-quote label."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="‘apapane",
+                      confidence=0.9, model="bioclip")
+    pred = db.get_predictions()[0]
+
+    result = db.accept_prediction(pred["id"])
+    # The stored keyword name is the normalized (clean) spelling.
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (result["keyword_id"],)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    # Response payload uses the stored spelling too.
+    assert result["species"] == "apapane"
+    # Pending keyword_add uses the clean spelling — a later remove of the
+    # stored keyword can then cancel the queued add.
+    pending = db.get_pending_changes()
+    add_values = [
+        c["value"] for c in pending if c["change_type"] == "keyword_add"
+    ]
+    assert "apapane" in add_values
+    assert "‘apapane" not in add_values
+
+
 def test_accept_prediction_commit_false_preserves_caller_transaction_on_error(
     tmp_path, monkeypatch,
 ):
@@ -8910,6 +8951,44 @@ def test_folder_under_rule_matches_backslash_paths(tmp_path, monkeypatch):
 
     under_sib = [{"field": "folder", "op": "under", "value": "C:/Photos/2023-trip"}]
     assert db.count_photos_for_rules(under_sib) == 1
+
+
+def test_folder_legacy_is_op_resolves_like_under(tmp_path, monkeypatch):
+    """Folder collections saved with the pre-'under' vocabulary use op 'is'
+    (and 'is not'). Those legacy ops must resolve as aliases for
+    'under'/'not_under' instead of raising 'unsupported field/op', which
+    previously 500'd the whole /api/collections list and blanked every
+    collection dropdown."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    f_2023 = db.add_folder("/photos/2023", name="2023")
+    f_sub = db.add_folder("/photos/2023/trip", name="trip", parent_id=f_2023)
+    f_sib = db.add_folder("/photos/2023-trip", name="2023-trip")
+    for fid, name in [(f_2023, "a"), (f_sub, "b"), (f_sib, "c")]:
+        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+                     file_size=100, file_mtime=1.0)
+
+    legacy_is = [{"field": "folder", "op": "is", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_is) == 2  # folder + descendant
+
+    legacy_is_not = [{"field": "folder", "op": "is not", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_is_not) == 1  # only the sibling
+
+    # 'equals' is the third legacy alias; it also resolves like 'under'
+    # (the folder plus its descendants), matching how the rule behaved
+    # when the older UI wrote it.
+    legacy_equals = [{"field": "folder", "op": "equals", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_equals) == 2
+
+    # count_collection_photos (used by /api/collections) must not raise.
+    import json
+    cid = db.add_collection("Legacy Folder", json.dumps(legacy_is))
+    assert db.count_collection_photos(cid) == 2
 
 
 def test_check_filename_collisions(db):
@@ -13366,9 +13445,11 @@ def test_update_keyword_same_name_retype_merges_into_peer(tmp_path):
         assert effective_id == taxonomy_id
 
         # Exactly one top-level taxonomy `apapane` row must remain.
+        # Stored names are always normalized, so a plain name comparison
+        # is exact.
         rows = db.conn.execute(
             "SELECT id FROM keywords "
-            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "WHERE name = 'apapane' COLLATE NOCASE "
             "AND parent_id IS NULL AND type = 'taxonomy'"
         ).fetchall()
         assert [r["id"] for r in rows] == [taxonomy_id]
@@ -13383,24 +13464,24 @@ def test_update_keyword_same_name_retype_merges_into_peer(tmp_path):
 
 def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
     """A type-only PUT (no `name` kwarg) must still run the same-slot peer
-    check. Otherwise, changing a clean general `apapane` row's type to
-    `taxonomy` via the Browse/Keywords type dropdown while a legacy
-    edge-quoted `‘apapane` taxonomy peer exists leaves two normalized-equal
-    taxonomy rows at the top level (UNIQUE(name, parent_id) treats NULL
-    parents as distinct), so later calls bind to either id at random.
+    check. Otherwise, changing a general `apapane` row's type to
+    `taxonomy` via the Browse/Keywords type dropdown while a taxonomy
+    `apapane` peer already exists at the same (NULL) parent leaves two
+    same-name taxonomy rows at the top level (UNIQUE(name, parent_id)
+    treats NULL parents as distinct), so later calls bind to either id at
+    random.
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        # Legacy edge-quoted taxonomy row at the top level (imported/
-        # upgraded DB shape).
+        # Clean top-level taxonomy row (stored rows are always normalized).
         cur = db.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type) "
             "VALUES (?, NULL, 1, 'taxonomy')",
-            ("‘apapane",),
+            ("apapane",),
         )
         taxonomy_id = cur.lastrowid
-        # Clean general peer at the same slot.
+        # General peer at the same slot.
         general_id = db.add_keyword("apapane", kw_type="general")
         assert general_id != taxonomy_id
 
@@ -13408,11 +13489,11 @@ def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
         effective_id = db.update_keyword(general_id, type="taxonomy")
         assert effective_id == taxonomy_id
 
-        # Exactly one top-level taxonomy row must remain for the normalized
-        # name, and it must be the pre-existing taxonomy row.
+        # Exactly one top-level taxonomy row must remain for the name, and
+        # it must be the pre-existing taxonomy row.
         rows = db.conn.execute(
             "SELECT id FROM keywords "
-            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "WHERE name = 'apapane' COLLATE NOCASE "
             "AND parent_id IS NULL AND type = 'taxonomy'"
         ).fetchall()
         assert [r["id"] for r in rows] == [taxonomy_id]
@@ -13425,299 +13506,580 @@ def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
         db.close()
 
 
-def test_update_keyword_merge_canonicalizes_legacy_peer_name(tmp_path):
-    """When update_keyword merges a clean row into a legacy edge-quote peer,
-    the survivor's stored name must be the canonical spelling and any
-    pending sidecar changes queued under the legacy spelling must be
-    retargeted to the clean name. Without this, the merge preserves the
-    legacy `‘apapane` as the survivor and _merge_keyword_into rewrites the
-    source's pending changes onto that quoted value, so the keyword remains
-    visible/exported as `‘apapane` even though the requested rename was
-    `apapane`.
+def test_update_keyword_retype_to_nontaxonomy_does_not_leak_is_species(tmp_path):
+    """Retyping a taxonomy row to a non-taxonomy type that already has a
+    same-name peer must not copy is_species=1 (or the taxon link) onto the
+    surviving peer. Otherwise species queries — `is_species = 1 OR type =
+    'taxonomy'` — would keep matching photos tagged with the survivor
+    (e.g. an ``individual`` row), silently mis-tagging every photo already
+    on it. Guards `_merge_keyword_into`'s destination-side flag propagation.
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        ws_id = db.ensure_default_workspace()
-        db.set_active_workspace(ws_id)
-        fid = db.add_folder('/photos', name='photos')
-        p1 = db.add_photo(
-            folder_id=fid, filename='a.jpg', extension='.jpg',
+        # Simulate a real folder + photos so tag rows are well-formed.
+        fid = db.add_folder("/photos", name="photos")
+        pid_src = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        p2 = db.add_photo(
-            folder_id=fid, filename='b.jpg', extension='.jpg',
+        pid_dst = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        # Legacy edge-quoted taxonomy row at the top level (imported/
-        # upgraded DB shape). One photo is tagged with it, and its
-        # pending sidecar add is queued under the legacy spelling.
+
+        # Taxonomy `Robin` (species=1) at the top level.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+            "VALUES (?, NULL, 1, 'taxonomy', NULL)",
+            ("Robin",),
+        )
+        taxonomy_id = cur.lastrowid
+        db.tag_photo(pid_src, taxonomy_id)
+
+        # Existing individual `Robin` peer at the same slot, is_species=0.
         cur = db.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type) "
-            "VALUES (?, NULL, 1, 'taxonomy')",
-            ("‘apapane",),
+            "VALUES (?, NULL, 0, 'individual')",
+            ("Robin",),
         )
-        legacy_id = cur.lastrowid
-        db.tag_photo(p1, legacy_id)
-        db.queue_change(p1, 'keyword_add', '‘apapane')
-        # Clean general peer at the same slot, tagged on the other photo.
-        general_id = db.add_keyword("apapane", kw_type="general")
-        db.tag_photo(p2, general_id)
-        assert general_id != legacy_id
+        individual_id = cur.lastrowid
+        db.tag_photo(pid_dst, individual_id)
 
-        # PUT-style retype: turn the clean general row into taxonomy. The
-        # peer lookup finds the legacy row and merges the clean row into
-        # it. The survivor must end up as clean `apapane`, not `‘apapane`.
-        effective_id = db.update_keyword(general_id, type="taxonomy")
-        assert effective_id == legacy_id
+        # Retype the taxonomy row to 'individual'. update_keyword must merge
+        # into the individual peer and return its id.
+        effective_id = db.update_keyword(taxonomy_id, type="individual")
+        assert effective_id == individual_id
 
-        # Survivor's stored name must be the canonical spelling.
-        row = db.conn.execute(
-            "SELECT name FROM keywords WHERE id = ?", (legacy_id,)
+        # The taxonomy row is gone.
+        assert db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (taxonomy_id,)
+        ).fetchone() is None
+
+        # Critically: the surviving individual row must NOT have inherited
+        # is_species=1 or a taxon_id from the taxonomy source.
+        survivor = db.conn.execute(
+            "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+            (individual_id,),
         ).fetchone()
-        assert row is not None
-        assert row["name"] == "apapane"
+        assert survivor["type"] == "individual"
+        assert survivor["is_species"] == 0, (
+            "is_species must not leak into a non-taxonomy destination"
+        )
+        assert survivor["taxon_id"] is None, (
+            "taxon_id must not leak into a non-taxonomy destination"
+        )
 
-        # Pending change queued under the legacy spelling must now
-        # reference the canonical name so sync_to_xmp doesn't leak the
-        # stray-quote spelling back into the sidecar.
-        pending = db.conn.execute(
-            "SELECT value FROM pending_changes "
-            "WHERE photo_id = ? AND change_type = 'keyword_add'",
-            (p1,),
-        ).fetchall()
-        values = sorted(r["value"] for r in pending)
-        assert values == ["apapane"], values
+        # Photos from both sides are retained on the survivor.
+        tagged = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (individual_id,),
+            ).fetchall()
+        }
+        assert tagged == {pid_src, pid_dst}
     finally:
         db.close()
 
 
-def test_update_keyword_merge_canonicalizes_non_root_peer_name(tmp_path):
-    """The peer-merge canonicalization must work for child keywords too.
-
-    Regression: for non-root rows the surviving `(name, parent_id)` slot is
-    UNIQUE-constrained. Normalizing the peer's stored spelling in place
-    while the clean source still occupies that slot silently no-ops on
-    ``IntegrityError``, so ``_merge_keyword_into`` then deletes the clean
-    source and leaves a legacy-spelled survivor ``Parent > ‘Hawk``. The fix
-    merges first (freeing the slot) and normalizes the peer afterwards, so
-    the surviving child row stores the canonical name.
+def test_update_keyword_retype_legacy_general_is_species_does_not_leak(tmp_path):
+    """Legacy `type='general', is_species=1` rows upgraded from pre-invariant
+    databases still count as species-bearing to the rest of the app
+    (`is_species = 1 OR type = 'taxonomy'`). Retyping such a row into an
+    existing individual/general peer must not stamp is_species=1 or a taxon
+    link onto the non-taxonomy survivor. Extends
+    ``test_update_keyword_retype_to_nontaxonomy_does_not_leak_is_species``
+    to cover the general-source variant flagged by Codex.
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        ws_id = db.ensure_default_workspace()
-        db.set_active_workspace(ws_id)
-        fid = db.add_folder('/photos', name='photos')
-        p1 = db.add_photo(
-            folder_id=fid, filename='a.jpg', extension='.jpg',
+        fid = db.add_folder("/photos", name="photos")
+        pid_src = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        p2 = db.add_photo(
-            folder_id=fid, filename='b.jpg', extension='.jpg',
+        pid_dst = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        parent_id = db.add_keyword("Parent", kw_type="general")
-        # Legacy edge-quoted taxonomy child (imported/upgraded DB shape).
-        # One photo carries it and its pending sidecar add references the
-        # legacy spelling.
+
+        # Legacy general row with is_species=1 and a taxon link — the shape
+        # upgraded DBs can carry before mark_species_keywords retypes them.
+        cur = db.conn.execute(
+            "INSERT INTO taxa (name, rank) VALUES (?, ?)",
+            ("Turdus migratorius", "species"),
+        )
+        taxon_row_id = cur.lastrowid
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+            "VALUES (?, NULL, 1, 'general', ?)",
+            ("Robin", taxon_row_id),
+        )
+        general_id = cur.lastrowid
+        db.tag_photo(pid_src, general_id)
+
+        # Existing individual `Robin` peer at the same slot, no species flag.
         cur = db.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type) "
-            "VALUES (?, ?, 1, 'taxonomy')",
-            ("‘Hawk", parent_id),
+            "VALUES (?, NULL, 0, 'individual')",
+            ("Robin",),
         )
-        legacy_id = cur.lastrowid
-        db.tag_photo(p1, legacy_id)
-        db.queue_change(p1, 'keyword_add', '‘Hawk')
-        # Clean general child at the same parent, tagged on the other photo.
-        general_id = db.add_keyword("Hawk", parent_id=parent_id, kw_type="general")
-        db.tag_photo(p2, general_id)
-        assert general_id != legacy_id
+        individual_id = cur.lastrowid
+        db.tag_photo(pid_dst, individual_id)
 
-        # PUT-style retype: turn the clean general child into taxonomy. The
-        # peer lookup finds the legacy child at the same parent and merges
-        # the clean row into it. The survivor must end up as clean `Hawk`,
-        # not `‘Hawk` -- otherwise the UNIQUE(name, parent_id) collision
-        # inside _normalize_keyword_row_name silently leaves the legacy
-        # spelling in place.
-        effective_id = db.update_keyword(general_id, type="taxonomy")
-        assert effective_id == legacy_id
+        # Retype the legacy general row to 'individual'. update_keyword must
+        # merge into the individual peer.
+        effective_id = db.update_keyword(general_id, type="individual")
+        assert effective_id == individual_id
 
-        # Survivor's stored name must be the canonical spelling.
-        row = db.conn.execute(
-            "SELECT name, parent_id, type FROM keywords WHERE id = ?",
-            (legacy_id,),
-        ).fetchone()
-        assert row is not None
-        assert row["name"] == "Hawk", row["name"]
-        assert row["parent_id"] == parent_id
-        assert row["type"] == "taxonomy"
-
-        # Exactly one child row must remain for the normalized name under
-        # this parent.
-        rows = db.conn.execute(
-            "SELECT id FROM keywords "
-            "WHERE vireo_normalize_keyword(name) = 'hawk' COLLATE NOCASE "
-            "AND parent_id = ? AND type = 'taxonomy'",
-            (parent_id,),
-        ).fetchall()
-        assert [r["id"] for r in rows] == [legacy_id]
-        # The old general row must be gone (merged away).
-        gone = db.conn.execute(
+        assert db.conn.execute(
             "SELECT id FROM keywords WHERE id = ?", (general_id,)
-        ).fetchone()
-        assert gone is None
+        ).fetchone() is None
 
-        # Pending change queued under the legacy spelling must now
-        # reference the canonical name so sync_to_xmp doesn't leak the
-        # stray-quote spelling back into the sidecar.
-        pending = db.conn.execute(
-            "SELECT value FROM pending_changes "
-            "WHERE photo_id = ? AND change_type = 'keyword_add'",
-            (p1,),
-        ).fetchall()
-        values = sorted(r["value"] for r in pending)
-        assert values == ["Hawk"], values
+        # Critically: is_species and taxon_id must NOT leak onto the
+        # non-taxonomy survivor even though the source was type='general'
+        # (not 'taxonomy').
+        survivor = db.conn.execute(
+            "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+            (individual_id,),
+        ).fetchone()
+        assert survivor["type"] == "individual"
+        assert survivor["is_species"] == 0, (
+            "legacy is_species=1 general source must not stamp survivor"
+        )
+        assert survivor["taxon_id"] is None
+
+        tagged = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (individual_id,),
+            ).fetchall()
+        }
+        assert tagged == {pid_src, pid_dst}
     finally:
         db.close()
 
 
-def test_add_keyword_species_prefers_taxonomy_peer_over_general_exact_match(tmp_path):
-    """When both a clean `general` row `apapane` and a legacy `taxonomy`
-    edge-quote row `‘apapane` exist at the same slot, add_keyword('apapane',
-    is_species=True) must resolve to the taxonomy peer. Otherwise the fast
-    exact-match query returns the general row and the promotion path stamps
-    a second taxonomy row with the same normalized name — silently
-    duplicating the species keyword and letting later calls bind to either
-    id at random.
+def test_merge_keyword_into_retargets_edit_history(tmp_path):
+    """When _merge_keyword_into deletes the source keyword row, any
+    edit_history entry referring to it as a keyword id must be retargeted
+    onto the survivor. Otherwise undo of a recent keyword_add / _remove /
+    prediction_accept / species_replace looks up the deleted id, finds
+    nothing, and marks the entry undone without reversing the tag — the
+    photo keeps the survivor's tag with no way to undo it. Covers the
+    Codex finding on the one-shot normalization migration.
     """
+    import json as _json
+
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        # Legacy edge-quoted taxonomy row that survived normalization on
-        # insert (the UDF fallback is only consulted for casing/quote
-        # variants of the requested name; here we insert directly to
-        # simulate the imported-DB shape Codex flagged).
-        cur = db.conn.execute(
-            "INSERT INTO keywords (name, parent_id, is_species, type) "
-            "VALUES (?, NULL, 1, 'taxonomy')",
-            ("‘apapane",),
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
         )
-        taxonomy_id = cur.lastrowid
-        # A clean general row also exists at the same slot.
-        general_id = db.add_keyword("apapane", kw_type='general')
-        assert general_id != taxonomy_id
+        pid_replace = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
 
-        resolved = db.add_keyword("apapane", is_species=True)
-        assert resolved == taxonomy_id
+        # Survivor and about-to-be-merged source of the same type.
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        # Both photos are tagged with merge_id so undo has something to hit.
+        db.tag_photo(pid, merge_id)
+        db.tag_photo(pid_replace, merge_id)
 
-        # Guard against the silent-duplicate: we must NOT have promoted the
-        # general row into a second taxonomy row.
-        rows = db.conn.execute(
-            "SELECT id, type FROM keywords "
-            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
-            "AND parent_id IS NULL AND type = 'taxonomy'"
-        ).fetchall()
-        assert [r["id"] for r in rows] == [taxonomy_id]
-        general_row = db.conn.execute(
-            "SELECT type FROM keywords WHERE id = ?", (general_id,)
+        # 1) A bare-id keyword_add edit whose new_value points at merge_id.
+        eid_add = db.record_edit(
+            "keyword_add", "Added keyword", str(merge_id),
+            [{"photo_id": pid, "old_value": "", "new_value": str(merge_id)}],
+        )
+        # 2) A keyword_remove edit whose item.old_value carries the bare id.
+        db.tag_photo(pid, merge_id)  # ensure tagged before recording remove
+        eid_remove = db.record_edit(
+            "keyword_remove", "Removed keyword", str(merge_id),
+            [{"photo_id": pid, "old_value": str(merge_id), "new_value": ""}],
+        )
+        # 3) A species_replace edit with JSON metadata carrying keyword_id +
+        #    keyword_ids that reference merge_id.
+        payload = _json.dumps(
+            {"keyword_id": merge_id, "keyword_ids": [merge_id]},
+            sort_keys=True,
+        )
+        eid_replace = db.record_edit(
+            "species_replace", "Replaced species", str(merge_id),
+            [{
+                "photo_id": pid_replace,
+                "old_value": payload,
+                "new_value": str(merge_id),
+            }],
+        )
+
+        # Merge merge_id into keep_id (mirrors the migration's convergence
+        # loop, and update_keyword's retype-into-peer path).
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        # edit_history.new_value retargeted for all three action types.
+        for eid in (eid_add, eid_remove, eid_replace):
+            row = db.conn.execute(
+                "SELECT new_value FROM edit_history WHERE id = ?", (eid,)
+            ).fetchone()
+            assert row["new_value"] == str(keep_id), (
+                f"edit_history #{eid}.new_value not retargeted"
+            )
+
+        # Bare-id item columns retargeted.
+        add_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_add,),
         ).fetchone()
-        assert general_row["type"] == "general"
+        assert add_item["new_value"] == str(keep_id)
+
+        remove_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_remove,),
+        ).fetchone()
+        assert remove_item["old_value"] == str(keep_id)
+
+        # JSON payload rewritten in place.
+        replace_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_replace,),
+        ).fetchone()
+        assert replace_item["new_value"] == str(keep_id)
+        parsed = _json.loads(replace_item["old_value"])
+        assert parsed["keyword_id"] == keep_id
+        assert parsed["keyword_ids"] == [keep_id]
     finally:
         db.close()
 
 
-def test_add_keyword_untyped_prefers_taxonomy_peer_over_general_auto_promote(
-    tmp_path,
-):
-    """Untyped `add_keyword('apapane')` must not silently promote the clean
-    general row to taxonomy when a legacy edge-quote taxonomy peer exists
-    at the same slot. The fast exact-match query returns the general row
-    (raw name matches under COLLATE NOCASE) and the auto-promote branch
-    below would stamp it with type='taxonomy' via
-    `_lookup_taxon_id_for_keyword` — producing two normalized-equal
-    taxonomy rows at the same slot. Untyped callers (typing into a
-    generic keyword input) would then bind to either at random.
+def test_merge_keyword_into_dedupes_keyword_ids_after_retarget(tmp_path):
+    """A species_replace payload whose keyword_ids list already contains
+    the destination id must not end up with a duplicate after retarget.
+    Otherwise undo would re-tag the survivor twice for the same keyword id.
     """
+    import json as _json
+
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        # Seed a taxon so `_lookup_taxon_id_for_keyword('apapane')` matches
-        # and would otherwise trigger the auto-promote path.
-        db.conn.execute(
-            "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
-            "VALUES (1, 'Himatione sanguinea', 'apapane', 'species', 'Animalia')"
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
         )
-        # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
-        cur = db.conn.execute(
-            "INSERT INTO keywords (name, parent_id, is_species, type) "
-            "VALUES (?, NULL, 1, 'taxonomy')",
-            ("‘apapane",),
+
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid, merge_id)
+
+        payload = _json.dumps(
+            {"keyword_id": merge_id, "keyword_ids": [keep_id, merge_id]},
+            sort_keys=True,
         )
-        taxonomy_id = cur.lastrowid
-        # A clean general row exists at the same slot.
-        general_id = db.add_keyword("apapane", kw_type='general')
-        assert general_id != taxonomy_id
+        eid = db.record_edit(
+            "species_replace", "Replaced species", str(merge_id),
+            [{
+                "photo_id": pid,
+                "old_value": payload,
+                "new_value": str(merge_id),
+            }],
+        )
 
-        # Untyped call from a generic keyword path — no is_species, no
-        # kw_type.
-        resolved = db.add_keyword("apapane")
-        assert resolved == taxonomy_id
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
 
-        # Guard against the silent-duplicate: the general row must NOT
-        # have been promoted into a second taxonomy row.
-        taxonomy_rows = db.conn.execute(
-            "SELECT id FROM keywords "
-            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
-            "AND parent_id IS NULL AND type = 'taxonomy'"
-        ).fetchall()
-        assert [r["id"] for r in taxonomy_rows] == [taxonomy_id]
-        general_row = db.conn.execute(
-            "SELECT type FROM keywords WHERE id = ?", (general_id,)
+        replace_item = db.conn.execute(
+            "SELECT old_value FROM edit_history_items WHERE edit_id = ?",
+            (eid,),
         ).fetchone()
-        assert general_row["type"] == "general"
+        parsed = _json.loads(replace_item["old_value"])
+        assert parsed["keyword_ids"] == [keep_id], (
+            "duplicate destination id after retarget"
+        )
     finally:
         db.close()
 
 
-def test_add_keyword_untyped_prefers_higher_priority_peer_over_individual_exact(
-    tmp_path,
-):
-    """Untyped `add_keyword('apapane')` must not bind to an exact clean
-    lower-priority typed row when a legacy edge-quote higher-priority peer
-    exists at the same slot. The fast exact-match query returns the
-    individual row (raw name matches under COLLATE NOCASE) and the earlier
-    fix only checked for a taxonomy peer when the exact match was
-    'general' — leaving the individual/location/genre exact-match case
-    silently binding to the wrong row and contradicting the
-    taxonomy > genre > individual > location > general priority.
+def test_merge_keyword_into_preserves_prediction_accept_old_value(tmp_path):
+    """`_merge_keyword_into`'s bare-string rewrite of
+    edit_history_items.old_value must skip prediction_accept entries.
+    api_accept_prediction records item.old_value = str(prediction_id),
+    and _edit_prediction_id falls back to that raw value. If the merged
+    keyword id happens to equal a stored prediction id, a blanket rewrite
+    would silently retarget undo/redo onto a different prediction.
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
-        cur = db.conn.execute(
-            "INSERT INTO keywords (name, parent_id, is_species, type) "
-            "VALUES (?, NULL, 1, 'taxonomy')",
-            ("‘apapane",),
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
         )
-        taxonomy_id = cur.lastrowid
-        # A clean individual row also exists at the same slot (e.g. a
-        # person tag). This is a deliberate lower-priority type.
-        individual_id = db.add_keyword("apapane", kw_type='individual')
-        assert individual_id != taxonomy_id
 
-        # Untyped call from a generic keyword path — no is_species, no
-        # kw_type.
-        resolved = db.add_keyword("apapane")
-        assert resolved == taxonomy_id
+        keep_id = db.add_keyword("Sparrow", kw_type="general")
+        merge_id = db.add_keyword("sparrow variant", kw_type="general")
 
-        # The individual row must remain individual — no silent type
-        # rewrite.
-        individual_row = db.conn.execute(
-            "SELECT type FROM keywords WHERE id = ?", (individual_id,)
+        # Contrive a prediction_accept edit whose item.old_value (the
+        # prediction id per api_accept_prediction) numerically equals the
+        # keyword row about to be merged — the exact collision the
+        # CodeRabbit finding calls out. The prediction row itself is not
+        # required for the rewrite pass; the retarget operates purely on
+        # edit_history_items.
+        prediction_id = merge_id
+        eid = db.record_edit(
+            "prediction_accept", "Accepted prediction", str(merge_id),
+            [{
+                "photo_id": pid,
+                "old_value": str(prediction_id),
+                "new_value": str(merge_id),
+            }],
+        )
+
+        db.tag_photo(pid, merge_id)
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid,),
         ).fetchone()
-        assert individual_row["type"] == "individual"
+        # new_value (keyword id) IS retargeted onto the survivor.
+        assert item["new_value"] == str(keep_id)
+        # old_value is the prediction id — MUST stay unchanged even
+        # though it numerically equals src_id.
+        assert item["old_value"] == str(merge_id), (
+            "prediction_accept.old_value (prediction id) was incorrectly "
+            "rewritten as if it were a keyword id"
+        )
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
+    """When a `keyword_add(src_id)` edit references a photo that already
+    carried dst_id at merge time, retargeting the edit onto dst_id would
+    let a later undo call untag_photo(dst_id) and strip the user's
+    survivor tag — which was never part of that add. `_merge_keyword_into`
+    must drop such items so undo iterates only over the items whose photos
+    did NOT pre-existingly hold the survivor. Covers the Codex finding on
+    the retargeting pass.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+
+        # pid_had_both already carries the survivor before the add.
+        db.tag_photo(pid_had_both, keep_id)
+        # Both photos then get tagged with the variant that will be merged.
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # A batch keyword_add edit records the variant tag on both photos.
+        eid = db.record_edit(
+            "keyword_add", "Added variant to 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": "",
+                 "new_value": str(merge_id)},
+                {"photo_id": pid_only_src, "old_value": "",
+                 "new_value": str(merge_id)},
+            ],
+            is_batch=True,
+        )
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        # The item for pid_had_both must be gone — retargeting it would
+        # let undo strip the survivor tag that pre-existed.
+        remaining = db.conn.execute(
+            "SELECT photo_id, new_value FROM edit_history_items "
+            "WHERE edit_id = ? ORDER BY photo_id", (eid,),
+        ).fetchall()
+        remaining_pids = [r["photo_id"] for r in remaining]
+        assert pid_had_both not in remaining_pids, (
+            "keyword_add item for a photo that pre-existingly held the "
+            "survivor tag should be dropped, not retargeted"
+        )
+        assert pid_only_src in remaining_pids
+        # Surviving item is retargeted onto the survivor id.
+        [only_src_item] = [r for r in remaining if r["photo_id"] == pid_only_src]
+        assert only_src_item["new_value"] == str(keep_id)
+
+        # End-to-end: undo the edit and confirm the pre-existing survivor
+        # tag on pid_had_both is preserved.
+        db.undo_last_edit()
+        keep_tags_had_both = {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }
+        assert keep_id in keep_tags_had_both, (
+            "undo removed the pre-existing survivor tag from pid_had_both"
+        )
+        # And pid_only_src, whose add was legitimately retargeted, no
+        # longer carries the survivor tag after undo.
+        keep_tags_only_src = {
+            r["id"] for r in db.get_photo_keywords(pid_only_src)
+        }
+        assert keep_id not in keep_tags_only_src
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_preserves_preexisting_survivor_for_keyword_remove(tmp_path):
+    """A `keyword_remove(src_id)` edit retargeted onto dst_id must not let
+    redo strip a pre-existing survivor tag. undo of keyword_remove tags on
+    entry.new_value (INSERT OR IGNORE — no-op if dst pre-existed), but
+    redo calls untag_photo(pid, entry.new_value); if entry.new_value was
+    retargeted to dst_id and pid already carried dst_id, redo removes
+    the user's survivor tag.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid_had_both, keep_id)
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # Record a keyword_remove edit for the variant on both photos.
+        # keyword_remove convention: item.old_value = str(kid), new_value = ''.
+        eid = db.record_edit(
+            "keyword_remove", "Removed variant from 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": str(merge_id),
+                 "new_value": ""},
+                {"photo_id": pid_only_src, "old_value": str(merge_id),
+                 "new_value": ""},
+            ],
+            is_batch=True,
+        )
+        # Simulate the untag the original edit performed.
+        db.untag_photo(pid_had_both, merge_id)
+        db.untag_photo(pid_only_src, merge_id)
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        remaining_pids = [
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (eid,),
+            ).fetchall()
+        ]
+        assert pid_had_both not in remaining_pids, (
+            "keyword_remove item for a photo that pre-existingly held the "
+            "survivor tag should be dropped so redo does not remove it"
+        )
+        assert pid_only_src in remaining_pids
+
+        # Undo (tags with entry.new_value=dst_id; no-op for pid_had_both
+        # because survivor was already there).
+        db.undo_last_edit()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }
+        # Redo (would untag survivor from pid_had_both without the fix).
+        db.redo_last_undo()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }, "redo of keyword_remove stripped the pre-existing survivor tag"
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept(tmp_path):
+    """A `prediction_accept(src_id)` edit retargeted onto dst_id must not
+    let undo strip a pre-existing survivor tag. prediction_accept shares
+    the keyword_add branch in _apply_undo — the untag_photo call would
+    remove the survivor. The migration drops such items; prediction-
+    status restoration for those specific items is intentionally
+    sacrificed to preserve the user's tag (see _merge_keyword_into).
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid_had_both, keep_id)
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # prediction_accept convention:
+        # entry.new_value = str(kid), item.old_value = str(pred_id),
+        # item.new_value = str(kid).
+        eid = db.record_edit(
+            "prediction_accept", "Accepted prediction for 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": "42",
+                 "new_value": str(merge_id)},
+                {"photo_id": pid_only_src, "old_value": "43",
+                 "new_value": str(merge_id)},
+            ],
+            is_batch=True,
+        )
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        remaining_pids = [
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (eid,),
+            ).fetchall()
+        ]
+        assert pid_had_both not in remaining_pids, (
+            "prediction_accept item for a photo that pre-existingly held "
+            "the survivor tag should be dropped so undo does not untag it"
+        )
+        assert pid_only_src in remaining_pids
+
+        db.undo_last_edit()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }, "undo of prediction_accept stripped the pre-existing survivor tag"
     finally:
         db.close()
 

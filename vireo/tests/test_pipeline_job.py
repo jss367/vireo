@@ -6687,9 +6687,8 @@ def _make_photo_dir(tmp_path, n):
     return photo_dir
 
 
-def test_thumbnail_failures_flip_stage_status_to_failed(tmp_path, monkeypatch):
-    """If any thumbnail fails, the stage status must be 'failed' (not 'completed'),
-    even when some thumbnails succeeded. Mixed-outcome rollups are 'failed'."""
+def test_thumbnail_failures_complete_stage_with_repair_warnings(tmp_path, monkeypatch):
+    """Per-photo gaps warn without invalidating successful thumbnails."""
     import config as cfg
     from db import Database
 
@@ -6723,12 +6722,7 @@ def test_thumbnail_failures_flip_stage_status_to_failed(tmp_path, monkeypatch):
     job = _make_job()
     runner = FakeRunner()
 
-    pipeline_result = None
-    try:
-        pipeline_result = run_pipeline_job(job, runner, db_path, ws_id, params)
-    except RuntimeError:
-        # Expected: pipeline raises when a stage ends up in 'failed'.
-        pipeline_result = job.get("result")
+    pipeline_result = run_pipeline_job(job, runner, db_path, ws_id, params)
 
     thumb_result = pipeline_result["stages"]["thumbnails"]
     assert thumb_result["failed"] > 0, (
@@ -6744,15 +6738,20 @@ def test_thumbnail_failures_flip_stage_status_to_failed(tmp_path, monkeypatch):
         if step == "thumbnails" and kwargs.get("status")
     ]
     final_status = final_thumb_updates[-1]["status"]
-    assert final_status == "failed", (
-        f"Mixed-outcome rollup must report 'failed', got {final_status!r}. "
+    assert final_status == "completed", (
+        f"Mixed-outcome rollup must report 'completed', got {final_status!r}. "
         f"Result: {thumb_result}"
     )
+    assert final_thumb_updates[-1]["error_count"] == thumb_result["failed"]
+    assert len(thumb_result["failed_photos"]) == thumb_result["failed"]
+    assert all(item["filename"] for item in thumb_result["failed_photos"])
+    assert pipeline_result["warnings"] == [
+        f"[thumbnails] {thumb_result['failed']} of 4 thumbnails need attention"
+    ]
 
 
-def test_thumbnail_failures_append_rollup_error(tmp_path, monkeypatch):
-    """Per-file thumbnail failures must surface as exactly one rollup entry
-    in the pipeline errors list — not N per-file entries."""
+def test_thumbnail_failures_append_rollup_warning_not_job_error(tmp_path, monkeypatch):
+    """Coverage gaps surface once as warnings without failing the job."""
     import config as cfg
     from db import Database
 
@@ -6779,18 +6778,47 @@ def test_thumbnail_failures_append_rollup_error(tmp_path, monkeypatch):
     )
     job = _make_job()
 
-    with contextlib.suppress(RuntimeError):
-        run_pipeline_job(job, FakeRunner(), db_path, ws_id, params)
+    result = run_pipeline_job(job, FakeRunner(), db_path, ws_id, params)
 
-    errors = job["errors"]
-    thumb_errors = [e for e in errors if "thumbnail" in e.lower()]
-    assert len(thumb_errors) == 1, (
-        f"Expected exactly one rollup entry for thumbnail failures, got "
-        f"{len(thumb_errors)}: {thumb_errors}"
+    assert job["errors"] == []
+    assert result["warnings"] == [
+        "[thumbnails] 3 of 3 thumbnails need attention"
+    ]
+    assert len(result["stages"]["thumbnails"]["failed_photos"]) == 3
+
+
+def test_pipeline_thumbnail_retry_uses_near_full_working_copy(tmp_path):
+    from PIL import Image
+    from pipeline_job import _retry_thumbnail_with_working_copy
+
+    vireo_dir = tmp_path / "vireo"
+    working_dir = vireo_dir / "working"
+    working_dir.mkdir(parents=True)
+    wc_path = working_dir / "7.jpg"
+    Image.new("RGB", (5392, 3592), "red").save(wc_path)
+    photo = {
+        "id": 7,
+        "filename": "photo.NEF",
+        "width": 5408,
+        "height": 3608,
+        "working_copy_path": "working/7.jpg",
+        "file_mtime": None,
+    }
+    calls = []
+
+    def generate(photo_id, source_path, cache_dir, **kwargs):
+        calls.append((photo_id, source_path, kwargs))
+        return str(tmp_path / "thumbs" / "7.jpg")
+
+    result = _retry_thumbnail_with_working_copy(
+        object(), generate, photo, 7, str(tmp_path / "photo.NEF"),
+        str(tmp_path / "thumbs"), 300,
+        {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
+        str(vireo_dir),
     )
-    assert "3" in thumb_errors[0], (
-        f"Rollup should mention the failure count (3), got: {thumb_errors[0]!r}"
-    )
+
+    assert result.endswith("7.jpg")
+    assert os.path.normpath(calls[0][1]) == os.path.normpath(str(wc_path))
 
 
 def test_thumbnail_progress_counter_includes_failed(tmp_path, monkeypatch):
@@ -7536,6 +7564,157 @@ def test_pipeline_regroup_invalidates_stamp_on_partial_run(tmp_path, monkeypatch
         "falsely report Group as 'done-prior' against a subset-only cache"
     )
     assert row["last_grouped_at"] is None
+
+
+def test_pipeline_regroup_does_not_stamp_when_eye_override_differs(
+    tmp_path, monkeypatch,
+):
+    """A per-run ``eye_detect_override`` that flips the effective
+    ``eye_detect_enabled`` away from the workspace's own setting means the
+    resulting KEEP/REJECT decisions came from settings the workspace's
+    normal state would not reproduce. ``compute_group_fingerprint`` reads
+    only encounter/burst keys, so stamping it would let a later default-off
+    plan run against the workspace's real settings falsely report Group as
+    'done-prior' against eye-scored results. Regression for Codex thread
+    PRRT_kwDORn8c-s6QN0m3."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    # Workspace default: eye detection off. The Process-page checkbox on
+    # this run flips it via ``eye_detect_override=True``.
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    # Pre-stamp a fingerprint as if a prior FULL default-off regroup had
+    # completed cleanly. The one-off eye-on run must NOT overwrite this
+    # with a fresh stamp — that would lie about workspace freshness.
+    db.set_workspace_group_state(
+        ws_id, fingerprint="pre-existing-default-off", when_ts=1714579200,
+    )
+
+    import pipeline as pipeline_mod
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline",
+        lambda photos, config=None, emit_trace=False: {
+            "summary": {"groups": 1}, "photos": photos,
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "save_results",
+        lambda results, cache_dir, workspace_id: None,
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": 1}],
+    )
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        # Explicit per-run opt-in against workspace's eye-off default.
+        eye_detect_override=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    db2 = Database(db_path)
+    row = db2.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_group_fingerprint"] is None, (
+        "one-off eye-on regroup against a default-off workspace stamped "
+        "workspace freshness — a later default-off plan will falsely report "
+        "'done-prior' against eye-scored KEEP/REJECT results"
+    )
+    assert row["last_grouped_at"] is None
+
+
+def test_pipeline_regroup_stamps_when_eye_override_matches_workspace(
+    tmp_path, monkeypatch,
+):
+    """The eye-override guard must only trigger when the override *differs*
+    from the workspace's own eye setting — otherwise a Process-page run
+    that ticks the checkbox in a workspace that already has eye detection
+    on would be treated as partial and the plan would loop forever on
+    'settings changed'."""
+    import config as cfg
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"pipeline": {"eye_detect_enabled": True}}, f)
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    for name in ("a.jpg", "b.jpg"):
+        Image.new("RGB", (16, 16), "black").save(str(photo_dir / name))
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    import pipeline as pipeline_mod
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline",
+        lambda photos, config=None, emit_trace=False: {
+            "summary": {"groups": 1}, "photos": photos,
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "save_results",
+        lambda results, cache_dir, workspace_id: None,
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda thread_db, collection_id=None, config=None: [{"id": 1}],
+    )
+
+    params = PipelineParams(
+        source=str(photo_dir),
+        skip_classify=True,
+        skip_extract_masks=True,
+        eye_detect_override=True,
+    )
+
+    runner = FakeRunner()
+    job = _make_job()
+
+    with contextlib.suppress(Exception):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws_id)
+    row = db2.conn.execute(
+        "SELECT last_grouped_at, last_group_fingerprint FROM workspaces WHERE id=?",
+        (ws_id,),
+    ).fetchone()
+    assert row["last_grouped_at"] is not None, (
+        "an eye_detect_override matching the workspace's own setting must "
+        "still stamp workspace freshness — otherwise the plan would loop "
+        "on 'settings changed'"
+    )
+    from pipeline import compute_group_fingerprint
+    effective = db2.get_effective_config(cfg.load())
+    assert row["last_group_fingerprint"] == compute_group_fingerprint(effective)
 
 
 
@@ -9527,6 +9706,491 @@ def test_pipeline_eye_keypoints_stage_excluded_photos_do_not_influence_downloads
     )
 
 
+def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
+    tmp_path, monkeypatch,
+):
+    """An explicit per-run eye opt-in — ``eye_detect_override=True`` set
+    from the Process-page checkbox or an API caller — must override the
+    Settings-level ``eye_detect_enabled`` so the stage actually runs even
+    when Settings has eye detection off (the new default). Without this,
+    the visible checkbox on the Process page is a no-op until the user
+    first flips Settings, which is the very "black box" the CLAUDE.md
+    philosophy forbids. ``skip_eye_keypoints=False`` alone is NOT the
+    signal — ``the "Full" saved process`` also sets it to False as a
+    base default (see ``test_pipeline_eye_keypoints_full_strategy_does_not_force_optin``).
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    # Use the REAL preflight — the fix must feed it a config where
+    # eye_detect_enabled=True regardless of the on-disk setting.
+    monkeypatch.setattr(
+        Database, "list_photos_for_eye_keypoint_stage",
+        lambda self, **k: [
+            {"id": pid, "taxonomy_class": "Aves", "species_conf": 0.9},
+        ],
+    )
+    import keypoints as _kp_mod
+    monkeypatch.setattr(
+        _kp_mod, "ensure_keypoint_weights",
+        lambda name, progress_callback=None: "/fake/model.onnx",
+    )
+
+    calls = {"count": 0, "configs": []}
+
+    def fake_detect_eye_keypoints_stage(
+        db_, config, progress_callback=None,
+        collection_id=None, exclude_photo_ids=None,
+        abort_check=None,
+    ):
+        calls["count"] += 1
+        calls["configs"].append(dict(config))
+
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        fake_detect_eye_keypoints_stage,
+    )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_eye_keypoints=False,
+        eye_detect_override=True,
+        skip_regroup=True,
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert calls["count"] == 1, (
+        f"detect_eye_keypoints_stage must run when the user opts in per-run "
+        f"even though eye_detect_enabled=False in config; got "
+        f"calls={calls['count']}"
+    )
+    assert calls["configs"][0].get("eye_detect_enabled") is True, (
+        f"the per-run opt-in must surface as eye_detect_enabled=True in the "
+        f"config passed to detect_eye_keypoints_stage so its internal "
+        f"preflight doesn't re-skip; got config={calls['configs'][0]!r}"
+    )
+
+
+def test_pipeline_eye_keypoints_full_strategy_does_not_force_optin(
+    tmp_path, monkeypatch,
+):
+    """Codex thread 5 regression guard: a ``full``-strategy chain (e.g.
+    after-import) reaches ``run_pipeline_job`` with
+    ``skip_eye_keypoints=False`` from ``the "Full" saved process`` — that
+    is a strategy default, NOT an explicit user opt-in. When Settings has
+    ``eye_detect_enabled=False`` (the new default) and no
+    ``eye_detect_override`` is set, the stage-level preflight must skip
+    with "Disabled in config" instead of forcing eye detection on and
+    triggering SuperAnimal downloads and eye-based scoring by default.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MegaDetector",
+    )
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    _stub_extract_masks_heavy_ops(monkeypatch)
+
+    calls = {"count": 0}
+
+    def fake_detect_eye_keypoints_stage(
+        db_, config, progress_callback=None,
+        collection_id=None, exclude_photo_ids=None,
+        abort_check=None,
+    ):
+        calls["count"] += 1
+
+    monkeypatch.setattr(
+        pipeline_mod, "detect_eye_keypoints_stage",
+        fake_detect_eye_keypoints_stage,
+    )
+
+    # Mirror what the "Full" saved process produces: skip_eye_keypoints=False
+    # (base default), but no eye_detect_override (leave None so config wins).
+    from process_strategies import SEED_PROCESSES, seed_flags
+    expanded = seed_flags(next(s for s in SEED_PROCESSES if s["name"] == "Full"))
+    assert expanded["skip_eye_keypoints"] is False
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_eye_keypoints=expanded["skip_eye_keypoints"],
+        skip_regroup=True,
+    )
+    assert params.eye_detect_override is None, (
+        "strategy expansion must not set eye_detect_override — it is the "
+        "explicit opt-in signal, not a strategy default"
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert calls["count"] == 0, (
+        f"detect_eye_keypoints_stage must not run when Settings has "
+        f"eye_detect_enabled=False and the caller did not explicitly "
+        f"opt in via eye_detect_override; got calls={calls['count']}"
+    )
+
+
+def test_pipeline_regroup_per_run_eye_optin_reaches_scoring_config(
+    tmp_path, monkeypatch,
+):
+    """The Process-page eye opt-in (``eye_detect_override=True``) must also
+    reach regroup/scoring, not just the eye stage. When the user checks
+    Eye Keypoints for a run and Settings has ``eye_detect_enabled=False``
+    (the new default), the eye stage runs and writes ``eye_tenengrad`` —
+    but scoring reloads the workspace config, sees eye disabled, and
+    ignores those values so the checkbox never affects culling results.
+    The regroup stage must mirror the eye stage's per-run override before
+    calling ``run_full_pipeline``.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    # Give load_photo_features a photo to return so regroup does not
+    # short-circuit on "No photos with pipeline features found."
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda *a, **kw: [
+            {"id": pid, "filename": "p.jpg", "timestamp": 1_000_000.0},
+        ],
+    )
+    monkeypatch.setattr(pipeline_mod, "save_results", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        pipeline_mod, "_resolve_collection_photo_ids",
+        lambda db_, cid: {pid},
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "compute_group_fingerprint", lambda *a, **kw: "fp",
+    )
+
+    calls = {"configs": []}
+
+    def fake_run_full_pipeline(photos, config=None, emit_trace=False):
+        calls["configs"].append(dict(config or {}))
+        return {"encounters": [], "photos": [], "summary": {"groups": 0}}
+
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline", fake_run_full_pipeline,
+    )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_eye_keypoints=False,
+        eye_detect_override=True,
+        skip_regroup=False,
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert calls["configs"], (
+        f"run_full_pipeline must be invoked by regroup_stage; got "
+        f"calls={calls['configs']!r}"
+    )
+    assert calls["configs"][0].get("eye_detect_enabled") is True, (
+        f"the per-run eye opt-in must surface as eye_detect_enabled=True "
+        f"in the pipeline_cfg passed to run_full_pipeline so scoring "
+        f"honors eye_tenengrad values the eye stage just wrote; got "
+        f"config={calls['configs'][0]!r}"
+    )
+
+
+def test_pipeline_regroup_full_strategy_default_does_not_force_scoring_config(
+    tmp_path, monkeypatch,
+):
+    """Codex thread 5 regression guard for the regroup stage: an
+    after-import ``full``-strategy chain reaches regroup with
+    ``skip_eye_keypoints=False`` from the strategy default, but no
+    ``eye_detect_override`` — so scoring must respect Settings'
+    ``eye_detect_enabled=False`` rather than forcing eye scoring on.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda *a, **kw: [
+            {"id": pid, "filename": "p.jpg", "timestamp": 1_000_000.0},
+        ],
+    )
+    monkeypatch.setattr(pipeline_mod, "save_results", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        pipeline_mod, "_resolve_collection_photo_ids",
+        lambda db_, cid: {pid},
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "compute_group_fingerprint", lambda *a, **kw: "fp",
+    )
+
+    calls = {"configs": []}
+
+    def fake_run_full_pipeline(photos, config=None, emit_trace=False):
+        calls["configs"].append(dict(config or {}))
+        return {"encounters": [], "photos": [], "summary": {"groups": 0}}
+
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline", fake_run_full_pipeline,
+    )
+
+    from process_strategies import SEED_PROCESSES, seed_flags
+    expanded = seed_flags(next(s for s in SEED_PROCESSES if s["name"] == "Full"))
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_eye_keypoints=expanded["skip_eye_keypoints"],
+        skip_regroup=False,
+    )
+    assert params.eye_detect_override is None
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert calls["configs"], "run_full_pipeline must be invoked"
+    assert calls["configs"][0].get("eye_detect_enabled") is False, (
+        f"strategy default skip_eye_keypoints=False without an explicit "
+        f"eye_detect_override must not force eye_detect_enabled=True in "
+        f"scoring config: got config={calls['configs'][0]!r}"
+    )
+
+
+def test_pipeline_regroup_no_optin_leaves_scoring_config_untouched(
+    tmp_path, monkeypatch,
+):
+    """When the caller sets ``skip_eye_keypoints=True`` (Process-page
+    checkbox off), regroup must fall back to the Settings-level
+    ``eye_detect_enabled`` value instead of forcing it on. Without this,
+    unchecking the Process-page checkbox would silently ignore workspaces
+    where Settings still has eye detection enabled.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"pipeline": {"eye_detect_enabled": False}}, f)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda *a, **kw: [
+            {"id": pid, "filename": "p.jpg", "timestamp": 1_000_000.0},
+        ],
+    )
+    monkeypatch.setattr(pipeline_mod, "save_results", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        pipeline_mod, "_resolve_collection_photo_ids",
+        lambda db_, cid: {pid},
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "compute_group_fingerprint", lambda *a, **kw: "fp",
+    )
+
+    calls = {"configs": []}
+
+    def fake_run_full_pipeline(photos, config=None, emit_trace=False):
+        calls["configs"].append(dict(config or {}))
+        return {"encounters": [], "photos": [], "summary": {"groups": 0}}
+
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline", fake_run_full_pipeline,
+    )
+
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_eye_keypoints=True,
+        skip_regroup=False,
+    )
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert calls["configs"], "run_full_pipeline must be invoked"
+    # Settings said False and user did not opt in — value stays False.
+    assert calls["configs"][0].get("eye_detect_enabled") is False, (
+        f"without a per-run opt-in, regroup must not force eye detection "
+        f"on: got config={calls['configs'][0]!r}"
+    )
+
+
+def test_pipeline_regroup_no_optin_preserves_settings_eye_on(
+    tmp_path, monkeypatch,
+):
+    """Reverse-direction guard for the Process-page checkbox flow: when
+    Settings has ``eye_detect_enabled=True`` and the user unchecks the
+    Eye Keypoints checkbox on the Process page, the client must NOT send
+    ``eye_detect_override=false`` — an unchecked box means "skip the
+    stage", not "disable eye scoring". Regroup must fall back to
+    Settings ``True`` so the run scores against existing
+    ``eye_tenengrad`` values instead of silently ignoring them.
+    """
+    import config as cfg
+    import pipeline as pipeline_mod
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    with open(cfg.CONFIG_PATH, "w") as f:
+        json.dump({"pipeline": {"eye_detect_enabled": True}}, f)
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+    pid = db.add_photo(folder_id, "p.jpg", ".jpg", 100, 1_000_000.0)
+    _drop_jpeg(folder_path, "p.jpg")
+    col_id = db.add_collection(
+        "Test", json.dumps([{"field": "photo_ids", "value": [pid]}]),
+    )
+
+    monkeypatch.setattr(
+        pipeline_mod, "load_photo_features",
+        lambda *a, **kw: [
+            {"id": pid, "filename": "p.jpg", "timestamp": 1_000_000.0},
+        ],
+    )
+    monkeypatch.setattr(pipeline_mod, "save_results", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        pipeline_mod, "_resolve_collection_photo_ids",
+        lambda db_, cid: {pid},
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "compute_group_fingerprint", lambda *a, **kw: "fp",
+    )
+
+    calls = {"configs": []}
+
+    def fake_run_full_pipeline(photos, config=None, emit_trace=False):
+        calls["configs"].append(dict(config or {}))
+        return {"encounters": [], "photos": [], "summary": {"groups": 0}}
+
+    monkeypatch.setattr(
+        pipeline_mod, "run_full_pipeline", fake_run_full_pipeline,
+    )
+
+    # Skip the stage but leave the override unset — the shape the Process
+    # page now sends when the Eye Keypoints checkbox is off.
+    params = PipelineParams(
+        collection_id=col_id,
+        skip_classify=True,
+        skip_extract_masks=True,
+        skip_eye_keypoints=True,
+        skip_regroup=False,
+    )
+    assert params.eye_detect_override is None
+    run_pipeline_job(_make_job(), FakeRunner(), db_path, ws_id, params)
+
+    assert calls["configs"], "run_full_pipeline must be invoked"
+    assert calls["configs"][0].get("eye_detect_enabled") is True, (
+        f"a Process-page run that only skips the eye stage (no explicit "
+        f"eye_detect_override) must let scoring keep Settings' "
+        f"eye_detect_enabled=True: got config={calls['configs'][0]!r}"
+    )
+
+
 def test_detect_eye_keypoints_stage_honors_abort_check(tmp_path, monkeypatch):
     """detect_eye_keypoints_stage must accept an `abort_check` callable and
     break the per-photo loop the first time it returns True. Without this
@@ -10390,8 +11054,12 @@ def test_pipeline_scan_thumbnails_honor_raw_marker_after_source_selection(
     )
 
     thumbnails_stage = result["stages"]["thumbnails"]
-    assert thumbnails_stage["failed"] == 0
-    assert thumbnails_stage["skipped"] == 1
+    assert thumbnails_stage["failed"] == 1
+    assert thumbnails_stage["skipped"] == 0
+    assert thumbnails_stage["failed_photos"][0]["filename"] == "source.NEF"
+    assert result["warnings"] == [
+        "[thumbnails] 1 of 1 thumbnails need attention"
+    ]
 
 
 # ---------------------------------------------------------------------------

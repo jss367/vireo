@@ -2478,44 +2478,50 @@ def _job_config(client, job_id):
 
 
 def _fake_active_model(monkeypatch):
-    """Keep the route's no-model auto-skip from firing so strategy flags
+    """Keep the route's no-model auto-skip from firing so process flags
     survive to the job config unmangled."""
     import models
 
     monkeypatch.setattr(models, "get_active_model", lambda: {"id": "fake"})
 
 
-def test_pipeline_strategy_expands_flags(app_and_db):
-    app, _ = app_and_db
+def _process_id(db, name):
+    return next(p["id"] for p in db.get_saved_processes() if p["name"] == name)
+
+
+def test_pipeline_process_id_expands_flags(app_and_db):
+    app, db = app_and_db
+    pid = _process_id(db, "Quick look")
     col_id = _make_collection(app)
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "collection_id": col_id, "strategy": "quick_look",
+            "collection_id": col_id, "process_id": pid,
         })
         assert resp.status_code == 200
         cfg = _job_config(client, resp.get_json()["job_id"])
-        assert cfg["strategy"] == "quick_look"
+        assert cfg["process_id"] == pid
         assert cfg["skip_classify"] is True
         assert cfg["skip_extract_masks"] is True
         assert cfg["skip_regroup"] is True
 
 
-def test_pipeline_identify_strategy_keeps_classify_only(app_and_db, monkeypatch):
-    app, _ = app_and_db
+def test_pipeline_identify_process_keeps_classify_only(app_and_db, monkeypatch):
+    app, db = app_and_db
+    pid = _process_id(db, "Identify birds")
     col_id = _make_collection(app)
     _fake_active_model(monkeypatch)
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "collection_id": col_id, "strategy": "identify",
+            "collection_id": col_id, "process_id": pid,
         })
         assert resp.status_code == 200
         cfg = _job_config(client, resp.get_json()["job_id"])
-        assert cfg["strategy"] == "identify"
+        assert cfg["process_id"] == pid
         assert cfg["skip_classify"] is False
         assert cfg["skip_extract_masks"] is True
         assert cfg["skip_regroup"] is True
         assert cfg["miss_enabled"] is False
-        # Only identify opts into the species-only save path — the flag
+        # Only Identify birds opts into the species-only save path — the flag
         # that gates regroup_stage's ``run_species_review_pipeline`` call.
         # Without it, a Custom body posting ``skip_regroup: true`` would
         # incorrectly land there too.
@@ -2523,67 +2529,103 @@ def test_pipeline_identify_strategy_keeps_classify_only(app_and_db, monkeypatch)
 
 
 def test_pipeline_cull_ready_pins_miss_enabled_false(app_and_db, monkeypatch):
-    # quick_look alone can't prove miss_enabled reached PipelineParams:
+    # Quick look alone can't prove miss_enabled reached PipelineParams:
     # it also sets skip_classify=True, and the misses stage is downstream
-    # of classify, so an implementation that never wires the strategy's
+    # of classify, so an implementation that never wires the process's
     # miss_enabled through to params would still produce a run without
     # misses (by dint of skip_classify) and this test would go green.
-    # cull_ready has skip_classify=False + miss_enabled=False, so the
-    # only way misses can be suppressed is if the strategy's miss_enabled
+    # Cull-ready has skip_classify=False + miss_enabled=False, so the
+    # only way misses can be suppressed is if the process's miss_enabled
     # actually reaches PipelineParams — that's the property pinned here.
-    app, _ = app_and_db
+    app, db = app_and_db
+    pid = _process_id(db, "Cull-ready")
     col_id = _make_collection(app)
     _fake_active_model(monkeypatch)
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "collection_id": col_id, "strategy": "cull_ready",
+            "collection_id": col_id, "process_id": pid,
         })
         assert resp.status_code == 200
         cfg = _job_config(client, resp.get_json()["job_id"])
-        assert cfg["strategy"] == "cull_ready"
+        assert cfg["process_id"] == pid
         assert cfg["miss_enabled"] is False
-        assert cfg["skip_classify"] is False  # cull_ready keeps classify on
+        assert cfg["skip_classify"] is False  # Cull-ready keeps classify on
 
 
-def test_pipeline_unknown_strategy_400(app_and_db):
+def test_pipeline_full_process_opts_into_eye_detection(app_and_db, monkeypatch):
+    # A saved process with Eye Keypoints on (the "Full" seed:
+    # skip_eye_keypoints=False) run by id must set eye_detect_override=True, so
+    # the eye stage runs instead of deferring to the workspace's
+    # eye_detect_enabled default (False) and silently skipping — mirroring what
+    # checking the Eye Keypoints box on the Process page does.
+    app, db = app_and_db
+    pid = _process_id(db, "Full")
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": pid,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["eye_detect_override"] is True
+
+
+def test_pipeline_eyes_off_process_leaves_eye_override_none(app_and_db, monkeypatch):
+    # A process with Eye Keypoints off (Identify birds) must NOT force the eye
+    # override — nothing to opt into, and the workspace default still governs.
+    app, db = app_and_db
+    pid = _process_id(db, "Identify birds")
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": pid,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["eye_detect_override"] is None
+
+
+def test_pipeline_unknown_process_id_404(app_and_db):
     app, _ = app_and_db
     col_id = _make_collection(app)
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "collection_id": col_id, "strategy": "yolo",
+            "collection_id": col_id, "process_id": 999999,
         })
-        assert resp.status_code == 400
-        assert "unknown strategy" in resp.get_json()["error"]
+        assert resp.status_code == 404
+        assert "unknown process id" in resp.get_json()["error"]
 
 
-def test_pipeline_null_strategy_400(app_and_db):
+def test_pipeline_null_process_id_400(app_and_db):
     # The "no process" case is expressed by NOT calling /api/jobs/pipeline.
-    # A present-but-null strategy must 400 so the server never silently
+    # A present-but-null process_id must 400 so the server never silently
     # falls through to default processing when a caller thought they were
-    # opting out. Distinct from "unknown strategy" — null is a shape error.
+    # opting out. Distinct from "unknown process id" — null is a shape error.
     app, _ = app_and_db
     col_id = _make_collection(app)
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "collection_id": col_id, "strategy": None,
+            "collection_id": col_id, "process_id": None,
         })
         assert resp.status_code == 400
-        assert "strategy" in resp.get_json()["error"]
+        assert "process_id" in resp.get_json()["error"]
 
 
-def test_pipeline_none_string_strategy_400(app_and_db):
-    # The literal string "none" is not a valid strategy name either.
+def test_pipeline_non_int_process_id_400(app_and_db):
+    # A string process_id is a shape error too.
     app, _ = app_and_db
     col_id = _make_collection(app)
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "collection_id": col_id, "strategy": "none",
+            "collection_id": col_id, "process_id": "quick_look",
         })
         assert resp.status_code == 400
 
 
-def test_pipeline_omitted_strategy_uses_body_params(app_and_db):
-    # No `strategy` key at all -> the route builds PipelineParams from the
+def test_pipeline_omitted_process_id_uses_body_params(app_and_db):
+    # No `process_id` key at all -> the route builds PipelineParams from the
     # body as usual. Distinguishing "omitted" from "null" is exactly why the
     # route must check key presence, not truthiness.
     app, _ = app_and_db
@@ -2592,19 +2634,37 @@ def test_pipeline_omitted_strategy_uses_body_params(app_and_db):
         resp = client.post("/api/jobs/pipeline", json={"collection_id": col_id})
         assert resp.status_code == 200
         cfg = _job_config(client, resp.get_json()["job_id"])
-        assert cfg.get("strategy") is None
+        assert cfg.get("process_id") is None
 
 
-def test_pipeline_explicit_flags_beat_strategy(app_and_db, monkeypatch):
-    # A caller may pin one flag on top of a strategy; explicit wins. The
+def test_pipeline_legacy_strategy_field_rejected(app_and_db):
+    # The previous /api/jobs/pipeline shape accepted a "strategy" name
+    # ("quick_look", "identify", "full", "cull_ready") and expanded it to
+    # stage flags. That vocabulary was replaced by saved-process ids; a
+    # caller still sending the old field must get a 400 instead of the
+    # request silently falling through to a default full-pipeline run
+    # (reclassifying/regrouping the whole collection unasked).
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "quick_look",
+        })
+        assert resp.status_code == 400
+        assert "strategy" in resp.get_json()["error"]
+
+
+def test_pipeline_explicit_flags_beat_process(app_and_db, monkeypatch):
+    # A caller may pin one flag on top of a process; explicit wins. The
     # fake model keeps the no-model auto-skip from flipping the same flags
     # and masking a broken merge order.
-    app, _ = app_and_db
+    app, db = app_and_db
+    pid = _process_id(db, "Full")
     col_id = _make_collection(app)
     _fake_active_model(monkeypatch)
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "collection_id": col_id, "strategy": "full", "skip_regroup": True,
+            "collection_id": col_id, "process_id": pid, "skip_regroup": True,
         })
         assert resp.status_code == 200
         cfg = _job_config(client, resp.get_json()["job_id"])
@@ -2671,7 +2731,7 @@ def test_pipeline_folder_ids_creates_adhoc_collection(app_and_db):
     child_id = _folder_id_by_path(db, "/photos/2024/January")
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "folder_ids": [child_id], "strategy": "quick_look",
+            "folder_ids": [child_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
         })
         assert resp.status_code == 200
         cfg = _job_config(client, resp.get_json()["job_id"])
@@ -2690,7 +2750,7 @@ def test_pipeline_folder_ids_includes_descendants(app_and_db):
     child_id = _folder_id_by_path(db, "/photos/2024/January")
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "folder_ids": [root_id], "strategy": "quick_look",
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
         })
         assert resp.status_code == 200
         cfg = _job_config(client, resp.get_json()["job_id"])
@@ -2712,7 +2772,7 @@ def test_pipeline_folder_ids_unlinked_folder_404(app_and_db):
     db.set_active_workspace(original_ws)
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "folder_ids": [foreign_id], "strategy": "quick_look",
+            "folder_ids": [foreign_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
         })
         assert resp.status_code == 404
 
@@ -2723,7 +2783,7 @@ def test_pipeline_folder_ids_rejects_non_int(app_and_db):
     app, _ = app_and_db
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "folder_ids": ["../etc"], "strategy": "quick_look",
+            "folder_ids": ["../etc"], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
         })
         assert resp.status_code == 400
 
@@ -2744,7 +2804,7 @@ def test_pipeline_folder_ids_rejects_out_of_range_integer(app_and_db, bad_fid):
     app, _ = app_and_db
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "folder_ids": [bad_fid], "strategy": "quick_look",
+            "folder_ids": [bad_fid], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
         })
         assert resp.status_code == 400, resp.get_json()
         assert "folder_ids" in resp.get_json()["error"]
@@ -2777,7 +2837,7 @@ def test_pipeline_folder_ids_includes_legacy_null_parent_descendants(app_and_db)
     )
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "folder_ids": [root_id], "strategy": "quick_look",
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
         })
         assert resp.status_code == 200, resp.get_json()
         cfg = _job_config(client, resp.get_json()["job_id"])
@@ -2808,7 +2868,7 @@ def test_pipeline_folder_ids_honors_exclude_paths(app_and_db):
     )
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "folder_ids": [root_id], "strategy": "quick_look",
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
             "exclude_paths": [excluded_root_file, excluded_child_file],
         })
         assert resp.status_code == 200, resp.get_json()
@@ -2837,7 +2897,7 @@ def test_pipeline_folder_ids_honors_exclude_photo_ids(app_and_db):
     excluded = all_ids[0]
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "folder_ids": [root_id], "strategy": "quick_look",
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
             "exclude_photo_ids": [excluded],
         })
         assert resp.status_code == 200, resp.get_json()
@@ -3019,7 +3079,7 @@ def test_pipeline_folder_ids_chunks_wide_subtree(app_and_db, monkeypatch):
 
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "folder_ids": [parent], "strategy": "quick_look",
+            "folder_ids": [parent], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
         })
         assert resp.status_code == 200, resp.get_json()
         cfg = _job_config(client, resp.get_json()["job_id"])
@@ -3037,7 +3097,7 @@ def test_pipeline_folder_ids_persisted_in_job_config(app_and_db):
     root_id = _folder_id_by_path(db, "/photos/2024")
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "folder_ids": [root_id], "strategy": "quick_look",
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
         })
         assert resp.status_code == 200
         cfg = _job_config(client, resp.get_json()["job_id"])
@@ -3183,7 +3243,7 @@ def test_pipeline_folder_ids_bad_model_selection_leaves_no_stray_collection(
     with app.test_client() as client:
         resp = client.post(
             "/api/jobs/pipeline",
-            json={"folder_ids": [root_id], "strategy": "full", **extra},
+            json={"folder_ids": [root_id], **extra},
         )
         assert resp.status_code == 400, resp.get_json()
         offending = next(iter(extra))
@@ -3212,7 +3272,7 @@ def test_pipeline_folder_ids_treats_empty_sources_as_omitted(
     root_id = _folder_id_by_path(db, "/photos/2024")
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={
-            "folder_ids": [root_id], "strategy": "quick_look", **extra,
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True, **extra,
         })
         assert resp.status_code == 200, resp.get_json()
 
@@ -3243,10 +3303,13 @@ def test_import_photos_happy_path(app_and_db, tmp_path):
     card = _import_card(tmp_path)
     dest = str(tmp_path / "archive")
 
+    cull_ready_id = next(
+        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Cull-ready")
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [card],
         "destination": dest,
-        "after_import": "cull_ready",
+        "after_import": cull_ready_id,
+        "trust_likely_duplicates": True,
     })
     assert resp.status_code == 200, resp.get_json()
     job_id = resp.get_json()["job_id"]
@@ -3256,7 +3319,8 @@ def test_import_photos_happy_path(app_and_db, tmp_path):
     assert config["sources"] == [card]
     assert config["destination"] == dest
     assert config["folder_template"] == "%Y/%Y-%m-%d"
-    assert config["after_import"] == "cull_ready"
+    assert config["after_import"] == cull_ready_id
+    assert config["trust_likely_duplicates"] is True
 
     job = wait_for_job_via_client(client, job_id)
     assert job["status"] == "completed", job
@@ -3266,8 +3330,303 @@ def test_import_photos_happy_path(app_and_db, tmp_path):
     assert result["safe_to_format"] is True
 
 
-def test_import_in_place_no_destination_required(app_and_db, tmp_path):
+def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(
+        os.path.join(card, "DSC_0002.jpg")
+    )
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Kenya trip", "Portfolio", "kenya trip"],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    config = _job_config(client, job_id)
+    assert config["tags"] == ["Kenya trip", "Portfolio"]
+
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["tagging"]["tagged_photos"] == 2
+    assert result["tagging"]["errors"] == []
+    for photo_id in result["photo_ids"]:
+        names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+        assert {"Kenya trip", "Portfolio"} <= names
+
+
+def test_import_tag_reuses_keyword_repaired_from_legacy_peer(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    clean_id = db.add_keyword("Import Legacy", kw_type="general")
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
+        ("‘Import Legacy",),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(photo_id, legacy_id)
+    # Simulate the supported upgrade sequence. The normalization repair runs
+    # before requests and merges the legacy spelling into the canonical row;
+    # runtime import code can then rely on the stored-name invariant instead
+    # of repeating normalized peer scans at every call site.
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = 'keyword_names_normalized'"
+    )
+    db.conn.commit()
+    db.normalize_keyword_data()
+
+    def imported_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": True,
+            "cancelled": False,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 1,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": True,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    monkeypatch.setattr(import_job, "run_import_job", imported_result)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Import Legacy"],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["tagging"]["tagged_photos"] == 0
+    linked = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id IN (?, ?)",
+        (photo_id, clean_id, legacy_id),
+    ).fetchall()
+    assert [row["keyword_id"] for row in linked] == [clean_id]
+
+
+def test_duplicate_only_import_does_not_tag_existing_photos(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    destination = str(tmp_path / "archive")
+
+    first = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": destination, "after_import": None,
+    })
+    wait_for_job_via_client(client, first.get_json()["job_id"])
+
+    second = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": destination,
+        "after_import": None,
+        "tags": ["Do not add to duplicates"],
+    })
+    job = wait_for_job_via_client(client, second.get_json()["job_id"])
+    result = job["result"]
+    assert result["photo_ids"] == []
+    assert result["tagging"]["skipped"] == "no new photos"
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = ?",
+        ("Do not add to duplicates",),
+    ).fetchone() is None
+
+
+def test_cancelled_import_does_not_apply_requested_tags(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+
+    def cancelled_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": False,
+            "cancelled": True,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 0,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": False,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    monkeypatch.setattr(import_job, "run_import_job", cancelled_result)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Must not be added"],
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    # The synthetic worker returns a cancelled result without setting the
+    # runner's cancellation flag, so JobRunner records this fixture as failed;
+    # the production cancellation path sets both. The behavior under test is
+    # that the result marker alone suppresses all post-import mutations.
+    assert job["status"] == "failed", job
+    assert job["result"]["tagging"]["skipped"] == "import cancelled"
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = ?", ("Must not be added",),
+    ).fetchone() is None
+
+
+def test_import_gps_tagging_stops_when_cancelled_during_resolution(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    runner = app._job_runner
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.clear_photo_location(photo_id)
+
+    def imported_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": True,
+            "cancelled": False,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 1,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": True,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    original_get = Database.get_photos_by_ids
+
+    def cancel_during_resolution(self, photo_ids):
+        running_ids = [
+            job_id for job_id, job in runner._jobs.items()
+            if job["type"] == "import" and job["status"] == "running"
+        ]
+        assert len(running_ids) == 1
+        assert runner.cancel_job(running_ids[0]) is True
+        return original_get(self, photo_ids)
+
+    monkeypatch.setattr(import_job, "run_import_job", imported_result)
+    monkeypatch.setattr(Database, "get_photos_by_ids", cancel_during_resolution)
+    quick_look_id = _process_id(db, "Quick look")
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": quick_look_id,
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "cancelled", job
+    assert job["result"]["cancelled"] is True
+    assert job["result"]["tagging"]["skipped"] == "import cancelled"
+    assert job["result"]["after_import_skipped"] == "import cancelled"
+    assert "process_job_id" not in job["result"]
+    assert db.get_assigned_photo_location(photo_id) is None
+
+
+@pytest.mark.parametrize("field,value,error", [
+    ("tags", "Trip", "tags must be a list"),
+    ("tags", ["Trip", 4], "only strings"),
+    ("tags", ["   "], "must not be empty"),
+    ("location_from_gps", "yes", "must be a boolean"),
+])
+def test_import_tag_options_are_validated_before_starting_job(
+    app_and_db, tmp_path, field, value, error,
+):
     app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        field: value,
+    })
+    assert resp.status_code == 400
+    assert error in resp.get_json()["error"]
+
+
+def test_import_can_add_structured_locations_from_each_photos_gps(
+    app_and_db, tmp_path, monkeypatch,
+):
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    original_get = Database.get_photos_by_ids
+    details = {
+        "place_id": "import-gps-place",
+        "name": "Central Park",
+        "lat": 40.785091,
+        "lng": -73.968285,
+        "types": ["park"],
+        "address_components": [
+            {"name": "New York", "types": ["locality"]},
+            {"name": "New York", "types": ["administrative_area_level_1"]},
+            {"name": "United States", "types": ["country"]},
+        ],
+    }
+
+    def photos_with_gps(self, photo_ids):
+        rows = original_get(self, photo_ids)
+        enriched = {}
+        for photo_id, row in rows.items():
+            photo = dict(row)
+            photo["latitude"] = details["lat"]
+            photo["longitude"] = details["lng"]
+            enriched[photo_id] = photo
+        self.reverse_geocode_cache_put(
+            details["lat"], details["lng"], details["place_id"],
+            json.dumps(details),
+        )
+        return enriched
+
+    monkeypatch.setattr(Database, "get_photos_by_ids", photos_with_gps)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["tagging"]["locations_added"] == 1
+    photo_id = result["photo_ids"][0]
+    location = db.get_assigned_photo_location(photo_id)
+    assert location["keyword_location_name"] == "Central Park"
+
+
+def test_import_in_place_no_destination_required(app_and_db, tmp_path):
+    app, db = app_and_db
     client = app.test_client()
     card = _import_card(tmp_path)
 
@@ -3291,6 +3650,11 @@ def test_import_in_place_no_destination_required(app_and_db, tmp_path):
     assert result["indexed"] == 1
     assert result["ok"] is True
     assert result["after_import_skipped"] == "import-only"
+    assert result["collection_name"].startswith("Import ")
+    photos = db.get_collection_photos(
+        result["collection_id"], per_page=999999,
+    )
+    assert [p["id"] for p in photos] == result["photo_ids"]
 
 
 def test_import_in_place_can_target_new_workspace(app_and_db, tmp_path):
@@ -3315,8 +3679,8 @@ def test_import_in_place_can_target_new_workspace(app_and_db, tmp_path):
 
 
 def test_import_photos_null_after_import_is_import_only(app_and_db, tmp_path):
-    """after_import: null means import-only (PR 3's hook short-circuits) —
-    same nullable vocabulary as pipeline.default_strategy."""
+    """after_import: null means import-only (the chaining hook short-circuits)
+    — same nullable vocabulary as pipeline.default_process_id."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.post("/api/jobs/import-photos", json={
@@ -3351,19 +3715,30 @@ def test_import_photos_can_target_new_workspace(app_and_db, tmp_path):
     assert active["id"] == config["workspace_id"]
 
 
-@pytest.mark.parametrize("bad", ["yolo", "none"])
-def test_import_photos_invalid_after_import_400(app_and_db, tmp_path, bad):
-    """Invalid strategy names fail at enqueue, not at completion — failing
+def test_import_photos_invalid_after_import_type_400(app_and_db, tmp_path):
+    """A non-int after_import fails at enqueue, not at completion — failing
     the chain hours later is the old pipeline's mistake."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
         "destination": str(tmp_path / "archive"),
-        "after_import": bad,
+        "after_import": "yolo",
     })
     assert resp.status_code == 400
-    assert "unknown strategy" in resp.get_json()["error"]
+    assert "process id" in resp.get_json()["error"]
+
+
+def test_import_photos_unknown_after_import_id_400(app_and_db, tmp_path):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": 999999,
+    })
+    assert resp.status_code == 400
+    assert "unknown process id" in resp.get_json()["error"]
 
 
 def test_import_photos_after_import_defaults_from_workspace(
@@ -3371,8 +3746,10 @@ def test_import_photos_after_import_defaults_from_workspace(
     app, db = app_and_db
     client = app.test_client()
     ws_id = db._active_workspace_id
+    pid = next(p["id"] for p in db.get_saved_processes()
+               if p["name"] == "Cull-ready")
     db.update_workspace(ws_id, config_overrides={
-        "pipeline": {"default_strategy": "cull_ready"},
+        "pipeline": {"default_process_id": pid},
     })
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
@@ -3380,20 +3757,21 @@ def test_import_photos_after_import_defaults_from_workspace(
     })
     assert resp.status_code == 200, resp.get_json()
     config = _job_config(client, resp.get_json()["job_id"])
-    assert config["after_import"] == "cull_ready"
+    assert config["after_import"] == pid
 
 
-def test_import_photos_new_workspace_ignores_old_default_strategy(
+def test_import_photos_new_workspace_ignores_old_default_process(
         app_and_db, tmp_path):
     """Regression: an omitted after_import must resolve against the TARGET
     workspace's effective config, not the caller's previously-active one.
-    Otherwise a stale pipeline.default_strategy override on the old
+    Otherwise a stale pipeline.default_process_id override on the old
     workspace silently chains onto a fresh-workspace import."""
     app, db = app_and_db
     client = app.test_client()
     old_ws = db._active_workspace_id
+    pid = db.get_saved_processes()[0]["id"]
     db.update_workspace(old_ws, config_overrides={
-        "pipeline": {"default_strategy": "cull_ready"},
+        "pipeline": {"default_process_id": pid},
     })
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [_import_card(tmp_path)],
@@ -3406,15 +3784,16 @@ def test_import_photos_new_workspace_ignores_old_default_strategy(
     assert config["after_import"] is None
 
 
-def test_import_in_place_new_workspace_ignores_old_default_strategy(
+def test_import_in_place_new_workspace_ignores_old_default_process(
         app_and_db, tmp_path):
     """Same regression as above, exercised through the in-place endpoint —
     both routes call _prepare_import_workspace so both had the bug."""
     app, db = app_and_db
     client = app.test_client()
     old_ws = db._active_workspace_id
+    pid = db.get_saved_processes()[0]["id"]
     db.update_workspace(old_ws, config_overrides={
-        "pipeline": {"default_strategy": "cull_ready"},
+        "pipeline": {"default_process_id": pid},
     })
     resp = client.post("/api/jobs/import-in-place", json={
         "sources": [_import_card(tmp_path)],
@@ -3748,26 +4127,30 @@ def test_import_chains_process_job(app_and_db, tmp_path):
     app, db = app_and_db
     card = _chain_card(tmp_path)
     with app.test_client() as client:
-        job_id = _post_import(client, card, tmp_path / "arch", "quick_look")
+        quick_look_id = next(
+            pr["id"] for pr in db.get_saved_processes()
+            if pr["name"] == "Quick look")
+        job_id = _post_import(client, card, tmp_path / "arch", quick_look_id)
         job = wait_for_job_via_client(client, job_id)
         res = job["result"]
         assert res.get("process_job_id"), res
         assert "after_import_skipped" not in res
 
         pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
-        assert pj["config"]["strategy"] == "quick_look"
+        assert pj["config"]["process_id"] == quick_look_id
         assert pj["config"].get("chained_from") == job_id
         col_id = pj["config"]["collection_id"]
+        assert res["collection_id"] == col_id
+        assert res["collection_name"].startswith("Import ")
         photos = db.get_collection_photos(col_id, per_page=999999)
         assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
 
 
 def test_import_only_choice_skips_chaining(app_and_db, tmp_path):
-    """after_import null (and the omitted->workspace-default-null case)
-    never reaches /api/jobs/pipeline; the result says why."""
+    """Import-only still records the exact import as a Browse collection."""
     from wait import wait_for_job_via_client
 
-    app, _ = app_and_db
+    app, db = app_and_db
     card = _chain_card(tmp_path)
     with app.test_client() as client:
         job_id = _post_import(client, card, tmp_path / "arch", None)
@@ -3775,6 +4158,11 @@ def test_import_only_choice_skips_chaining(app_and_db, tmp_path):
         res = job["result"]
         assert res.get("after_import_skipped") == "import-only"
         assert "process_job_id" not in res
+        assert res["collection_name"].startswith("Import ")
+        photos = db.get_collection_photos(
+            res["collection_id"], per_page=999999,
+        )
+        assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
 
 
 def test_failed_import_does_not_chain(app_and_db, tmp_path):
@@ -3782,7 +4170,9 @@ def test_failed_import_does_not_chain(app_and_db, tmp_path):
     convention): any failed file suppresses chaining."""
     from wait import wait_for_job_via_client
 
-    app, _ = app_and_db
+    app, db = app_and_db
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Quick look")
     card = _chain_card(tmp_path)
     unreadable = card / "DSC_9999.jpg"
     Image.new("RGB", (16, 16), "blue").save(str(unreadable))
@@ -3790,15 +4180,52 @@ def test_failed_import_does_not_chain(app_and_db, tmp_path):
     try:
         with app.test_client() as client:
             job_id = _post_import(
-                client, card, tmp_path / "arch", "quick_look",
+                client, card, tmp_path / "arch", quick_look_id,
             )
             job = wait_for_job_via_client(client, job_id)
             res = job["result"]
             assert res["failed"] >= 1
             assert res.get("after_import_skipped") == "import failed"
             assert "process_job_id" not in res
+            assert "collection_id" not in res
     finally:
         os.chmod(str(unreadable), 0o644)
+
+
+def test_cancelled_import_does_not_create_collection(
+        app_and_db, tmp_path, monkeypatch):
+    """Partial photo ids from a cancelled run must not look like a complete
+    import collection in Browse."""
+    import import_job
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    existing_photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    def cancelled_result(*args, **kwargs):
+        return {
+            "ok": False,
+            "cancelled": True,
+            "photo_ids": [existing_photo_id],
+            "copied": 1,
+            "failed": 0,
+        }
+
+    monkeypatch.setattr(import_job, "run_import_job", cancelled_result)
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Quick look")
+    card = _chain_card(tmp_path, n=1)
+    with app.test_client() as client:
+        job_id = _post_import(
+            client, card, tmp_path / "arch", quick_look_id,
+        )
+        result = wait_for_job_via_client(client, job_id)["result"]
+
+    assert result["after_import_skipped"] == "import failed"
+    assert "collection_id" not in result
+    assert "process_job_id" not in result
 
 
 def test_duplicates_only_import_skips_chaining(app_and_db, tmp_path):
@@ -3806,17 +4233,20 @@ def test_duplicates_only_import_skips_chaining(app_and_db, tmp_path):
     not an empty process run."""
     from wait import wait_for_job_via_client
 
-    app, _ = app_and_db
+    app, db = app_and_db
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Quick look")
     card = _chain_card(tmp_path)
     with app.test_client() as client:
         first = _post_import(client, card, tmp_path / "arch", None)
         wait_for_job_via_client(client, first)
-        second = _post_import(client, card, tmp_path / "arch", "quick_look")
+        second = _post_import(client, card, tmp_path / "arch", quick_look_id)
         job = wait_for_job_via_client(client, second)
         res = job["result"]
         assert res["skipped_duplicate"] == 2
         assert res.get("after_import_skipped") == "no new photos"
         assert "process_job_id" not in res
+        assert "collection_id" not in res
 
 
 def test_chained_run_surfaces_model_warning(app_and_db, tmp_path):
@@ -3825,13 +4255,67 @@ def test_chained_run_surfaces_model_warning(app_and_db, tmp_path):
     model_warning the manual pipeline route surfaces."""
     from wait import wait_for_job_via_client
 
-    app, _ = app_and_db
+    app, db = app_and_db
+    cull_ready_id = next(
+        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Cull-ready")
     card = _chain_card(tmp_path)
     with app.test_client() as client:
-        job_id = _post_import(client, card, tmp_path / "arch", "cull_ready")
+        job_id = _post_import(client, card, tmp_path / "arch", cull_ready_id)
         job = wait_for_job_via_client(client, job_id)
         res = job["result"]
         assert res.get("process_job_id"), res
         assert "model_warning" in res
         pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
         assert pj["config"]["skip_classify"] is True  # auto-skip applied
+
+
+def test_chained_process_snapshot_survives_mid_import_edit(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A saved process edited AFTER the user submits the import must not
+    change the chained run — the enqueue point captures the flag snapshot.
+
+    An archive-copy import from a full card can take many minutes; if the
+    resolve happens only when the chain hook fires, a settings edit in
+    that window would silently swap in different toggles than the user
+    accepted at the click. This test flips skip_regroup on the chosen
+    process between submit and the chained job's config read, then asserts
+    the chained run reflects the ORIGINAL flags.
+
+    The fake active model keeps the no-model auto-skip from touching
+    skip_classify (which would otherwise mask an unrelated flag flip),
+    so skip_regroup (which the auto-skip never touches) cleanly proves
+    the snapshot survived.
+    """
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    # Snapshot the "Full" seed and then flip skip_regroup=True after the
+    # import request returns. Any live-resolve would show skip_regroup=True
+    # in the chained job config; the enqueue-time snapshot keeps it False.
+    full_id = next(pr["id"] for pr in db.get_saved_processes()
+                   if pr["name"] == "Full")
+    original = db.get_saved_process(full_id)
+    assert original["skip_regroup"] is False, original
+
+    _fake_active_model(monkeypatch)
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "arch", full_id)
+        # Mutate the saved process BEFORE the chain hook fires. The import
+        # still runs to completion, so this is the exact window the fix
+        # closes: the chain hook fires from the import-job thread after
+        # ingest, and without the snapshot it would call resolve_process
+        # against this mutated row.
+        db.update_saved_process(full_id, skip_regroup=True)
+
+        job = wait_for_job_via_client(client, job_id)
+        res = job["result"]
+        assert res.get("process_job_id"), res
+
+        pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
+        # The chained run should reflect the snapshot at enqueue time
+        # (skip_regroup=False), not the post-submit edit.
+        assert pj["config"]["skip_regroup"] is False, pj["config"]
+        # And the process_id link is still preserved for provenance.
+        assert pj["config"]["process_id"] == full_id

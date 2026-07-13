@@ -2,14 +2,22 @@
 
 from playwright.sync_api import expect
 
-INAT_URL = "https://www.inaturalist.org/observations/upload?taxon_name=Corvus"
+INAT_UPLOAD_URL = "https://www.inaturalist.org/observations/upload"
+INAT_URL = (
+    INAT_UPLOAD_URL
+    + "?taxon_name=Corvus%20corax&observed_on=2026-07-12&lat=47.61&lng=-122.33"
+)
 
 
-def _item(photo_id=1, *, url=INAT_URL, duplicate=False):
+def _item(photo_id=1, *, url=INAT_UPLOAD_URL, duplicate=False):
     return {
         "photo_id": photo_id,
         "filename": f"photo-{photo_id}.jpg",
         "upload_url": url,
+        "taxon_name": "Corvus corax",
+        "observed_on": "2026-07-12",
+        "latitude": 47.61,
+        "longitude": -122.33,
         "already_submitted": duplicate,
         "existing_url": (
             "https://www.inaturalist.org/observations/123" if duplicate else None
@@ -48,12 +56,24 @@ def _open_commands(page):
     )
 
 
-def test_native_quick_open_uses_one_command_and_only_a_toast(live_server, page):
+def test_native_quick_open_reviews_checked_metadata_before_opening(live_server, page):
     page.goto(f"{live_server['url']}/browse")
     original_url = page.url
     _mock_tauri(page)
 
     page.evaluate("item => openInatQuickModal([item], [])", _item())
+
+    assert _open_commands(page) == []
+    expect(page.locator("#inatModal")).to_have_class("modal-overlay open")
+    expect(page.locator("#inatIncludeTaxon0")).to_be_checked()
+    expect(page.locator("#inatIncludeDate0")).to_be_checked()
+    expect(page.locator("#inatIncludeLocation0")).to_be_checked()
+
+    page.locator("#inatCards button", has_text="Open Upload Page").click()
+    page.wait_for_function(
+        "window.__externalTest.invokes.some(call => "
+        "call.command === 'open_external_url')"
+    )
 
     commands = _open_commands(page)
     assert commands == [{"command": "open_external_url", "args": {"url": INAT_URL}}]
@@ -62,7 +82,26 @@ def test_native_quick_open_uses_one_command_and_only_a_toast(live_server, page):
     expect(page.locator("#toastContainer")).to_contain_text(
         "Opened iNaturalist in your browser."
     )
-    expect(page.locator("#inatModal")).not_to_have_class("open")
+    expect(page.locator("#inatModal")).to_have_class("modal-overlay open")
+
+
+def test_quick_open_can_omit_all_metadata_for_generic_upload(live_server, page):
+    page.goto(f"{live_server['url']}/browse")
+    _mock_tauri(page)
+    page.evaluate("item => openInatQuickModal([item], [])", _item())
+
+    page.locator("#inatIncludeTaxon0").uncheck()
+    page.locator("#inatIncludeDate0").uncheck()
+    page.locator("#inatIncludeLocation0").uncheck()
+    page.locator("#inatCards button", has_text="Open Upload Page").click()
+    page.wait_for_function(
+        "window.__externalTest.invokes.some(call => "
+        "call.command === 'open_external_url')"
+    )
+
+    assert _open_commands(page) == [
+        {"command": "open_external_url", "args": {"url": INAT_UPLOAD_URL}}
+    ]
 
 
 def test_native_open_failure_stays_put_and_offers_retry_and_copy(live_server, page):
@@ -71,6 +110,7 @@ def test_native_open_failure_stays_put_and_offers_retry_and_copy(live_server, pa
     _mock_tauri(page, fail_open=True)
 
     page.evaluate("item => openInatQuickModal([item], [])", _item())
+    page.locator("#inatCards button", has_text="Open Upload Page").click()
 
     assert len(_open_commands(page)) == 1
     assert page.evaluate("window.__externalTest.windowOpenCalls") == []
@@ -144,7 +184,6 @@ def test_batch_quick_uploads_require_explicit_per_item_open(live_server, page):
         _item(1),
         _item(
             2,
-            url="https://www.inaturalist.org/observations/upload?taxon_name=Pica",
         ),
     ]
 
@@ -152,7 +191,7 @@ def test_batch_quick_uploads_require_explicit_per_item_open(live_server, page):
 
     assert _open_commands(page) == []
     expect(page.locator("#inatModal")).to_have_class("modal-overlay open")
-    expect(page.locator("#inatCards a", has_text="Open Upload")).to_have_count(2)
+    expect(page.locator("#inatCards button", has_text="Open Upload")).to_have_count(2)
     expect(page.locator("#inatCards button", has_text="Copy URL")).to_have_count(2)
 
     # Copy still has a DOM fallback when clipboard permission is unavailable;
@@ -189,9 +228,8 @@ def test_batch_quick_open_preserves_preparation_failures(live_server, page):
         {"item": _item(1), "failures": failures},
     )
 
-    # The batch had preparation failures, so the auto-open shortcut must be
-    # skipped and the modal must render both the prepared upload and the
-    # failure summary — otherwise those dropped photos are silently lost.
+    # The review modal must render both the prepared upload and the failure
+    # summary — otherwise those dropped photos are silently lost.
     assert _open_commands(page) == []
     expect(page.locator("#inatModal")).to_have_class("modal-overlay open")
     expect(page.locator("#inatCards", has_text="Open Upload Page")).to_be_visible()

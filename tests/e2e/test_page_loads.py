@@ -38,6 +38,26 @@ def test_page_loads_within_timeout(live_server, page, path):
     expect(page.locator("body")).not_to_be_empty()
 
 
+def test_storage_page_reports_health_and_safety(live_server, page):
+    separate_mask_requests = []
+    page.on(
+        "request",
+        lambda request: separate_mask_requests.append(request.url)
+        if request.url.endswith("/api/storage/masks") else None,
+    )
+    page.goto(f"{live_server['url']}/storage")
+
+    expect(page.locator("#storageTotalSize")).not_to_have_text("-")
+    expect(page.locator("#storageFreeSize")).not_to_have_text("-")
+    expect(page.locator("#storageReclaimableSize")).not_to_have_text("-")
+    expect(page.locator("#storageUpdatedAt")).to_contain_text("Updated")
+    expect(page.locator("#storageLocations code").first).not_to_have_text("")
+    expect(page.locator("#storageGrid .stat-label", has_text="Database")).to_have_count(1)
+    expect(page.get_by_text("Safe to clear", exact=True).first).to_be_visible()
+    expect(page.get_by_role("button", name="Open folder").first).to_be_visible()
+    assert separate_mask_requests == []
+
+
 def _expect_text_correction_disabled(locator):
     expect(locator).to_have_attribute("autocomplete", "off")
     expect(locator).to_have_attribute("autocorrect", "off")

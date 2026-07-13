@@ -118,6 +118,17 @@
 
 <div class="content">
 
+  <!-- Storage -->
+  <div class="section">
+    <div class="section-title">Storage</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
+      <p style="font-size:13px;color:var(--text-dim);margin:0;">
+        View disk usage, configure preview caches, and clean up generated files on the dedicated Storage page.
+      </p>
+      <a href="/storage" class="btn btn-secondary" style="white-space:nowrap;">Open Storage</a>
+    </div>
+  </div>
+
   <!-- Models -->
   <div class="section">
     <div class="section-title">Models</div>
@@ -595,10 +606,10 @@
       <div class="setting-row">
         <div class="setting-label">
           Enable eye-focus detection
-          <small>Runs the SuperAnimal keypoint stage to localize the animal's eye and use a windowed sharpness around it for the focus score. Weights are opt-in on the Pipeline page.</small>
+          <small>Runs the SuperAnimal keypoint stage to localize the animal's eye and use a windowed sharpness around it for the focus score. Weights are opt-in on the Process page.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="checkbox" id="cfgEyeDetectEnabled" checked
+          <input type="checkbox" id="cfgEyeDetectEnabled"
                  onchange="saveConfig()" style="accent-color:var(--accent);">
         </div>
       </div>
@@ -1830,7 +1841,7 @@ async function loadConfig() {
 
     // Eye-focus detection tunables
     document.getElementById('cfgEyeDetectEnabled').checked =
-      p.eye_detect_enabled !== false;  // default true
+      p.eye_detect_enabled === true;  // default false
     var ecg = VireoPipelineConfig.percent(p.eye_classifier_conf_gate, 'eye_classifier_conf_gate');
     document.getElementById('cfgEyeClassifierConfGate').value = ecg;
     document.getElementById('cfgEyeClassifierConfGateVal').textContent = ecg + '%';
@@ -2082,7 +2093,7 @@ function resetPipelineDefaults() {
   document.getElementById('cfgEyeWindowK').value = eyeWindow;
   document.getElementById('cfgEyeWindowKVal').textContent =
     (eyeWindow / 100).toFixed(2);
-  document.getElementById('cfgEyeDetectEnabled').checked = p.eye_detect_enabled !== false;
+  document.getElementById('cfgEyeDetectEnabled').checked = p.eye_detect_enabled === true;
   document.getElementById('cfgMissEnabled').checked = p.miss_enabled !== false;
   setPercent('cfgMissDetConf', 'miss_det_confidence');
   var bboxMin = Math.round(

@@ -753,65 +753,16 @@ def test_sync_to_xmp_normalized_rename_preserves_unrelated_hierarchy(tmp_path):
     assert 'Animals|Birds|Hawk' in read_hierarchical_keywords(xmp_path)
 
 
-def test_sync_from_xmp_prunes_duplicate_normalized_db_variants(tmp_path):
-    """A single canonical XMP entry must collapse duplicate DB variants.
-
-    Regression: when an upgraded photo carries both a legacy row like
-    ``‘apapane`` and the clean row ``apapane``, and the sidecar has only
-    the canonical ``apapane``, the old prune loop kept both DB tags
-    because ``keyword_match_key`` matched them both against the same XMP
-    key. The reconciler now keeps the canonical row (preferring the
-    stored name equal to ``normalize_keyword_display(xmp_name)``) and
-    untags the rest.
-    """
-    from db import Database
-    from sync import sync_from_xmp
-    from xmp import write_sidecar
-
-    db = Database(str(tmp_path / "test.db"))
-    ws_id = db.ensure_default_workspace()
-    db.set_active_workspace(ws_id)
-    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db, keywords={'apapane'})
-
-    # Clean row (canonical) via the normal path.
-    kid_clean = db.add_keyword('apapane')
-    # Legacy quoted row inserted directly so it survives the
-    # add_keyword() normalization step.
-    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ('‘apapane',))
-    db.conn.commit()
-    kid_legacy = db.conn.execute(
-        "SELECT id FROM keywords WHERE name = ?", ('‘apapane',)
-    ).fetchone()[0]
-
-    db.tag_photo(pid, kid_clean)
-    db.tag_photo(pid, kid_legacy)
-
-    os.remove(xmp_path)
-    write_sidecar(xmp_path, flat_keywords={'apapane'}, hierarchical_keywords=set())
-
-    sync_from_xmp(db, [pid])
-
-    keywords = db.get_photo_keywords(pid)
-    # Exactly one tag survives, and it is the canonical clean row --
-    # not the legacy `‘apapane` id.
-    assert len(keywords) == 1
-    assert keywords[0]['name'] == 'apapane'
-    assert keywords[0]['id'] == kid_clean
-
-
 def test_sync_from_xmp_preserves_cross_slot_homonyms(tmp_path):
     """Cross-slot same-text keywords must both survive a sidecar reconcile.
 
-    Regression: the earlier duplicate-normalized prune keyed only on
-    ``keyword_match_key(name)``, so a photo legitimately tagged with two
-    distinct DB rows sharing the same normalized text but sitting in
-    different slots (e.g. a taxonomy ``Robin`` and an individual
-    ``Robin``, or the same leaf name under different hierarchical
-    parents) got collapsed to one row -- the reconciler picked a
-    "keeper" and untagged the other. The dedup boundary elsewhere in the
-    codebase is ``(name, parent_id, type)``; a single flat ``Robin`` in
-    the sidecar can't disambiguate between the two homonyms, so both
-    legitimate tags must survive.
+    A photo can legitimately carry two distinct DB rows sharing the same
+    normalized text in different slots (e.g. a taxonomy ``Robin`` and an
+    individual ``Robin`` — SQLite's UNIQUE(name, parent_id) treats NULL
+    parents as distinct, and the dedup boundary elsewhere in the codebase
+    is (name, parent_id, type)). A single flat ``Robin`` in the sidecar
+    cannot disambiguate between the homonyms, so reconciliation must keep
+    both tags rather than untag one arbitrarily.
     """
     from db import Database
     from sync import sync_from_xmp
@@ -824,9 +775,7 @@ def test_sync_from_xmp_preserves_cross_slot_homonyms(tmp_path):
 
     # Two top-level rows with the same normalized text but different
     # types. Insert directly so both rows survive add_keyword's peer
-    # promotion, and so the two rows share a NULL parent_id (SQLite
-    # UNIQUE(name, parent_id) treats NULL as distinct, so this is a
-    # legitimate real-world state).
+    # promotion.
     db.conn.execute(
         "INSERT INTO keywords (name, type) VALUES (?, ?)",
         ('Robin', 'taxonomy'),

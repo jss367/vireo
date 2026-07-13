@@ -1711,6 +1711,9 @@ def test_preview_destination_groups_by_date(tmp_path):
     assert by_path["2026/2026-03-25"]["full_path"] == str(dst / "2026" / "2026-03-25")
     assert "2026/2026-03-26" in by_path
     assert by_path["2026/2026-03-26"]["count"] == 1
+    destinations = {f["path"]: f for f in result["files"]}
+    assert destinations[str(src / "a.jpg")]["folder"] == "2026/2026-03-25"
+    assert destinations[str(src / "c.jpg")]["full_folder"] == str(dst / "2026" / "2026-03-26")
 
 
 def test_preview_destination_uses_metadata_dates_when_lightweight_exif_fails(
