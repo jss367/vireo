@@ -38,7 +38,9 @@ LOCAL_RESERVE_BYTES = 1024**3
 
 # Serializes stage/sync/discard per workspace. A short global guard covers
 # stage's cross-workspace overlap validation so two concurrent stages cannot
-# both pass the guards before either records its claim.
+# both pass the guards before either records its claim, and folder-mutating
+# routes take the same guard around their (check, write) so a stage claim
+# that would rebase the folder cannot slip in between the check and the write.
 _LOCKS: dict[int, threading.RLock] = {}
 _LOCKS_GUARD = threading.Lock()
 _STAGE_GUARD = threading.Lock()
@@ -47,6 +49,19 @@ _STAGE_GUARD = threading.Lock()
 def _workspace_lock(workspace_id: int) -> threading.RLock:
     with _LOCKS_GUARD:
         return _LOCKS.setdefault(int(workspace_id), threading.RLock())
+
+
+def stage_boundary_lock() -> threading.Lock:
+    """Return the shared lock every guard-plus-mutation critical section must hold.
+
+    Stage's initial state-and-mapping insert holds this lock, so a folder- or
+    workspace-membership route that reads ``local_workspace_folders`` /
+    ``local_workspaces`` and then mutates ``folders`` / ``workspace_folders``
+    can wrap the whole (read, write) in the same lock to atomically block the
+    "guard says free → stage claims it → mutation runs on a now-claimed
+    folder" race called out in the review.
+    """
+    return _STAGE_GUARD
 
 
 class LocalWorkspaceError(RuntimeError):

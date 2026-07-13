@@ -1217,7 +1217,11 @@ def test_work_locally_http_job_flow(tmp_path, monkeypatch):
         other_workspace = client.post("/api/workspaces", json={"name": "Other"}).get_json()["id"]
         assert client.post(f"/api/workspaces/{other_workspace}/activate").status_code == 200
         blocked_delete = client.delete(f"/api/workspaces/{workspace_id}")
-        assert blocked_delete.status_code == 400
+        # A workspace with local work is a resolvable conflict (409), matching
+        # every other "blocked because of local work" guard on this PR — a
+        # plain 400 would misclassify it as a bad request and clients that
+        # branch on 409 to show "resolve local work first" would miss it.
+        assert blocked_delete.status_code == 409
         assert "sync or discard" in blocked_delete.get_json()["error"]
         assert client.post(f"/api/workspaces/{workspace_id}/activate").status_code == 200
 
@@ -1341,3 +1345,146 @@ def test_discard_http_flow_guards_stale_page_state(tmp_path, monkeypatch):
     final_db = Database(db_path)
     assert _folder_path(final_db, folder_id) == str(source)
     final_db.close()
+
+
+def test_local_workspace_folders_folder_id_fk_cascades_on_folder_delete(local_workspace_env):
+    """Deleting the underlying folder cascades to local_workspace_folders.
+
+    The API-level guards refuse a folder delete while a workspace has it
+    staged, but the FK is the belt-and-suspenders backstop for any code path
+    that reaches ``DELETE FROM folders`` without going through the guard —
+    otherwise the ``local_workspace_folders`` row would dangle and later
+    sync/discard would fail to restore the catalog.
+    """
+    env = local_workspace_env
+    db = env["db"]
+    stage_workspace(db, env["workspace_id"], str(env["vireo_dir"]))
+    child_id = env["child_id"]
+    claim = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM local_workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (env["workspace_id"], child_id),
+    ).fetchone()["n"]
+    assert claim == 1
+    # Bypass the API guard by going straight to raw SQL — this is what the
+    # FK protects against. Clear the unrelated ``photos.folder_id`` and
+    # ``workspace_folders.folder_id`` FKs on this leaf first; those
+    # constraints predate this PR and are unrelated to the
+    # local_workspace_folders cascade we're verifying.
+    db.conn.execute("DELETE FROM photos WHERE folder_id=?", (child_id,))
+    db.conn.execute("DELETE FROM workspace_folders WHERE folder_id=?", (child_id,))
+    db.conn.execute("DELETE FROM folders WHERE id=?", (child_id,))
+    db.conn.commit()
+    dangling = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM local_workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (env["workspace_id"], child_id),
+    ).fetchone()["n"]
+    assert dangling == 0
+
+
+def test_local_workspace_folders_fk_migration_backfills_existing_dbs(tmp_path):
+    """A DB whose ``local_workspace_folders`` was created without the FK
+    is rebuilt with the constraint on the next Database open."""
+    db_path = str(tmp_path / "legacy.db")
+    legacy = Database(db_path)
+    # Drop the table and re-create it in the pre-fix shape (folder_id
+    # without a REFERENCES clause) so the migration has something to fix.
+    legacy.conn.execute("DROP TABLE local_workspace_folders")
+    legacy.conn.execute(
+        """CREATE TABLE local_workspace_folders (
+            workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            folder_id       INTEGER NOT NULL,
+            source_path     TEXT NOT NULL,
+            local_path      TEXT NOT NULL,
+            original_status TEXT NOT NULL DEFAULT 'ok',
+            is_root         INTEGER NOT NULL DEFAULT 0,
+            root_index      INTEGER,
+            PRIMARY KEY (workspace_id, folder_id)
+        )"""
+    )
+    legacy.conn.commit()
+    fk_before = legacy.conn.execute(
+        "PRAGMA foreign_key_list(local_workspace_folders)"
+    ).fetchall()
+    assert not any(row["from"] == "folder_id" for row in fk_before)
+    legacy.close()
+
+    # Re-open the DB: the migration inside Database.__init__ rebuilds the
+    # table with the folder_id → folders(id) FK.
+    upgraded = Database(db_path)
+    fk_after = upgraded.conn.execute(
+        "PRAGMA foreign_key_list(local_workspace_folders)"
+    ).fetchall()
+    assert any(
+        row["from"] == "folder_id" and row["table"] == "folders" and row["on_delete"] == "CASCADE"
+        for row in fk_after
+    )
+    upgraded.close()
+
+
+def test_folder_delete_route_holds_stage_boundary_lock_around_guard(tmp_path, monkeypatch):
+    """``api_folder_delete`` runs its guard-plus-delete under stage_boundary_lock.
+
+    That is the atomicity CodeRabbit's Critical finding requires: a stage's
+    ``INSERT INTO local_workspace_folders`` also holds the same lock, so a
+    concurrent stage cannot claim the folder in the window between
+    ``folder_has_local_workspace`` and ``db.delete_folder``. Verify the
+    route acquires the lock by swapping it for a tracking wrapper.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+    from services import local_workspace as service
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    folder_id = db.add_folder(str(source), name="photos")
+    db.close()
+
+    # Instrument the shared lock by replacing it with a wrapper that
+    # counts (guard, mutation) critical sections. Restored after the test.
+    original_stage_guard = service._STAGE_GUARD
+
+    class _CountingLock:
+        def __init__(self, inner):
+            self._inner = inner
+            self.enters = 0
+            self.exits = 0
+
+        def acquire(self, *args, **kwargs):
+            result = self._inner.acquire(*args, **kwargs)
+            if result:
+                self.enters += 1
+            return result
+
+        def release(self):
+            self.exits += 1
+            return self._inner.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.release()
+            return False
+
+    counting = _CountingLock(original_stage_guard)
+    monkeypatch.setattr(service, "_STAGE_GUARD", counting)
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        response = client.delete(f"/api/folders/{folder_id}")
+        assert response.status_code == 200
+
+    # The route acquired and released the shared boundary lock at least once
+    # around its (guard, mutation). A route that skipped the lock would
+    # leave both counters at zero, breaking the atomicity guarantee.
+    assert counting.enters >= 1
+    assert counting.exits == counting.enters

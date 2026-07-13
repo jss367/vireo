@@ -686,7 +686,7 @@ class Database:
 
             CREATE TABLE IF NOT EXISTS local_workspace_folders (
                 workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-                folder_id       INTEGER NOT NULL,
+                folder_id       INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
                 source_path     TEXT NOT NULL,
                 local_path      TEXT NOT NULL,
                 original_status TEXT NOT NULL DEFAULT 'ok',
@@ -1390,6 +1390,56 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN hash_status TEXT"
             )
+
+        # Migration: add ON DELETE CASCADE foreign key on
+        # local_workspace_folders.folder_id. Early builds of this table
+        # declared folder_id as a bare INTEGER, so a folder DELETE on those
+        # DBs would leave a dangling local-workspace mapping and break
+        # sync/discard's catalog restore. SQLite can't add a FK via ALTER
+        # TABLE, so rebuild the table when the constraint is absent.
+        fk_rows = self.conn.execute(
+            "PRAGMA foreign_key_list(local_workspace_folders)"
+        ).fetchall()
+        has_folder_fk = any(
+            row["from"] == "folder_id" and row["table"] == "folders"
+            for row in fk_rows
+        )
+        if not has_folder_fk:
+            self.conn.execute("PRAGMA foreign_keys=OFF")
+            try:
+                self.conn.execute("BEGIN IMMEDIATE")
+                self.conn.execute(
+                    """CREATE TABLE local_workspace_folders_new (
+                        workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                        folder_id       INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+                        source_path     TEXT NOT NULL,
+                        local_path      TEXT NOT NULL,
+                        original_status TEXT NOT NULL DEFAULT 'ok',
+                        is_root         INTEGER NOT NULL DEFAULT 0,
+                        root_index      INTEGER,
+                        PRIMARY KEY (workspace_id, folder_id)
+                    )"""
+                )
+                # Only carry over rows whose folder_id still exists; a
+                # concurrent-with-migration folder delete on the old shape
+                # is the exact bug this FK closes, and dragging a dangling
+                # row into the new table would immediately trip the FK.
+                self.conn.execute(
+                    """INSERT INTO local_workspace_folders_new
+                       SELECT lwf.* FROM local_workspace_folders lwf
+                       JOIN folders f ON f.id = lwf.folder_id"""
+                )
+                self.conn.execute("DROP TABLE local_workspace_folders")
+                self.conn.execute(
+                    "ALTER TABLE local_workspace_folders_new "
+                    "RENAME TO local_workspace_folders"
+                )
+                self.conn.commit()
+            except BaseException:
+                self.conn.rollback()
+                raise
+            finally:
+                self.conn.execute("PRAGMA foreign_keys=ON")
 
         # Backfill pre-existing photos with mask_path set on the photos
         # row but no row in photo_masks. They get migrated to
