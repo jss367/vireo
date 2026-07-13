@@ -888,13 +888,19 @@ async function recomputeMisses() {
       body: JSON.stringify(body),
     });
     if (requestId !== missLoadRequestId) {
-      setMissTuningStatus('Recompute finished for previous filters');
+      if (r.ok) {
+        setMissTuningStatus('Recomputed previous filters; refreshing current view');
+        loadMisses();
+      } else {
+        setMissTuningStatus('Recompute finished for previous filters');
+      }
       return;
     }
     if (!r.ok) throw new Error('http ' + r.status);
     var data = await r.json();
     if (requestId !== missLoadRequestId) {
-      setMissTuningStatus('Recompute finished for previous filters');
+      setMissTuningStatus('Recomputed previous filters; refreshing current view');
+      loadMisses();
       return;
     }
     if (missFilterParams().toString() !== requestedFilters.toString()) {

@@ -106,6 +106,11 @@ def test_filter_change_ignores_older_threshold_preview(live_server, page):
 
 
 def test_filter_change_ignores_older_recompute_response(live_server, page):
+    """A recompute POST that returns after the user has changed filters must
+    not replace the newer filtered view with the previous filter's payload,
+    and — since the server-side recompute has still persisted miss flags for
+    the previous scope — must trigger a fresh loadMisses() for the current
+    filters so any overlapping photos reflect the new flags."""
     url = live_server["url"]
     db = live_server["db"]
     pids = live_server["data"]["photos"]
@@ -114,9 +119,11 @@ def test_filter_change_ignores_older_recompute_response(live_server, page):
     page.goto(f"{url}/misses")
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(5)
     page.evaluate("""() => {
+      window.missesFetchCalls = [];
       const realFetch = window.fetch.bind(window);
       let held = false;
       window.fetch = (url, options) => {
+        window.missesFetchCalls.push(String(url));
         if (!held && String(url).includes('/api/misses/recompute')) {
           held = true;
           return new Promise(resolve => {
@@ -131,11 +138,21 @@ def test_filter_change_ignores_older_recompute_response(live_server, page):
 
     page.locator("#missRatingFilter").select_option("4")
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    calls_before_release = page.evaluate(
+        "window.missesFetchCalls.filter(u => u.startsWith('/api/misses') && !u.includes('/recompute') && !u.includes('/preview')).length"
+    )
     page.evaluate("window.releaseHeldRecompute()")
     expect(page.locator("#missTuningStatus")).to_have_text(
-        "Recompute finished for previous filters"
+        "Recomputed previous filters; refreshing current view"
     )
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    # The stale recompute must have scheduled a fresh /api/misses for the
+    # current filters so any overlapping photos pick up the newly persisted
+    # miss flags rather than continuing to render the pre-recompute payload.
+    page.wait_for_function(
+        f"window.missesFetchCalls.filter(u => u.startsWith('/api/misses') && !u.includes('/recompute') && !u.includes('/preview')).length > {calls_before_release}",
+        timeout=3000,
+    )
 
 
 def test_bulk_reject_uses_filters_that_rendered_visible_cards(live_server, page):
