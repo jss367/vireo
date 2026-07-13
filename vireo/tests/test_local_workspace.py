@@ -2058,3 +2058,95 @@ def test_move_folder_endpoint_refuses_while_transition_job_is_pending(tmp_path, 
         finally:
             hold.set()
         wait_for_job_via_client(client, job_id)
+
+
+def test_stage_copies_top_level_double_dot_prefixed_filename(local_workspace_env):
+    """A top-level regular file whose name starts with two dots stages cleanly.
+
+    ``os.path.relpath()`` for ``/root/..metadata.jpg`` under ``/root`` returns
+    ``..metadata.jpg``; a bare ``startswith("..")`` check inside
+    ``_open_source_regular_within_root`` would treat that as escaping the
+    workspace and abort staging. The correct boundary test — matching the
+    one in ``_relative()`` — only rejects ``os.pardir`` or paths that begin
+    with ``os.pardir + os.sep``, letting valid hidden filenames stage.
+    """
+    env = local_workspace_env
+    (env["source"] / "..metadata.jpg").write_bytes(b"leading-dots-are-fine")
+
+    result = stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    assert result["files"] == 4  # root.jpg + child bird.jpg/xmp + ..metadata.jpg
+
+    local_root = Path(_folder_path(env["db"], env["root_id"]))
+    staged = local_root / "..metadata.jpg"
+    assert staged.is_file()
+    assert staged.read_bytes() == b"leading-dots-are-fine"
+
+
+def test_stage_endpoint_registers_job_under_stage_boundary_lock(tmp_path, monkeypatch):
+    """``/api/workspaces/active/local-workspace/stage`` registers under the shared lock.
+
+    The scan/move-folder pending-transition guards rely on the local-workspace
+    runner registration being visible under ``stage_boundary_lock``: if
+    ``runner.start()`` runs outside that lock, a concurrent scan/move can
+    slip through the gap between our validation and the job appearing in
+    the runner queue. Verify the endpoint acquires the shared boundary lock
+    by swapping it for a counting wrapper.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+    from services import local_workspace as service
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    db.add_folder(str(source), name="photos")
+    db.close()
+
+    original_stage_guard = service._STAGE_GUARD
+
+    class _CountingLock:
+        def __init__(self, inner):
+            self._inner = inner
+            self.enters = 0
+            self.exits = 0
+
+        def acquire(self, *args, **kwargs):
+            result = self._inner.acquire(*args, **kwargs)
+            if result:
+                self.enters += 1
+            return result
+
+        def release(self):
+            self.exits += 1
+            return self._inner.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.release()
+            return False
+
+    counting = _CountingLock(original_stage_guard)
+    monkeypatch.setattr(service, "_STAGE_GUARD", counting)
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        before = counting.enters
+        response = client.post("/api/workspaces/active/local-workspace/stage")
+        assert response.status_code == 202
+        job_id = response.get_json()["job_id"]
+        # The route acquired and released the shared boundary lock while
+        # registering the runner job.
+        assert counting.enters >= before + 1
+        assert counting.exits == counting.enters
+        wait_for_job_via_client(client, job_id)

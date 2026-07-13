@@ -9,6 +9,7 @@ from flask import Blueprint, jsonify, request
 from services.local_workspace import (
     LocalWorkspaceError,
     discard_local,
+    stage_boundary_lock,
     stage_workspace,
     status,
     sync_back,
@@ -49,7 +50,15 @@ def create_local_workspace_blueprint(
         return json_error(f"Wait for the {busy['type']} job to finish before {action}", 409)
 
     def _start_job_exclusive(workspace_id, job_type, work, validate):
-        """Atomically validate workspace state and register its job."""
+        """Atomically validate workspace state and register its job.
+
+        The runner.start() call runs inside ``stage_boundary_lock`` so a
+        concurrent scan or move-folder guard's ``_pending_local_workspace_transition``
+        read cannot fall in the gap between our validation and the job
+        becoming visible in the runner queue: the scan/move guards take the
+        same boundary lock around their pending-transition check, and here we
+        take it around the registration that check must observe.
+        """
         with transition_lock:
             busy = _busy_job(workspace_id)
             if busy:
@@ -57,11 +66,12 @@ def create_local_workspace_blueprint(
             validation_error = validate()
             if validation_error is not None:
                 return None, None, validation_error
-            job_id = get_runner().start(
-                job_type,
-                work,
-                workspace_id=workspace_id,
-            )
+            with stage_boundary_lock():
+                job_id = get_runner().start(
+                    job_type,
+                    work,
+                    workspace_id=workspace_id,
+                )
             return job_id, None, None
 
     @blueprint.get("/api/workspaces/active/local-workspace")

@@ -458,9 +458,11 @@ def _open_source_regular_within_root(source_root: str, source: str) -> int:
         return os.open(source, base_flags)
 
     rel = os.path.relpath(source, source_root)
-    if rel == "." or rel.startswith(".."):
+    if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep):
         # The caller passed a source outside its recorded root — treat it
-        # as a topology change and refuse before opening anything.
+        # as a topology change and refuse before opening anything. Uses the
+        # same boundary test as _relative(); a bare startswith("..") would
+        # reject valid hidden filenames like `..metadata.jpg`.
         raise LocalWorkspaceError(
             f"Source entry is not under its recorded root: {source}"
         )
