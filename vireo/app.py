@@ -11620,6 +11620,75 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             grouped[category] = photos
         return grouped
 
+    def _miss_filter_photo_ids(db, values):
+        """Resolve Misses-page filters to an intersected workspace photo set."""
+        def value(name):
+            raw = values.get(name)
+            return None if raw in (None, "") else raw
+
+        def integer(name, minimum=None, maximum=None):
+            raw = value(name)
+            if raw is None:
+                return None
+            try:
+                parsed = int(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} must be an integer") from None
+            if minimum is not None and parsed < minimum:
+                raise ValueError(f"{name} must be at least {minimum}")
+            if maximum is not None and parsed > maximum:
+                raise ValueError(f"{name} must be at most {maximum}")
+            return parsed
+
+        collection_id = integer("collection_id", minimum=1)
+        folder_id = integer("folder_id", minimum=1)
+        rating_min = integer("rating_min", minimum=1, maximum=5)
+        keyword = value("keyword")
+        date_from = value("date_from")
+        date_to = value("date_to")
+        color_label = value("color_label")
+        if color_label not in (None, "red", "yellow", "green", "blue", "purple"):
+            raise ValueError("invalid color_label")
+        flag = value("flag")
+        if flag not in (None, "none", "flagged", "rejected"):
+            raise ValueError("invalid flag")
+
+        def boolean(name):
+            raw = value(name)
+            if raw is None:
+                return False
+            if isinstance(raw, bool):
+                return raw
+            return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+        has_browse_filters = any((
+            folder_id, rating_min, keyword, date_from, date_to, color_label, flag,
+        ))
+        photo_ids = None
+        if has_browse_filters:
+            photo_ids = set(db.get_photo_ids(
+                folder_id=folder_id,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                keyword_match_case=boolean("keyword_match_case"),
+                keyword_whole_word=boolean("keyword_whole_word"),
+                color_label=color_label,
+                flag=flag,
+            ))
+        if collection_id is not None:
+            valid_ids = {c["id"] for c in db.get_collections()}
+            if collection_id not in valid_ids:
+                raise ValueError("collection not found")
+            collection_ids = db.collection_photo_ids(collection_id)
+            photo_ids = (
+                collection_ids
+                if photo_ids is None
+                else photo_ids & collection_ids
+            )
+        return photo_ids
+
     @app.route("/api/misses")
     def api_misses():
         """Return photos flagged as misses.
@@ -11632,17 +11701,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         category = request.args.get("category")
         since = request.args.get("since") or None
+        try:
+            photo_ids = _miss_filter_photo_ids(db, request.args)
+        except ValueError as e:
+            return json_error(str(e), 400)
         if category is not None:
             if category not in ("no_subject", "clipped", "oof"):
                 return jsonify({"error": "invalid category"}), 400
-            photos = [dict(p) for p in db.list_misses(category=category, since=since)]
+            photos = [dict(p) for p in db.list_misses(
+                category=category, since=since, photo_ids=photo_ids
+            )]
             _attach_species_representatives(db, photos)
             _attach_edit_recipes(db, photos)
             return jsonify({"photos": photos, "category": category})
         grouped = {
-            "no_subject": db.list_misses(category="no_subject", since=since),
-            "clipped":    db.list_misses(category="clipped", since=since),
-            "oof":        db.list_misses(category="oof", since=since),
+            "no_subject": db.list_misses(category="no_subject", since=since, photo_ids=photo_ids),
+            "clipped":    db.list_misses(category="clipped", since=since, photo_ids=photo_ids),
+            "oof":        db.list_misses(category="oof", since=since, photo_ids=photo_ids),
         }
         return jsonify(_attach_miss_edit_recipes(db, grouped))
 
@@ -11659,9 +11734,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         except ValueError as e:
             return json_error(str(e))
+        try:
+            photo_ids = _miss_filter_photo_ids(db, body)
+        except ValueError as e:
+            return json_error(str(e), 400)
         grouped = preview_misses_for_workspace(
             db, pipeline, detector_confidence=detector_confidence,
-            since=body.get("since") or None,
+            since=body.get("since") or None, photo_ids=photo_ids,
         )
         _attach_miss_edit_recipes(db, grouped)
         grouped["config"] = values
@@ -11681,6 +11760,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         except ValueError as e:
             return json_error(str(e))
+        try:
+            photo_ids = _miss_filter_photo_ids(db, body)
+        except ValueError as e:
+            return json_error(str(e), 400)
 
         if body.get("save_defaults") is True:
             _save_miss_threshold_overrides(db, values, pipeline)
@@ -11688,9 +11771,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         since = body.get("since") or None
         updated = compute_misses_for_workspace(
             db, pipeline, detector_confidence=detector_confidence, since=since,
+            photo_ids=photo_ids,
         )
         grouped = preview_misses_for_workspace(
             db, pipeline, detector_confidence=detector_confidence, since=since,
+            photo_ids=photo_ids,
         )
         _attach_miss_edit_recipes(db, grouped)
         grouped["config"] = values
@@ -11719,7 +11804,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         since = body.get("since") or None
         if category not in ("no_subject", "clipped", "oof"):
             return jsonify({"error": "invalid category"}), 400
-        affected = db.bulk_reject_miss_category(category, since=since)
+        try:
+            photo_ids = _miss_filter_photo_ids(db, body)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        affected = db.bulk_reject_miss_category(
+            category, since=since, photo_ids=photo_ids
+        )
         if affected:
             items = [
                 {"photo_id": a["photo_id"],

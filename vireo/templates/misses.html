@@ -300,6 +300,33 @@
     border: 1px solid var(--border-primary);
     border-radius: 6px;
   }
+  .misses-filters {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-primary);
+    border-radius: 6px;
+  }
+  .misses-filters input,
+  .misses-filters select,
+  .misses-filters button {
+    min-height: 30px;
+    border: 1px solid var(--border-secondary);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    padding: 5px 8px;
+    font-size: 12px;
+  }
+  .misses-filters input[type="search"] { flex: 1 1 220px; min-width: 160px; }
+  .misses-filters input[type="date"] { width: 130px; }
+  .misses-filters button { cursor: pointer; color: var(--text-secondary); }
+  .misses-filters button:hover { border-color: var(--accent); color: var(--text-primary); }
+  .misses-filter-label { font-size: 11px; color: var(--text-secondary); }
   .misses-tuning-head {
     display: flex;
     align-items: center;
@@ -412,6 +439,40 @@
     <a href="/misses" style="color:var(--accent);margin-left:8px;">Show all</a>
   </div>
 
+  <div class="misses-filters" aria-label="Miss filters">
+    <select id="missCollectionFilter" onchange="applyMissFilters()" title="Filter by collection">
+      <option value="">All collections</option>
+    </select>
+    <select id="missFolderFilter" onchange="applyMissFilters()" title="Filter by folder and its subfolders">
+      <option value="">All folders</option>
+    </select>
+    <input id="missSearchFilter" type="search" placeholder="Search keywords or filenames..."
+           autocomplete="off" oninput="scheduleMissFilter()"
+           onkeydown="if(event.key==='Enter'){event.preventDefault();applyMissFilters();}">
+    <select id="missRatingFilter" onchange="applyMissFilters()" title="Minimum star rating">
+      <option value="">Any rating</option>
+      <option value="1">1+ stars</option><option value="2">2+ stars</option>
+      <option value="3">3+ stars</option><option value="4">4+ stars</option>
+      <option value="5">5 stars</option>
+    </select>
+    <select id="missFlagFilter" onchange="applyMissFilters()" title="Filter by pick status">
+      <option value="">Any pick status</option>
+      <option value="none">Unflagged</option>
+      <option value="flagged">Picks</option>
+    </select>
+    <select id="missColorFilter" onchange="applyMissFilters()" title="Filter by color label">
+      <option value="">Any color</option>
+      <option value="red">Red</option><option value="yellow">Yellow</option>
+      <option value="green">Green</option><option value="blue">Blue</option>
+      <option value="purple">Purple</option>
+    </select>
+    <span class="misses-filter-label">Captured</span>
+    <input id="missDateFrom" type="date" onchange="applyMissFilters()" title="Captured from">
+    <span class="misses-filter-label">to</span>
+    <input id="missDateTo" type="date" onchange="applyMissFilters()" title="Captured through">
+    <button type="button" onclick="clearMissFilters()">Clear filters</button>
+  </div>
+
   <div class="misses-tuning" id="missesTuning">
     <div class="misses-tuning-head">
       <span class="misses-tuning-title">Miss thresholds</span>
@@ -498,6 +559,19 @@ var missLightboxCurrent = null;
 // sections accumulates them all. The focused card doubles as the anchor for
 // shift-click range selection (range stays within the clicked category).
 var selection = new Set();
+var missFilterTimer = null;
+var missLoadRequestId = 0;
+var appliedMissFilters = new URLSearchParams();
+var MISS_FILTER_FIELDS = {
+  collection_id: 'missCollectionFilter',
+  folder_id: 'missFolderFilter',
+  keyword: 'missSearchFilter',
+  rating_min: 'missRatingFilter',
+  flag: 'missFlagFilter',
+  color_label: 'missColorFilter',
+  date_from: 'missDateFrom',
+  date_to: 'missDateTo',
+};
 var MISS_TUNING_CONTROL_IDS = [
   'missCfgDetectorFloor',
   'missCfgNoSubject',
@@ -561,6 +635,96 @@ function getSinceParam() {
     var s = u.searchParams.get('since');
     return s || null;
   } catch (e) { return null; }
+}
+
+function missFilterParams() {
+  var params = new URLSearchParams();
+  Object.keys(MISS_FILTER_FIELDS).forEach(function(key) {
+    var el = document.getElementById(MISS_FILTER_FIELDS[key]);
+    var value = el ? String(el.value || '').trim() : '';
+    if (value) params.set(key, value);
+  });
+  return params;
+}
+
+function addFilterParamsToBody(body, params) {
+  params.forEach(function(value, key) { body[key] = value; });
+  return body;
+}
+
+function addMissFiltersToBody(body) {
+  return addFilterParamsToBody(body, missFilterParams());
+}
+
+function addAppliedMissFiltersToBody(body) {
+  return addFilterParamsToBody(body, appliedMissFilters);
+}
+
+function syncMissFilterUrl() {
+  var url = new URL(window.location.href);
+  Object.keys(MISS_FILTER_FIELDS).forEach(function(key) { url.searchParams.delete(key); });
+  missFilterParams().forEach(function(value, key) { url.searchParams.set(key, value); });
+  window.history.replaceState({}, '', url.pathname + (url.searchParams.toString() ? '?' + url.searchParams.toString() : ''));
+}
+
+function applyMissFilters() {
+  if (missFilterTimer) clearTimeout(missFilterTimer);
+  missFilterTimer = null;
+  invalidateMissPreview();
+  syncMissFilterUrl();
+  selection.clear();
+  focusedCategory = null;
+  focusedIndex = -1;
+  loadMisses();
+}
+
+function scheduleMissFilter() {
+  if (missFilterTimer) clearTimeout(missFilterTimer);
+  missFilterTimer = setTimeout(applyMissFilters, 250);
+}
+
+function clearMissFilters() {
+  Object.keys(MISS_FILTER_FIELDS).forEach(function(key) {
+    var el = document.getElementById(MISS_FILTER_FIELDS[key]);
+    if (el) el.value = '';
+  });
+  applyMissFilters();
+}
+
+async function initMissFilters() {
+  var current = new URL(window.location.href).searchParams;
+  var results = await Promise.all([
+    fetch('/api/collections').then(function(r) { return r.ok ? r.json() : []; }).catch(function() { return []; }),
+    fetch('/api/folders').then(function(r) { return r.ok ? r.json() : []; }).catch(function() { return []; }),
+  ]);
+  var collectionSelect = document.getElementById('missCollectionFilter');
+  (results[0] || []).forEach(function(c) {
+    var option = document.createElement('option');
+    option.value = c.id;
+    option.textContent = c.name + (c.photo_count == null ? '' : ' (' + c.photo_count + ')');
+    option.disabled = !!c.count_error;
+    collectionSelect.appendChild(option);
+  });
+  var folderSelect = document.getElementById('missFolderFilter');
+  (results[1] || []).slice().sort(function(a, b) {
+    return String(a.path || a.name || '').localeCompare(String(b.path || b.name || ''));
+  }).forEach(function(f) {
+    var option = document.createElement('option');
+    option.value = f.id;
+    option.textContent = f.path || f.name || ('Folder ' + f.id);
+    folderSelect.appendChild(option);
+  });
+  Object.keys(MISS_FILTER_FIELDS).forEach(function(key) {
+    var el = document.getElementById(MISS_FILTER_FIELDS[key]);
+    if (el && current.has(key)) el.value = current.get(key);
+  });
+  // Seed the applied-filters snapshot from the URL so recompute/bulk reject
+  // scope to the URL-requested review set if the user clicks before the first
+  // /api/misses response applies (e.g. /misses?rating_min=4). Without this,
+  // loadMissConfig() enables the Recompute button while appliedMissFilters is
+  // still empty, and an early click POSTs an unfiltered recompute that flags
+  // photos outside the URL scope.
+  appliedMissFilters = missFilterParams();
 }
 
 function setMissTuningStatus(text) {
@@ -680,7 +844,10 @@ async function previewMisses() {
     previewTimer = null;
   }
   var requestId = ++previewRequestId;
+  missLoadRequestId++;
+  var requestedFilters = missFilterParams();
   var body = collectMissThresholds();
+  addFilterParamsToBody(body, requestedFilters);
   var since = getSinceParam();
   if (since) body.since = since;
   setMissTuningStatus('Previewing...');
@@ -693,6 +860,7 @@ async function previewMisses() {
     if (!r.ok) throw new Error('http ' + r.status);
     var data = await r.json();
     if (requestId !== previewRequestId) return;
+    appliedMissFilters = new URLSearchParams(requestedFilters.toString());
     previewActive = true;
     previewPayload = data;
     applyMissesPayload(data);
@@ -706,8 +874,13 @@ async function previewMisses() {
 async function recomputeMisses() {
   if (!missConfigLoaded) return;
   invalidateMissPreview();
+  var requestId = ++missLoadRequestId;
   var btn = document.getElementById('missRecomputeBtn');
+  // Recompute the photos that produced the cards the user is looking at.
+  // Live controls may already represent a newer filter whose load is pending.
+  var requestedFilters = new URLSearchParams(appliedMissFilters.toString());
   var body = collectMissThresholds();
+  addFilterParamsToBody(body, requestedFilters);
   var since = getSinceParam();
   if (since) body.since = since;
   body.save_defaults = !!document.getElementById('missSaveDefaults').checked;
@@ -723,6 +896,25 @@ async function recomputeMisses() {
     });
     if (!r.ok) throw new Error('http ' + r.status);
     var data = await r.json();
+    if (requestId !== missLoadRequestId) {
+      if (data.config && data.saved_defaults) {
+        missConfig = data.config;
+        originalMissConfig = Object.assign({}, data.config);
+      }
+      setMissTuningStatus('Recomputed previous filters; refreshing current view');
+      loadMisses();
+      return;
+    }
+    if (missFilterParams().toString() !== requestedFilters.toString()) {
+      if (data.config && data.saved_defaults) {
+        missConfig = data.config;
+        originalMissConfig = Object.assign({}, data.config);
+      }
+      setMissTuningStatus('Recomputed visible photos; refreshing filters');
+      loadMisses();
+      return;
+    }
+    appliedMissFilters = new URLSearchParams(requestedFilters.toString());
     previewActive = false;
     previewPayload = null;
     applyMissesPayload(data);
@@ -768,6 +960,7 @@ function applyMissesPayload(data) {
 
 /* ---------- Fetch + render ---------- */
 async function loadMisses() {
+  var requestId = ++missLoadRequestId;
   var since = getSinceParam();
   if (since) {
     var b = document.getElementById('scopeBanner');
@@ -780,14 +973,20 @@ async function loadMisses() {
     await previewMisses();
     return;
   }
-  var url = '/api/misses' + (since ? '?since=' + encodeURIComponent(since) : '');
+  var requestedFilters = missFilterParams();
+  var params = new URLSearchParams(requestedFilters.toString());
+  if (since) params.set('since', since);
+  var url = '/api/misses' + (params.toString() ? '?' + params.toString() : '');
   var r = await fetch(url);
+  if (requestId !== missLoadRequestId) return;
   if (!r.ok) {
     document.getElementById('missesRoot').innerHTML =
       '<div class="misses-empty-page">Failed to load misses.</div>';
     return;
   }
   var data = await r.json();
+  if (requestId !== missLoadRequestId) return;
+  appliedMissFilters = new URLSearchParams(requestedFilters.toString());
   applyMissesPayload(data);
 }
 
@@ -1027,7 +1226,9 @@ async function bulkReject(cat, e) {
   // Match the /misses?since=... review-window scope so bulk reject only
   // touches photos visible in this view, not older misses from prior runs.
   var since = getSinceParam();
-  var body = since ? { category: cat, since: since } : { category: cat };
+  var body = addAppliedMissFiltersToBody(
+    since ? { category: cat, since: since } : { category: cat }
+  );
   var r = await fetch('/api/misses/reject', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1085,6 +1286,10 @@ function _clearMissRepresentativeStateIfIneligible(photoIds, flag) {
  * the card from the list, so j/k navigation stays continuous. The card will
  * disappear on the next loadMisses() (list_misses excludes flag='rejected').
  */
+function refreshAppliedFlagFilter() {
+  if (appliedMissFilters.has('flag')) loadMisses();
+}
+
 async function flagFocusedMiss(photoId, flag) {
   try {
     var r = await fetch('/api/photos/' + photoId + '/flag', {
@@ -1104,6 +1309,7 @@ async function flagFocusedMiss(photoId, flag) {
     var label = flag === 'flagged' ? 'Flagged' : flag === 'rejected' ? 'Rejected' : 'Cleared';
     showToast(label + ' photo', 'success');
   }
+  refreshAppliedFlagFilter();
 }
 
 /* ---------- Bulk flag/reject for the multi-selection ----------
@@ -1133,6 +1339,7 @@ async function bulkFlagSelection(flag) {
   }
   clearSelection();
   if (repChanged) render();
+  refreshAppliedFlagFilter();
 }
 
 /* Bulk unflag-as-miss across the selection. Each photo can be flagged in
@@ -1598,15 +1805,18 @@ document.addEventListener('lightbox:flagchanged', function(e) {
   var detail = e && e.detail ? e.detail : {};
   var photoId = detail.photoId;
   var flag = detail.flag;
-  if (photoId == null || flag !== 'rejected') return;
+  if (photoId == null) return;
   if (_clearMissRepresentativeStateIfIneligible([photoId], flag)) {
     render();
   }
+  refreshAppliedFlagFilter();
 });
 
 /* ---------- Boot ---------- */
 installMissSliderHandlers();
-loadMissConfig().then(loadMisses);
+initMissFilters().then(function() {
+  return loadMissConfig();
+}).then(loadMisses);
 </script>
 
 </body>
