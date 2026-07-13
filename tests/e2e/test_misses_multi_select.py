@@ -4,6 +4,7 @@ Covers plain-click selection, ctrl-click toggle, shift-click range, shift+J/K
 keyboard extension, Esc-to-clear, toolbar actions, and bulk P/X/U acting on the
 selection. Double-click opens the shared lightbox.
 """
+import json
 import time
 
 from playwright.sync_api import expect
@@ -41,6 +42,33 @@ def _ctrl_click(page, locator):
     # Cmd on macOS, Ctrl elsewhere — both map to e.metaKey/e.ctrlKey in our
     # handler. Use Playwright's "Meta" because the test host is macOS.
     locator.click(modifiers=["Meta"])
+
+
+def test_collection_and_rating_filters_limit_visible_misses(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+    collection_id = db.add_collection(
+        "Hawk review",
+        json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
+    )
+
+    page.goto(f"{url}/misses")
+    page.locator("[data-testid^='miss-card-no_subject-']").first.wait_for(
+        state="visible", timeout=3000,
+    )
+    page.locator("#missCollectionFilter").select_option(str(collection_id))
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(3)
+    assert f"collection_id={collection_id}" in page.url
+
+    # The shared E2E fixture gives the first hawk four stars; the other two
+    # have no rating, so composing filters should leave exactly that miss.
+    page.locator("#missRatingFilter").select_option("4")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    expect(
+        page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']")
+    ).to_be_visible()
 
 
 def test_ctrl_click_toggles_selection(live_server, page):

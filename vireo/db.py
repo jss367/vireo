@@ -13910,13 +13910,15 @@ class Database:
         """Back-compat shim — prefer get_detector_run_photo_ids."""
         return self.get_detector_run_photo_ids(detector_model)
 
-    def list_misses(self, category=None, since=None):
+    def list_misses(self, category=None, since=None, photo_ids=None):
         """Return photos flagged as misses in the active workspace.
 
         category: None | "no_subject" | "clipped" | "oof"
         since: optional ISO timestamp; if set, restricts to photos whose
             miss_computed_at >= since. Used by the pipeline-review step to
             scope results to the current run.
+        photo_ids: optional iterable restricting results to an already-resolved
+            collection or filter scope. An empty iterable matches no photos.
 
         Excludes photos already flagged as rejected. Scoped to folders
         linked to the active workspace. ``detection_box`` and
@@ -13941,6 +13943,8 @@ class Database:
         if since:
             where = f"({where}) AND p.miss_computed_at >= ?"
             params.append(since)
+        scope_clause, scope_params = self._scope_clause(photo_ids)
+        params.extend(scope_params)
 
         rows = self.conn.execute(
             f"SELECT p.id, p.folder_id, p.filename, p.companion_path, "
@@ -13954,6 +13958,7 @@ class Database:
             f"WHERE wf.workspace_id = ? "
             f"  AND ({where}) "
             f"  AND (p.flag IS NULL OR p.flag != 'rejected') "
+            f"  {scope_clause} "
             f"ORDER BY p.timestamp DESC",
             params,
         ).fetchall()
@@ -14016,7 +14021,7 @@ class Database:
         )
         self.conn.commit()
 
-    def bulk_reject_miss_category(self, category, since=None):
+    def bulk_reject_miss_category(self, category, since=None, photo_ids=None):
         """Set flag='rejected' on every photo flagged with that miss category
         in the active workspace and not already rejected.
 
@@ -14025,6 +14030,9 @@ class Database:
         keeps bulk reject scoped to the /misses view the user is looking
         at (e.g. the current pipeline run), so older misses not shown on
         screen aren't silently rejected.
+
+        ``photo_ids`` further restricts the mutation to the collection and
+        Browse-style filters currently visible on the Misses page.
 
         Returns a list of ``{"photo_id": int, "old_value": str}`` for each
         photo whose flag was changed. The caller (``/api/misses/reject``)
@@ -14043,13 +14051,16 @@ class Database:
         if since:
             since_clause = "    AND p.miss_computed_at >= ? "
             params.append(since)
+        scope_clause, scope_params = self._scope_clause(photo_ids)
+        params.extend(scope_params)
         rows = self.conn.execute(
             f"SELECT p.id, p.flag FROM photos p "
             f"JOIN workspace_folders wf ON wf.folder_id = p.folder_id "
             f"WHERE wf.workspace_id = ? "
             f"  AND p.{col}=1 "
             f"  AND (p.flag IS NULL OR p.flag != 'rejected') "
-            f"{since_clause}",
+            f"{since_clause}"
+            f"{scope_clause}",
             params,
         ).fetchall()
         # Preserve NULL flag values in old_value so undo is lossless.
