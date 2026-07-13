@@ -138,6 +138,37 @@ def test_filter_change_ignores_older_recompute_response(live_server, page):
     expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
 
 
+def test_bulk_reject_uses_filters_that_rendered_visible_cards(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?rating_min=4")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    page.evaluate("""() => {
+      const realFetch = window.fetch.bind(window);
+      let held = false;
+      window.fetch = (url, options) => {
+        if (!held && String(url) === '/api/misses') {
+          held = true;
+          return new Promise(resolve => {
+            window.releaseHeldFilterLoad = () => realFetch(url, options).then(resolve);
+          });
+        }
+        return realFetch(url, options);
+      };
+    }""")
+    page.locator("#missRatingFilter").select_option("")
+    page.wait_for_function("window.releaseHeldFilterLoad != null")
+
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.locator("[data-testid='miss-reject-no_subject']").click()
+    assert _wait_for_flag(db, pids[0], "rejected") == "rejected"
+    assert all(db.get_photo(pid)["flag"] != "rejected" for pid in pids[1:])
+    page.evaluate("window.releaseHeldFilterLoad()")
+
+
 def test_ctrl_click_toggles_selection(live_server, page):
     url = live_server["url"]
     db = live_server["db"]

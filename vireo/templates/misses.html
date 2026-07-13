@@ -561,6 +561,7 @@ var missLightboxCurrent = null;
 var selection = new Set();
 var missFilterTimer = null;
 var missLoadRequestId = 0;
+var appliedMissFilters = new URLSearchParams();
 var MISS_FILTER_FIELDS = {
   collection_id: 'missCollectionFilter',
   folder_id: 'missFolderFilter',
@@ -646,9 +647,17 @@ function missFilterParams() {
   return params;
 }
 
-function addMissFiltersToBody(body) {
-  missFilterParams().forEach(function(value, key) { body[key] = value; });
+function addFilterParamsToBody(body, params) {
+  params.forEach(function(value, key) { body[key] = value; });
   return body;
+}
+
+function addMissFiltersToBody(body) {
+  return addFilterParamsToBody(body, missFilterParams());
+}
+
+function addAppliedMissFiltersToBody(body) {
+  return addFilterParamsToBody(body, appliedMissFilters);
 }
 
 function syncMissFilterUrl() {
@@ -829,8 +838,9 @@ async function previewMisses() {
   }
   var requestId = ++previewRequestId;
   missLoadRequestId++;
+  var requestedFilters = missFilterParams();
   var body = collectMissThresholds();
-  addMissFiltersToBody(body);
+  addFilterParamsToBody(body, requestedFilters);
   var since = getSinceParam();
   if (since) body.since = since;
   setMissTuningStatus('Previewing...');
@@ -843,6 +853,7 @@ async function previewMisses() {
     if (!r.ok) throw new Error('http ' + r.status);
     var data = await r.json();
     if (requestId !== previewRequestId) return;
+    appliedMissFilters = new URLSearchParams(requestedFilters.toString());
     previewActive = true;
     previewPayload = data;
     applyMissesPayload(data);
@@ -858,8 +869,9 @@ async function recomputeMisses() {
   invalidateMissPreview();
   var requestId = ++missLoadRequestId;
   var btn = document.getElementById('missRecomputeBtn');
+  var requestedFilters = missFilterParams();
   var body = collectMissThresholds();
-  addMissFiltersToBody(body);
+  addFilterParamsToBody(body, requestedFilters);
   var since = getSinceParam();
   if (since) body.since = since;
   body.save_defaults = !!document.getElementById('missSaveDefaults').checked;
@@ -883,6 +895,7 @@ async function recomputeMisses() {
       setMissTuningStatus('Recompute finished for previous filters');
       return;
     }
+    appliedMissFilters = new URLSearchParams(requestedFilters.toString());
     previewActive = false;
     previewPayload = null;
     applyMissesPayload(data);
@@ -941,7 +954,8 @@ async function loadMisses() {
     await previewMisses();
     return;
   }
-  var params = missFilterParams();
+  var requestedFilters = missFilterParams();
+  var params = new URLSearchParams(requestedFilters.toString());
   if (since) params.set('since', since);
   var url = '/api/misses' + (params.toString() ? '?' + params.toString() : '');
   var r = await fetch(url);
@@ -953,6 +967,7 @@ async function loadMisses() {
   }
   var data = await r.json();
   if (requestId !== missLoadRequestId) return;
+  appliedMissFilters = new URLSearchParams(requestedFilters.toString());
   applyMissesPayload(data);
 }
 
@@ -1192,7 +1207,9 @@ async function bulkReject(cat, e) {
   // Match the /misses?since=... review-window scope so bulk reject only
   // touches photos visible in this view, not older misses from prior runs.
   var since = getSinceParam();
-  var body = addMissFiltersToBody(since ? { category: cat, since: since } : { category: cat });
+  var body = addAppliedMissFiltersToBody(
+    since ? { category: cat, since: since } : { category: cat }
+  );
   var r = await fetch('/api/misses/reject', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
