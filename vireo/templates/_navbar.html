@@ -7523,8 +7523,7 @@ function _inatQuickUploadUrl(idx) {
   return base + (params.length ? '?' + params.join('&') : '');
 }
 
-async function openInatQuickUpload(idx) {
-  var url = _inatQuickUploadUrl(idx);
+async function _openInatQuickUploadNative(url) {
   if (await _inatOpenUrl(url)) {
     showToast('Opened iNaturalist in your browser.', 'success');
     return;
@@ -7535,6 +7534,26 @@ async function openInatQuickUpload(idx) {
       'Vireo could not open iNaturalist. Retry or copy the upload URL below.'
     );
   }
+}
+
+function openInatQuickUpload(event, idx) {
+  var url = _inatQuickUploadUrl(idx);
+  var link = event && event.currentTarget;
+  if (link) link.href = url;
+
+  if (typeof isTauri === 'function' && isTauri()) {
+    if (event) event.preventDefault();
+    _openInatQuickUploadNative(url);
+    return false;
+  }
+
+  // The loopback page can occasionally load without Tauri's IPC globals.
+  // Preserve a real link in that case: a normal browser opens a new tab, and
+  // the native shell's on_new_window hook sends the URL to the OS browser.
+  // Stop propagation so the delegated external-link handler does not replace
+  // this fallback with the unavailable IPC path.
+  if (event) event.stopPropagation();
+  return true;
 }
 
 function copyInatQuickUploadUrl(idx) {
@@ -7654,7 +7673,7 @@ async function openInatQuickModal(items, failures) {
       '</div>' +
       _inatQuickOptions(items[0], 0) +
       '<div style="margin-top:12px;">' +
-        '<button type="button" class="modal-btn modal-btn-primary" onclick="openInatQuickUpload(0)">Open Upload Page</button>' +
+        '<a class="modal-btn modal-btn-primary" href="' + escapeAttr(items[0].upload_url || 'https://www.inaturalist.org/observations/upload') + '" target="_blank" rel="noopener" onclick="return openInatQuickUpload(event, 0)" style="display:inline-block;text-decoration:none;">Open Upload Page</a>' +
         '<button type="button" class="modal-btn" onclick="copyInatQuickUploadUrl(0)" style="margin-left:8px;">Copy URL</button>' +
       '</div>' +
     '</div>';
@@ -7668,7 +7687,7 @@ async function openInatQuickModal(items, failures) {
         '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
           '<span style="font-size:13px;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escapeHtml(item.filename) + '</span>' +
           '<span style="display:flex;align-items:center;gap:8px;white-space:nowrap;">' +
-            '<button type="button" onclick="openInatQuickUpload(' + idx + ')" style="border:0;background:none;color:var(--accent);font-size:12px;cursor:pointer;padding:0;">Open Upload</button>' +
+            '<a href="' + escapeAttr(item.upload_url || 'https://www.inaturalist.org/observations/upload') + '" target="_blank" rel="noopener" onclick="return openInatQuickUpload(event, ' + idx + ')" style="color:var(--accent);font-size:12px;">Open Upload</a>' +
             '<button type="button" onclick="copyInatQuickUploadUrl(' + idx + ')" style="border:0;background:none;color:var(--text-secondary);font-size:12px;cursor:pointer;padding:0;">Copy URL</button>' +
           '</span>' +
         '</div>' +
