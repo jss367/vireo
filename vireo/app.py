@@ -10220,27 +10220,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         err = _validate_workspace_config_overrides(config_overrides, db)
         if err is not None:
             return err
+        folder_ids = body.get("folder_ids", [])
+        # A folder already covered by another workspace's
+        # local_workspace_folders row points at that workspace's managed local
+        # copy, not the original NAS path. Silently linking it into a
+        # brand-new workspace would make imports and edits here share the
+        # managed copy, so the owning workspace's later sync could publish
+        # them or discard could delete them. This mirrors the same check that
+        # POST /api/workspaces/<id>/folders already runs; without it, an API
+        # client can bypass the guard by supplying folder_ids at create time.
+        # The check + create + link run under stage_boundary_lock so a stage
+        # claim cannot slip between "guard says free" and add_workspace_folder.
         try:
-            ws_id = db.create_workspace(name, config_overrides=config_overrides)
-            # SQLite can reuse the rowid of a deleted workspace here, so a
-            # ready Missing Originals payload cached under the old
-            # workspace could otherwise be served to this fresh workspace
-            # until its own scan overwrites the entry — mirroring the
-            # new-images cache guard in db.create_workspace.
-            _invalidate_missing_originals_cache(workspace_ids=[ws_id])
-            # Seed the standard smart collections (All Photos, Flagged, etc.).
-            # Startup only seeds the active workspace, so without this a
-            # workspace created via the API never gets defaults until it's
-            # active during a future Vireo restart — which is how a
-            # workspace in the wild ended up with zero defaults and broke
-            # "All Photos" in the pipeline collection picker.
-            db.create_default_collections(workspace_id=ws_id)
-            # Link selected folders if provided
-            folder_ids = body.get("folder_ids", [])
-            for folder_id in folder_ids:
-                db.add_workspace_folder(ws_id, folder_id)
-            db.mark_workspace_folder_roots(ws_id, folder_ids)
-            ws = db.get_workspace(ws_id)
+            with stage_boundary_lock():
+                for folder_id in folder_ids:
+                    staged_by, owner_ws = folder_has_local_workspace(db, folder_id)
+                    if staged_by:
+                        return json_error(
+                            f"Folder is staged locally by workspace {owner_ws}. "
+                            "Sync or discard that workspace's local copy before linking the folder here.",
+                            409,
+                        )
+                ws_id = db.create_workspace(name, config_overrides=config_overrides)
+                # SQLite can reuse the rowid of a deleted workspace here, so a
+                # ready Missing Originals payload cached under the old
+                # workspace could otherwise be served to this fresh workspace
+                # until its own scan overwrites the entry — mirroring the
+                # new-images cache guard in db.create_workspace.
+                _invalidate_missing_originals_cache(workspace_ids=[ws_id])
+                # Seed the standard smart collections (All Photos, Flagged, etc.).
+                # Startup only seeds the active workspace, so without this a
+                # workspace created via the API never gets defaults until it's
+                # active during a future Vireo restart — which is how a
+                # workspace in the wild ended up with zero defaults and broke
+                # "All Photos" in the pipeline collection picker.
+                db.create_default_collections(workspace_id=ws_id)
+                # Link selected folders if provided
+                for folder_id in folder_ids:
+                    db.add_workspace_folder(ws_id, folder_id)
+                db.mark_workspace_folder_roots(ws_id, folder_ids)
+                ws = db.get_workspace(ws_id)
             return jsonify(dict(ws))
         except Exception as e:
             return json_error(str(e))
@@ -17748,6 +17767,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not folder_id:
             return json_error("folder_id required")
+
+        # A folder covered by any workspace's local_workspace_folders row has
+        # its folders.path rebased into that workspace's managed copy; a
+        # concurrent workspace-membership guard would refuse to touch the
+        # folders row for exactly this reason. Moving it here (via
+        # db.move_folder_path) would move or delete the managed copy and
+        # rewrite the catalog while local_workspace_folders and the manifest
+        # still expect the pre-move layout, so the owning workspace's next
+        # status falls into missing-local recovery and sync/discard can no
+        # longer restore. Reject the job before enqueue.
+        db_for_guard = _get_db()
+        with stage_boundary_lock():
+            staged_here, staged_owner_ws = folder_has_local_workspace(
+                db_for_guard, folder_id,
+            )
+            if staged_here:
+                return json_error(
+                    f"Cannot move this folder — workspace {staged_owner_ws} has it "
+                    "staged locally. Switch to that workspace and sync or discard the "
+                    "local copy first.",
+                    409,
+                )
 
         import config as cfg
         import move as move_mod

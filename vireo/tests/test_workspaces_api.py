@@ -583,6 +583,73 @@ def test_folder_delete_rejected_when_folder_is_locally_staged(app_and_db):
     assert "staged locally" in resp.get_json()["error"]
 
 
+def test_move_folder_job_rejected_when_folder_is_locally_staged(
+    app_and_db, tmp_path,
+):
+    """POST /api/jobs/move-folder must refuse when the target folder is
+    covered by any workspace's local_workspace_folders row. Without the
+    guard the job runs move_folder(), which reaches db.move_folder_path()
+    and rebases the folders row out from under local_workspace_folders and
+    the manifest — the owning workspace's next status would fall into
+    missing-local recovery and sync/discard could no longer restore the
+    catalog."""
+    app, db = app_and_db
+    client = app.test_client()
+    active = client.get("/api/workspaces/active").get_json()
+    folder = db.conn.execute("SELECT id FROM folders LIMIT 1").fetchone()
+    fid = folder["id"]
+    # Any workspace holding this folder in local_workspace_folders must
+    # block the move — the folder's path is rebased into the managed copy,
+    # not the value the job's move_folder would try to move.
+    other_ws_id = client.post(
+        "/api/workspaces", json={"name": "OwnsFolderLocally"},
+    ).get_json()["id"]
+    _stage_folder_locally(db, other_ws_id, fid)
+
+    dst = str(tmp_path / "move_folder_dst")
+    (tmp_path / "move_folder_dst").mkdir()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "destination": dst,
+    })
+    assert resp.status_code == 409, resp.get_json()
+    assert "staged locally" in resp.get_json()["error"]
+
+
+def test_create_workspace_rejected_when_folder_ids_include_locally_staged(
+    app_and_db,
+):
+    """POST /api/workspaces accepts a `folder_ids` list and links each id to
+    the new workspace, so it must run the same folder_has_local_workspace
+    guard the per-workspace folders route runs. Without the guard, an API
+    client can create a fresh workspace that points at another workspace's
+    managed local copy — imports and edits made through the new workspace
+    would silently share the managed copy, and the owning workspace's
+    later sync could publish them or discard could delete them."""
+    app, db = app_and_db
+    client = app.test_client()
+    # Owner workspace already has the folder staged locally.
+    owner_ws_id = client.post(
+        "/api/workspaces", json={"name": "OwnerLocalCreate"},
+    ).get_json()["id"]
+    folder = db.conn.execute("SELECT id FROM folders LIMIT 1").fetchone()
+    fid = folder["id"]
+    _stage_folder_locally(db, owner_ws_id, fid)
+
+    resp = client.post("/api/workspaces", json={
+        "name": "NewRemote",
+        "folder_ids": [fid],
+    })
+    assert resp.status_code == 409, resp.get_json()
+    assert "staged locally" in resp.get_json()["error"]
+    # The workspace row must not have been created either — otherwise the
+    # guard has succeeded at the visible level but left orphan state.
+    names = {
+        ws["name"] for ws in client.get("/api/workspaces").get_json()
+    }
+    assert "NewRemote" not in names
+
+
 # ---- Pin / unpin + ordering ----
 
 def test_pin_workspace_sets_pinned_at(app_and_db):
