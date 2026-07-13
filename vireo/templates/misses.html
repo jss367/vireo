@@ -718,6 +718,13 @@ async function initMissFilters() {
     var el = document.getElementById(MISS_FILTER_FIELDS[key]);
     if (el && current.has(key)) el.value = current.get(key);
   });
+  // Seed the applied-filters snapshot from the URL so recompute/bulk reject
+  // scope to the URL-requested review set if the user clicks before the first
+  // /api/misses response applies (e.g. /misses?rating_min=4). Without this,
+  // loadMissConfig() enables the Recompute button while appliedMissFilters is
+  // still empty, and an early click POSTs an unfiltered recompute that flags
+  // photos outside the URL scope.
+  appliedMissFilters = missFilterParams();
 }
 
 function setMissTuningStatus(text) {
