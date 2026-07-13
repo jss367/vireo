@@ -126,11 +126,21 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
 
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
 
+    # Put photo 1 into a 1:1 view. Crucially set _lbPending1To1 = true rather
+    # than relying on _lbZoom == _lbNativeZoom: lightboxNav() carries the 1:1
+    # intent forward via _lbIsOneToOneZoom(), which returns true immediately when
+    # _lbPending1To1 is set but otherwise depends on _lbNativeZoom. The fixture
+    # photos are seeded without width/height, so photo 1's async /api/photos/1
+    # metadata (width=null) recomputes _lbNativeZoom to null; if that lands after
+    # this force (as it does under CI CPU contention), _lbIsOneToOneZoom() would
+    # be false at Next and the next photo would not inherit the pending 1:1 —
+    # exactly the failure that blocked the v0.24.0 release build. Keying off
+    # pending makes the carry-forward immune to that clobber.
     page.evaluate(
         """() => {
             window._lbNativeZoom = 2;
             window._lbZoom = 2;
-            window._lbPending1To1 = false;
+            window._lbPending1To1 = true;
         }"""
     )
 
