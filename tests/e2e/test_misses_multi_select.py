@@ -260,6 +260,21 @@ def test_initial_recompute_uses_url_filters_before_grid_loads(live_server, page)
     page.evaluate("window.releaseInitialMissesLoad()")
 
 
+def test_pick_refreshes_unflagged_miss_filter(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?flag=none")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(5)
+    page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']").click()
+    page.keyboard.press("p")
+
+    assert _wait_for_flag(db, pids[0], "flagged") == "flagged"
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(4)
+
+
 def test_ctrl_click_toggles_selection(live_server, page):
     url = live_server["url"]
     db = live_server["db"]

@@ -1282,6 +1282,10 @@ function _clearMissRepresentativeStateIfIneligible(photoIds, flag) {
  * the card from the list, so j/k navigation stays continuous. The card will
  * disappear on the next loadMisses() (list_misses excludes flag='rejected').
  */
+function refreshAppliedFlagFilter() {
+  if (appliedMissFilters.has('flag')) loadMisses();
+}
+
 async function flagFocusedMiss(photoId, flag) {
   try {
     var r = await fetch('/api/photos/' + photoId + '/flag', {
@@ -1301,6 +1305,7 @@ async function flagFocusedMiss(photoId, flag) {
     var label = flag === 'flagged' ? 'Flagged' : flag === 'rejected' ? 'Rejected' : 'Cleared';
     showToast(label + ' photo', 'success');
   }
+  refreshAppliedFlagFilter();
 }
 
 /* ---------- Bulk flag/reject for the multi-selection ----------
@@ -1330,6 +1335,7 @@ async function bulkFlagSelection(flag) {
   }
   clearSelection();
   if (repChanged) render();
+  refreshAppliedFlagFilter();
 }
 
 /* Bulk unflag-as-miss across the selection. Each photo can be flagged in
@@ -1795,10 +1801,11 @@ document.addEventListener('lightbox:flagchanged', function(e) {
   var detail = e && e.detail ? e.detail : {};
   var photoId = detail.photoId;
   var flag = detail.flag;
-  if (photoId == null || flag !== 'rejected') return;
+  if (photoId == null) return;
   if (_clearMissRepresentativeStateIfIneligible([photoId], flag)) {
     render();
   }
+  refreshAppliedFlagFilter();
 });
 
 /* ---------- Boot ---------- */
