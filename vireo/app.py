@@ -93,7 +93,7 @@ from services.local_workspace import (
     has_local_workspace,
     stage_boundary_lock,
 )
-from web.local_workspace import create_local_workspace_blueprint
+from web.local_workspace import LOCAL_WORKSPACE_JOB_TYPES, create_local_workspace_blueprint
 from web.pages import pages_blueprint
 from web.photo_labels import create_photo_labels_blueprint
 from web.photo_review import create_photo_review_blueprint
@@ -4063,6 +4063,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if job.get("type") in _MISSING_ORIGINALS_HEAVY_JOB_TYPES:
                 return True
         return False
+
+    def _pending_local_workspace_transition(workspace_id):
+        # ``has_local_workspace`` only observes the ``local_workspaces`` row
+        # a stage worker inserts once it actually runs; a stage/sync/discard
+        # that has been enqueued but not yet reached that insert would leave
+        # the row absent. A scan or move-folder enqueued in that window
+        # passes its own guard and then rebases the catalog after the
+        # transition worker later claims the workspace, so the folder /
+        # workspace_folders / folders rows those jobs write end up outside
+        # the manifest and local_workspace_folders. Detecting the pending
+        # transition job in the runner queue closes that race at enqueue.
+        if workspace_id is None:
+            return None
+        for job in app._job_runner.list_jobs():
+            if job.get("workspace_id") != workspace_id:
+                continue
+            if job.get("status") not in ("queued", "running"):
+                continue
+            if job.get("type") in LOCAL_WORKSPACE_JOB_TYPES:
+                return job
+        return None
 
     def _invalidate_missing_originals_cache(workspace_ids=None):
         """Drop cached Missing Originals results for this app's database.
@@ -16393,12 +16414,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # discard could not rebase or remove them, and the workspace would mix
         # unmanaged source paths with the managed local copy. Refuse until
         # the local copy is synced or discarded, mirroring the folder-add,
-        # folder-remove, and move-folders guards.
+        # folder-remove, and move-folders guards. Also refuse when a
+        # stage/sync/discard job is queued or running but hasn't yet touched
+        # local_workspaces — otherwise the scan enqueued in that window
+        # could add unmanaged rows before the transition worker claims the
+        # workspace.
         if active_ws is not None:
             with stage_boundary_lock():
                 if has_local_workspace(_get_db(), active_ws):
                     return json_error(
                         "Cannot scan folders while working locally. Sync or discard the local copy first.",
+                        409,
+                    )
+                pending = _pending_local_workspace_transition(active_ws)
+                if pending:
+                    return json_error(
+                        f"Wait for the {pending['type']} job to finish before scanning; "
+                        "otherwise the scan would add folder rows the workspace's local "
+                        "manifest doesn't cover.",
                         409,
                     )
 
@@ -17806,6 +17839,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "local copy first.",
                     409,
                 )
+            # ``folder_has_local_workspace`` only sees a completed stage
+            # claim. A stage/sync/discard queued or running against a
+            # workspace that contains this folder hasn't yet written
+            # local_workspace_folders, so the read-only guard above passes
+            # even though the transition worker is about to rebase this
+            # folder's paths. Enqueueing the move now would rewrite the
+            # ``folders`` row out from under the pending transition —
+            # missing-local recovery on the next status. Refuse until the
+            # transition finishes.
+            row = db_for_guard.conn.execute(
+                "SELECT workspace_id FROM workspace_folders WHERE folder_id = ?",
+                (folder_id,),
+            ).fetchall()
+            for ws_row in row:
+                pending = _pending_local_workspace_transition(int(ws_row["workspace_id"]))
+                if pending:
+                    return json_error(
+                        f"Wait for the {pending['type']} job on workspace "
+                        f"{int(ws_row['workspace_id'])} to finish before moving this "
+                        "folder; otherwise the move would run on paths that workspace "
+                        "is about to claim.",
+                        409,
+                    )
 
         import config as cfg
         import move as move_mod

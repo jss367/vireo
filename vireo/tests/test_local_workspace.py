@@ -1940,3 +1940,121 @@ def test_scan_endpoint_refuses_while_working_locally(tmp_path, monkeypatch):
 
         allowed = client.post("/api/jobs/scan", json={"root": str(third)})
         assert allowed.status_code == 200
+
+
+def test_scan_endpoint_refuses_while_transition_job_is_pending(tmp_path, monkeypatch):
+    """A stage/sync/discard job queued or running but not yet at its
+    ``local_workspaces`` write must still block a scan.
+
+    ``has_local_workspace`` only sees a completed stage claim, so a scan
+    enqueued in the window between "transition job registered" and
+    "transition worker inserts the state row" would silently pass the
+    workspace-state guard and later add folder/workspace_folders rows
+    outside the manifest that the transition is about to build.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    db.add_folder(str(source), name="photos")
+    workspace_id = db._active_workspace_id
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+
+    hold = threading.Event()
+    started = threading.Event()
+
+    def slow_transition(_job):
+        started.set()
+        assert hold.wait(timeout=5)
+        return {"ok": True}
+
+    with app.test_client() as client:
+        # Simulate a stage/sync/discard job that has been enqueued and
+        # started but hasn't yet reached the state-row insert. The
+        # ``local_workspaces`` row is deliberately never written by this
+        # stub — the pending-transition guard alone must reject the scan.
+        job_id = app._job_runner.start(
+            "work-locally-stage", slow_transition, workspace_id=workspace_id
+        )
+        try:
+            assert started.wait(timeout=5)
+
+            other = tmp_path / "nas" / "other"
+            other.mkdir()
+            (other / "kestrel.jpg").write_bytes(b"another root")
+            blocked = client.post("/api/jobs/scan", json={"root": str(other)})
+            assert blocked.status_code == 409
+            body = blocked.get_json()["error"].lower()
+            assert "work-locally-stage" in body
+        finally:
+            hold.set()
+        wait_for_job_via_client(client, job_id)
+
+
+def test_move_folder_endpoint_refuses_while_transition_job_is_pending(tmp_path, monkeypatch):
+    """The move-folder guard must also cover pending stage transitions.
+
+    ``folder_has_local_workspace`` only sees a completed stage claim.
+    Moving a folder that a queued/running stage worker is about to claim
+    would rewrite the ``folders`` row out from under the transition and
+    drop the workspace into missing-local recovery.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    folder_id = db.add_folder(str(source), name="photos")
+    workspace_id = db._active_workspace_id
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+
+    hold = threading.Event()
+    started = threading.Event()
+
+    def slow_transition(_job):
+        started.set()
+        assert hold.wait(timeout=5)
+        return {"ok": True}
+
+    destination = tmp_path / "nas" / "moved"
+
+    with app.test_client() as client:
+        job_id = app._job_runner.start(
+            "work-locally-stage", slow_transition, workspace_id=workspace_id
+        )
+        try:
+            assert started.wait(timeout=5)
+
+            blocked = client.post(
+                "/api/jobs/move-folder",
+                json={"folder_id": folder_id, "destination": str(destination)},
+            )
+            assert blocked.status_code == 409
+            body = blocked.get_json()["error"].lower()
+            assert "work-locally-stage" in body
+        finally:
+            hold.set()
+        wait_for_job_via_client(client, job_id)
