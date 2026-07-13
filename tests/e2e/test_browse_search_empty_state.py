@@ -63,7 +63,16 @@ def test_clearing_keyword_search_keeps_selected_photo_in_place(live_server, page
         selected_id,
     )
 
-    search.fill("")
+    # Clearing can likewise be applied by another filter before the debounce.
+    # That reset must infer that the search was cleared and preserve the anchor.
+    page.evaluate(
+        """() => {
+          const input = document.getElementById('searchInput');
+          input.value = '';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          applyFilters();
+        }"""
+    )
     page.wait_for_function(
         "(id) => photos.length === 5 && selectedPhotoId === id",
         arg=selected_id,

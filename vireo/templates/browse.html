@@ -3659,14 +3659,16 @@ async function saveCollection() {
 /* ---------- Photo Loading ---------- */
 async function resetAndLoad(options) {
   cancelScheduledSearchFilter();
-  var preserveAnchor = !!(options && options.preserveAnchor);
+  var searchInput = document.getElementById('searchInput');
+  var currentSearch = searchInput ? searchInput.value.trim() : '';
+  var searchWasCleared = appliedKeywordSearch !== '' && currentSearch === '';
+  var preserveAnchor = !!(options && options.preserveAnchor) || searchWasCleared;
   var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
   // Any non-collection reload also applies the current text box through
   // buildCurrentBrowseParams(). Keep the tracker aligned when another control
   // (sort/date/color/etc.) beats the search debounce to this reset.
-  var searchInput = document.getElementById('searchInput');
-  appliedKeywordSearch = searchInput ? searchInput.value.trim() : '';
+  appliedKeywordSearch = currentSearch;
   if (clipSearchActive) {
     clipSearchActive = false;
     document.getElementById('clipSearchInput').value = '';
