@@ -1,4 +1,10 @@
+import base64
+
 from playwright.sync_api import expect
+
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def test_browse_compare_two_selected_photos(live_server, page):
@@ -71,6 +77,10 @@ def test_browse_compare_opens_with_c_shortcut(live_server, page):
 
 def test_browse_compare_zoom_is_independent_and_can_be_reset(live_server, page):
     url = live_server["url"]
+    page.route(
+        "**/photos/*/original",
+        lambda route: route.fulfill(status=200, content_type="image/png", body=PNG_1X1),
+    )
     page.goto(f"{url}/browse")
 
     cards = page.locator(".grid-card")
@@ -92,6 +102,9 @@ def test_browse_compare_zoom_is_independent_and_can_be_reset(live_server, page):
     )
     expect(page.locator("#browseCompareZoomA")).not_to_have_text("Fit")
     expect(page.locator("#browseCompareZoomB")).to_have_text("Fit")
+    expect(page.locator("#browseCompareImgA")).to_have_attribute(
+        "data-original-loaded", "true"
+    )
     assert page.locator("#browseCompareImgA").get_attribute("src").endswith(
         "/original"
     )
@@ -119,3 +132,28 @@ def test_browse_compare_double_click_toggles_detail_zoom(live_server, page):
 
     left.dblclick(position={"x": 200, "y": 200})
     expect(page.locator("#browseCompareZoomA")).to_have_text("Fit")
+
+
+def test_browse_compare_keeps_preview_when_original_fails(live_server, page):
+    url = live_server["url"]
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(status=200, content_type="image/png", body=PNG_1X1),
+    )
+    page.route("**/photos/*/original", lambda route: route.fulfill(status=404))
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    assert cards.count() >= 2
+
+    cards.nth(0).click(modifiers=["Meta"])
+    cards.nth(1).click(modifiers=["Meta"])
+    page.locator("#compareBtn").click()
+
+    image = page.locator("#browseCompareImgA")
+    page.locator("#browseCompareWrapA").dblclick(position={"x": 200, "y": 200})
+
+    expect(image).to_have_attribute("data-original-loaded", "failed")
+    assert image.get_attribute("src").endswith("/full")
+    assert image.evaluate("img => img.naturalWidth") > 0

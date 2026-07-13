@@ -4792,9 +4792,25 @@ function applyBrowseCompareView(prefix) {
 
 function ensureBrowseCompareOriginal(prefix) {
   var els = browseCompareElements(prefix);
-  if (!els.img || !els.img.dataset.photoId || els.img.dataset.originalLoaded === 'true') return;
-  els.img.dataset.originalLoaded = 'true';
-  els.img.src = '/photos/' + els.img.dataset.photoId + '/original';
+  if (!els.img || !els.img.dataset.photoId) return;
+  var loadState = els.img.dataset.originalLoaded;
+  if (loadState === 'true' || loadState === 'loading' || loadState === 'failed') return;
+  var photoId = els.img.dataset.photoId;
+  els.img.dataset.originalLoaded = 'loading';
+  var original = new Image();
+  els.img._browseCompareOriginalProbe = original;
+  original.onload = function() {
+    if (els.img.dataset.photoId !== photoId) return;
+    els.img.dataset.originalLoaded = 'true';
+    els.img.src = original.src;
+    els.img._browseCompareOriginalProbe = null;
+  };
+  original.onerror = function() {
+    if (els.img.dataset.photoId !== photoId) return;
+    els.img.dataset.originalLoaded = 'failed';
+    els.img._browseCompareOriginalProbe = null;
+  };
+  original.src = '/photos/' + photoId + '/original';
 }
 
 function setBrowseCompareZoom(prefix, zoom, clientX, clientY) {
@@ -4929,6 +4945,7 @@ function setBrowseComparePane(prefix, photo) {
   var name = document.getElementById('browseCompareName' + prefix);
   var meta = document.getElementById('browseCompareMeta' + prefix);
   if (img) {
+    img._browseCompareOriginalProbe = null;
     img.alt = photo.filename || '';
     img.dataset.photoId = photo.id;
     img.dataset.originalLoaded = 'false';
