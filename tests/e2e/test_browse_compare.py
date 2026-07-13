@@ -67,3 +67,55 @@ def test_browse_compare_opens_with_c_shortcut(live_server, page):
     expect(page.locator("#browseCompareOverlay")).to_have_class(
         "browse-compare-overlay active"
     )
+
+
+def test_browse_compare_zoom_is_independent_and_can_be_reset(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    assert cards.count() >= 2
+
+    cards.nth(0).click(modifiers=["Meta"])
+    cards.nth(1).click(modifiers=["Meta"])
+    page.locator("#compareBtn").click()
+
+    left = page.locator("#browseCompareWrapA")
+    left.dispatch_event(
+        "wheel", {"deltaY": -300, "clientX": 250, "clientY": 250}
+    )
+
+    expect(left).to_have_class("browse-compare-image-wrap zoomed")
+    expect(page.locator("#browseCompareWrapB")).to_have_class(
+        "browse-compare-image-wrap"
+    )
+    expect(page.locator("#browseCompareZoomA")).not_to_have_text("Fit")
+    expect(page.locator("#browseCompareZoomB")).to_have_text("Fit")
+    assert page.locator("#browseCompareImgA").get_attribute("src").endswith(
+        "/original"
+    )
+
+    page.get_by_role("button", name="Reset views").click()
+    expect(left).to_have_class("browse-compare-image-wrap")
+    expect(page.locator("#browseCompareZoomA")).to_have_text("Fit")
+
+
+def test_browse_compare_double_click_toggles_detail_zoom(live_server, page):
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    cards = page.locator(".grid-card")
+    cards.first.wait_for(state="visible")
+    assert cards.count() >= 2
+
+    cards.nth(0).click(modifiers=["Meta"])
+    cards.nth(1).click(modifiers=["Meta"])
+    page.locator("#compareBtn").click()
+
+    left = page.locator("#browseCompareWrapA")
+    left.dblclick(position={"x": 200, "y": 200})
+    expect(page.locator("#browseCompareZoomA")).to_have_text("200%")
+
+    left.dblclick(position={"x": 200, "y": 200})
+    expect(page.locator("#browseCompareZoomA")).to_have_text("Fit")

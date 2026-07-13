@@ -1189,16 +1189,50 @@ body {
 .browse-compare-image-wrap {
   flex: 1;
   min-height: 0;
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 18px;
+  cursor: zoom-in;
+  touch-action: none;
+  user-select: none;
+}
+.browse-compare-image-wrap.zoomed {
+  cursor: grab;
+}
+.browse-compare-image-wrap.zoomed:active {
+  cursor: grabbing;
 }
 .browse-compare-image {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
   display: block;
+  transform-origin: center center;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.browse-compare-zoom-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  min-width: 44px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.68);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: center;
+  pointer-events: none;
+}
+.browse-compare-hint {
+  color: var(--text-dim);
+  font-size: 11px;
 }
 .browse-compare-meta {
   flex-shrink: 0;
@@ -1844,15 +1878,18 @@ body {
   <div class="browse-compare-toolbar" onclick="event.stopPropagation()">
     <span class="browse-compare-title">Compare</span>
     <span class="browse-compare-count" id="browseCompareCount"></span>
+    <span class="browse-compare-hint">Scroll to zoom · drag to pan · double-click to toggle</span>
     <span class="browse-compare-spacer"></span>
+    <button class="browse-compare-btn" onclick="resetBrowseCompareViews()" title="Fit both photos to their panes">Reset views</button>
     <button class="browse-compare-btn" id="browseComparePrev" onclick="browseCompareStep(-1)" title="Previous pair">Previous</button>
     <button class="browse-compare-btn" id="browseCompareNext" onclick="browseCompareStep(1)" title="Next pair">Next</button>
     <button class="browse-compare-close" onclick="closeBrowseCompare(event)" title="Close">&times;</button>
   </div>
   <div class="browse-compare-stage" onclick="event.stopPropagation()">
     <div class="browse-compare-pane">
-      <div class="browse-compare-image-wrap">
-        <img class="browse-compare-image" id="browseCompareImgA" src="" alt="">
+      <div class="browse-compare-image-wrap" id="browseCompareWrapA" data-pane="A" title="Scroll to zoom, then drag to pan">
+        <span class="browse-compare-zoom-badge" id="browseCompareZoomA">Fit</span>
+        <img class="browse-compare-image" id="browseCompareImgA" src="" alt="" draggable="false">
       </div>
       <div class="browse-compare-meta">
         <div class="browse-compare-name" id="browseCompareNameA"></div>
@@ -1860,8 +1897,9 @@ body {
       </div>
     </div>
     <div class="browse-compare-pane">
-      <div class="browse-compare-image-wrap">
-        <img class="browse-compare-image" id="browseCompareImgB" src="" alt="">
+      <div class="browse-compare-image-wrap" id="browseCompareWrapB" data-pane="B" title="Scroll to zoom, then drag to pan">
+        <span class="browse-compare-zoom-badge" id="browseCompareZoomB">Fit</span>
+        <img class="browse-compare-image" id="browseCompareImgB" src="" alt="" draggable="false">
       </div>
       <div class="browse-compare-meta">
         <div class="browse-compare-name" id="browseCompareNameB"></div>
@@ -1932,6 +1970,11 @@ var browseCompareIds = [];
 var browseCompareOffset = 0;
 var browseCompareSeq = 0;
 var browseCompareEscToken = null;
+var browseCompareViews = {
+  A: { zoom: 1, panX: 0, panY: 0 },
+  B: { zoom: 1, panX: 0, panY: 0 }
+};
+var browseComparePointer = null;
 
 function refreshPendingSyncBanner() {
   if (typeof checkPendingSync === 'function') {
@@ -4714,6 +4757,149 @@ function browseCompareStep(delta) {
   renderBrowseCompare();
 }
 
+function browseCompareElements(prefix) {
+  return {
+    wrap: document.getElementById('browseCompareWrap' + prefix),
+    img: document.getElementById('browseCompareImg' + prefix),
+    badge: document.getElementById('browseCompareZoom' + prefix)
+  };
+}
+
+function clampBrowseComparePan(prefix) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap || !els.img) return;
+  if (view.zoom <= 1.001) {
+    view.panX = 0;
+    view.panY = 0;
+    return;
+  }
+  var maxX = Math.max(0, (els.img.clientWidth * view.zoom - els.wrap.clientWidth) / 2);
+  var maxY = Math.max(0, (els.img.clientHeight * view.zoom - els.wrap.clientHeight) / 2);
+  view.panX = Math.max(-maxX, Math.min(maxX, view.panX));
+  view.panY = Math.max(-maxY, Math.min(maxY, view.panY));
+}
+
+function applyBrowseCompareView(prefix) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap || !els.img) return;
+  clampBrowseComparePan(prefix);
+  els.img.style.transform = 'translate(' + view.panX + 'px, ' + view.panY + 'px) scale(' + view.zoom + ')';
+  els.wrap.classList.toggle('zoomed', view.zoom > 1.001);
+  if (els.badge) els.badge.textContent = view.zoom <= 1.001 ? 'Fit' : Math.round(view.zoom * 100) + '%';
+}
+
+function ensureBrowseCompareOriginal(prefix) {
+  var els = browseCompareElements(prefix);
+  if (!els.img || !els.img.dataset.photoId || els.img.dataset.originalLoaded === 'true') return;
+  els.img.dataset.originalLoaded = 'true';
+  els.img.src = '/photos/' + els.img.dataset.photoId + '/original';
+}
+
+function setBrowseCompareZoom(prefix, zoom, clientX, clientY) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap) return;
+  var oldZoom = view.zoom;
+  var nextZoom = Math.max(1, Math.min(8, zoom));
+  if (nextZoom > 1.001 && oldZoom > 0 && clientX != null && clientY != null) {
+    var rect = els.wrap.getBoundingClientRect();
+    var cursorX = clientX - (rect.left + rect.width / 2);
+    var cursorY = clientY - (rect.top + rect.height / 2);
+    var ratio = nextZoom / oldZoom;
+    view.panX = cursorX - ratio * (cursorX - view.panX);
+    view.panY = cursorY - ratio * (cursorY - view.panY);
+  }
+  view.zoom = nextZoom;
+  if (nextZoom <= 1.001) {
+    view.panX = 0;
+    view.panY = 0;
+  } else {
+    ensureBrowseCompareOriginal(prefix);
+  }
+  applyBrowseCompareView(prefix);
+}
+
+function resetBrowseCompareView(prefix) {
+  var view = browseCompareViews[prefix];
+  if (!view) return;
+  view.zoom = 1;
+  view.panX = 0;
+  view.panY = 0;
+  applyBrowseCompareView(prefix);
+}
+
+function resetBrowseCompareViews() {
+  resetBrowseCompareView('A');
+  resetBrowseCompareView('B');
+}
+
+function browseComparePaneFromEvent(e) {
+  var wrap = e.target && e.target.closest ? e.target.closest('.browse-compare-image-wrap') : null;
+  return wrap && wrap.dataset ? wrap.dataset.pane : null;
+}
+
+(function installBrowseCompareZoomHandlers() {
+  document.addEventListener('wheel', function(e) {
+    if (!isBrowseCompareOpen()) return;
+    var prefix = browseComparePaneFromEvent(e);
+    if (!prefix || !browseCompareViews[prefix]) return;
+    e.preventDefault();
+    var sensitivity = e.ctrlKey ? 0.02 : 0.0015;
+    var factor = Math.exp(-e.deltaY * sensitivity);
+    setBrowseCompareZoom(prefix, browseCompareViews[prefix].zoom * factor, e.clientX, e.clientY);
+  }, { passive: false });
+
+  document.addEventListener('dblclick', function(e) {
+    if (!isBrowseCompareOpen()) return;
+    var prefix = browseComparePaneFromEvent(e);
+    if (!prefix || !browseCompareViews[prefix]) return;
+    e.preventDefault();
+    setBrowseCompareZoom(prefix, browseCompareViews[prefix].zoom > 1.001 ? 1 : 2, e.clientX, e.clientY);
+  });
+
+  document.addEventListener('pointerdown', function(e) {
+    if (!isBrowseCompareOpen() || e.button !== 0) return;
+    var prefix = browseComparePaneFromEvent(e);
+    var view = prefix && browseCompareViews[prefix];
+    if (!view || view.zoom <= 1.001) return;
+    browseComparePointer = {
+      pointerId: e.pointerId,
+      prefix: prefix,
+      startX: e.clientX,
+      startY: e.clientY,
+      panX: view.panX,
+      panY: view.panY
+    };
+    if (e.target.setPointerCapture) e.target.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  document.addEventListener('pointermove', function(e) {
+    var drag = browseComparePointer;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    var view = browseCompareViews[drag.prefix];
+    view.panX = drag.panX + e.clientX - drag.startX;
+    view.panY = drag.panY + e.clientY - drag.startY;
+    applyBrowseCompareView(drag.prefix);
+    e.preventDefault();
+  });
+
+  function stopBrowseComparePan(e) {
+    if (browseComparePointer && (e.pointerId == null || browseComparePointer.pointerId === e.pointerId)) {
+      browseComparePointer = null;
+    }
+  }
+  document.addEventListener('pointerup', stopBrowseComparePan);
+  document.addEventListener('pointercancel', stopBrowseComparePan);
+  window.addEventListener('resize', function() {
+    if (!isBrowseCompareOpen()) return;
+    applyBrowseCompareView('A');
+    applyBrowseCompareView('B');
+  });
+})();
+
 function findBrowsePhoto(id) {
   return photos.find(function(p) { return p.id === id; }) || null;
 }
@@ -4744,6 +4930,8 @@ function setBrowseComparePane(prefix, photo) {
   var meta = document.getElementById('browseCompareMeta' + prefix);
   if (img) {
     img.alt = photo.filename || '';
+    img.dataset.photoId = photo.id;
+    img.dataset.originalLoaded = 'false';
     img.src = '/photos/' + photo.id + '/full';
   }
   if (name) name.textContent = photo.filename || ('Photo ' + photo.id);
@@ -4756,6 +4944,7 @@ async function renderBrowseCompare() {
   var leftId = browseCompareIds[browseCompareOffset];
   var rightId = browseCompareIds[browseCompareOffset + 1];
   if (leftId == null || rightId == null) return;
+  resetBrowseCompareViews();
 
   var count = document.getElementById('browseCompareCount');
   if (count) {
