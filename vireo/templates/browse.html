@@ -362,11 +362,11 @@ body.sidebar-resizing {
 .grid-card-color[data-color="blue"] { background: #3498db; }
 .grid-card-color[data-color="purple"] { background: #9b59b6; }
 
-/* Placeholder cells for photos that exist but haven't loaded yet. The grid
-   reserves the full dataset's scroll height up front so scrolling never
-   hits a hard wall; placeholders fill in as pages arrive. Deliberately NOT
-   .grid-card — selection/keyboard/summary code queries that class and must
-   only ever see real photos. */
+/* Placeholder cells for the next photos that haven't loaded yet. The grid
+   keeps a bounded runway after the loaded cards so users can scroll smoothly
+   while the next pages arrive without implying that arbitrary unloaded
+   positions support random access. Deliberately NOT .grid-card — selection,
+   keyboard, and summary code queries that class and must only see real photos. */
 .skel-card {
   background: var(--bg-secondary);
   border-radius: 6px;
@@ -393,7 +393,6 @@ body.sidebar-resizing {
   margin-top: 2px;
 }
 @keyframes skelPulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
-.grid-tail-spacer { grid-column: 1 / -1; }
 
 /* ---------- Detail Panel ---------- */
 .detail-panel {
@@ -2535,16 +2534,14 @@ function appendGridPhotos(newPhotos, startIdx) {
   updateGridTail();
 }
 
-/* The grid tail reserves scroll space for photos that haven't loaded yet:
-   a pool of skeleton cells at the loading boundary, a spacer sized to the
-   estimated rows in between, and a second pool at the very end so dragging
-   the scrollbar to the bottom lands on placeholder cells rather than a
-   blank region. Rebuilt after every page append. Lives in a
+/* The grid tail reserves a bounded amount of scroll space for the next photos
+   that haven't loaded yet. It must not reserve the entire dataset: Browse
+   loads a contiguous prefix, so an absolute-bottom jump in a large library
+   would otherwise force every preceding page to load before the viewport
+   could show a real card. Rebuilt after every page append. Lives in a
    display:contents wrapper so its children participate in the grid layout
    but real cards can be inserted before it as a unit. */
 var SKEL_POOL = 300;
-var SKEL_END_POOL = 100;
-var GRID_GAP_PX = 12; // keep in sync with .grid { gap }
 
 function updateGridTail() {
   var grid = document.getElementById('grid');
@@ -2564,22 +2561,10 @@ function updateGridTail() {
     grid.style.setProperty('--skel-info-h', infoEl.offsetHeight + 'px');
   }
 
-  var front = Math.min(remaining, SKEL_POOL);
-  var end = Math.min(remaining - front, SKEL_END_POOL);
-  var beyond = remaining - front - end;
-
-  var spacerH = 0;
-  if (beyond > 0) {
-    var cols = (getComputedStyle(grid).gridTemplateColumns || '').split(' ').length || 1;
-    var rowH = lastCard.getBoundingClientRect().height + GRID_GAP_PX;
-    spacerH = Math.round(Math.ceil(beyond / cols) * rowH);
-  }
-
   var skel = '<div class="skel-card"><div class="skel-thumb"></div><div class="skel-info"><div class="skel-line"></div></div></div>';
   var html = '';
-  for (var i = 0; i < front; i++) html += skel;
-  if (beyond > 0) html += '<div class="grid-tail-spacer" style="height:' + spacerH + 'px"></div>';
-  for (var j = 0; j < end; j++) html += skel;
+  var visible = Math.min(remaining, SKEL_POOL);
+  for (var i = 0; i < visible; i++) html += skel;
 
   if (!tail) {
     tail = document.createElement('div');
@@ -2751,8 +2736,8 @@ async function bootstrapBrowse() {
   loading = false;
   if (bootstrapSucceeded) {
     rearmInfiniteScrollObserver();
-    // The sentinel sits below the full-height tail now, so it may never
-    // intersect — make sure a tall viewport still gets its second page.
+    // Make sure a tall viewport still gets its second page even when the
+    // sentinel callback does not fire after the initial layout.
     requestAnimationFrame(ensureViewportHydrated);
   }
 }
@@ -4311,12 +4296,14 @@ function updateScrollPosition() {
   var viewHeight = container.clientHeight;
 
   // Viewport entirely below every loaded card (placeholder territory):
-  // reporting the loaded range would be a lie, so estimate the position
-  // from the scroll fraction until real cards catch up.
+  // reporting the loaded range would be a lie, so estimate within the
+  // bounded runway represented by the rendered skeleton cells.
   var lastCard = cards[cards.length - 1];
   if (lastCard.offsetTop + lastCard.offsetHeight < scrollTop) {
     var frac = Math.min(1, (scrollTop + viewHeight / 2) / Math.max(1, container.scrollHeight));
-    var approx = Math.max(1, Math.min(totalPhotos, Math.round(frac * totalPhotos)));
+    var skeletonCount = document.querySelectorAll('#gridTail .skel-card').length;
+    var representedPhotos = Math.min(totalPhotos, photos.length + skeletonCount);
+    var approx = Math.max(1, Math.min(representedPhotos, Math.round(frac * representedPhotos)));
     el.textContent = '≈' + approx.toLocaleString() + ' of ' + totalPhotos.toLocaleString();
     return;
   }
@@ -4459,7 +4446,7 @@ observer.disconnect = function() {
 observer.observe(document.getElementById('scrollSentinel'));
 
 function rearmInfiniteScrollObserver() {
-  // With the 1200px root margin, the sentinel can remain intersecting after
+  // With the 3200px root margin, the sentinel can remain intersecting after
   // bootstrap or page loads. Re-observing asks IntersectionObserver to deliver
   // a fresh callback for the current layout instead of waiting for a scroll
   // transition that may never occur.
@@ -4471,11 +4458,9 @@ function rearmInfiniteScrollObserver() {
   observer.observe(sentinel);
 }
 
-/* Scroll-driven page loading. The grid now reserves the full dataset's
-   height, so the bottom sentinel only intersects near the absolute end —
-   the primary load trigger is proximity to the loading boundary (the
-   first skeleton cell). Fires on scroll and chains after each successful
-   page load until the viewport is covered by real cards. */
+/* Scroll-driven page loading. The primary trigger is proximity to the loading
+   boundary (the first skeleton cell). Fires on scroll and chains after each
+   successful page load until the viewport is covered by real cards. */
 function ensureViewportHydrated() {
   if (infiniteScrollObserverDisconnected || !infiniteScrollObserverIsNative) return;
   if (loading || allLoaded || clipSearchActive || anchorScanDepth > 0) return;

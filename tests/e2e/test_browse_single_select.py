@@ -14,6 +14,86 @@ def disable_infinite_scroll(page):
     """)
 
 
+def test_large_library_uses_bounded_placeholder_runway(live_server, page):
+    """A large result set must not expose its unloaded tail as scroll space.
+
+    Browse only loads a contiguous prefix. Reserving the full dataset height
+    made an absolute-bottom jump crawl through every preceding page before a
+    real card could reach the viewport.
+    """
+    disable_infinite_scroll(page)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    state = page.evaluate(
+        """() => {
+          totalPhotos = 50000;
+          allLoaded = false;
+          updateGridTail();
+          var container = document.getElementById('gridContainer');
+          container.scrollTop = container.scrollHeight;
+          updateScrollPosition();
+          return {
+            skeletons: document.querySelectorAll('#gridTail .skel-card').length,
+            spacers: document.querySelectorAll('#gridTail .grid-tail-spacer').length,
+            position: document.getElementById('filterSummary').textContent,
+          };
+        }"""
+    )
+
+    assert state["skeletons"] == 300
+    assert state["spacers"] == 0
+    assert state["position"].endswith(" of 50,000")
+    assert state["position"] != "≈50,000 of 50,000"
+
+    hydration = page.evaluate(
+        """async () => {
+          var originalSafeFetch = safeFetch;
+          var nextId = 100000;
+          var calls = 0;
+          safeFetch = function(url, options, fetchOptions) {
+            if (url.indexOf('/api/photos?') === 0) {
+              calls++;
+              var perPage = parseInt(new URL(url, location.origin).searchParams.get('per_page'), 10);
+              if (calls >= 10) return Promise.resolve({photos: [], total: totalPhotos});
+              var batch = [];
+              for (var i = 0; i < perPage; i++) {
+                batch.push({id: nextId++, filename: 'photo-' + nextId + '.jpg'});
+              }
+              return Promise.resolve({photos: batch, total: totalPhotos});
+            }
+            return originalSafeFetch(url, options, fetchOptions);
+          };
+          try {
+            // The test observer is intentionally non-native; opt into the
+            // scroll-driven path directly without enabling observer races.
+            infiniteScrollObserverIsNative = true;
+            infiniteScrollObserverDisconnected = false;
+            var container = document.getElementById('gridContainer');
+            container.scrollTop = container.scrollHeight;
+            ensureViewportHydrated();
+
+            var deadline = Date.now() + 3000;
+            while (Date.now() < deadline) {
+              var firstSkeleton = document.querySelector('#gridTail .skel-card');
+              var boundaryIsPastViewport = firstSkeleton &&
+                firstSkeleton.getBoundingClientRect().top -
+                  container.getBoundingClientRect().bottom > 3200;
+              if (calls > 0 && !loading && (boundaryIsPastViewport || allLoaded)) break;
+              await new Promise(function(resolve) { setTimeout(resolve, 20); });
+            }
+            return {calls: calls, loaded: photos.length, allLoaded: allLoaded};
+          } finally {
+            safeFetch = originalSafeFetch;
+          }
+        }"""
+    )
+
+    assert 1 <= hydration["calls"] < 10
+    assert hydration["loaded"] < 50000
+    assert not hydration["allLoaded"]
+
+
 def test_single_click_reveals_batch_bar(live_server, page):
     """Normal-click on one photo reveals the batch bar so Develop/Export/Delete
     are reachable with a single photo selected.
