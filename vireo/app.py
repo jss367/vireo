@@ -10359,6 +10359,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "Cannot change folder membership while working locally. Sync or discard the local copy first.",
                 409,
             )
+        # A folder already covered by another workspace's local_workspace_folders
+        # points at that workspace's managed copy, not the original NAS path. Linking
+        # it into a second workspace would silently make edits or imports there share
+        # the managed copy, so the owning workspace's later sync could publish them
+        # to the source and discard could delete them. Refuse until the owning
+        # workspace's local copy is resolved.
+        staged_by, owner_ws = folder_has_local_workspace(db, folder_id)
+        if staged_by:
+            return json_error(
+                f"Folder is staged locally by workspace {owner_ws}. "
+                "Sync or discard that workspace's local copy before linking the folder here.",
+                409,
+            )
         db.add_workspace_folder(ws_id, folder_id)
         # A newly linked folder can introduce ghosts (or resolve them if it
         # was previously offline). The missing-originals cache is keyed by

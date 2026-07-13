@@ -477,6 +477,24 @@ def test_add_folder_rejected_while_workspace_is_local(app_and_db):
     assert "working locally" in resp.get_json()["error"]
 
 
+def test_add_folder_rejected_when_folder_is_locally_staged_elsewhere(app_and_db):
+    """A folder covered by another workspace's local_workspace_folders points
+    at that workspace's managed local copy, not the original NAS path. Linking
+    it into a second workspace would silently share the managed copy; the
+    endpoint must refuse until the owning workspace's local copy is resolved."""
+    app, db = app_and_db
+    client = app.test_client()
+    owner_ws_id = client.post("/api/workspaces", json={"name": "OwnerLocal"}).get_json()["id"]
+    target_ws_id = client.post("/api/workspaces", json={"name": "TargetRemote"}).get_json()["id"]
+    folder = db.conn.execute("SELECT id FROM folders LIMIT 1").fetchone()
+    fid = folder["id"]
+    _stage_folder_locally(db, owner_ws_id, fid)
+
+    resp = client.post(f"/api/workspaces/{target_ws_id}/folders", json={"folder_id": fid})
+    assert resp.status_code == 409
+    assert "staged locally" in resp.get_json()["error"]
+
+
 def test_remove_folder_rejected_while_workspace_is_local(app_and_db):
     """Removing a staged root while local work is active would leave the
     manifest and local_workspace_folders covering paths the UI no longer

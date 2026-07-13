@@ -451,12 +451,30 @@ def _copy_regular_with_hash(source: str, destination: str, cancel_check=None) ->
     raise AssertionError("copy retry loop exhausted")
 
 
-def _copy_entry(source: str, destination: str, st, cancel_check=None) -> dict | None:
+def _copy_entry(source: str, destination: str, st, source_root: str, cancel_check=None) -> dict | None:
     mode = st.st_mode
     if stat.S_ISDIR(mode):
         os.makedirs(destination, exist_ok=True)
         return None
     if stat.S_ISLNK(mode):
+        # A NAS-side swap between _collect_source_entries and here can point the
+        # link at an absolute or escaping target: re-lstat and re-check
+        # containment on the current target before creating the local link so
+        # we never publish an unsafe target into the managed tree.
+        try:
+            current_st = os.lstat(source)
+        except OSError as exc:
+            raise LocalWorkspaceError(
+                f"Source symlink is no longer readable: {source}"
+            ) from exc
+        if not stat.S_ISLNK(current_st.st_mode):
+            raise LocalWorkspaceError(
+                f"Source entry changed type before it could be staged: {source}"
+            )
+        if not _symlink_stays_within(source, source_root):
+            raise LocalWorkspaceError(
+                f"Symlink escapes or uses an absolute target and cannot be staged: {source}"
+            )
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         target = os.readlink(source)
         with suppress(FileNotFoundError):
@@ -642,7 +660,7 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
                     if cancel_check and cancel_check():
                         raise LocalWorkspaceCancelled("Local workspace transfer cancelled")
                     destination = os.path.join(root["local_path"], rel)
-                    record = _copy_entry(source, destination, st, cancel_check)
+                    record = _copy_entry(source, destination, st, root["source_path"], cancel_check)
                     if record is None:
                         continue
                     record.update({"root": root_index, "path": rel})

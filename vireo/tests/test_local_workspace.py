@@ -229,6 +229,45 @@ def test_stage_rejects_source_swapped_to_symlink_before_copy(local_workspace_env
     assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_stage_rejects_symlink_target_swapped_after_walk(local_workspace_env, tmp_path, monkeypatch):
+    # A source symlink can be repointed between _collect_source_entries and
+    # the copy pass. If we trusted the walk-time containment check, the copy
+    # would follow readlink() on the swapped target and publish an
+    # absolute/escaping link into the managed tree. The copy pass must
+    # re-validate containment on the current target and refuse.
+    env = local_workspace_env
+    # Relative link that stays inside the source root passes the walk-time
+    # containment check; the swap below turns it into an absolute escaping
+    # link that only the copy pass can catch.
+    link_path = env["source"] / "safe-link.jpg"
+    os.symlink("root.jpg", link_path)
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"outside")
+
+    real_walk_entries = local_workspace._walk_entries
+    swapped = {"done": False}
+
+    def swap_after_walk(root):
+        for entry in real_walk_entries(root):
+            rel, full, _st = entry
+            yield entry
+            if not swapped["done"] and rel == "safe-link.jpg":
+                os.unlink(full)
+                os.symlink(str(outside), full)
+                swapped["done"] = True
+
+    monkeypatch.setattr(local_workspace, "_walk_entries", swap_after_walk)
+
+    with pytest.raises(LocalWorkspaceError, match="Symlink escapes"):
+        stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert swapped["done"], "test did not exercise the symlink swap"
+    # Catalog untouched and no unsafe link was published into the managed tree.
+    assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
+    assert not workspace_dir(str(env["vireo_dir"]), env["workspace_id"]).exists()
+
+
 def test_stage_rejects_case_colliding_source_paths(local_workspace_env, monkeypatch):
     # On case-insensitive local storage (Windows/macOS defaults) two source
     # paths differing only in case would land on the same destination; the
