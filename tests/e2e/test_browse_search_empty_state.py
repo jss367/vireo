@@ -28,6 +28,51 @@ def test_keyword_search_empty_state_and_clear(live_server, page):
     expect(page.locator("#welcomeState")).to_be_hidden()
 
 
+def test_clearing_keyword_search_keeps_selected_photo_in_place(live_server, page):
+    """Restoring filtered-out photos must not pull focus away from the selection."""
+    url = live_server["url"]
+    selected_id = live_server["data"]["photos"][3]
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.evaluate("updateThumbSize(400)")
+
+    search = page.locator("#searchInput")
+    search.fill("American Robin")
+    page.wait_for_function("() => photos.length === 1")
+    selected = page.locator(f'.grid-card[data-id="{selected_id}"]')
+    selected.wait_for(state="visible")
+    selected.click()
+
+    top_before = page.evaluate(
+        """(id) => {
+          const card = document.querySelector(`.grid-card[data-id="${id}"]`);
+          const container = document.getElementById('gridContainer');
+          return card.getBoundingClientRect().top - container.getBoundingClientRect().top;
+        }""",
+        selected_id,
+    )
+
+    search.fill("")
+    page.wait_for_function(
+        "(id) => photos.length === 5 && selectedPhotoId === id",
+        arg=selected_id,
+    )
+    page.wait_for_timeout(100)  # allow the anchor-restoration animation frame
+
+    assert page.evaluate("selectedPhotos.size") == 0
+    expect(selected).to_have_class("grid-card selected")
+    top_after = page.evaluate(
+        """(id) => {
+          const card = document.querySelector(`.grid-card[data-id="${id}"]`);
+          const container = document.getElementById('gridContainer');
+          return card.getBoundingClientRect().top - container.getBoundingClientRect().top;
+        }""",
+        selected_id,
+    )
+    assert abs(top_after - top_before) < 4
+
+
 def test_flag_quick_filters_show_picks_and_rejects(live_server, page):
     """Browse keeps always-visible quick filters for picked and rejected photos."""
     url = live_server["url"]

@@ -1942,7 +1942,7 @@ var allLoaded = false;
 var selectedPhotoId = null;
 var selectedIndex = -1;
 var anchorRestoreEpoch = 0;
-var collectionAnchorScanDepth = 0;
+var anchorScanDepth = 0;
 var selectedPhotos = new Set(); // multi-select
 var selectionKeywordRequestSeq = 0;
 var selectionKeywordKey = '';
@@ -1975,6 +1975,7 @@ var calendarData = null;
 var clipSearchActive = false;
 var clipSearchSeq = 0;
 var searchFilterTimer = null;
+var appliedKeywordSearch = '';
 var bestBatchData = null;
 var keywordAutocompleteCache = null;
 var keywordAutocompletePromise = null;
@@ -3081,7 +3082,7 @@ async function filterByCollection(id, options) {
   function anchorScanShouldContinue() {
     return collectionRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
   }
-  if (anchor) collectionAnchorScanDepth++;
+  if (anchor) anchorScanDepth++;
   try {
     await loadPhotos();
     if (!collectionRequestIsCurrent()) return;
@@ -3107,12 +3108,12 @@ async function filterByCollection(id, options) {
     });
   } finally {
     if (anchor) {
-      collectionAnchorScanDepth = Math.max(0, collectionAnchorScanDepth - 1);
+      anchorScanDepth = Math.max(0, anchorScanDepth - 1);
       // Auto-hydration was suppressed for every loadPhotos() call while a scan
       // was open (including ones from unrelated folder/keyword switches). When
       // the last scan ends, resume the normal path so the current grid fills
       // its viewport instead of stalling on skeletons until a manual scroll.
-      if (collectionAnchorScanDepth === 0) {
+      if (anchorScanDepth === 0) {
         rearmInfiniteScrollObserver();
         requestAnimationFrame(ensureViewportHydrated);
       }
@@ -3656,8 +3657,11 @@ async function saveCollection() {
 }
 
 /* ---------- Photo Loading ---------- */
-function resetAndLoad() {
+async function resetAndLoad(options) {
   cancelScheduledSearchFilter();
+  var preserveAnchor = !!(options && options.preserveAnchor);
+  var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
+  var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
   if (clipSearchActive) {
     clipSearchActive = false;
     document.getElementById('clipSearchInput').value = '';
@@ -3666,7 +3670,7 @@ function resetAndLoad() {
   photos = [];
   currentPage = 1;
   allLoaded = false;
-  loadEpoch++;
+  var resetLoadEpoch = ++loadEpoch;
   selectAllRequestSeq++;
   loading = false;
   // Dataset is about to change; any prior selection (multi-select Set or
@@ -3679,9 +3683,51 @@ function resetAndLoad() {
   // Leaving collection mode when applying non-collection filters (sort, rating,
   // date, keyword, folder) so the summary stays in sync with the visible grid.
   activeCollectionId = null;
-  closeDetail();
+  if (anchor) hideDetailPanel();
+  else closeDetail();
   document.getElementById('grid').innerHTML = '';
-  loadPhotos();
+  document.getElementById('gridContainer').scrollTop = 0;
+
+  function resetRequestIsCurrent() {
+    return resetLoadEpoch === loadEpoch && activeCollectionId == null;
+  }
+  function anchorScanShouldContinue() {
+    return resetRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
+  }
+
+  if (anchor) anchorScanDepth++;
+  try {
+    await loadPhotos();
+    if (!resetRequestIsCurrent() || !anchor) return;
+
+    var card = await loadUntilPhotoRendered(anchor.photoId, anchorScanShouldContinue);
+    if (!resetRequestIsCurrent()) return;
+    if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
+    if (!card) {
+      clearActiveSelectionAndDetail();
+      return;
+    }
+
+    selectedPhotoId = anchor.photoId;
+    selectedIndex = photos.findIndex(function(p) { return p.id === anchor.photoId; });
+    refreshCardSelectionVisuals();
+    updateBatchBar();
+    if (anchor.detailVisible) loadDetail(anchor.photoId);
+    requestAnimationFrame(function() {
+      if (!resetRequestIsCurrent()) return;
+      if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
+      restorePhotoAnchor(anchor);
+      updateScrollPosition();
+    });
+  } finally {
+    if (anchor) {
+      anchorScanDepth = Math.max(0, anchorScanDepth - 1);
+      if (anchorScanDepth === 0) {
+        rearmInfiniteScrollObserver();
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
+  }
 }
 
 function buildCurrentBrowseParams() {
@@ -3820,7 +3866,7 @@ async function loadPhotos(options) {
       // scan can drain during our fetch, and its own hydration rAF then
       // bails on loading=true. In that overlap this load is the current
       // view's only chance to re-arm.
-      if (loadSucceeded && collectionAnchorScanDepth === 0) {
+      if (loadSucceeded && anchorScanDepth === 0) {
         rearmInfiniteScrollObserver();
         // Chain: keep loading while the viewport is at or past the loading
         // boundary (rAF so the freshly appended cards have a layout first).
@@ -4010,7 +4056,7 @@ function scheduleSearchFilter() {
   cancelScheduledSearchFilter();
   searchFilterTimer = setTimeout(function() {
     searchFilterTimer = null;
-    applyFilters();
+    applySearchFilters();
   }, 250);
 }
 
@@ -4023,7 +4069,17 @@ function cancelScheduledSearchFilter() {
 
 function applySearchFilterNow() {
   cancelScheduledSearchFilter();
-  applyFilters();
+  applySearchFilters();
+}
+
+function applySearchFilters() {
+  var input = document.getElementById('searchInput');
+  var nextSearch = input ? input.value.trim() : '';
+  var preserveAnchor = appliedKeywordSearch !== '' && nextSearch === '';
+  appliedKeywordSearch = nextSearch;
+  if (timelineMode) loadCalendarData();
+  activeCollectionId = null;
+  reloadBrowseResults({ preserveAnchor: preserveAnchor });
 }
 
 function setFilterRating(val) {
@@ -4096,11 +4152,11 @@ function appendClipSearchScopeParams(params) {
   appendKeywordSearchParams(params);
 }
 
-function reloadBrowseResults() {
+function reloadBrowseResults(options) {
   if (clipSearchActive && getClipSearchQuery()) {
     runClipSearch();
   } else {
-    resetAndLoad();
+    resetAndLoad(options);
   }
 }
 
@@ -4372,7 +4428,7 @@ function rearmInfiniteScrollObserver() {
    page load until the viewport is covered by real cards. */
 function ensureViewportHydrated() {
   if (infiniteScrollObserverDisconnected || !infiniteScrollObserverIsNative) return;
-  if (loading || allLoaded || clipSearchActive || collectionAnchorScanDepth > 0) return;
+  if (loading || allLoaded || clipSearchActive || anchorScanDepth > 0) return;
   if (photos.length === 0) return;
   var tail = document.getElementById('gridTail');
   if (!tail || !tail.firstElementChild) return;
