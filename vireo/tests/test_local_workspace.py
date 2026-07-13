@@ -230,6 +230,79 @@ def test_stage_rejects_source_swapped_to_symlink_before_copy(local_workspace_env
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_stage_rejects_source_parent_swapped_to_symlink_before_copy(
+    local_workspace_env, tmp_path, monkeypatch,
+):
+    # An intermediate source ancestor can be replaced with a symlink between
+    # _collect_source_entries and the per-file open in _copy_regular_with_hash.
+    # O_NOFOLLOW only refuses the final path component; a bare open() would
+    # follow the symlinked parent and copy bytes from outside the workspace
+    # (staging would then record them as part of the managed copy). The fd
+    # descent must refuse when any ancestor is now a symlink.
+    env = local_workspace_env
+    outside_tree = tmp_path / "outside-tree"
+    outside_tree.mkdir()
+    (outside_tree / "bird.jpg").write_bytes(b"outside-leak")
+    (outside_tree / "bird.xmp").write_text("outside metadata", encoding="utf-8")
+
+    real_copy_entry = local_workspace._copy_entry
+    swapped = {"done": False}
+
+    def swap_after_first_copy(source, destination, st, source_root, cancel_check=None):
+        result = real_copy_entry(source, destination, st, source_root, cancel_check)
+        # Once the walk-time entries are locked in and root.jpg has already
+        # copied cleanly, swap the "2026" subdirectory to a symlink so the
+        # follow-up bird.jpg/bird.xmp copies see a symlinked parent.
+        if not swapped["done"] and source == str(env["source"] / "root.jpg"):
+            shutil.rmtree(env["child"])
+            os.symlink(str(outside_tree), str(env["child"]))
+            swapped["done"] = True
+        return result
+
+    monkeypatch.setattr(local_workspace, "_copy_entry", swap_after_first_copy)
+
+    with pytest.raises(LocalWorkspaceError):
+        stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert swapped["done"], "test did not exercise the parent-directory swap"
+    # Catalog untouched: nothing was rebased.
+    assert _folder_path(env["db"], env["root_id"]) == str(env["source"])
+    # No outside-tree bytes landed in the managed copy (the whole staging tree
+    # is torn down on failure, but if any bytes survive the cleanup they must
+    # not be the outside-tree leak).
+    managed = workspace_dir(str(env["vireo_dir"]), env["workspace_id"])
+    if managed.exists():
+        for path in managed.rglob("*"):
+            if path.is_file():
+                assert b"outside-leak" not in path.read_bytes()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_stage_replaces_symlinked_workspace_dir_debris(local_workspace_env, tmp_path):
+    # A stale (or user-created) symlink at local-workspaces/<id> would survive
+    # shutil.rmtree(ignore_errors=True) and make the next stage's
+    # ``base / "files"`` writes land inside the linked-to tree instead of the
+    # managed area. Stage must reject/unlink the symlink and then create a
+    # real directory in its place, without touching the linked-to tree.
+    env = local_workspace_env
+    outside_tree = tmp_path / "outside-tree"
+    outside_tree.mkdir()
+    base = workspace_dir(str(env["vireo_dir"]), env["workspace_id"])
+    base.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(str(outside_tree), str(base))
+    assert base.is_symlink()
+
+    result = stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    assert result["files"] == 3
+
+    # The stale symlink is gone and a real directory was created in its place.
+    assert not base.is_symlink()
+    assert base.is_dir()
+    # The linked-to tree was not written into.
+    assert list(outside_tree.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
 def test_stage_rejects_symlink_target_swapped_after_walk(local_workspace_env, tmp_path, monkeypatch):
     # A source symlink can be repointed between _collect_source_entries and
     # the copy pass. If we trusted the walk-time containment check, the copy

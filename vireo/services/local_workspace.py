@@ -88,6 +88,35 @@ def workspace_dir(vireo_dir: str, workspace_id: int) -> Path:
     return Path(vireo_dir) / "local-workspaces" / str(int(workspace_id))
 
 
+def _remove_workspace_dir(vireo_dir: str, workspace_id: int) -> None:
+    """Remove a workspace's managed-copy directory safely.
+
+    ``shutil.rmtree(..., ignore_errors=True)`` on a symlinked directory
+    silently leaves the symlink in place; a stale or user-created symlink at
+    ``local-workspaces/<id>`` would then let staging/discard write the
+    managed copy into whatever tree the symlink points at (or make the next
+    stage's ``base / "files"`` land under a foreign directory). Reject the
+    symlink by unlinking it first so we never touch — or follow it into —
+    an unrelated tree.
+    """
+    base = workspace_dir(vireo_dir, workspace_id)
+    try:
+        st = os.lstat(base)
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(st.st_mode):
+        with suppress(FileNotFoundError):
+            os.unlink(base)
+        return
+    if stat.S_ISDIR(st.st_mode):
+        shutil.rmtree(base, ignore_errors=True)
+        return
+    # A regular file or special file where a directory is expected is stale
+    # debris; remove it so staging can create the directory fresh.
+    with suppress(FileNotFoundError):
+        os.unlink(base)
+
+
 def manifest_path(vireo_dir: str, workspace_id: int) -> Path:
     return workspace_dir(vireo_dir, workspace_id) / "manifest.json"
 
@@ -402,20 +431,74 @@ def _collect_source_entries(roots: list[dict], local_base: Path) -> tuple[dict[i
     return per_root, total_files, total_bytes
 
 
-def _copy_regular_with_hash(source: str, destination: str, cancel_check=None) -> dict:
+def _open_source_regular_within_root(source_root: str, source: str) -> int:
+    """Open ``source`` for read while refusing symlink swaps in any component.
+
+    ``O_NOFOLLOW`` only protects the final path component; if a NAS-side
+    process replaces an intermediate ancestor with a symlink after
+    ``_collect_source_entries()`` walked it, a bare ``os.open(source)`` would
+    follow that symlink and read a file from outside the workspace (staging
+    would then record the smuggled bytes as part of the managed copy).
+
+    On platforms that expose ``O_NOFOLLOW``/``O_DIRECTORY`` we descend the
+    ancestor chain one component at a time using ``dir_fd`` + ``O_NOFOLLOW``,
+    so a symlink swap anywhere between ``source_root`` and ``source`` fails
+    the open with ``ELOOP`` instead of silently escaping. ``source_root`` is
+    already validated up front (``_preflight_sources`` / the
+    ``sync_back`` lstat guard reject symlinked roots) so it is safe to open
+    without ``O_NOFOLLOW``.
+
+    On Windows (no ``O_NOFOLLOW``) NTFS symlinks require elevated privileges
+    to create, so this falls back to opening ``source`` directly.
+    """
+    base_flags = os.O_RDONLY
+    if hasattr(os, "O_BINARY"):
+        base_flags |= os.O_BINARY
+    if not hasattr(os, "O_NOFOLLOW"):
+        return os.open(source, base_flags)
+
+    rel = os.path.relpath(source, source_root)
+    if rel == "." or rel.startswith(".."):
+        # The caller passed a source outside its recorded root — treat it
+        # as a topology change and refuse before opening anything.
+        raise LocalWorkspaceError(
+            f"Source entry is not under its recorded root: {source}"
+        )
+    parts = rel.split(os.sep)
+
+    dir_open_flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_DIRECTORY"):
+        dir_open_flags |= os.O_DIRECTORY
+    file_open_flags = base_flags | os.O_NOFOLLOW
+
+    root_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        root_flags |= os.O_DIRECTORY
+    root_fd = os.open(source_root, root_flags)
+    open_fds = [root_fd]
+    try:
+        dir_fd = root_fd
+        for part in parts[:-1]:
+            new_fd = os.open(part, dir_open_flags, dir_fd=dir_fd)
+            open_fds.append(new_fd)
+            dir_fd = new_fd
+        return os.open(parts[-1], file_open_flags, dir_fd=dir_fd)
+    finally:
+        for fd in open_fds:
+            with suppress(OSError):
+                os.close(fd)
+
+
+def _copy_regular_with_hash(source: str, destination: str, source_root: str, cancel_check=None) -> dict:
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     # A source entry that was a regular file during _walk_entries can be
     # swapped to a symlink or FIFO before we open it: a bare open() would then
     # follow the link (reading from outside the workspace) or block on the
     # FIFO. Re-lstat immediately before open and fstat the opened descriptor
     # so a type flip in either window aborts staging instead of quietly
-    # copying the wrong bytes. Where available, O_NOFOLLOW refuses a symlink
-    # swap at the syscall boundary.
-    open_flags = os.O_RDONLY
-    if hasattr(os, "O_BINARY"):
-        open_flags |= os.O_BINARY
-    if hasattr(os, "O_NOFOLLOW"):
-        open_flags |= os.O_NOFOLLOW
+    # copying the wrong bytes. _open_source_regular_within_root descends the
+    # ancestor chain with O_NOFOLLOW so an intermediate-directory swap to a
+    # symlink cannot escape the workspace either.
     for attempt in range(2):
         before = os.stat(source, follow_symlinks=False)
         if not stat.S_ISREG(before.st_mode):
@@ -431,7 +514,9 @@ def _copy_regular_with_hash(source: str, destination: str, cancel_check=None) ->
         source_fd = None
         try:
             try:
-                source_fd = os.open(source, open_flags)
+                source_fd = _open_source_regular_within_root(source_root, source)
+            except LocalWorkspaceError:
+                raise
             except OSError as exc:
                 raise LocalWorkspaceError(
                     f"Source entry could not be opened as a regular file: {source}"
@@ -517,7 +602,7 @@ def _copy_entry(source: str, destination: str, st, source_root: str, cancel_chec
         return {"type": "symlink", "target": target}
     if not stat.S_ISREG(mode):
         raise LocalWorkspaceError(f"Unsupported special file in workspace: {source}")
-    return _copy_regular_with_hash(source, destination, cancel_check)
+    return _copy_regular_with_hash(source, destination, source_root, cancel_check)
 
 
 def _other_local_source_roots(db, workspace_id: int) -> list[str]:
@@ -640,8 +725,11 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
                 raise LocalWorkspaceError("This workspace is already staged locally")
             # A leftover tree without a state row is debris from a crash
             # after a completed restore; staging owns this directory.
-            if base.exists():
-                shutil.rmtree(base, ignore_errors=True)
+            # _remove_workspace_dir refuses to follow a symlink here — a
+            # stale or user-created symlink to another directory would
+            # otherwise survive shutil.rmtree(ignore_errors=True) and make
+            # later ``base / "files"`` writes land in that foreign tree.
+            _remove_workspace_dir(vireo_dir, workspace_id)
 
             roots, folders = _root_records(db, workspace_id, base / "files")
 
@@ -750,7 +838,7 @@ def stage_workspace(db, workspace_id: int, vireo_dir: str, *, progress=None, can
             # partial copy is safe to remove.
             current = local_state(db, workspace_id)
             if current and current.get("state") == "staging":
-                shutil.rmtree(base, ignore_errors=True)
+                _remove_workspace_dir(vireo_dir, workspace_id)
                 _delete_state_rows(db, workspace_id)
                 db.conn.commit()
             raise
@@ -1314,7 +1402,7 @@ def sync_back(
                 progress(done, total, rel)
 
         _restore_catalog(db, workspace_id)
-        shutil.rmtree(workspace_dir(vireo_dir, workspace_id), ignore_errors=True)
+        _remove_workspace_dir(vireo_dir, workspace_id)
         return {
             "ok": True,
             "created_or_modified": len(changed),
@@ -1366,7 +1454,7 @@ def discard_local(db, workspace_id: int, vireo_dir: str, *, acknowledge_publishe
             raise LocalWorkspaceError("This workspace is not working locally")
         state = state_row["state"]
         if state == "staging":
-            shutil.rmtree(workspace_dir(vireo_dir, workspace_id), ignore_errors=True)
+            _remove_workspace_dir(vireo_dir, workspace_id)
             _delete_state_rows(db, workspace_id)
             db.conn.commit()
             return {"ok": True, "discarded": True}
@@ -1380,5 +1468,5 @@ def discard_local(db, workspace_id: int, vireo_dir: str, *, acknowledge_publishe
             raise LocalWorkspaceError("Local workspace is not in a recoverable state")
 
         _restore_catalog(db, workspace_id)
-        shutil.rmtree(workspace_dir(vireo_dir, workspace_id), ignore_errors=True)
+        _remove_workspace_dir(vireo_dir, workspace_id)
         return {"ok": True, "discarded": True}
