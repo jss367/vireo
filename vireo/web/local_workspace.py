@@ -14,6 +14,10 @@ from services.local_workspace import (
     sync_back,
 )
 
+LOCAL_WORKSPACE_JOB_TYPES = frozenset(
+    {"work-locally-stage", "work-locally-sync", "work-locally-discard"}
+)
+
 
 def create_local_workspace_blueprint(
     get_db, json_error, get_runner, db_path, vireo_dir, invalidate_missing_originals=None
@@ -71,9 +75,12 @@ def create_local_workspace_blueprint(
             return json_error(str(exc), 409)
         # Live-job awareness: a fresh page load (or second tab) must see a
         # running transfer as in-progress work, never as an interrupted
-        # state needing recovery.
+        # state needing recovery. Only local-workspace transfer jobs are
+        # surfaced here; an unrelated pipeline/scan on the same workspace
+        # would otherwise render as "Copying workspace locally..." because
+        # the client's job watcher treats unknown types as staging.
         busy = _busy_job(workspace_id)
-        if busy:
+        if busy and busy.get("type") in LOCAL_WORKSPACE_JOB_TYPES:
             payload["job"] = {"id": busy["id"], "type": busy["type"]}
         return jsonify(payload)
 

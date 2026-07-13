@@ -1405,6 +1405,12 @@ class Database:
             for row in fk_rows
         )
         if not has_folder_fk:
+            # Earlier migrations in this method may have executed DML (for
+            # example the db_meta backfill marker above) which sqlite3
+            # wraps in an implicit transaction. Toggling foreign_keys and
+            # starting BEGIN IMMEDIATE both require no open transaction, so
+            # commit any pending migration writes before the rebuild.
+            self.conn.commit()
             self.conn.execute("PRAGMA foreign_keys=OFF")
             try:
                 self.conn.execute("BEGIN IMMEDIATE")

@@ -1510,3 +1510,148 @@ def test_folder_delete_route_holds_stage_boundary_lock_around_guard(tmp_path, mo
     # leave both counters at zero, breaking the atomicity guarantee.
     assert counting.enters >= 1
     assert counting.exits == counting.enters
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows test runners may not permit symlinks")
+def test_stage_reads_symlink_target_once_during_copy(local_workspace_env, monkeypatch):
+    """The copy pass must read the source symlink once, not once per check.
+
+    The old shape called ``_symlink_stays_within`` (which readlinks) and then
+    re-read the target with a second ``os.readlink`` before ``os.symlink``.
+    A NAS-side swap between those two reads could pass the containment check
+    against the safe target and publish the swapped-in escaping target into
+    the managed tree. The fix collapses that to a single readlink; the total
+    per source is 1 (walk-time check) + 1 (copy pass) = 2.
+    """
+    env = local_workspace_env
+    link_path = env["source"] / "safe-link.jpg"
+    os.symlink("root.jpg", link_path)
+
+    calls = []
+    real_readlink = local_workspace.os.readlink
+
+    def counting_readlink(path):
+        if os.path.samefile(path, str(link_path)):
+            calls.append(path)
+        return real_readlink(path)
+
+    monkeypatch.setattr(local_workspace.os, "readlink", counting_readlink)
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    # Two calls total: one from the walk-time containment check, one from the
+    # copy pass. Three or more calls means the copy pass reopened the TOCTOU
+    # window this test guards.
+    assert len(calls) == 2
+
+
+def test_status_endpoint_does_not_surface_unrelated_workspace_jobs(tmp_path, monkeypatch):
+    """Unrelated jobs on the active workspace must not appear as transfer jobs.
+
+    The workspace page's job watcher treats any ``payload["job"]`` as a
+    stage/sync/discard, so a pipeline or scan job running on the same
+    workspace would render as "Copying workspace locally..." until it
+    finished. The status endpoint filters to the three transfer types so
+    unrelated jobs no longer leak into the Work Locally panel.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    db.add_folder(str(source), name="photos")
+    workspace_id = db._active_workspace_id
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+
+    hold = threading.Event()
+    started = threading.Event()
+
+    def slow_scan(_job):
+        started.set()
+        assert hold.wait(timeout=5)
+        return {"ok": True}
+
+    with app.test_client() as client:
+        # Register a non-transfer job on the same workspace. The exact job
+        # type doesn't matter as long as it is not one of the three
+        # LOCAL_WORKSPACE_JOB_TYPES the status endpoint whitelists.
+        job_id = app._job_runner.start(
+            "scan", slow_scan, workspace_id=workspace_id
+        )
+        try:
+            assert started.wait(timeout=5)
+            payload = client.get("/api/workspaces/active/local-workspace").get_json()
+            # No "job" key: the scan is not a Work Locally transfer, so the
+            # panel must not report it as one.
+            assert "job" not in payload
+        finally:
+            hold.set()
+
+        # Sanity-check the whitelist: a real transfer job still surfaces.
+        stage_response = client.post("/api/workspaces/active/local-workspace/stage", json={})
+        assert stage_response.status_code == 202
+        stage_job_id = stage_response.get_json()["job_id"]
+        during = client.get("/api/workspaces/active/local-workspace").get_json()
+        # The status endpoint may race with the job completing on very fast
+        # runners; either state (surfaced or already finished) is acceptable
+        # as long as the type check whitelisted the transfer job.
+        if "job" in during:
+            assert during["job"] == {"id": stage_job_id, "type": "work-locally-stage"}
+        wait_for_job_via_client(client, stage_job_id)
+
+
+def test_fk_migration_survives_pending_db_meta_transaction(tmp_path):
+    """The FK rebuild must not race an implicit txn from earlier migrations.
+
+    Older DBs upgraded on a build that predates the ``eye_kp_fingerprint_backfill``
+    marker: opening one runs an INSERT into ``db_meta`` (implicit sqlite3
+    transaction) immediately before the FK migration below. Without the
+    ``self.conn.commit()`` guard, ``BEGIN IMMEDIATE`` then raises
+    "cannot start a transaction within a transaction" and Vireo refuses to
+    open the DB instead of rebuilding the table.
+    """
+    db_path = str(tmp_path / "legacy.db")
+    legacy = Database(db_path)
+    legacy.conn.execute("DROP TABLE local_workspace_folders")
+    legacy.conn.execute(
+        """CREATE TABLE local_workspace_folders (
+            workspace_id    INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            folder_id       INTEGER NOT NULL,
+            source_path     TEXT NOT NULL,
+            local_path      TEXT NOT NULL,
+            original_status TEXT NOT NULL DEFAULT 'ok',
+            is_root         INTEGER NOT NULL DEFAULT 0,
+            root_index      INTEGER,
+            PRIMARY KEY (workspace_id, folder_id)
+        )"""
+    )
+    # Force the earlier eye_kp_fingerprint_backfill migration to run on the
+    # next open — its INSERT into db_meta opens the implicit transaction
+    # that used to collide with BEGIN IMMEDIATE.
+    legacy.conn.execute(
+        "DELETE FROM db_meta WHERE key='eye_kp_fingerprint_backfill'"
+    )
+    legacy.conn.commit()
+    legacy.close()
+
+    upgraded = Database(db_path)
+    fk_after = upgraded.conn.execute(
+        "PRAGMA foreign_key_list(local_workspace_folders)"
+    ).fetchall()
+    assert any(
+        row["from"] == "folder_id" and row["table"] == "folders"
+        for row in fk_after
+    )
+    marker = upgraded.conn.execute(
+        "SELECT value FROM db_meta WHERE key='eye_kp_fingerprint_backfill'"
+    ).fetchone()
+    assert marker is not None
+    upgraded.close()

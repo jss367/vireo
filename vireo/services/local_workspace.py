@@ -230,11 +230,10 @@ def _physical_is_within(path: str, root: str) -> bool:
         return False
 
 
-def _symlink_stays_within(path: str, root: str) -> bool:
-    target = os.readlink(path)
+def _symlink_target_stays_within(target: str, link_path: str, root: str) -> bool:
     if os.path.isabs(target):
         return False
-    parent_rel = os.path.relpath(os.path.dirname(path), root)
+    parent_rel = os.path.relpath(os.path.dirname(link_path), root)
     lexical_parts = [] if parent_rel == os.curdir else list(Path(parent_rel).parts)
     for part in Path(target).parts:
         if part in {"", os.curdir}:
@@ -245,8 +244,12 @@ def _symlink_stays_within(path: str, root: str) -> bool:
             lexical_parts.pop()
         else:
             lexical_parts.append(part)
-    resolved = os.path.join(os.path.dirname(path), target)
+    resolved = os.path.join(os.path.dirname(link_path), target)
     return _physical_is_within(resolved, root)
+
+
+def _symlink_stays_within(path: str, root: str) -> bool:
+    return _symlink_target_stays_within(os.readlink(path), path, root)
 
 
 def _relative(path: str, root: str) -> str:
@@ -472,10 +475,11 @@ def _copy_entry(source: str, destination: str, st, source_root: str, cancel_chec
         os.makedirs(destination, exist_ok=True)
         return None
     if stat.S_ISLNK(mode):
-        # A NAS-side swap between _collect_source_entries and here can point the
-        # link at an absolute or escaping target: re-lstat and re-check
-        # containment on the current target before creating the local link so
-        # we never publish an unsafe target into the managed tree.
+        # A NAS-side swap between _collect_source_entries and here can point
+        # the link at an absolute or escaping target: re-lstat and readlink
+        # once, validate that exact target, and create the local link from
+        # the same value so a swap between the check and the symlink call
+        # cannot smuggle an unsafe target into the managed tree.
         try:
             current_st = os.lstat(source)
         except OSError as exc:
@@ -486,12 +490,17 @@ def _copy_entry(source: str, destination: str, st, source_root: str, cancel_chec
             raise LocalWorkspaceError(
                 f"Source entry changed type before it could be staged: {source}"
             )
-        if not _symlink_stays_within(source, source_root):
+        try:
+            target = os.readlink(source)
+        except OSError as exc:
+            raise LocalWorkspaceError(
+                f"Source symlink is no longer readable: {source}"
+            ) from exc
+        if not _symlink_target_stays_within(target, source, source_root):
             raise LocalWorkspaceError(
                 f"Symlink escapes or uses an absolute target and cannot be staged: {source}"
             )
         os.makedirs(os.path.dirname(destination), exist_ok=True)
-        target = os.readlink(source)
         with suppress(FileNotFoundError):
             os.unlink(destination)
         os.symlink(target, destination)
