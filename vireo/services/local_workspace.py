@@ -1154,6 +1154,24 @@ def sync_back(
                 )
 
         baseline, local, changed, deleted = _local_changes(manifest)
+        # When resuming a partially-completed sync, the first attempt may have
+        # already unlinked confirmed-deletion source files. Any such key that
+        # the user has since restored in the managed local copy must be
+        # republished: falling through as "unchanged" (metadata matching
+        # baseline) would leave the source deleted and the local restore
+        # silently discarded, while a modified-metadata restore would raise
+        # a source-missing conflict that recovery cannot get out of. Both
+        # cases finish the previously-confirmed operation by writing the
+        # current local file back to source.
+        recovery_republish: set = set()
+        if resuming and recovery_confirmed:
+            changed_set = set(changed)
+            for key in recovery_confirmed:
+                if key in local:
+                    recovery_republish.add(key)
+                    if key not in changed_set:
+                        changed.append(key)
+                        changed_set.add(key)
         if deleted and not allow_deletions:
             raise LocalWorkspaceError(f"Local work deleted {len(deleted)} file(s); confirm deletions before syncing")
         # Fresh count-bound check applies to both initial and resumed syncs:
@@ -1202,6 +1220,14 @@ def sync_back(
             # A prior interrupted sync may already have published this exact
             # result. Treat it as resumable, not as an outside conflict.
             if local_path is None and not os.path.lexists(remote_path):
+                continue
+            # A prior interrupted sync may already have unlinked a
+            # confirmed-deletion source file that the user then restored in
+            # the managed local copy. Republishing the restored local file
+            # completes the previously-confirmed operation instead of leaving
+            # the source deleted; the missing remote is not an outside
+            # conflict here.
+            if key in recovery_republish and not os.path.lexists(remote_path):
                 continue
             if local_path and _matches_remote(local_path, remote_path, remote_sha, cancel_check):
                 continue

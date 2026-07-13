@@ -16385,6 +16385,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
+        # A workspace with active local state has its folder paths rebased
+        # into the managed copy; scanner.scan() calls
+        # db.add_folder(link_to_workspace=True) for every folder it discovers,
+        # so any new root scanned here would add folder/workspace_folders rows
+        # that the manifest and local_workspace_folders don't cover — sync and
+        # discard could not rebase or remove them, and the workspace would mix
+        # unmanaged source paths with the managed local copy. Refuse until
+        # the local copy is synced or discarded, mirroring the folder-add,
+        # folder-remove, and move-folders guards.
+        if active_ws is not None:
+            with stage_boundary_lock():
+                if has_local_workspace(_get_db(), active_ws):
+                    return json_error(
+                        "Cannot scan folders while working locally. Sync or discard the local copy first.",
+                        409,
+                    )
+
         work = _build_scan_work(roots_list, incremental, active_ws)
 
         job_config = {"roots": roots_list, "incremental": incremental}

@@ -1655,3 +1655,184 @@ def test_fk_migration_survives_pending_db_meta_transaction(tmp_path):
     ).fetchone()
     assert marker is not None
     upgraded.close()
+
+
+def test_sync_recovery_republishes_restored_confirmed_deletion(local_workspace_env, monkeypatch):
+    """Recovery must republish a confirmed-deletion file the user restored.
+
+    The first sync attempt already unlinked the source file (it was in the
+    user's confirmed deletion set). Restoring the local copy before "Finish
+    Sync-back" would otherwise fall through as "unchanged" — restore then
+    removes the local copy while the source stays deleted — or, if restored
+    with new content, raise a source-missing conflict recovery cannot get out
+    of. Both cases must republish the current local file back to source.
+    """
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+
+    # Snapshot the staged baseline metadata: restoring bird.jpg with these
+    # exact values makes it match baseline in ``_local_changes`` (Case A —
+    # falls out of both ``changed`` and ``deleted``, so nothing publishes it
+    # without the recovery-republish fix).
+    baseline_jpg_stat = os.stat(local_child / "bird.jpg")
+
+    # Two confirmed deletions; one will be restored with original metadata,
+    # the other with different content after the crash.
+    os.unlink(local_child / "bird.jpg")
+    os.unlink(local_child / "bird.xmp")
+
+    real_unlink = local_workspace.os.unlink
+    source_unlinks = {"count": 0}
+    source_root_str = str(env["source"])
+
+    def crashing_unlink(path):
+        real_unlink(path)
+        # Only trip on source-side deletions (the sync deletion loop). Temp
+        # files created inside ``_atomic_publish`` are named ``.<basename>``
+        # and are exempt so a restored file's later republish still works.
+        basename = os.path.basename(str(path))
+        if source_root_str in str(path) and not basename.startswith("."):
+            source_unlinks["count"] += 1
+            # Let both deletions run so recovery has both keys to reason
+            # about, then simulate a mid-sync death.
+            if source_unlinks["count"] == 2:
+                raise RuntimeError("simulated crash after source deletions")
+
+    monkeypatch.setattr(local_workspace.os, "unlink", crashing_unlink)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        sync_back(
+            env["db"],
+            env["workspace_id"],
+            str(env["vireo_dir"]),
+            allow_deletions=True,
+            confirmed_deletions=2,
+        )
+    monkeypatch.setattr(local_workspace.os, "unlink", real_unlink)
+
+    assert not (env["child"] / "bird.jpg").exists()
+    assert not (env["child"] / "bird.xmp").exists()
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "recovery"
+
+    # Case A: restore bird.jpg with its original content AND original mtime,
+    # so ``_same_metadata`` returns True and the key doesn't reach ``changed``
+    # or ``deleted`` on its own.
+    (local_child / "bird.jpg").write_bytes(b"bird-original")
+    os.utime(
+        local_child / "bird.jpg",
+        ns=(baseline_jpg_stat.st_atime_ns, baseline_jpg_stat.st_mtime_ns),
+    )
+    # Case B: restore bird.xmp with different content. It lands in ``changed``
+    # naturally and — without the conflict-scan bypass — the missing source
+    # would raise a source-side conflict recovery cannot recover from.
+    (local_child / "bird.xmp").write_text("edited-after-restore", encoding="utf-8")
+
+    result = sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+
+    assert result["ok"] is True
+    assert (env["child"] / "bird.jpg").read_bytes() == b"bird-original"
+    assert (env["child"] / "bird.xmp").read_text(encoding="utf-8") == "edited-after-restore"
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "remote"
+
+
+def test_sync_recovery_leaves_unrestored_deletions_deleted(local_workspace_env, monkeypatch):
+    """Recovery still deletes confirmed-deletion files the user did not restore.
+
+    Complement to the republish test: a confirmed deletion whose local copy
+    remains absent on resume must not be resurrected — the user already
+    approved that deletion, the first attempt already ran ``os.unlink`` on
+    the source, and no republish path should touch it.
+    """
+    env = local_workspace_env
+    stage_workspace(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    local_child = Path(_folder_path(env["db"], env["child_id"]))
+    os.unlink(local_child / "bird.jpg")
+
+    real_unlink = local_workspace.os.unlink
+
+    def crashing_unlink(path):
+        real_unlink(path)
+        raise RuntimeError("simulated crash after source deletion")
+
+    monkeypatch.setattr(local_workspace.os, "unlink", crashing_unlink)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        sync_back(
+            env["db"],
+            env["workspace_id"],
+            str(env["vireo_dir"]),
+            allow_deletions=True,
+            confirmed_deletions=1,
+        )
+    monkeypatch.setattr(local_workspace.os, "unlink", real_unlink)
+
+    # User does not restore the local file. Resume should complete cleanly
+    # and leave the source deleted.
+    sync_back(env["db"], env["workspace_id"], str(env["vireo_dir"]))
+    assert not (env["child"] / "bird.jpg").exists()
+    assert status(env["db"], env["workspace_id"], str(env["vireo_dir"]))["state"] == "remote"
+
+
+def test_scan_endpoint_refuses_while_working_locally(tmp_path, monkeypatch):
+    """``POST /api/jobs/scan`` must refuse while the active workspace is staged.
+
+    ``scanner.scan()`` calls ``db.add_folder(link_to_workspace=True)`` for
+    every discovered folder, so a scan started against a new root while
+    local work is active would add folder/workspace_folders rows that the
+    manifest and ``local_workspace_folders`` don't cover — sync and discard
+    could not rebase or remove them. The scan endpoint mirrors the
+    folder-add/remove/move-folders guards and returns 409.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    other_source = tmp_path / "nas" / "other"
+    other_source.mkdir(parents=True)
+    (other_source / "kestrel.jpg").write_bytes(b"another root")
+
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    db.add_folder(str(source), name="photos")
+    workspace_id = db._active_workspace_id
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+
+    with app.test_client() as client:
+        # Sanity: a scan is accepted before any local staging.
+        pre = client.post("/api/jobs/scan", json={"root": str(other_source)})
+        assert pre.status_code == 200
+        # Let the scan complete so it can't collide with the stage below.
+        wait_for_job_via_client(client, pre.get_json()["job_id"])
+
+        # Stage the workspace locally, then attempt to scan a new root.
+        stage_response = client.post(
+            "/api/workspaces/active/local-workspace/stage", json={}
+        )
+        assert stage_response.status_code == 202
+        wait_for_job_via_client(client, stage_response.get_json()["job_id"])
+
+        third = tmp_path / "nas" / "third"
+        third.mkdir()
+        (third / "owl.jpg").write_bytes(b"third root")
+        blocked = client.post("/api/jobs/scan", json={"root": str(third)})
+        assert blocked.status_code == 409
+        assert "working locally" in blocked.get_json()["error"].lower()
+
+        # After discarding the local copy, the scan is allowed again.
+        discarded = client.post(
+            "/api/workspaces/active/local-workspace/discard",
+            json={"confirm": True},
+        )
+        assert discarded.status_code == 202
+        wait_for_job_via_client(client, discarded.get_json()["job_id"])
+
+        allowed = client.post("/api/jobs/scan", json={"root": str(third)})
+        assert allowed.status_code == 200
