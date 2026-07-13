@@ -224,6 +224,37 @@ def test_recompute_uses_filters_that_rendered_visible_cards(live_server, page):
     page.evaluate("window.releaseHeldFilterLoad()")
 
 
+def test_initial_recompute_uses_url_filters_before_grid_loads(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+    page.add_init_script("""(() => {
+      const realFetch = window.fetch.bind(window);
+      let held = false;
+      window.fetch = (url, options) => {
+        if (!held && String(url).includes('/api/misses?rating_min=4')) {
+          held = true;
+          return new Promise(resolve => {
+            window.releaseInitialMissesLoad = () => realFetch(url, options).then(resolve);
+          });
+        }
+        if (String(url).includes('/api/misses/recompute')) {
+          window.initialRecomputeBody = JSON.parse(options.body);
+        }
+        return realFetch(url, options);
+      };
+    })()""")
+
+    page.goto(f"{url}/misses?rating_min=4")
+    page.wait_for_function("window.releaseInitialMissesLoad != null")
+    expect(page.locator("#missRecomputeBtn")).to_be_enabled()
+    page.locator("#missRecomputeBtn").click()
+    page.wait_for_function("window.initialRecomputeBody != null")
+    assert page.evaluate("window.initialRecomputeBody.rating_min") == "4"
+    page.evaluate("window.releaseInitialMissesLoad()")
+
+
 def test_ctrl_click_toggles_selection(live_server, page):
     url = live_server["url"]
     db = live_server["db"]
