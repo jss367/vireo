@@ -246,6 +246,44 @@
     font-style: italic;
   }
   .bucket-card.applying { opacity: 0.6; }
+
+  .trash-progress {
+    margin: -6px 0 14px; padding: 12px 14px;
+    border: 1px solid var(--border-primary); border-radius: 6px;
+    background: var(--bg-secondary); color: var(--text-secondary);
+  }
+  .trash-progress[hidden] { display: none; }
+  .trash-progress.compact {
+    margin: 10px 0 0; padding: 10px 12px; background: var(--bg-primary);
+  }
+  .trash-progress.error { border-color: var(--danger); }
+  .trash-progress .trash-progress-head {
+    display: flex; justify-content: space-between; gap: 12px;
+    margin-bottom: 7px; font-size: 12px; font-style: normal;
+  }
+  .trash-progress .trash-progress-head b {
+    color: var(--text-primary); font-weight: 500;
+  }
+  .trash-progress .trash-progress-percent {
+    color: var(--text-dim); font-variant-numeric: tabular-nums;
+  }
+  .trash-progress .trash-progress-track {
+    height: 8px; overflow: hidden; border-radius: 999px;
+    background: var(--bg-tertiary); border: 1px solid var(--border-primary);
+  }
+  .trash-progress .trash-progress-fill {
+    width: 0; height: 100%; border-radius: inherit;
+    background: var(--accent); transition: width 0.2s ease;
+  }
+  .trash-progress.error .trash-progress-fill { background: var(--danger); }
+  .trash-progress .trash-progress-detail {
+    margin-top: 7px; font-size: 11px; color: var(--text-dim);
+    font-style: normal; font-variant-numeric: tabular-nums;
+  }
+  .trash-progress .trash-progress-note {
+    margin-top: 3px; font-size: 10px; color: var(--text-ghost);
+    font-style: normal;
+  }
 </style>
 </head>
 <body>
@@ -571,6 +609,8 @@
           '</button>';
       }
       html += '</div></div>';
+      html += '<div class="trash-progress" id="trashAllProgress" hidden ' +
+        'aria-live="polite"></div>';
       html += '<div class="' + listClass + '" id="resolvedList">';
       resolved.forEach(function(group) {
         html += renderResolvedGroup(group);
@@ -754,14 +794,15 @@
 
       var trashCallFailed = false;
       if (deleteFiles && loserIds.length > 0) {
-        if (status) status.textContent = 'Moving ' + loserIds.length +
-          ' file' + (loserIds.length === 1 ? '' : 's') + ' to Trash...';
+        if (status) {
+          status.classList.add('trash-progress', 'compact');
+          status.hidden = false;
+        }
         try {
-          var trashData = await safeFetch('/api/duplicates/delete-loser-files', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ photo_ids: loserIds }),
-          });
+          var trashData = await trashLoserFilesInBatches(
+            loserIds,
+            function(progress) { updateTrashProgress(status, progress); }
+          );
           var trashed = trashData.trashed || 0;
           var trashFailed = (trashData.failed || []).length;
           var msg = 'Resolved ' + resolved.length + ', moved ' + trashed + ' to Trash';
@@ -779,8 +820,8 @@
           // so the bucket card stays visible; otherwise the user thinks
           // cleanup completed and has no path to retry without a rescan.
           trashCallFailed = true;
-          showToast('Resolved DB but trash failed: ' + (e.message || 'error') +
-                    ' — rescan to retry trash', 'error');
+          showToast('Duplicates were resolved, but moving files to Trash failed: ' +
+                    (e.message || 'error') + ' — rescan to retry', 'error');
         }
       } else {
         var msg = 'Resolved ' + resolved.length + ' group' +
@@ -796,7 +837,6 @@
         // the on-disk files that still need trashing.
         card.classList.remove('applying');
         btns.forEach(function(b) { b.disabled = false; });
-        if (status) status.textContent = 'Trash failed — rescan to retry';
         return;
       }
 
@@ -1023,6 +1063,161 @@
     return !!(p && p.winner && p.winner.exists === false);
   }
 
+  // Keep each request small enough that the UI can report real progress even
+  // for libraries with thousands of duplicate files. Each completed request
+  // is also a durable checkpoint: a retry only includes cards that have not
+  // already been cleaned up in this browser session.
+  var TRASH_BATCH_SIZE = 25;
+
+  function formatCount(n) {
+    return Number(n || 0).toLocaleString();
+  }
+
+  function updateTrashProgress(container, progress) {
+    if (!container) return;
+    var total = progress.total || 0;
+    var completed = Math.min(progress.completed || 0, total);
+    var percent = total > 0 ? Math.round(completed / total * 100) : 0;
+    var phase = progress.phase || 'moving';
+    var headline;
+    if (phase === 'complete') {
+      headline = 'Cleanup complete';
+    } else if (phase === 'complete_with_errors') {
+      headline = 'Cleanup finished with problems';
+    } else if (phase === 'error') {
+      headline = 'Cleanup paused after ' + formatCount(completed) + ' of ' +
+        formatCount(total) + ' files';
+    } else {
+      headline = 'Moving files ' + formatCount(progress.batchStart || 1) +
+        '\u2013' + formatCount(progress.batchEnd || total) + ' of ' +
+        formatCount(total) + ' to Trash\u2026';
+    }
+
+    container.hidden = false;
+    container.classList.toggle(
+      'error', phase === 'error' || phase === 'complete_with_errors');
+    container.innerHTML =
+      '<div class="trash-progress-head"><b>' + headline + '</b>' +
+        '<span class="trash-progress-percent">' + percent + '%</span></div>' +
+      '<div class="trash-progress-track" role="progressbar" ' +
+        'aria-label="Moving duplicate files to Trash" aria-valuemin="0" ' +
+        'aria-valuemax="' + total + '" aria-valuenow="' + completed + '">' +
+        '<div class="trash-progress-fill" style="width:' + percent + '%"></div>' +
+      '</div>' +
+      '<div class="trash-progress-detail">' + formatCount(completed) + ' processed' +
+        ' &middot; ' + formatCount(progress.trashed) + ' moved' +
+        ' &middot; ' + formatCount(progress.skipped) + ' skipped' +
+        ' &middot; ' + formatCount(progress.failed) + ' failed</div>' +
+      '<div class="trash-progress-note">Files are processed in small batches. ' +
+        'External and network drives may take longer; moved files remain recoverable ' +
+        'from your operating system\u2019s Trash.</div>';
+  }
+
+  async function trashLoserFilesInBatches(photoIds, onProgress, onBatch) {
+    var summary = {trashed: 0, skipped: [], failed: [], completed: 0,
+                   total: photoIds.length};
+    for (var offset = 0; offset < photoIds.length; offset += TRASH_BATCH_SIZE) {
+      var batch = photoIds.slice(offset, offset + TRASH_BATCH_SIZE);
+      var progress = {
+        phase: 'moving', total: photoIds.length, completed: offset,
+        batchStart: offset + 1, batchEnd: offset + batch.length,
+        trashed: summary.trashed, skipped: summary.skipped.length,
+        failed: summary.failed.length,
+      };
+      if (onProgress) onProgress(progress);
+
+      var data;
+      try {
+        data = await safeFetch('/api/duplicates/delete-loser-files', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ photo_ids: batch }),
+        }, {toast: false});
+      } catch (e) {
+        progress.phase = 'error';
+        progress.completed = summary.completed;
+        if (onProgress) onProgress(progress);
+        e.trashSummary = summary;
+        throw e;
+      }
+
+      summary.trashed += data.trashed || 0;
+      summary.skipped = summary.skipped.concat(data.skipped || []);
+      summary.failed = summary.failed.concat(data.failed || []);
+      summary.completed += batch.length;
+      if (onBatch) onBatch(data, batch);
+
+      var hasActionableSkips = summary.skipped.some(function(s) {
+        return s.reason !== 'file already missing';
+      });
+      if (onProgress) onProgress({
+        phase: summary.completed === photoIds.length
+          ? (summary.failed.length || hasActionableSkips
+              ? 'complete_with_errors' : 'complete')
+          : 'moving',
+        total: photoIds.length, completed: summary.completed,
+        batchStart: summary.completed === photoIds.length ? summary.completed : summary.completed + 1,
+        batchEnd: Math.min(summary.completed + TRASH_BATCH_SIZE, photoIds.length),
+        trashed: summary.trashed, skipped: summary.skipped.length,
+        failed: summary.failed.length,
+      });
+    }
+    return summary;
+  }
+
+  function applyTrashBatchToCards(data, requestedIds) {
+    // "file already missing" still deletes the orphan DB row, so it is a
+    // terminal completion even though no file needed to be moved.
+    var terminalSkips = new Set(['file already missing']);
+    var completedSet = new Set(requestedIds);
+    (data.skipped || []).forEach(function(s) {
+      if (!terminalSkips.has(s.reason)) completedSet.delete(s.id);
+    });
+    (data.failed || []).forEach(function(f) { completedSet.delete(f.id); });
+    completedSet.forEach(function(pid) {
+      var card = document.querySelector('.dup-card[data-photo-id="' + pid + '"]');
+      if (card) {
+        card.classList.add('trashed');
+        var status = card.querySelector('[data-trash-status]');
+        if (status) status.textContent = 'Cleaned up';
+      }
+    });
+    (data.skipped || []).forEach(function(s) {
+      if (terminalSkips.has(s.reason)) return;
+      var card = document.querySelector('.dup-card[data-photo-id="' + s.id + '"]');
+      if (card) {
+        var status = card.querySelector('[data-trash-status]');
+        if (status) status.textContent = 'Skipped: ' + (s.reason || '');
+      }
+    });
+    (data.failed || []).forEach(function(f) {
+      var card = document.querySelector('.dup-card[data-photo-id="' + f.id + '"]');
+      if (card) {
+        var status = card.querySelector('[data-trash-status]');
+        if (status) status.textContent = 'Failed: ' + (f.error || '');
+      }
+    });
+  }
+
+  function refreshTrashAllButton(btn) {
+    if (!btn) return;
+    var remaining = 0;
+    _proposals.forEach(function(p) {
+      if (p.status !== 'resolved' || isBulkTrashProtected(p)) return;
+      (p.losers || []).forEach(function(l) {
+        var card = document.querySelector('.dup-card[data-photo-id="' + l.id + '"]');
+        if (card && !card.classList.contains('trashed')) remaining++;
+      });
+    });
+    if (remaining > 0) {
+      btn.disabled = false;
+      btn.textContent = 'Move ' + remaining + ' extra ' +
+                        (remaining === 1 ? 'copy' : 'copies') + ' to Trash';
+    } else {
+      btn.remove();
+    }
+  }
+
   async function trashAllLoserFiles() {
     var resolved = _proposals.filter(function(p) { return p.status === 'resolved'; });
     var ids = [];
@@ -1049,92 +1244,33 @@
     }
 
     var btn = document.getElementById('trashAllBtn');
+    var progressEl = document.getElementById('trashAllProgress');
     if (btn) { btn.disabled = true; btn.textContent = 'Moving to Trash...'; }
 
     try {
-      var data = await safeFetch('/api/duplicates/delete-loser-files', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ photo_ids: ids }),
-      });
+      var data = await trashLoserFilesInBatches(
+        ids,
+        function(progress) { updateTrashProgress(progressEl, progress); },
+        applyTrashBatchToCards
+      );
       var trashed = data.trashed || 0;
-      var skipped = (data.skipped || []).length;
       var failed = (data.failed || []).length;
 
-      // Mark trashed cards. The API also deletes DB rows for "file already
-      // missing" skips (the file is gone, the row would otherwise be orphaned
-      // and re-counted forever), so we treat those as terminal completions
-      // here too — without this, the bulk button keeps re-offering files
-      // that don't exist and repeat clicks degrade into "photo not found".
-      var TERMINAL_SKIPS = new Set(['file already missing']);
-      var trashedSet = new Set(ids);
-      (data.skipped || []).forEach(function(s) {
-        if (!TERMINAL_SKIPS.has(s.reason)) trashedSet.delete(s.id);
-      });
-      (data.failed || []).forEach(function(f) { trashedSet.delete(f.id); });
-      trashedSet.forEach(function(pid) {
-        var card = document.querySelector('.dup-card[data-photo-id="' + pid + '"]');
-        if (card) {
-          card.classList.add('trashed');
-          var s = card.querySelector('[data-trash-status]');
-          if (s) s.textContent = 'Cleaned up';
-        }
-      });
-      (data.skipped || []).forEach(function(s) {
-        // Terminal skips were already handled in trashedSet above.
-        if (TERMINAL_SKIPS.has(s.reason)) return;
-        var card = document.querySelector('.dup-card[data-photo-id="' + s.id + '"]');
-        if (card) {
-          var st = card.querySelector('[data-trash-status]');
-          if (st) st.textContent = 'Skipped: ' + (s.reason || '');
-        }
-      });
-      (data.failed || []).forEach(function(f) {
-        var card = document.querySelector('.dup-card[data-photo-id="' + f.id + '"]');
-        if (card) {
-          var st = card.querySelector('[data-trash-status]');
-          if (st) st.textContent = 'Failed: ' + (f.error || '');
-        }
-      });
-
       var actionableSkips = (data.skipped || []).filter(function(s) {
-        return !TERMINAL_SKIPS.has(s.reason);
+        return s.reason !== 'file already missing';
       }).length;
       var msg = 'Moved ' + trashed + ' file' + (trashed === 1 ? '' : 's') + ' to Trash';
       if (actionableSkips) msg += ', ' + actionableSkips + ' skipped';
       if (failed) msg += ', ' + failed + ' failed';
       showToast(msg, failed ? 'error' : 'success');
 
-      if (btn) {
-        // Recompute remaining count using the same protection predicate as
-        // the action path, so the label never advertises files the next
-        // ``trashAllLoserFiles`` call would skip. Without this, a mixed scan
-        // (actionable groups + ``winner.exists === false`` groups) leaves the
-        // button re-enabled with a non-zero count after the first cleanup,
-        // and subsequent clicks become persistent no-ops ("Nothing to trash").
-        var remaining = 0;
-        _proposals.forEach(function(p) {
-          if (p.status !== 'resolved') return;
-          if (isBulkTrashProtected(p)) return;
-          (p.losers || []).forEach(function(l) {
-            var card = document.querySelector(
-              '.dup-card[data-photo-id="' + l.id + '"]');
-            if (card && !card.classList.contains('trashed')) remaining++;
-          });
-        });
-        if (remaining > 0) {
-          btn.disabled = false;
-          btn.textContent = 'Move ' + remaining + ' extra ' +
-                            (remaining === 1 ? 'copy' : 'copies') + ' to Trash';
-        } else {
-          // Mirror the initial render: when there's nothing left that the
-          // bulk action would actually touch, drop the button rather than
-          // leaving a disabled "Move 0 ..." stub hanging around.
-          btn.remove();
-        }
-      }
+      refreshTrashAllButton(btn);
     } catch (e) {
-      if (btn) { btn.disabled = false; btn.textContent = 'Move extra copies to Trash'; }
+      var completed = e.trashSummary ? e.trashSummary.completed : 0;
+      showToast('Trash cleanup paused after ' + completed + ' of ' + ids.length +
+                ' files: ' + (e.message || 'request failed') +
+                '. Use the button to retry the remaining files.', 'error');
+      refreshTrashAllButton(btn);
     }
   }
 
