@@ -1109,6 +1109,28 @@ def test_stage_rejects_source_root_from_active_local_workspace(tmp_path):
     db.close()
 
 
+def test_stage_reports_overlap_when_roots_share_normalized_key(tmp_path, monkeypatch):
+    # Two workspace roots that normalize to the same key (e.g. case-only
+    # variants on a case-insensitive filesystem) used to raise TypeError from
+    # the tuple sort before the informative overlap error could run.
+    source_root = tmp_path / "nas" / "photos"
+    source_root.mkdir(parents=True)
+    other_root = tmp_path / "nas" / "extras"
+    other_root.mkdir(parents=True)
+    (source_root / "bird.jpg").write_bytes(b"bird")
+    (other_root / "bug.jpg").write_bytes(b"bug")
+    db = Database(str(tmp_path / "vireo.db"))
+    workspace_id = db._active_workspace_id
+    db.add_folder(str(source_root), name="photos")
+    db.add_folder(str(other_root), name="extras")
+
+    monkeypatch.setattr(local_workspace, "_norm", lambda _path: "COLLIDES")
+
+    with pytest.raises(LocalWorkspaceError, match="Workspace roots overlap"):
+        stage_workspace(db, workspace_id, str(tmp_path / "local-data"))
+    db.close()
+
+
 def test_shared_folder_check_handles_more_than_sqlite_variable_limit(tmp_path):
     source_root = tmp_path / "nas" / "photos"
     source_root.mkdir(parents=True)

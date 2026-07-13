@@ -515,7 +515,13 @@ def _root_records(db, workspace_id: int, local_base: Path) -> tuple[list[dict], 
     if not roots:
         raise LocalWorkspaceError("Add at least one folder before working locally")
 
-    normalized = sorted((_norm(row["path"]), row) for row in roots)
+    # Sort by the normalized path key only; a tie-breaker over row dicts would
+    # raise TypeError before the informative overlap error could run when two
+    # roots normalize to the same value (e.g. case-only variants on a
+    # case-insensitive workspace).
+    normalized = sorted(
+        ((_norm(row["path"]), row) for row in roots), key=lambda pair: pair[0]
+    )
     for index, (path, _row) in enumerate(normalized):
         for other, _other_row in normalized[index + 1 :]:
             if _is_within(other, path):
