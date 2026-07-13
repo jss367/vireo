@@ -5487,9 +5487,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "unresolved": [],
                 "skipped": [],
             }, None
-        if len(photo_ids) > 10000:
-            return None, json_error("too many photo_ids", 400)
-
         photos_map = db.get_photos_by_ids(photo_ids)
         if len(photos_map) != len(photo_ids):
             return None, json_error("One or more photos were not found", 404)
@@ -5757,9 +5754,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             skipped = 0
             added = 0
             cancelled_during_gps = False
-            # The public bulk endpoint caps a request at 10,000 IDs. Imports
-            # can exceed that, so reuse its resolution logic in bounded
-            # chunks while sharing the persistent ~110 m geocode cache.
+            # Resolve imports in bounded chunks to limit each payload's memory
+            # use and give cancellation a chance between large batches while
+            # sharing the persistent ~110 m geocode cache.
             for photo_chunk in _gps_location_chunks(photo_ids, size=10000):
                 if cancel_requested():
                     cancelled_during_gps = True
