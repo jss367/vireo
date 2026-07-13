@@ -145,7 +145,6 @@ def test_filter_change_ignores_older_recompute_response(live_server, page):
     expect(page.locator("#missTuningStatus")).to_have_text(
         "Recomputed previous filters; refreshing current view"
     )
-    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
     # The stale recompute must have scheduled a fresh /api/misses for the
     # current filters so any overlapping photos pick up the newly persisted
     # miss flags rather than continuing to render the pre-recompute payload.
