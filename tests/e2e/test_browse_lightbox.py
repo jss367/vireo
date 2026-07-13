@@ -1431,6 +1431,23 @@ def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, 
 
     page.route("**/photos/*/original", hold_first_original)
 
+    # The fixture photos are seeded without width/height, so /api/photos/<id>
+    # returns width=null. When that async metadata fetch resolves it overwrites
+    # the _lbPhotoW=4000 injected below with null (app: `_lbPhotoW = data.width
+    # || null`), which nulls _lbNativeZoom. Depending on whether that lands
+    # before or after the native-zoom reads below, the test either crashed
+    # ("None is not defined") or hung waiting for native zoom to settle. Force
+    # real dimensions into the metadata response so _lbPhotoW stays 4000 and
+    # native zoom is stable for the duration of the test.
+    def force_photo_dims(route):
+        resp = route.fetch()
+        data = resp.json()
+        data["width"] = 4000
+        data["height"] = 2000
+        route.fulfill(response=resp, json=data)
+
+    page.route(re.compile(r"/api/photos/\d+$"), force_photo_dims)
+
     url = live_server["url"]
     page.set_viewport_size({"width": 1000, "height": 800})
     page.goto(f"{url}/browse")
@@ -1461,7 +1478,10 @@ def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, 
     )
     assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
     assert page.evaluate("window._lbCurrentSrcKey") == "full"
-    deadline = time.time() + 2
+    # The deferred swap is scheduled on a debounced timer; under CI CPU
+    # contention that timer plus the preloader round-trip can take well over 2s,
+    # so allow generous headroom before asserting the /original request was held.
+    deadline = time.time() + 8
     while "route" not in held_original and time.time() < deadline:
         page.wait_for_timeout(25)
     assert "route" in held_original
@@ -1510,6 +1530,23 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
             route.fulfill(body=original_svg, content_type="image/svg+xml")
 
     page.route("**/photos/*/original", hold_first_original)
+
+    # The fixture photos are seeded without width/height, so /api/photos/<id>
+    # returns width=null. When that async metadata fetch resolves it overwrites
+    # the _lbPhotoW=4000 injected below with null (app: `_lbPhotoW = data.width
+    # || null`), which nulls _lbNativeZoom. Depending on whether that lands
+    # before or after the native-zoom reads below, the test either crashed
+    # ("None is not defined") or hung waiting for native zoom to settle. Force
+    # real dimensions into the metadata response so _lbPhotoW stays 4000 and
+    # native zoom is stable for the duration of the test.
+    def force_photo_dims(route):
+        resp = route.fetch()
+        data = resp.json()
+        data["width"] = 4000
+        data["height"] = 2000
+        route.fulfill(response=resp, json=data)
+
+    page.route(re.compile(r"/api/photos/\d+$"), force_photo_dims)
 
     url = live_server["url"]
     page.set_viewport_size({"width": 1000, "height": 800})
