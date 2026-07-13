@@ -88,6 +88,12 @@ from render_source import (
     working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
 )
 from schema import ensure_schema
+from services.local_workspace import (
+    folder_has_local_workspace,
+    has_local_workspace,
+    stage_boundary_lock,
+)
+from web.local_workspace import LOCAL_WORKSPACE_JOB_TYPES, create_local_workspace_blueprint
 from web.pages import pages_blueprint
 from web.photo_labels import create_photo_labels_blueprint
 from web.photo_review import create_photo_review_blueprint
@@ -4058,6 +4064,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return True
         return False
 
+    def _pending_local_workspace_transition(workspace_id):
+        # ``has_local_workspace`` only observes the ``local_workspaces`` row
+        # a stage worker inserts once it actually runs; a stage/sync/discard
+        # that has been enqueued but not yet reached that insert would leave
+        # the row absent. A scan or move-folder enqueued in that window
+        # passes its own guard and then rebases the catalog after the
+        # transition worker later claims the workspace, so the folder /
+        # workspace_folders / folders rows those jobs write end up outside
+        # the manifest and local_workspace_folders. Detecting the pending
+        # transition job in the runner queue closes that race at enqueue.
+        if workspace_id is None:
+            return None
+        for job in app._job_runner.list_jobs():
+            if job.get("workspace_id") != workspace_id:
+                continue
+            if job.get("status") not in ("queued", "running"):
+                continue
+            if job.get("type") in LOCAL_WORKSPACE_JOB_TYPES:
+                return job
+        return None
+
     def _invalidate_missing_originals_cache(workspace_ids=None):
         """Drop cached Missing Originals results for this app's database.
 
@@ -4602,26 +4629,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not os.path.isdir(new_path):
             return json_error("path does not exist or is not a directory")
 
-        # Capture the old path before the DB rewrite so we can rebase the
-        # corresponding darktable output subdir on disk. Developed outputs
-        # are nested under developed_folder_key(folder_path), so a path
-        # change invalidates the old key and would silently regress export
-        # to RAW until the user re-developed.
-        old_row = db.conn.execute(
-            "SELECT path, status FROM folders WHERE id = ?", (folder_id,)
-        ).fetchone()
-        old_path = old_row["path"] if old_row else ""
+        # Relocating a folder that a local workspace has rebased would leave
+        # local_workspace_folders and the manifest pointing at a path this
+        # route just moved out from under them, so a later sync/discard could
+        # not restore the catalog to the source layout. The guard and the
+        # subsequent write must both run under stage_boundary_lock so a stage
+        # claim cannot commit between them.
+        with stage_boundary_lock():
+            staged, owner_ws = folder_has_local_workspace(db, folder_id)
+            if staged:
+                return json_error(
+                    f"Cannot relocate this folder — workspace {owner_ws} has it staged locally. "
+                    "Switch to that workspace and sync or discard the local copy first.",
+                    409,
+                )
 
-        try:
-            cascaded = db.relocate_folder(folder_id, new_path)
-        except ValueError as e:
-            if old_row and old_row["status"] == "missing":
-                current_row = db.conn.execute(
-                    "SELECT status FROM folders WHERE id = ?", (folder_id,)
-                ).fetchone()
-                if current_row and current_row["status"] == "ok":
-                    _invalidate_missing_originals_cache()
-            return json_error(str(e), 409)
+            # Capture the old path before the DB rewrite so we can rebase the
+            # corresponding darktable output subdir on disk. Developed outputs
+            # are nested under developed_folder_key(folder_path), so a path
+            # change invalidates the old key and would silently regress export
+            # to RAW until the user re-developed.
+            old_row = db.conn.execute(
+                "SELECT path, status FROM folders WHERE id = ?", (folder_id,)
+            ).fetchone()
+            old_path = old_row["path"] if old_row else ""
+
+            try:
+                cascaded = db.relocate_folder(folder_id, new_path)
+            except ValueError as e:
+                if old_row and old_row["status"] == "missing":
+                    current_row = db.conn.execute(
+                        "SELECT status FROM folders WHERE id = ?", (folder_id,)
+                    ).fetchone()
+                    if current_row and current_row["status"] == "ok":
+                        _invalidate_missing_originals_cache()
+                return json_error(str(e), 409)
 
         # Relocation rewrites folders.path (and can merge/delete rows via the
         # missing→existing branch). A ready /api/photos/missing cache would
@@ -4647,7 +4689,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
     def api_folder_delete(folder_id):
         db = _get_db()
-        result = db.delete_folder(folder_id)
+        # Deleting a folder that a local workspace has rebased removes the
+        # folders row that local_workspace_folders and the manifest depend on,
+        # so a later sync/discard would be unable to restore the catalog. The
+        # guard and delete run under stage_boundary_lock so a stage claim
+        # cannot commit between them; the local_workspace_folders FK to
+        # folders(id) ON DELETE CASCADE is the final safety net.
+        with stage_boundary_lock():
+            staged, owner_ws = folder_has_local_workspace(db, folder_id)
+            if staged:
+                return json_error(
+                    f"Cannot delete this folder — workspace {owner_ws} has it staged locally. "
+                    "Switch to that workspace and sync or discard the local copy first.",
+                    409,
+                )
+            result = db.delete_folder(folder_id)
         # Clean up cached files alongside the cascaded photo rows so preview
         # files don't get orphaned on disk (untracked by preview_cache).
         _cleanup_cached_files_for_deleted_photos(result.get("files", []))
@@ -10185,27 +10241,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         err = _validate_workspace_config_overrides(config_overrides, db)
         if err is not None:
             return err
+        folder_ids = body.get("folder_ids", [])
+        # A folder already covered by another workspace's
+        # local_workspace_folders row points at that workspace's managed local
+        # copy, not the original NAS path. Silently linking it into a
+        # brand-new workspace would make imports and edits here share the
+        # managed copy, so the owning workspace's later sync could publish
+        # them or discard could delete them. This mirrors the same check that
+        # POST /api/workspaces/<id>/folders already runs; without it, an API
+        # client can bypass the guard by supplying folder_ids at create time.
+        # The check + create + link run under stage_boundary_lock so a stage
+        # claim cannot slip between "guard says free" and add_workspace_folder.
         try:
-            ws_id = db.create_workspace(name, config_overrides=config_overrides)
-            # SQLite can reuse the rowid of a deleted workspace here, so a
-            # ready Missing Originals payload cached under the old
-            # workspace could otherwise be served to this fresh workspace
-            # until its own scan overwrites the entry — mirroring the
-            # new-images cache guard in db.create_workspace.
-            _invalidate_missing_originals_cache(workspace_ids=[ws_id])
-            # Seed the standard smart collections (All Photos, Flagged, etc.).
-            # Startup only seeds the active workspace, so without this a
-            # workspace created via the API never gets defaults until it's
-            # active during a future Vireo restart — which is how a
-            # workspace in the wild ended up with zero defaults and broke
-            # "All Photos" in the pipeline collection picker.
-            db.create_default_collections(workspace_id=ws_id)
-            # Link selected folders if provided
-            folder_ids = body.get("folder_ids", [])
-            for folder_id in folder_ids:
-                db.add_workspace_folder(ws_id, folder_id)
-            db.mark_workspace_folder_roots(ws_id, folder_ids)
-            ws = db.get_workspace(ws_id)
+            with stage_boundary_lock():
+                for folder_id in folder_ids:
+                    staged_by, owner_ws = folder_has_local_workspace(db, folder_id)
+                    if staged_by:
+                        return json_error(
+                            f"Folder is staged locally by workspace {owner_ws}. "
+                            "Sync or discard that workspace's local copy before linking the folder here.",
+                            409,
+                        )
+                ws_id = db.create_workspace(name, config_overrides=config_overrides)
+                # SQLite can reuse the rowid of a deleted workspace here, so a
+                # ready Missing Originals payload cached under the old
+                # workspace could otherwise be served to this fresh workspace
+                # until its own scan overwrites the entry — mirroring the
+                # new-images cache guard in db.create_workspace.
+                _invalidate_missing_originals_cache(workspace_ids=[ws_id])
+                # Seed the standard smart collections (All Photos, Flagged, etc.).
+                # Startup only seeds the active workspace, so without this a
+                # workspace created via the API never gets defaults until it's
+                # active during a future Vireo restart — which is how a
+                # workspace in the wild ended up with zero defaults and broke
+                # "All Photos" in the pipeline collection picker.
+                db.create_default_collections(workspace_id=ws_id)
+                # Link selected folders if provided
+                for folder_id in folder_ids:
+                    db.add_workspace_folder(ws_id, folder_id)
+                db.mark_workspace_folder_roots(ws_id, folder_ids)
+                ws = db.get_workspace(ws_id)
             return jsonify(dict(ws))
         except Exception as e:
             return json_error(str(e))
@@ -10241,7 +10316,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Prevent deleting the active workspace
         if ws_id == db._active_workspace_id:
             return json_error("Cannot delete the active workspace. Switch first.")
-        db.delete_workspace(ws_id)
+        # Guard and delete run under stage_boundary_lock so a stage claim
+        # cannot commit between the check and the workspace DELETE.
+        with stage_boundary_lock():
+            if has_local_workspace(db, ws_id):
+                return json_error(
+                    "Cannot delete a workspace with local work. Switch to it and sync or discard the local copy first.",
+                    409,
+                )
+            db.delete_workspace(ws_id)
         # Drop this workspace's cached Missing Originals payload so a
         # later workspace that reuses this SQLite rowid can't be served
         # the deleted workspace's ghost photos / folder paths.
@@ -10321,7 +10404,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("Workspace not found", 404)
         if not db.get_folder(folder_id):
             return json_error("Folder not found", 404)
-        db.add_workspace_folder(ws_id, folder_id)
+        # A workspace with active local state has folder paths rebased into
+        # the managed copy and a manifest covering those paths. Silently
+        # adding a folder here would leave the UI showing a folder that the
+        # manifest and local_workspace_folders don't cover, so a later sync
+        # or discard could not act on it consistently. Guards and INSERT run
+        # under stage_boundary_lock so a stage claim cannot commit between
+        # them.
+        with stage_boundary_lock():
+            if has_local_workspace(db, ws_id):
+                return json_error(
+                    "Cannot change folder membership while working locally. Sync or discard the local copy first.",
+                    409,
+                )
+            # A folder already covered by another workspace's
+            # local_workspace_folders points at that workspace's managed copy,
+            # not the original NAS path. Linking it into a second workspace
+            # would silently make edits or imports there share the managed
+            # copy, so the owning workspace's later sync could publish them
+            # to the source and discard could delete them. Refuse until the
+            # owning workspace's local copy is resolved.
+            staged_by, owner_ws = folder_has_local_workspace(db, folder_id)
+            if staged_by:
+                return json_error(
+                    f"Folder is staged locally by workspace {owner_ws}. "
+                    "Sync or discard that workspace's local copy before linking the folder here.",
+                    409,
+                )
+            db.add_workspace_folder(ws_id, folder_id)
         # A newly linked folder can introduce ghosts (or resolve them if it
         # was previously offline). The missing-originals cache is keyed by
         # workspace, so leaving a stale ready payload here would keep serving
@@ -10332,7 +10442,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/workspaces/<int:ws_id>/folders/<int:folder_id>", methods=["DELETE"])
     def api_remove_workspace_folder(ws_id, folder_id):
         db = _get_db()
-        db.remove_workspace_folder_tree(ws_id, folder_id)
+        # Removing a staged root while local work is active would leave
+        # local_workspace_folders and the manifest covering paths the UI no
+        # longer shows, so a later sync could publish/delete files for a
+        # folder the workspace has already dropped. Guard and DELETE run
+        # under stage_boundary_lock so a stage claim cannot commit between
+        # them.
+        with stage_boundary_lock():
+            if has_local_workspace(db, ws_id):
+                return json_error(
+                    "Cannot change folder membership while working locally. Sync or discard the local copy first.",
+                    409,
+                )
+            db.remove_workspace_folder_tree(ws_id, folder_id)
         # Unlinking a folder tree removes photos from the workspace's scope;
         # the cached ready payload would otherwise keep listing ghosts from
         # the now-detached folders until a manual rescan.
@@ -10354,30 +10476,49 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if target_ws_id and new_ws_name:
             return json_error("Provide target_workspace_id or new_workspace_name, not both")
 
-        # Validate source workspace and folder ownership before creating a
-        # new workspace to avoid orphans if the move would fail.
-        if new_ws_name:
-            if not db.get_workspace(ws_id):
-                return json_error(f"Source workspace {ws_id} not found")
-            source_folder_ids = {f["id"] for f in db.get_workspace_folders(ws_id)}
-            for fid in folder_ids:
-                if fid not in source_folder_ids:
-                    return json_error(f"Folder {fid} does not belong to source workspace {ws_id}")
-            try:
-                target_ws_id = db.create_workspace(new_ws_name)
-            except Exception as e:
-                return json_error(f"Failed to create workspace: {e}")
+        # Block folder-membership mutation while either side is working
+        # locally: moving a folder off a staged workspace would leave its
+        # manifest covering a folder the UI no longer shows, and moving one
+        # onto a workspace whose paths are rebased would leave the new folder
+        # untracked by the manifest. Guards and mutation run under
+        # stage_boundary_lock so a stage claim on either side cannot commit
+        # between check and write.
+        with stage_boundary_lock():
+            if has_local_workspace(db, ws_id):
+                return json_error(
+                    "Cannot move folders out of a workspace working locally. Sync or discard the local copy first.",
+                    409,
+                )
+            if target_ws_id and has_local_workspace(db, target_ws_id):
+                return json_error(
+                    "Cannot move folders into a workspace working locally. Sync or discard the local copy first.",
+                    409,
+                )
 
-        try:
-            result = db.move_folders_to_workspace(ws_id, target_ws_id, folder_ids)
-            result["target_workspace_id"] = target_ws_id
-            # Moving folders changes membership on both source and target
-            # workspaces, so any cached missing-originals payloads for either
-            # side would go stale.
-            _invalidate_missing_originals_cache()
-            return jsonify(result)
-        except ValueError as e:
-            return json_error(str(e))
+            # Validate source workspace and folder ownership before creating a
+            # new workspace to avoid orphans if the move would fail.
+            if new_ws_name:
+                if not db.get_workspace(ws_id):
+                    return json_error(f"Source workspace {ws_id} not found")
+                source_folder_ids = {f["id"] for f in db.get_workspace_folders(ws_id)}
+                for fid in folder_ids:
+                    if fid not in source_folder_ids:
+                        return json_error(f"Folder {fid} does not belong to source workspace {ws_id}")
+                try:
+                    target_ws_id = db.create_workspace(new_ws_name)
+                except Exception as e:
+                    return json_error(f"Failed to create workspace: {e}")
+
+            try:
+                result = db.move_folders_to_workspace(ws_id, target_ws_id, folder_ids)
+                result["target_workspace_id"] = target_ws_id
+                # Moving folders changes membership on both source and target
+                # workspaces, so any cached missing-originals payloads for either
+                # side would go stale.
+                _invalidate_missing_originals_cache()
+                return jsonify(result)
+            except ValueError as e:
+                return json_error(str(e))
 
     @app.route("/api/workspaces/active/config")
     def api_workspace_config():
@@ -10484,6 +10625,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     app.register_blueprint(
         create_workspace_blueprint(_get_db, json_error, ALL_PAGES)
+    )
+    app.register_blueprint(
+        create_local_workspace_blueprint(
+            _get_db,
+            json_error,
+            lambda: app._job_runner,
+            db_path,
+            os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            invalidate_missing_originals=lambda ws_id: _invalidate_missing_originals_cache(
+                workspace_ids=[ws_id]
+            ),
+        )
     )
 
     def _new_images_walk_fns(db, ws_id):
@@ -16253,6 +16406,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
+        # A workspace with active local state has its folder paths rebased
+        # into the managed copy; scanner.scan() calls
+        # db.add_folder(link_to_workspace=True) for every folder it discovers,
+        # so any new root scanned here would add folder/workspace_folders rows
+        # that the manifest and local_workspace_folders don't cover — sync and
+        # discard could not rebase or remove them, and the workspace would mix
+        # unmanaged source paths with the managed local copy. Refuse until
+        # the local copy is synced or discarded, mirroring the folder-add,
+        # folder-remove, and move-folders guards. Also refuse when a
+        # stage/sync/discard job is queued or running but hasn't yet touched
+        # local_workspaces — otherwise the scan enqueued in that window
+        # could add unmanaged rows before the transition worker claims the
+        # workspace.
+        if active_ws is not None:
+            with stage_boundary_lock():
+                if has_local_workspace(_get_db(), active_ws):
+                    return json_error(
+                        "Cannot scan folders while working locally. Sync or discard the local copy first.",
+                        409,
+                    )
+                pending = _pending_local_workspace_transition(active_ws)
+                if pending:
+                    return json_error(
+                        f"Wait for the {pending['type']} job to finish before scanning; "
+                        "otherwise the scan would add folder rows the workspace's local "
+                        "manifest doesn't cover.",
+                        409,
+                    )
+
         work = _build_scan_work(roots_list, incremental, active_ws)
 
         job_config = {"roots": roots_list, "incremental": incremental}
@@ -17635,6 +17817,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not folder_id:
             return json_error("folder_id required")
+
+        # A folder covered by any workspace's local_workspace_folders row has
+        # its folders.path rebased into that workspace's managed copy; a
+        # concurrent workspace-membership guard would refuse to touch the
+        # folders row for exactly this reason. Moving it here (via
+        # db.move_folder_path) would move or delete the managed copy and
+        # rewrite the catalog while local_workspace_folders and the manifest
+        # still expect the pre-move layout, so the owning workspace's next
+        # status falls into missing-local recovery and sync/discard can no
+        # longer restore. Reject the job before enqueue.
+        db_for_guard = _get_db()
+        with stage_boundary_lock():
+            staged_here, staged_owner_ws = folder_has_local_workspace(
+                db_for_guard, folder_id,
+            )
+            if staged_here:
+                return json_error(
+                    f"Cannot move this folder — workspace {staged_owner_ws} has it "
+                    "staged locally. Switch to that workspace and sync or discard the "
+                    "local copy first.",
+                    409,
+                )
+            # ``folder_has_local_workspace`` only sees a completed stage
+            # claim. A stage/sync/discard queued or running against a
+            # workspace that contains this folder hasn't yet written
+            # local_workspace_folders, so the read-only guard above passes
+            # even though the transition worker is about to rebase this
+            # folder's paths. Enqueueing the move now would rewrite the
+            # ``folders`` row out from under the pending transition —
+            # missing-local recovery on the next status. Refuse until the
+            # transition finishes.
+            row = db_for_guard.conn.execute(
+                "SELECT workspace_id FROM workspace_folders WHERE folder_id = ?",
+                (folder_id,),
+            ).fetchall()
+            for ws_row in row:
+                pending = _pending_local_workspace_transition(int(ws_row["workspace_id"]))
+                if pending:
+                    return json_error(
+                        f"Wait for the {pending['type']} job on workspace "
+                        f"{int(ws_row['workspace_id'])} to finish before moving this "
+                        "folder; otherwise the move would run on paths that workspace "
+                        "is about to claim.",
+                        409,
+                    )
 
         import config as cfg
         import move as move_mod
