@@ -147,6 +147,72 @@ def test_prepared_render_invalidates_when_companion_changes(
     assert load_calls[-1] == companion_path
 
 
+def test_prepared_render_invalidates_when_primary_changes_before_scan(
+    client_with_photo, monkeypatch,
+):
+    import image_loader
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
+    photo = db.get_photo(photo_id)
+    folder_path = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
+    ).fetchone()["path"]
+    primary_path = os.path.join(folder_path, photo["filename"])
+    original_load_image = image_loader.load_image
+    load_calls = []
+
+    def tracking_load_image(path, *args, **kwargs):
+        load_calls.append(str(path))
+        return original_load_image(path, *args, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    assert client.get(f"/photos/{photo_id}/original").status_code == 200
+    assert client.get(f"/photos/{photo_id}/original").status_code == 200
+    assert len(load_calls) == 1
+
+    old_stat = os.stat(primary_path)
+    Image.new("RGB", (800, 600), "purple").save(primary_path, "JPEG")
+    os.utime(
+        primary_path,
+        ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns + 1_000_000_000),
+    )
+
+    assert client.get(f"/photos/{photo_id}/original").status_code == 200
+    assert len(load_calls) == 2
+
+
+def test_preferred_offline_source_rejects_stale_primary(client_with_photo):
+    from offline_cache import cache_photo_original, resolve_original_path
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder_path = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (photo["folder_id"],),
+    ).fetchone()["path"]
+    folders = {photo["folder_id"]: folder_path}
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    primary_path = os.path.join(folder_path, photo["filename"])
+
+    assert cache_photo_original(
+        db, photo, vireo_dir, folders,
+    )["status"] == "cached"
+    old_stat = os.stat(primary_path)
+    Image.new("RGB", (800, 600), "purple").save(primary_path, "JPEG")
+    os.utime(
+        primary_path,
+        ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns + 1_000_000_000),
+    )
+
+    source_path, used_cache = resolve_original_path(
+        db, photo, vireo_dir, folders, prefer_cached=True,
+    )
+    assert used_cache is False
+    assert source_path == primary_path
+
+
 def test_preferred_offline_source_rejects_stale_companion(client_with_photo):
     from offline_cache import cache_photo_original, resolve_original_path
 

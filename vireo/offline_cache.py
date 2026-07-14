@@ -89,6 +89,21 @@ def resolve_original_path(
     folder_id = photo["folder_id"]
     offline_row = db.offline_original_get(photo["id"])
     cached = offline_original_abs(vireo_dir, offline_row)
+    source_path = (
+        os.path.join(folders[folder_id], photo["filename"])
+        if folder_id in folders
+        else ""
+    )
+    source_is_available = os.path.isfile(source_path)
+    primary_is_current = (
+        _same_file_stat(source_path, cached)
+        if source_is_available
+        else bool(
+            offline_row
+            and offline_row["source_size"] == (photo["file_size"] or 0)
+            and offline_row["source_mtime"] == photo["file_mtime"]
+        )
+    )
     companion_is_current = True
     if photo["companion_path"] and folder_id in folders:
         source_original = os.path.join(
@@ -111,18 +126,13 @@ def resolve_original_path(
         and offline_row["status"] == "cached"
         and cached
         and os.path.isfile(cached)
-        and offline_row["source_size"] == (photo["file_size"] or 0)
-        and offline_row["source_mtime"] == photo["file_mtime"]
+        and primary_is_current
         and companion_is_current
     )
     if prefer_cached and cached_is_current:
         return cached, True
-    if folder_id in folders:
-        source_path = os.path.join(folders[folder_id], photo["filename"])
-        if os.path.isfile(source_path):
-            return source_path, False
-    else:
-        source_path = ""
+    if source_is_available:
+        return source_path, False
     if cached and os.path.isfile(cached):
         return cached, True
     return source_path, False

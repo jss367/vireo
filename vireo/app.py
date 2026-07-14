@@ -2320,7 +2320,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchone()
         return row is not None
 
-    def _full_resolution_render_signature(photo, recipe, companion_state=None):
+    def _full_resolution_render_signature(photo, recipe, file_state=None):
         """Describe every catalogued input to a cached inspection render.
 
         The source size/mtime pair is refreshed by scans, the canonical recipe
@@ -2337,17 +2337,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "source_mtime": photo["file_mtime"],
             "filename": photo["filename"],
             "companion_path": photo["companion_path"],
-            "companion_state": companion_state,
+            "file_state": file_state,
             "recipe": recipe_to_json(recipe),
             "edit_math_version": EDIT_MATH_VERSION,
         }
 
     def _full_resolution_render_path(
-        vireo_dir, photo, recipe, companion_state=None,
+        vireo_dir, photo, recipe, file_state=None,
     ):
         signature = json.dumps(
             _full_resolution_render_signature(
-                photo, recipe, companion_state,
+                photo, recipe, file_state,
             ),
             sort_keys=True,
             separators=(",", ":"),
@@ -2358,10 +2358,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
 
     def _prepared_full_resolution_render(
-        vireo_dir, photo, recipe, companion_state=None,
+        vireo_dir, photo, recipe, file_state=None,
     ):
         cache_path = _full_resolution_render_path(
-            vireo_dir, photo, recipe, companion_state,
+            vireo_dir, photo, recipe, file_state,
         )
         try:
             if not os.path.isfile(cache_path) or os.path.getsize(cache_path) <= 0:
@@ -24973,15 +24973,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return None
             return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
-        companion_state = None
+        offline_row = db.offline_original_get(photo_id)
+        cached_original = (
+            os.path.join(vireo_dir, offline_row["original_path"])
+            if offline_row and offline_row["original_path"]
+            else None
+        )
+        file_state = {
+            "primary": {
+                "source": _file_render_state(
+                    os.path.join(folder["path"], photo["filename"]),
+                ),
+                "cached": _file_render_state(cached_original),
+            },
+            "companion": None,
+        }
         if photo["companion_path"]:
-            offline_row = db.offline_original_get(photo_id)
             cached_companion = (
                 os.path.join(vireo_dir, offline_row["companion_path"])
                 if offline_row and offline_row["companion_path"]
                 else None
             )
-            companion_state = {
+            file_state["companion"] = {
                 "source": _file_render_state(
                     os.path.join(folder["path"], photo["companion_path"]),
                 ),
@@ -24989,7 +25002,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             }
 
         prepared_render = _prepared_full_resolution_render(
-            vireo_dir, photo, recipe, companion_state,
+            vireo_dir, photo, recipe, file_state,
         )
         if prepared_render:
             return send_file(prepared_render, mimetype="image/jpeg")
@@ -25257,7 +25270,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             originals_dir = os.path.join(vireo_dir, "originals")
             cache_path = _full_resolution_render_path(
-                vireo_dir, photo, recipe, companion_state,
+                vireo_dir, photo, recipe, file_state,
             )
             os.makedirs(originals_dir, exist_ok=True)
             quality = cfg.load().get("working_copy_quality", 92)
@@ -25603,7 +25616,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             tmp_prefix = f".{photo_id}.display."
         else:
             cache_path = _full_resolution_render_path(
-                vireo_dir, photo, recipe, companion_state,
+                vireo_dir, photo, recipe, file_state,
             )
             cache_dir = os.path.dirname(cache_path)
             tmp_prefix = f".{photo_id}."
