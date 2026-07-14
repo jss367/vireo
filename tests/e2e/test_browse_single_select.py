@@ -117,6 +117,122 @@ def test_single_click_reveals_batch_bar(live_server, page):
     expect(page.locator("#developBtn")).to_be_visible()
 
 
+def test_prepare_full_resolution_uses_active_browse_selection(live_server, page):
+    submitted = []
+
+    def start_job(route):
+        submitted.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "prepare-ui-test", "total": 1}),
+        )
+
+    page.route("**/api/jobs/prepare-full-resolution", start_job)
+    page.route(
+        "**/api/jobs/prepare-ui-test/stream",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            body=(
+                "event: progress\n"
+                "data: {\"current\":1,\"total\":1,\"current_file\":\"hawk1.jpg\"}\n\n"
+                "event: complete\n"
+                "data: {\"status\":\"completed\",\"result\":{\"ready\":1,\"copied\":1,\"failed\":0}}\n\n"
+            ),
+        ),
+    )
+
+    page.goto(f"{live_server['url']}/browse")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    selected_id = int(first.get_attribute("data-id"))
+    first.click()
+
+    button = page.locator("#prepareFullResolutionBtn")
+    expect(button).to_be_visible()
+    button.click()
+
+    page.wait_for_function(
+        "() => window._prepareFullResolutionJobId === null"
+    )
+    assert submitted == [{"photo_ids": [selected_id]}]
+    expect(button).to_be_enabled()
+    expect(button).to_have_text("Prepare Full Resolution")
+
+
+def test_prepare_full_resolution_surfaces_fatal_job_failure(live_server, page):
+    page.route(
+        "**/api/jobs/prepare-full-resolution",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "prepare-failed-test", "total": 1}),
+        ),
+    )
+    page.route(
+        "**/api/jobs/prepare-failed-test/stream",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            body=(
+                "event: complete\n"
+                "data: {\"status\":\"failed\",\"result\":null,"
+                "\"errors\":[\"database unavailable\"]}\n\n"
+            ),
+        ),
+    )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+    page.locator("#prepareFullResolutionBtn").click()
+
+    page.wait_for_function(
+        "() => window._prepareFullResolutionJobId === null"
+    )
+    expect(page.locator("#toastContainer > div").last).to_have_text(
+        "Full-resolution preparation failed: database unavailable"
+    )
+
+
+def test_prepare_full_resolution_summarizes_partial_failure(live_server, page):
+    page.route(
+        "**/api/jobs/prepare-full-resolution",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "prepare-partial-test", "total": 3}),
+        ),
+    )
+    page.route(
+        "**/api/jobs/prepare-partial-test/stream",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            body=(
+                "event: complete\n"
+                "data: {\"status\":\"failed\",\"result\":{"
+                "\"ready\":2,\"copied\":2,\"failed\":1},"
+                "\"errors\":[\"one source was unavailable\"]}\n\n"
+            ),
+        ),
+    )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+    page.locator("#prepareFullResolutionBtn").click()
+
+    page.wait_for_function(
+        "() => window._prepareFullResolutionJobId === null"
+    )
+    expect(page.locator("#toastContainer > div").last).to_have_text(
+        "Full-resolution preparation complete: 2 ready, 2 copied locally, "
+        "1 failed"
+    )
+
+
 def test_adjust_capture_time_lives_in_native_menu_not_batch_bar(live_server, page):
     """Capture-time adjustment is useful, but too infrequent for the Browse
     batch bar; it remains available through the native Photo menu command.
