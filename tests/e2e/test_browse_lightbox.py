@@ -98,6 +98,49 @@ def test_browse_lightbox_same_photo_reopen_does_not_lock_controls(live_server, p
     }
 
 
+def test_browse_lightbox_filename_can_be_selected_without_resetting_zoom(
+    live_server, page
+):
+    """Selecting the filename must not bubble into the lightbox zoom/close handlers."""
+    page.goto(f"{live_server['url']}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_filename = first_card.get_attribute("data-filename")
+    first_card.dblclick()
+
+    overlay = page.locator("#lightboxOverlay")
+    filename_display = page.locator("#lightboxFilename")
+    expect(overlay).to_have_class("lightbox-overlay active")
+    expect(filename_display).to_have_text(first_filename)
+
+    page.evaluate(
+        """() => {
+            window._lbNativeZoom = 2;
+            window._lbSetZoom(2, null, null);
+        }"""
+    )
+
+    # A click is part of both double-click and drag-to-select interactions. It
+    # previously reached closeLightbox(), which reset _lbZoom to fit.
+    filename_display.click()
+
+    expect(overlay).to_have_class("lightbox-overlay active")
+    assert page.evaluate("window._lbZoom") == 2
+    assert filename_display.evaluate(
+        "el => getComputedStyle(el).userSelect"
+    ) == "text"
+    assert filename_display.evaluate(
+        "el => getComputedStyle(el).cursor"
+    ) == "text"
+    assert page.evaluate(
+        """() => (
+            Number(getComputedStyle(document.getElementById('lightboxFlagStatus')).zIndex) >
+            Number(getComputedStyle(document.querySelector('.lightbox-bottom-bar')).zIndex)
+        )"""
+    ) is True
+
+
 def test_browse_photo_id_deep_link_loads_target_folder_first_page(live_server, page):
     """Open in Browse must find a target that is not on global Browse page 1."""
     db = live_server["db"]
@@ -261,8 +304,235 @@ def test_browse_lightbox_predecodes_adjacent_photo_for_current_source_tier(
     assert page.evaluate("window._lightboxCurrentId") != next_id
 
 
-def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page):
-    """Arrow navigation preserves pan/zoom per photo and carries it to unseen photos."""
+def test_browse_lightbox_preloads_current_original_after_preview_settles(
+    live_server, page
+):
+    """The current photo's 100% source is decoded after a short dwell at Fit."""
+    current_id = live_server["data"]["photos"][0]
+    live_server["db"].conn.execute(
+        "UPDATE photos SET width=4000, height=2000 WHERE id=?",
+        (current_id,),
+    )
+    live_server["db"].conn.commit()
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+
+    assert page.evaluate("window._lightboxCurrentId") == current_id
+    page.wait_for_function(
+        """photoId => window._lbOriginalPreload && (
+            window._lbOriginalPreload.photoId === photoId &&
+            window._lbOriginalPreload.status === 'decoded'
+        )""",
+        arg=current_id,
+    )
+
+    assert any(f"/photos/{current_id}/original" in url for url in original_requests)
+    assert page.evaluate("window._lbCurrentSrcKey") == "full"
+
+
+def test_browse_lightbox_waits_for_fit_image_before_preloading_original(
+    live_server, page
+):
+    """A slow Fit render is not made slower by a competing original request."""
+    current_id = live_server["data"]["photos"][0]
+    db = live_server["db"]
+    db.conn.execute(
+        "UPDATE photos SET width=4000, height=2000 WHERE id=?",
+        (current_id,),
+    )
+    db.conn.commit()
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
+    )
+    held_full = {}
+    original_requests = []
+
+    def hold_full(route):
+        held_full["route"] = route
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/full", hold_full)
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function("window._lbFullUsesOriginal === false")
+    page.wait_for_timeout(800)
+
+    assert "route" in held_full
+    assert original_requests == []
+
+    held_full.pop("route").fulfill(body=full_svg, content_type="image/svg+xml")
+    page.wait_for_function(
+        """photoId => window._lbOriginalPreload && (
+            window._lbOriginalPreload.photoId === photoId &&
+            window._lbOriginalPreload.status === 'decoded'
+        )""",
+        arg=current_id,
+    )
+
+
+def test_browse_lightbox_skips_original_when_full_covers_one_to_one(
+    live_server, page
+):
+    """Small photos stay on /full at 100%, so warming /original is wasteful."""
+    current_id = live_server["data"]["photos"][0]
+    db = live_server["db"]
+    db.conn.execute(
+        "UPDATE photos SET width=1600, height=800 WHERE id=?",
+        (current_id,),
+    )
+    db.conn.commit()
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="800" '
+        'viewBox="0 0 1600 800"><rect width="1600" height="800" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function("window._lbNativeZoom !== null")
+    page.wait_for_timeout(800)
+
+    assert page.evaluate("window._lbPickSourceKey(window._lbNativeZoom)") == "full"
+    assert original_requests == []
+    assert page.evaluate("window._lbOriginalPreload") is None
+
+
+def test_browse_lightbox_cancels_original_warmup_when_zoom_leaves_fit(
+    live_server, page
+):
+    """A visible intermediate-tier upgrade takes priority over background warming."""
+    current_id = live_server["data"]["photos"][0]
+    db = live_server["db"]
+    db.conn.execute(
+        "UPDATE photos SET width=4000, height=2000 WHERE id=?",
+        (current_id,),
+    )
+    db.conn.commit()
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    preview_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1280" '
+        'viewBox="0 0 2560 1280"><rect width="2560" height="1280" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/preview?size=2560*",
+        lambda route: route.fulfill(body=preview_svg, content_type="image/svg+xml"),
+    )
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=preview_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function("window._lbOriginalPreloadTimer !== null")
+
+    selected_key = page.evaluate(
+        """() => {
+            let zoom = 1.01;
+            while (zoom < window._lbNativeZoom && window._lbPickSourceKey(zoom) === 'full') {
+                zoom += 0.05;
+            }
+            const key = window._lbPickSourceKey(zoom);
+            window._lbSetZoom(zoom);
+            return key;
+        }"""
+    )
+    assert selected_key == "2560"
+    page.wait_for_timeout(800)
+
+    assert original_requests == []
+    assert page.evaluate("window._lbOriginalPreloadTimer") is None
+    assert page.evaluate("window._lbOriginalPreload") is None
+
+
+def test_browse_lightbox_does_not_preload_when_full_already_uses_original(
+    live_server, page
+):
+    """Full-resolution preview mode must not request the original twice."""
+    db = live_server["db"]
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"preview_max_size": 0},
+    )
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function("window._lbFullUsesOriginal === true")
+    page.wait_for_timeout(800)
+
+    assert original_requests == []
+    assert page.evaluate("window._lbOriginalPreload") is None
+
+
+def test_browse_lightbox_carries_current_viewport_to_previously_seen_photo(
+    live_server, page
+):
+    """Arrow navigation uses the current viewport, not a target photo's old one."""
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
         'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
@@ -297,11 +567,17 @@ def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page)
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
             window._lbRecomputeNativeZoom();
-            window._lbApplyViewportState({zoom: 2.2, centerX: 0.24, centerY: 0.70});
+            window._lbApplyViewportState({
+                zoom: window._lbNativeZoom,
+                centerX: 0.24,
+                centerY: 0.70,
+                oneToOne: true,
+            });
             window._lbSaveViewportState(window._lightboxCurrentId);
             return window._lbViewportStateFromCurrent();
         }"""
     )
+    assert first_view["oneToOne"] is True
 
     page.locator("[title='Next (→)']").click()
     expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
@@ -319,19 +595,29 @@ def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page)
     assert abs(carried_view["centerX"] - first_view["centerX"]) < 0.03
     assert abs(carried_view["centerY"] - first_view["centerY"]) < 0.03
 
-    page.evaluate(
+    second_view = page.evaluate(
         """() => {
-            window._lbApplyViewportState({zoom: 2.2, centerX: 0.78, centerY: 0.30});
+            window._lbApplyViewportState({zoom: 1, centerX: 0.5, centerY: 0.5});
             window._lbSaveViewportState(window._lightboxCurrentId);
+            return window._lbViewportStateFromCurrent();
         }"""
     )
     page.locator("[title='Previous (←)']").click()
     expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbTryApplyPendingViewportState();
+        }"""
+    )
     page.wait_for_function("window._lbPendingViewportState === null")
-    restored_view = page.evaluate("window._lbViewportStateFromCurrent()")
-    assert abs(restored_view["zoom"] - first_view["zoom"]) < 0.05
-    assert abs(restored_view["centerX"] - first_view["centerX"]) < 0.03
-    assert abs(restored_view["centerY"] - first_view["centerY"]) < 0.03
+    returned_view = page.evaluate("window._lbViewportStateFromCurrent()")
+    assert abs(returned_view["zoom"] - second_view["zoom"]) < 0.05
+    assert abs(returned_view["centerX"] - second_view["centerX"]) < 0.03
+    assert abs(returned_view["centerY"] - second_view["centerY"]) < 0.03
+    assert abs(returned_view["zoom"] - first_view["zoom"]) > 0.5
 
 
 def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
@@ -521,18 +807,15 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     assert abs(carried["centerY"] - before["viewport"]["centerY"]) < 0.03
 
 
-def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
+def test_browse_lightbox_mid_transition_save_keeps_navigation_handoff(
     live_server, page
 ):
-    """A save while the outgoing bitmap is still frozen must not stomp the
-    incoming photo's intended inspection point.
+    """A save while the outgoing bitmap is frozen keeps the handed-off viewport.
 
     Regression: while _lbVisualTransitionPending is true, _lightboxCurrentId
     already points at the incoming photo but the DOM transform still belongs
-    to the outgoing bitmap. A save triggered by another arrow press or
-    closeLightbox in that window used to read the DOM and record the outgoing
-    transform under the incoming photo's id, replacing the state the next
-    open of that photo would otherwise restore.
+    to the outgoing bitmap. The save must use the pending navigation handoff,
+    rather than re-reading that transitional DOM state.
     """
     first_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
@@ -591,8 +874,8 @@ def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
         }"""
     )
 
-    # Prime a distinctive saved viewport for the incoming photo so we can
-    # tell "our intended state survives" from "outgoing DOM state leaked in".
+    # Prime a distinctive old viewport for the incoming photo. Navigation
+    # must ignore it in favor of the current outgoing viewport.
     incoming_id = page.evaluate("window.photos[1].id")
     intended = {"zoom": 2.5, "centerX": 0.80, "centerY": 0.15}
     page.evaluate(
@@ -633,21 +916,14 @@ def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
         incoming_id,
     )
 
-    # The stored state for the incoming photo must not be the outgoing
-    # bitmap's transform. It should be either the pending restore state that
-    # openLightbox armed for the incoming photo, or the pre-existing saved
-    # state we primed above — never the outgoing photo's centerX/centerY.
+    # The stored state for the incoming photo should be the pending handoff,
+    # not the stale per-photo viewport primed above.
     stored = saved_during_transition["stored"]
     assert stored is not None
-    # Guard against the specific regression: the outgoing photo's off-center
-    # inspection point (0.20, 0.75) must not be recorded under the incoming
-    # photo's id.
-    assert not (
-        abs(stored["centerX"] - outgoing["centerX"]) < 0.05
-        and abs(stored["centerY"] - outgoing["centerY"]) < 0.05
-    ), (
-        "outgoing DOM transform leaked into incoming photo's saved viewport"
-    )
+    assert abs(stored["zoom"] - outgoing["zoom"]) < 0.05
+    assert abs(stored["centerX"] - outgoing["centerX"]) < 0.05
+    assert abs(stored["centerY"] - outgoing["centerY"]) < 0.05
+    assert abs(stored["centerX"] - intended["centerX"]) > 0.1
 
     held_original.pop("route").fulfill(
         body=next_svg, content_type="image/svg+xml"
