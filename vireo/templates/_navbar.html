@@ -526,15 +526,26 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .lightbox-overlay.lb-hide-info .lightbox-zoom-badge {
   display: none !important;
 }
-.lightbox-actions {
+.lightbox-bottom-bar {
   position: absolute;
+  left: 24px;
   right: 24px;
   bottom: 16px;
+  z-index: 10000;
   display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  pointer-events: none;
+}
+.lightbox-actions {
+  display: flex;
+  flex: 1 1 520px;
+  min-width: 0;
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
-  max-width: calc(100vw - 48px);
   padding: 8px;
   border-radius: 6px;
   background: rgba(0, 0, 0, 0.62);
@@ -542,6 +553,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.42);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+  pointer-events: auto;
 }
 .lifelist-lb-panel { display:flex; flex-direction:column; gap:6px; align-items:stretch; padding:4px 8px; border-radius:4px; background:rgba(12,14,16,0.88); border:1px solid rgba(255,255,255,0.42); color:#f4f7f8; font-size:12px; font-weight:650; text-shadow:0 1px 1px rgba(0,0,0,0.75); }
 .lifelist-lb-row { display:flex; align-items:center; gap:8px; justify-content:space-between; }
@@ -954,15 +966,20 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   line-height: 1.4;
 }
 .lightbox-filename {
-  position: absolute;
-  bottom: 16px;
-  left: 50%;
-  transform: translateX(-50%);
+  flex: 0 1 min(35vw, 420px);
+  max-width: min(35vw, 420px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-muted);
   font-size: 13px;
   background: rgba(0,0,0,0.6);
   padding: 4px 12px;
   border-radius: 4px;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+  pointer-events: auto;
 }
 
 /* ---------- Pipeline Inspector ---------- */
@@ -3449,10 +3466,14 @@ async function createWorkspace() {
       <div id="lightboxEye" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;"></div>
     </div>
   </div>
-  <div class="lightbox-filename" id="lightboxFilename"></div>
   <div class="lightbox-flag-status" id="lightboxFlagStatus" aria-live="polite"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 160px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
-  <div id="lightboxActions" class="lightbox-actions">
+  <div class="lightbox-bottom-bar">
+    <div class="lightbox-filename" id="lightboxFilename"
+         onmousedown="event.stopPropagation();"
+         onclick="event.stopPropagation();"
+         title="Select and copy filename"></div>
+    <div id="lightboxActions" class="lightbox-actions">
     <button class="lb-action-btn" id="lightboxToggleBoxes" onclick="event.stopPropagation(); toggleLightboxBoxes();" title="Toggle detection boxes (b)">
       Hide Boxes
     </button>
@@ -3491,6 +3512,7 @@ async function createWorkspace() {
       Edit Photo
     </button>
     <button class="lb-action-btn lb-action-danger" onclick="lightboxDelete()" title="Delete photo">Delete</button>
+    </div>
   </div>
   <div class="lightbox-adjust-panel" id="lightboxAdjustPanel" onclick="event.stopPropagation();">
     <div class="lb-adjust-header">
