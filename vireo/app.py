@@ -25163,6 +25163,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "Companion re-extraction failed for photo %s; "
                             "keeping undersized RAW working copy", photo_id,
                         )
+            if primary_is_raw and trusted_wc_path:
+                expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
+                display_is_near_full = (
+                    expected_w <= 0
+                    or expected_h <= 0
+                    or (
+                        uw >= expected_w * 0.99
+                        and uh >= expected_h * 0.99
+                    )
+                )
+                if not display_is_near_full:
+                    # RAW extraction can report success after falling back to
+                    # a preview-sized embedded JPEG. Do not persist that as
+                    # the 1:1 display cache when a trusted full-res copy is
+                    # already available, and mark the RAW retry so later
+                    # requests take the fast fallback path.
+                    with contextlib.suppress(OSError):
+                        os.unlink(wc_abs)
+                    _record_working_copy_failure(
+                        db, photo, source_for_extraction,
+                    )
+                    return send_file(trusted_wc_path, mimetype="image/jpeg")
             if not primary_is_raw:
                 updates = ["working_copy_path=?"]
                 params = [wc_rel]

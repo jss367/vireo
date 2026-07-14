@@ -4468,6 +4468,79 @@ def test_original_records_raw_failure_before_working_copy_fallback(
     assert row["working_copy_failed_source"] == "source"
 
 
+def test_original_uses_trusted_copy_when_raw_display_is_undersized(
+    client_with_photo, monkeypatch,
+):
+    """A preview-sized embedded JPEG must not become the 1:1 display cache."""
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder_path = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
+        "WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()["path"]
+    raw_path = os.path.join(folder_path, "embedded.NEF")
+    with open(raw_path, "wb") as raw_file:
+        raw_file.write(b"unsupported raw")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_rel = f"working/{photo_id}.jpg"
+    working_path = os.path.join(vireo_dir, working_rel)
+    Image.new("RGB", (800, 600), (40, 80, 120)).save(working_path, "JPEG")
+    file_mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='embedded.NEF', extension='.nef',
+               width=800, height=600, file_mtime=?,
+               companion_path=NULL, working_copy_path=?,
+               working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (file_mtime, working_rel, photo_id),
+    )
+    db.conn.commit()
+
+    extract_calls = []
+
+    def extract_embedded_preview(source, output, *args, **kwargs):
+        extract_calls.append(str(source))
+        Image.new("RGB", (320, 240), (180, 90, 40)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(
+        image_loader, "extract_working_copy", extract_embedded_preview,
+    )
+
+    client = app.test_client()
+    first = client.get(f"/photos/{photo_id}/original")
+    second = client.get(f"/photos/{photo_id}/original")
+
+    with open(working_path, "rb") as working_file:
+        working_bytes = working_file.read()
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.data == working_bytes
+    assert second.data == working_bytes
+    assert extract_calls == [raw_path]
+    assert not os.path.exists(
+        os.path.join(vireo_dir, "originals", f"{photo_id}.display.jpg")
+    )
+    row = db.conn.execute(
+        """SELECT working_copy_failed_mtime, working_copy_failed_source
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["working_copy_failed_source"] == "source"
+
+
 def test_original_falls_back_to_companion_when_raw_extraction_fails(
     client_with_photo, monkeypatch,
 ):
