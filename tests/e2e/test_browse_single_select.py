@@ -161,6 +161,41 @@ def test_prepare_full_resolution_uses_active_browse_selection(live_server, page)
     expect(button).to_have_text("Prepare Full Resolution")
 
 
+def test_prepare_full_resolution_surfaces_fatal_job_failure(live_server, page):
+    page.route(
+        "**/api/jobs/prepare-full-resolution",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "prepare-failed-test", "total": 1}),
+        ),
+    )
+    page.route(
+        "**/api/jobs/prepare-failed-test/stream",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            body=(
+                "event: complete\n"
+                "data: {\"status\":\"failed\",\"result\":null,"
+                "\"errors\":[\"database unavailable\"]}\n\n"
+            ),
+        ),
+    )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+    page.locator("#prepareFullResolutionBtn").click()
+
+    page.wait_for_function(
+        "() => window._prepareFullResolutionJobId === null"
+    )
+    expect(page.locator("#toastContainer > div").last).to_have_text(
+        "Full-resolution preparation failed: database unavailable"
+    )
+
+
 def test_adjust_capture_time_lives_in_native_menu_not_batch_bar(live_server, page):
     """Capture-time adjustment is useful, but too infrequent for the Browse
     batch bar; it remains available through the native Photo menu command.

@@ -8487,6 +8487,17 @@ async function prepareFullResolutionSelection(photoIds) {
           showToast('Full-resolution preparation was stopped.', 'error');
           return;
         }
+        if (done.status === 'failed') {
+          var errors = done.errors || [];
+          var failureMessage = errors.length
+            ? errors[0]
+            : 'The preparation job ended before producing a result.';
+          showToast(
+            'Full-resolution preparation failed: ' + failureMessage,
+            'error'
+          );
+          return;
+        }
         var ready = result.ready || 0;
         var failed = result.failed || 0;
         var copied = result.copied || 0;
