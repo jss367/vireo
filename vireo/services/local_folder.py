@@ -334,6 +334,48 @@ def _delete_state_rows(db, root_folder_id: int) -> None:
     db.conn.execute("DELETE FROM local_folders WHERE root_folder_id=?", (root_folder_id,))
 
 
+def _materialize_ancestor_workspaces(db, source_path: str, folders: list[dict]) -> None:
+    """Insert workspace_folders rows for ancestor-linked workspaces.
+
+    When workspace A links ``/parent`` and hasn't yet materialized
+    ``/parent/child``, staging ``/parent/child`` in another workspace rebases
+    the child ``folders.path`` under ``local-folders/``. After that move,
+    ``_materialize_workspace_descendants(A)`` walks ``folders.path`` below
+    ``/parent`` and no longer finds the child, so A never gets a
+    ``workspace_folders`` link to it. That link is what
+    :func:`affected_workspace_ids` and :func:`workspace_local_root_ids` both
+    key off — without it, ``workspace_status(A)`` reports ``/parent`` as
+    remote and the UI hides sync/discard controls even though A's catalog
+    is partly rebased under the shared local copy. Running this before the
+    rebase transaction closes the gap while the child rows are still at
+    their original source paths.
+    """
+    if not folders:
+        return
+    rows = db.conn.execute(
+        """SELECT DISTINCT wf.workspace_id, f.path
+           FROM workspace_folders wf
+           JOIN folders f ON f.id = wf.folder_id"""
+    ).fetchall()
+    ancestor_ws_ids = sorted({
+        int(row["workspace_id"])
+        for row in rows
+        if row["path"] and _is_within(source_path, row["path"])
+    })
+    if not ancestor_ws_ids:
+        return
+    folder_ids = [folder["folder_id"] for folder in folders]
+    pairs = [(ws_id, folder_id) for ws_id in ancestor_ws_ids for folder_id in folder_ids]
+    db.conn.executemany(
+        """INSERT OR IGNORE INTO workspace_folders
+           (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
+        pairs,
+    )
+    db.conn.commit()
+    for ws_id in ancestor_ws_ids:
+        db._new_images_cache.invalidate_workspaces(db._db_path, [ws_id])
+
+
 def stage_folder(
     db,
     root_folder_id: int,
@@ -415,6 +457,13 @@ def stage_folder(
             if begin_commit and not begin_commit():
                 raise LocalWorkspaceCancelled("Local folder transfer cancelled")
             _write_manifest(manifest_path(vireo_dir, root_folder_id), manifest)
+
+            # Ancestor-linked workspaces need explicit workspace_folders rows
+            # for every descendant we're about to rebase; otherwise the rebase
+            # hides those rows from _materialize_workspace_descendants and the
+            # workspace can never reach the shared local copy from its
+            # ancestor root. Must run before the UPDATE below.
+            _materialize_ancestor_workspaces(db, roots[0]["source_path"], folders)
 
             db.conn.execute("BEGIN IMMEDIATE")
             try:

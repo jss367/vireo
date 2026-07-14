@@ -427,6 +427,53 @@ def test_workspace_status_surfaces_descendant_local_session(tmp_path):
         db.close()
 
 
+def test_ancestor_workspace_materialized_before_stage_rebase(tmp_path):
+    """When a workspace links an ancestor of the staged folder and the child
+    row was inserted after that link, staging must materialize the workspace's
+    link to the child BEFORE rebasing folders.path. Otherwise
+    _materialize_workspace_descendants can no longer find the child under the
+    ancestor path (it's been moved under local-folders/), so
+    affected_workspace_ids/workspace_local_root_ids omit the workspace and
+    workspace_status still reports the folder as remote even though its
+    catalog is partly rebased under the shared local copy."""
+    from services.local_folder import affected_workspace_ids, workspace_local_root_ids
+
+    db = Database(str(tmp_path / "vireo.db"))
+    parent_ws = db.create_workspace("Parent")
+    child_ws = db.create_workspace("Child")
+    parent = tmp_path / "nas" / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (child / "bird.jpg").write_bytes(b"original")
+    parent_id = db.add_folder(str(parent), name="parent", link_to_workspace=False)
+    # Link the parent BEFORE the child row exists. add_workspace_folder only
+    # materializes descendants present at link time, so parent_ws gets no
+    # explicit workspace_folders row for any child yet — this is the gap the
+    # fix has to close before rebasing catalog paths.
+    db.add_workspace_folder(parent_ws, parent_id)
+    child_id = db.add_folder(str(child), name="child", parent_id=parent_id, link_to_workspace=False)
+    db.add_workspace_folder(child_ws, child_id)
+
+    pre_row = db.conn.execute(
+        "SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+        (parent_ws, child_id),
+    ).fetchone()
+    assert pre_row is None
+
+    try:
+        stage_folder(db, child_id, str(tmp_path / "vireo"))
+
+        assert parent_ws in affected_workspace_ids(db, child_id)
+        assert child_id in workspace_local_root_ids(db, parent_ws)
+
+        status = workspace_status(db, parent_ws, str(tmp_path / "vireo"))
+        assert status["state"] == "mixed"
+        local_items = [item for item in status["folders"] if item["state"] != "remote"]
+        assert local_items and local_items[0]["root_folder_id"] == child_id
+    finally:
+        db.close()
+
+
 def test_ancestor_workspace_can_sync_descendant_local_session(tmp_path, monkeypatch):
     """A workspace linked to an ancestor of a staged folder must be able to
     sync/discard the descendant session — the workspace-status surface makes
