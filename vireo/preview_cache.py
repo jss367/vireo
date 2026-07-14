@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 def cleanup_cached_files_for_deleted_photos(
     thumb_cache_dir, files, progress_callback=None,
 ):
-    """Remove thumbnail, preview, and working-copy files for deleted photos.
+    """Remove thumbnail, preview, working-copy, and display files for deleted photos.
 
     ``files`` is the list returned by ``db.delete_photos`` /
     ``db.delete_folder``. The FK cascade drops preview_cache rows when
@@ -35,6 +35,7 @@ def cleanup_cached_files_for_deleted_photos(
     vireo_dir = os.path.dirname(thumb_cache_dir)
     preview_dir = os.path.join(vireo_dir, "previews")
     working_dir = os.path.join(vireo_dir, "working")
+    originals_dir = os.path.join(vireo_dir, "originals")
     # Offline-cache layout: offline/{originals,xmp,companions}/{pid}{ext}.
     # The FK cascade drops the offline_originals row when the photo is
     # deleted, so we lose the exact stored paths — glob by photo id to
@@ -59,6 +60,17 @@ def cleanup_cached_files_for_deleted_photos(
                     log.warning(
                         "Failed to remove cached file %s after photo "
                         "delete — will be reclaimed by Clear Cache: %s",
+                        cached, e,
+                    )
+        for name in (f"{pid}.jpg", f"{pid}.display.jpg"):
+            cached = os.path.join(originals_dir, name)
+            if os.path.isfile(cached):
+                try:
+                    os.remove(cached)
+                except OSError as e:
+                    log.warning(
+                        "Failed to remove cached original rendition %s after "
+                        "photo delete — will be reclaimed by Clear Cache: %s",
                         cached, e,
                     )
         for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):

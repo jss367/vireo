@@ -365,6 +365,11 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             "UPDATE photos SET companion_path = ? WHERE id = ?",
             (companion["filename"], primary["id"]),
         )
+        if vireo_dir:
+            # An unedited RAW display cache may have been rendered before the
+            # camera JPEG was paired. File mtimes cannot tell which source
+            # produced that cache, so discard it when the companion changes.
+            _invalidate_raw_display_cache(vireo_dir, primary["id"])
 
         # Transfer detections (and their cascaded predictions) from companion to primary.
         # Detection IDs are content-addressed on (photo_id, detector_model, box,
@@ -550,13 +555,29 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     commit_with_retry(db.conn)
 
 
+def _invalidate_raw_display_cache(vireo_dir, photo_id):
+    display_file = os.path.join(
+        vireo_dir, "originals", f"{photo_id}.display.jpg",
+    )
+    if os.path.exists(display_file):
+        try:
+            os.remove(display_file)
+        except OSError:
+            log.debug(
+                "Could not delete stale RAW display rendition %s",
+                display_file,
+                exc_info=True,
+            )
+
+
 def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
-    """Delete cached thumbnail / working copy / tracked preview for a photo.
+    """Delete cached thumbnail / working copy / display / preview for a photo.
 
     Called when the scanner detects that an existing photo's source content
-    has changed (different file_hash). Thumbnails, working copies, and
-    preview-pyramid sizes are all derived from the source bytes, so they're
-    stale as soon as the source changes.
+    has changed (different file_hash). Thumbnails, working copies, unedited
+    full-resolution display renditions, and preview-pyramid sizes are all
+    derived from the source bytes, so they're stale as soon as the source
+    changes.
 
     Scope is intentionally O(1) per photo — untracked preview files
     (no preview_cache row) are handled by
@@ -624,6 +645,8 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
         " WHERE id = ?",
         (photo_id,),
     )
+
+    _invalidate_raw_display_cache(vireo_dir, photo_id)
 
     # Preview pyramid + its LRU accounting. Only drop a preview_cache row
     # for sizes whose file was successfully removed (or was already

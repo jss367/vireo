@@ -1130,6 +1130,36 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     assert db.get_photo_edit_recipe(photo["id"]) is None
 
 
+def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
+    """A newly paired camera JPEG must replace a pre-pairing RAW rendition."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(img_dir), name="photos")
+    raw_id = db.add_photo(
+        folder_id=folder_id, filename="IMG_002.cr3", extension=".cr3",
+        file_size=2000, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=folder_id, filename="IMG_002.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+    )
+
+    originals_dir = tmp_path / "originals"
+    originals_dir.mkdir()
+    display_cache = originals_dir / f"{raw_id}.display.jpg"
+    display_cache.write_bytes(b"pre-pairing RAW display")
+
+    _pair_raw_jpeg_companions(db, vireo_dir=str(tmp_path))
+
+    photo = db.get_photo(raw_id)
+    assert photo["companion_path"] == "IMG_002.jpg"
+    assert not display_cache.exists()
+
+
 def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
     """Pairing raw+JPEG must move edit-mask snapshot files to the primary id.
 
@@ -2853,6 +2883,10 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     # Seed a preview file + accounting row, as /photos/<id>/preview would.
     preview_file = preview_dir / f"{photo_id}_1920.jpg"
     Image.new("RGB", (1920, 1440), color=(255, 0, 0)).save(str(preview_file), "JPEG")
+    originals_dir = vireo_dir / "originals"
+    originals_dir.mkdir()
+    display_file = originals_dir / f"{photo_id}.display.jpg"
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(display_file, "JPEG")
     file_bytes = preview_file.stat().st_size
     db.preview_cache_insert(photo_id, 1920, file_bytes)
     assert db.preview_cache_total_bytes() == file_bytes
@@ -2863,6 +2897,7 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
 
     assert not preview_file.exists(), "preview file should be deleted"
+    assert not display_file.exists(), "RAW display cache should be deleted"
     assert db.preview_cache_get(photo_id, 1920) is None, (
         "preview_cache row must be deleted alongside the file; "
         "leaving it inflates preview_cache_total_bytes and triggers "
