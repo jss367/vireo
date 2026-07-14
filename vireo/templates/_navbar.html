@@ -8343,6 +8343,8 @@ function _lbShouldPreloadOriginal(photoId) {
     _lbCurrentSrcKey !== 'full' ||
     _lbFullUsesOriginal !== false ||
     _lbOriginalUnavailable ||
+    _lbZoom > 1.001 ||
+    (_lbDesiredSrcKey && _lbDesiredSrcKey !== 'full') ||
     !_lbNativeZoom ||
     _lbPickSourceKey(_lbNativeZoom) !== 'original'
   ) return false;
@@ -8446,6 +8448,9 @@ function _lbScheduleSourceSwap(targetZoom) {
   if (!_lightboxCurrentId) return;
   var desired = _lbPickSourceKey(targetZoom);
   _lbDesiredSrcKey = desired;
+  if (_lbZoom > 1.001 && desired !== 'original') {
+    _lbCancelOriginalPreload();
+  }
   if (desired === _lbCurrentSrcKey) {
     _lbPrimeAdjacentPhotos(desired);
     return;
