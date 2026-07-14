@@ -5725,10 +5725,16 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     plain_preview = preview_dir / f"{pid_plain}_1920.jpg"
     edited_thumb = thumb_dir / f"{pid_edited}.jpg"
     plain_thumb = thumb_dir / f"{pid_plain}.jpg"
+    edited_raw_thumb = thumb_dir / f"{pid_edited}_raw.jpg"
+    edited_jpeg_thumb = thumb_dir / f"{pid_edited}_jpeg.jpg"
+    plain_raw_thumb = thumb_dir / f"{pid_plain}_raw.jpg"
     edited_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"o" * 1024)
     plain_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"p" * 1024)
     edited_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"t" * 1024)
     plain_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"u" * 1024)
+    edited_raw_thumb.write_bytes(b"stale raw")
+    edited_jpeg_thumb.write_bytes(b"stale jpeg")
+    plain_raw_thumb.write_bytes(b"plain raw")
     db.preview_cache_insert(pid_edited, 1920, edited_preview.stat().st_size)
     db.preview_cache_insert(pid_plain, 1920, plain_preview.stat().st_size)
     db.conn.execute(
@@ -5747,6 +5753,8 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     # Edited photo: preview and thumb gone, thumb_path cleared, no row.
     assert not edited_preview.exists()
     assert not edited_thumb.exists()
+    assert not edited_raw_thumb.exists()
+    assert not edited_jpeg_thumb.exists()
     assert db.preview_cache_get(pid_edited, 1920) is None
     edited_row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (pid_edited,),
@@ -5756,6 +5764,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     # Plain photo: cache survives because no recipe → output bytes unchanged.
     assert plain_preview.exists()
     assert plain_thumb.exists()
+    assert plain_raw_thumb.exists()
     assert db.preview_cache_get(pid_plain, 1920) is not None
     plain_row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (pid_plain,),

@@ -1,13 +1,21 @@
 import base64
+import io
 import re
 import time
 
+from PIL import Image
 from playwright.sync_api import expect
 
 _PNG_1X1 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
     "/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
+
+
+def _png_bytes(size, color):
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, "PNG")
+    return buf.getvalue()
 
 
 def test_browse_lightbox_arrows_navigate(live_server, page):
@@ -96,6 +104,226 @@ def test_browse_lightbox_same_photo_reopen_does_not_lock_controls(live_server, p
         "actionsInert": False,
         "adjustInert": False,
     }
+
+
+def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
+    live_server, page, tmp_path,
+):
+    """Pair labels follow displayed pixels and failed switches preserve state."""
+    db = live_server["db"]
+    folder_path = tmp_path / "paired"
+    folder_path.mkdir()
+    folder_id = db.add_folder(str(folder_path), name="paired")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="developed.nef",
+        extension=".nef",
+        file_size=1000,
+        file_mtime=1.0,
+        width=4000,
+        height=3000,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='developed.jpg' WHERE id=?",
+        (photo_id,),
+    )
+    db.save_detections(photo_id, [{
+        "box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+        "confidence": 0.95,
+        "category": "animal",
+    }], detector_model="test-detector")
+    db.conn.commit()
+
+    jpeg = _png_bytes((200, 100), "green")
+    raw = _png_bytes((100, 200), "red")
+    fail_raw = {"enabled": False, "attempts": 0}
+    hold_raw = {"enabled": False, "routes": []}
+
+    def serve_pair(route):
+        wants_raw = "source=raw" in route.request.url
+        if wants_raw and hold_raw["enabled"]:
+            hold_raw["routes"].append(route)
+            return
+        if wants_raw and fail_raw["enabled"]:
+            fail_raw["attempts"] += 1
+            route.abort()
+            return
+        body = raw if wants_raw else jpeg
+        route.fulfill(body=body, content_type="image/png")
+
+    pair_url = re.compile(
+        rf"/(thumbnails/{photo_id}\.jpg|photos/{photo_id}/(full|original|preview))"
+    )
+    page.route(pair_url, serve_pair)
+    page.goto(f"{live_server['url']}/browse?photo_id={photo_id}")
+
+    card = page.locator(f'.grid-card[data-id="{photo_id}"]')
+    expect(card).to_be_visible()
+    jpeg_card_html = page.evaluate(
+        """photoId => {
+            const photo = Object.assign({}, window.photos.find(p => p.id === photoId), {
+                detections: [{x: 0.1, y: 0.2, w: 0.3, h: 0.4, confidence: 0.95}]
+            });
+            const previous = window.showDetectionBoxes;
+            window.showDetectionBoxes = true;
+            const html = window.renderPhotoCard(photo, 0);
+            window.showDetectionBoxes = previous;
+            return html;
+        }""",
+        photo_id,
+    )
+    assert 'style="display:none;left:' in jpeg_card_html
+    card.dblclick()
+
+    control = page.locator("#lightboxSourceControl")
+    image = page.locator("#lightboxImg")
+    expect(control).to_be_visible()
+    expect(control).to_have_text("Viewing JPEG · Show RAW")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.naturalWidth === 200 && img.naturalHeight === 100;
+        }"""
+    )
+    assert image.evaluate("img => [img.naturalWidth, img.naturalHeight]") == [200, 100]
+    assert page.evaluate(
+        """() => [
+            document.getElementById('lightboxTransform').style.width,
+            document.getElementById('lightboxTransform').style.height
+        ]"""
+    ) == ["200px", "100px"]
+
+    control.click()
+    expect(control).to_have_text("Viewing RAW · Show JPEG")
+    assert image.evaluate("img => [img.naturalWidth, img.naturalHeight]") == [100, 200]
+    expect(page.locator("#lightboxDetections .lb-detection-box")).to_have_count(1)
+    expect(card.locator(".pair-source-badge")).to_have_text("RAW · JPEG pair")
+    rebuilt = page.evaluate(
+        """photoId => {
+            const photo = Object.assign({}, window.photos.find(p => p.id === photoId), {
+                detections: [{x: 0.1, y: 0.2, w: 0.3, h: 0.4, confidence: 0.95}]
+            });
+            const previous = window.showDetectionBoxes;
+            window.showDetectionBoxes = true;
+            const html = window.renderPhotoCard(photo, 0);
+            window.showDetectionBoxes = previous;
+            return html;
+        }""",
+        photo_id,
+    )
+    assert "RAW · JPEG pair" in rebuilt
+    assert 'class="det-box"' in rebuilt
+    assert 'style="display:none;left:' not in rebuilt
+
+    control.click()
+    expect(control).to_have_text("Viewing JPEG · Show RAW")
+    fail_raw["enabled"] = True
+    attempts_before = fail_raw["attempts"]
+    control.click()
+    for _ in range(50):
+        if fail_raw["attempts"] > attempts_before:
+            break
+        page.wait_for_timeout(100)
+    assert fail_raw["attempts"] > attempts_before, (
+        "Expected the RAW source request to be attempted so the abort "
+        "path is exercised before asserting the state is unchanged."
+    )
+    expect(control).to_have_text("Viewing JPEG · Show RAW")
+    assert image.evaluate("img => [img.naturalWidth, img.naturalHeight]") == [200, 100]
+
+    fail_raw["enabled"] = False
+    hold_raw["enabled"] = True
+    control.click()
+    expect(control).to_contain_text("Loading RAW")
+    for _ in range(50):
+        if hold_raw["routes"]:
+            break
+        page.wait_for_timeout(20)
+    assert hold_raw["routes"], "expected the RAW probe request to be held"
+    page.evaluate(
+        """dataUrl => {
+            window._lightboxCurrentId = -1;
+            document.getElementById('lightboxImg').src = dataUrl;
+        }""",
+        "data:image/png;base64," + _PNG_1X1,
+    )
+    page.wait_for_function(
+        """() => document.getElementById('lightboxImg').naturalWidth === 1"""
+    )
+    hold_raw["routes"].pop(0).fulfill(body=raw, content_type="image/png")
+    page.wait_for_timeout(100)
+    assert image.get_attribute("src").startswith("data:image/png;base64,")
+    assert page.evaluate(
+        """photoId => (
+            window._vireoPairSource(photoId) === 'jpeg' &&
+            !window._vireoPairPendingSourceByPhoto[String(photoId)]
+        )""",
+        photo_id,
+    )
+
+
+def test_non_raw_jpeg_companions_do_not_enable_pair_controls(
+    live_server, page, tmp_path,
+):
+    """Sidecars and reverse pair records must not become RAW/JPEG switches."""
+    db = live_server["db"]
+    folder_path = tmp_path / "non-pair"
+    folder_path.mkdir()
+    folder_id = db.add_folder(str(folder_path), name="non-pair")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="developed.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+        width=200,
+        height=100,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='developed.nef' WHERE id=?",
+        (photo_id,),
+    )
+    db.conn.commit()
+
+    image_requests = []
+
+    def serve_image(route):
+        image_requests.append(route.request.url)
+        route.fulfill(body=_png_bytes((200, 100), "green"), content_type="image/png")
+
+    page.route(
+        re.compile(
+            rf"/(thumbnails/{photo_id}\.jpg|photos/{photo_id}/(full|original|preview))"
+        ),
+        serve_image,
+    )
+    page.goto(f"{live_server['url']}/browse?photo_id={photo_id}")
+
+    card = page.locator(f'.grid-card[data-id="{photo_id}"]')
+    expect(card).to_be_visible()
+    expect(card.locator(".pair-source-badge")).to_have_count(0)
+    assert page.evaluate(
+        """() => [
+            window.vireoPhotoIsRawJpegPair({
+                filename: 'developed.jpg', extension: '.jpg',
+                companion_path: 'developed.nef'
+            }),
+            window.vireoPhotoIsRawJpegPair({
+                filename: 'capture.nef', extension: '.nef',
+                companion_path: 'capture.xmp'
+            }),
+            window.vireoPhotoIsRawJpegPair({
+                filename: 'capture.NEF', companion_path: 'capture.JPEG'
+            })
+        ]"""
+    ) == [False, False, True]
+
+    card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    expect(page.locator("#lightboxSourceControl")).to_be_hidden()
+    assert page.evaluate("photoId => window._vireoPairSource(photoId)", photo_id) is None
+    assert image_requests
+    assert all("source=" not in request_url for request_url in image_requests)
 
 
 def test_browse_lightbox_filename_can_be_selected_without_resetting_zoom(

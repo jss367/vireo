@@ -167,7 +167,7 @@ def _retry_thumbnail_with_working_copy(
 
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
-    raw_decode=None, min_source_size=None, native_size=None,
+    raw_decode=None, min_source_size=None, native_size=None, cache_name=None,
 ):
     """Generate a JPEG thumbnail for a photo.
 
@@ -192,11 +192,15 @@ def generate_thumbnail(
             of the photo (see ``render_source.recipe_source_dimensions``),
             used to scale the recipe's detail pass (sharpen/NR kernels) to
             this render's resolution.
+        cache_name: optional cache filename. The default remains
+            ``{photo_id}.jpg``; paired-source views use a distinct filename
+            so switching between RAW and JPEG can never return pixels cached
+            for the other source.
 
     Returns:
         path to the thumbnail file, or None on failure
     """
-    thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+    thumb_path = os.path.join(cache_dir, cache_name or f"{photo_id}.jpg")
 
     if os.path.exists(thumb_path):
         return thumb_path

@@ -3478,6 +3478,9 @@ async function createWorkspace() {
          onclick="event.stopPropagation();"
          title="Select and copy filename"></div>
     <div id="lightboxActions" class="lightbox-actions">
+    <button class="lb-action-btn lb-action-accent" id="lightboxSourceControl" style="display:none;" onclick="event.stopPropagation(); vireoTogglePairSource(_lightboxCurrentId);" title="Switch between the developed JPEG and RAW source">
+      Viewing JPEG · Show RAW
+    </button>
     <button class="lb-action-btn" id="lightboxToggleBoxes" onclick="event.stopPropagation(); toggleLightboxBoxes();" title="Toggle detection boxes (b)">
       Hide Boxes
     </button>
@@ -4019,6 +4022,18 @@ function _vireoUrlWithRenderVersion(url, photoId) {
   return _vireoUrlWithQueryParam(url, 'rv', version);
 }
 
+function _vireoUrlWithPhotoSource(url, source) {
+  // Source is a mutable choice, unlike cache-bust params. Remove any prior
+  // value before appending so toggling JPEG -> RAW cannot leave Flask reading
+  // the first of two conflicting ``source`` query parameters.
+  url = String(url || '')
+    .replace(/([?&])source=[^&]*(&?)/, function(match, prefix, suffix) {
+      return suffix ? prefix : '';
+    })
+    .replace(/[?&]$/, '');
+  return source ? _vireoUrlWithQueryParam(url, 'source', source) : url;
+}
+
 function _vireoCleanRenderSearch(search) {
   if (!search) return '';
   try {
@@ -4057,6 +4072,221 @@ function _vireoBumpRenderVersion(photoId) {
   return version;
 }
 
+// A RAW+JPEG pair stays one logical photo, but the user can choose which
+// physical file supplies the displayed pixels. A newly discovered pair starts
+// on JPEG because that file is commonly the photographer's developed result.
+var _vireoPairKnownByPhoto = {};
+var _vireoPairSourceByPhoto = {};
+var _vireoPairPendingSourceByPhoto = {};
+
+window.vireoPhotoIsRawJpegPair = function(photo) {
+  if (!photo || !photo.companion_path) return false;
+  var rawExtensions = {
+    '.nef': true,
+    '.cr2': true,
+    '.cr3': true,
+    '.arw': true,
+    '.raf': true,
+    '.dng': true,
+    '.rw2': true,
+    '.orf': true
+  };
+  var primaryName = photo.filename || '';
+  var primaryMatch = String(primaryName).toLowerCase().match(/(\.[^.\/\\]+)$/);
+  var primaryExt = primaryMatch ? primaryMatch[1] : '';
+  if (!primaryExt) {
+    primaryExt = String(photo.extension || '').toLowerCase();
+    if (primaryExt && primaryExt.charAt(0) !== '.') primaryExt = '.' + primaryExt;
+  }
+  var companionMatch = String(photo.companion_path).toLowerCase().match(/(\.[^.\/\\]+)$/);
+  var companionExt = companionMatch ? companionMatch[1] : '';
+  return !!rawExtensions[primaryExt] && (companionExt === '.jpg' || companionExt === '.jpeg');
+};
+
+window.vireoRememberPhotoPair = function(photo) {
+  if (!photo || photo.id == null) return;
+  var key = String(photo.id);
+  if (window.vireoPhotoIsRawJpegPair(photo)) {
+    _vireoPairKnownByPhoto[key] = true;
+    if (!_vireoPairSourceByPhoto[key]) _vireoPairSourceByPhoto[key] = 'jpeg';
+  } else if (Object.prototype.hasOwnProperty.call(photo, 'companion_path')) {
+    delete _vireoPairKnownByPhoto[key];
+    delete _vireoPairSourceByPhoto[key];
+  }
+};
+
+function _vireoPairSource(photoId) {
+  return _vireoPairSourceByPhoto[String(photoId)] || null;
+}
+
+window.vireoUpdatePairSourceControls = function(photoId) {
+  if (photoId == null) return;
+  var key = String(photoId);
+  var paired = !!_vireoPairKnownByPhoto[key];
+  var source = _vireoPairSourceByPhoto[key] || 'jpeg';
+  var pending = _vireoPairPendingSourceByPhoto[key] || null;
+  var text = pending
+    ? 'Viewing ' + source.toUpperCase() + ' · Loading ' + pending.toUpperCase() + '…'
+    : (source === 'jpeg'
+      ? 'Viewing JPEG · Show RAW'
+      : 'Viewing RAW · Show JPEG');
+
+  var lightboxControl = document.getElementById('lightboxSourceControl');
+  if (lightboxControl && String(_lightboxCurrentId) === key) {
+    lightboxControl.style.display = paired ? '' : 'none';
+    lightboxControl.textContent = text;
+    lightboxControl.disabled = !!pending;
+  }
+  var detailControl = document.getElementById('detailSourceControl');
+  if (detailControl && String(window._detailPhotoId) === key) {
+    detailControl.style.display = paired ? 'block' : 'none';
+    detailControl.textContent = paired
+      ? 'RAW + JPEG pair · ' + text
+      : '';
+    detailControl.disabled = !!pending;
+  }
+  document.querySelectorAll('[data-pair-source-id="' + key + '"]').forEach(function(badge) {
+    badge.textContent = source === 'jpeg'
+      ? 'JPEG · RAW pair'
+      : 'RAW · JPEG pair';
+  });
+};
+
+function _vireoPairAnchorImage(photoId) {
+  var key = String(photoId);
+  if (String(_lightboxCurrentId) === key) {
+    return document.getElementById('lightboxImg');
+  }
+  if (String(window._detailPhotoId) === key) {
+    return document.getElementById('detailImg');
+  }
+  return document.querySelector('.grid-card[data-id="' + key + '"] img');
+}
+
+function _vireoPairAnchorStillCurrent(anchor, photoId) {
+  if (!anchor) return false;
+  var key = String(photoId);
+  if (anchor.id === 'lightboxImg') return String(_lightboxCurrentId) === key;
+  if (anchor.id === 'detailImg') return String(window._detailPhotoId) === key;
+  var card = anchor.closest ? anchor.closest('.grid-card') : null;
+  return !card || String(card.getAttribute('data-id')) === key;
+}
+
+function _vireoCancelPairSourceChange(photoId, requested) {
+  var key = String(photoId);
+  if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
+  delete _vireoPairPendingSourceByPhoto[key];
+  window.vireoUpdatePairSourceControls(photoId);
+}
+
+function _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc) {
+  var key = String(photoId);
+  if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
+  var anchorStillCurrent = (
+    anchor && anchor.isConnected &&
+    _vireoPairAnchorStillCurrent(anchor, photoId)
+  );
+  delete _vireoPairPendingSourceByPhoto[key];
+  window.vireoUpdatePairSourceControls(photoId);
+  if (anchorStillCurrent && oldSrc) anchor.src = oldSrc;
+  if (anchorStillCurrent && typeof showToast === 'function') {
+    showToast('Could not load the ' + requested.toUpperCase() + ' source', 'error');
+  }
+}
+
+function _vireoPairSourceImageLoaded(photoId, requested, anchor) {
+  var key = String(photoId);
+  if (
+    !anchor || anchor.id !== 'lightboxImg' ||
+    String(_lightboxCurrentId) !== key
+  ) return;
+  _lbFullLongEdge = _lbCurrentSrcKey === 'full'
+    ? (Math.max(anchor.naturalWidth || 0, anchor.naturalHeight || 0) || null)
+    : null;
+  _lbNativeZoom = null;
+  _lbRecomputeNativeZoom();
+  _lbApplyTransform();
+  if (requested === 'raw') {
+    _lbLoadDetections(photoId);
+    _lbRenderEyeCrosshair(_lbPhotoDataByPhoto[key]);
+    _lbLoadMaskVariants(photoId);
+  }
+  _lbApplyBoxesVisibility();
+  _lbApplyEyeVisibility();
+  _lbApplyMaskVisibility();
+}
+
+function _vireoCommitPairSource(photoId, requested, anchor) {
+  var key = String(photoId);
+  if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
+  _vireoPairSourceByPhoto[key] = requested;
+  delete _vireoPairPendingSourceByPhoto[key];
+  window.vireoUpdatePairSourceControls(photoId);
+  _vireoPairSourceImageLoaded(photoId, requested, anchor);
+  if (typeof window.vireoRefreshPhotoRenders === 'function') {
+    window.vireoRefreshPhotoRenders([photoId]);
+  }
+}
+
+window.vireoTogglePairSource = function(photoId) {
+  if (photoId == null || !_vireoPairKnownByPhoto[String(photoId)]) return;
+  var key = String(photoId);
+  if (_vireoPairPendingSourceByPhoto[key]) return;
+  var requested = _vireoPairSourceByPhoto[key] === 'raw'
+    ? 'jpeg'
+    : 'raw';
+  var anchor = _vireoPairAnchorImage(photoId);
+  var oldSrc = anchor ? (anchor.getAttribute('src') || anchor.src || '') : '';
+  var base = oldSrc ? _vireoBaseRenderedUrl(oldSrc) : '/thumbnails/' + key + '.jpg';
+  _vireoBumpRenderVersion(photoId);
+  var targetUrl = window.vireoRenderedUrl(base, photoId, requested);
+  _vireoPairPendingSourceByPhoto[key] = requested;
+  window.vireoUpdatePairSourceControls(photoId);
+
+  // Validate the target without disturbing the currently displayed pixels.
+  // Once it is decoded, swap the visible anchor and commit the label/state only
+  // from that image's load event. A failed request leaves the old source intact.
+  var probe = new Image();
+  probe.onload = function() {
+    if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
+    if (
+      !anchor || !anchor.isConnected ||
+      !_vireoPairAnchorStillCurrent(anchor, photoId)
+    ) {
+      _vireoCancelPairSourceChange(photoId, requested);
+      return;
+    }
+    function cleanup() {
+      anchor.removeEventListener('load', loaded);
+      anchor.removeEventListener('error', failed);
+    }
+    function loaded() {
+      cleanup();
+      if (!_vireoPairAnchorStillCurrent(anchor, photoId)) {
+        _vireoCancelPairSourceChange(photoId, requested);
+        return;
+      }
+      _vireoCommitPairSource(photoId, requested, anchor);
+    }
+    function failed() {
+      cleanup();
+      _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc);
+    }
+    anchor.addEventListener('load', loaded);
+    anchor.addEventListener('error', failed);
+    if (_vireoPairAnchorStillCurrent(anchor, photoId)) {
+      anchor.src = targetUrl;
+    } else {
+      cleanup();
+      _vireoCancelPairSourceChange(photoId, requested);
+    }
+  };
+  probe.onerror = function() {
+    _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc);
+  };
+  probe.src = targetUrl;
+};
+
 window.vireoRefreshPhotoRenders = function(photoIds) {
   if (!Array.isArray(photoIds)) photoIds = [photoIds];
   var idSet = {};
@@ -4071,9 +4301,9 @@ window.vireoRefreshPhotoRenders = function(photoIds) {
     var base = _vireoBaseRenderedUrl(attr);
     Object.keys(idSet).forEach(function(id) {
       if (
-        base === '/thumbnails/' + id + '.jpg' ||
-        base === '/photos/' + id + '/full' ||
-        base === '/photos/' + id + '/original' ||
+        base.indexOf('/thumbnails/' + id + '.jpg') === 0 ||
+        base.indexOf('/photos/' + id + '/full') === 0 ||
+        base.indexOf('/photos/' + id + '/original') === 0 ||
         base.indexOf('/photos/' + id + '/preview?') === 0
       ) {
         img.src = window.vireoRenderedUrl
@@ -4089,7 +4319,9 @@ window.vireoRefreshPhotoRenders = function(photoIds) {
   } catch (_) {}
 };
 
-window.vireoRenderedUrl = function(url, photoId) {
+window.vireoRenderedUrl = function(url, photoId, sourceOverride) {
+  var source = sourceOverride || (photoId == null ? null : _vireoPairSource(photoId));
+  if (source) url = _vireoUrlWithPhotoSource(url, source);
   var recipe = photoId == null ? null : _lbEditRecipeByPhoto[String(photoId)];
   var recipeKey = _vireoEditRecipeCacheKey(recipe);
   if (recipeKey) url = _vireoUrlWithQueryParam(url, 'er', recipeKey);
@@ -4100,6 +4332,9 @@ window.vireoThumbnailUrl = function(photoOrId) {
   var photo = photoOrId && typeof photoOrId === 'object' ? photoOrId : null;
   var photoId = photo ? (photo.photo_id != null ? photo.photo_id : photo.id) : photoOrId;
   if (photoId == null) return '';
+  if (photo && typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(photo);
+  }
   if (
     photo &&
     Object.prototype.hasOwnProperty.call(photo, 'edit_recipe') &&
@@ -5779,7 +6014,12 @@ function _lbOrientationSwapsAxes(orientation) {
 }
 
 function _lbSourceOverlaysAvailable() {
-  return !_lbRecipeHasGeometricEdit(_lbCurrentEditRecipe);
+  var pairUsesJpeg = (
+    _lightboxCurrentId != null &&
+    _vireoPairKnownByPhoto[String(_lightboxCurrentId)] &&
+    _vireoPairSource(_lightboxCurrentId) === 'jpeg'
+  );
+  return !pairUsesJpeg && !_lbRecipeHasGeometricEdit(_lbCurrentEditRecipe);
 }
 
 function _lbApplyBoxesVisibility() {
@@ -6652,6 +6892,12 @@ function openLightbox(photoId, filename, photoList, options) {
   if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
   _lbApplyEditButtonState();
   var currentFromList = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
+  if (currentFromList && typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(currentFromList);
+  }
+  if (typeof window.vireoUpdatePairSourceControls === 'function') {
+    window.vireoUpdatePairSourceControls(photoId);
+  }
   if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'flag')) {
     _lbRememberConfirmedFlag(photoId, currentFromList.flag);
   } else {
@@ -6772,6 +7018,29 @@ function openLightbox(photoId, filename, photoList, options) {
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
       if (!data || _lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+      var pairWasKnown = !!_vireoPairKnownByPhoto[String(photoId)];
+      if (typeof window.vireoRememberPhotoPair === 'function') {
+        window.vireoRememberPhotoPair(data);
+      }
+      if (typeof window.vireoUpdatePairSourceControls === 'function') {
+        window.vireoUpdatePairSourceControls(photoId);
+      }
+      if (!pairWasKnown && _vireoPairKnownByPhoto[String(photoId)]) {
+        var pairImg = document.getElementById('lightboxImg');
+        var pairLoad = function() {
+          pairImg.removeEventListener('load', pairLoad);
+          pairImg.removeEventListener('error', pairError);
+          _vireoPairSourceImageLoaded(photoId, 'jpeg', pairImg);
+        };
+        var pairError = function() {
+          pairImg.removeEventListener('load', pairLoad);
+          pairImg.removeEventListener('error', pairError);
+        };
+        pairImg.addEventListener('load', pairLoad);
+        pairImg.addEventListener('error', pairError);
+        _vireoBumpRenderVersion(photoId);
+        window.vireoRefreshPhotoRenders([photoId]);
+      }
       var editRecipeFresh = _lbEditRecipeWriteSeqFor(photoId) === editRecipeFetchSeq;
       var recipeKeyBefore = _vireoEditRecipeCacheKey(_lbEditRecipeByPhoto[String(photoId)]);
       if (!editRecipeFresh) {
@@ -8224,6 +8493,17 @@ function _lbDisplayDimsForRecipe(width, height, recipe) {
 function _lbLayoutDims() {
   var img = document.getElementById('lightboxImg');
   if (!img) return null;
+  // A developed companion may have been cropped or resized independently of
+  // its RAW primary. Use the pixels that actually loaded so the lightbox never
+  // stretches the JPEG into the RAW row's catalog dimensions.
+  if (
+    _lightboxCurrentId != null &&
+    _vireoPairKnownByPhoto[String(_lightboxCurrentId)] &&
+    _vireoPairSource(_lightboxCurrentId) === 'jpeg' &&
+    img.naturalWidth && img.naturalHeight
+  ) {
+    return { w: img.naturalWidth, h: img.naturalHeight };
+  }
   // While /original is available, keep the transform layer in original photo
   // coordinates even if the currently displayed tier is /full. That matches the
   // sharp natural-layout path and avoids recalibrating pan/zoom when the source swaps.
