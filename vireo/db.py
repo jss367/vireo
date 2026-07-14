@@ -695,6 +695,27 @@ class Database:
                 PRIMARY KEY (workspace_id, folder_id)
             );
 
+            -- Folder-scoped managed local copies.  A root folder is a
+            -- library resource shared by every workspace that references it;
+            -- workspace-local status is derived from these rows rather than
+            -- owning a second copy of the lifecycle state.
+            CREATE TABLE IF NOT EXISTS local_folders (
+                root_folder_id INTEGER PRIMARY KEY REFERENCES folders(id) ON DELETE CASCADE,
+                state          TEXT NOT NULL,
+                created_at     REAL,
+                activated_at   REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS local_folder_mappings (
+                root_folder_id INTEGER NOT NULL REFERENCES local_folders(root_folder_id) ON DELETE CASCADE,
+                folder_id      INTEGER NOT NULL UNIQUE REFERENCES folders(id) ON DELETE CASCADE,
+                source_path    TEXT NOT NULL,
+                local_path     TEXT NOT NULL,
+                original_status TEXT NOT NULL DEFAULT 'ok',
+                is_root        INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (root_folder_id, folder_id)
+            );
+
             CREATE TABLE IF NOT EXISTS collections (
                 id          INTEGER PRIMARY KEY,
                 name        TEXT,

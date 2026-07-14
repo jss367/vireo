@@ -99,286 +99,24 @@
   </div>
 </div>
 
+<!-- Shared local-folder bulk actions -->
+<div class="modal-overlay" id="localFoldersModal">
+  <div class="modal">
+    <h3 style="margin:0 0 8px 0;font-size:16px;">Finish Local Work</h3>
+    <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:14px;">
+      Choose which local folders to act on. Shared folders affect every linked workspace.
+    </div>
+    <div id="localFoldersModalItems"></div>
+    <div class="modal-actions" style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="modal-btn modal-btn-primary" id="syncSelectedLocalFolders">Sync Selected Back</button>
+      <button class="modal-btn" id="discardSelectedLocalFolders" style="color:var(--danger);">Discard Selected</button>
+      <button class="modal-btn" id="closeLocalFoldersModal">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/vireo-work-locally.js"></script>
 <script>
-loadWsFolders();
-loadHistory();
-loadWorkspaces();
-loadSubjectTypes();
-
-/* ---------- Work Locally ---------- */
-(function initLocalWorkspace() {
-var _localWorkspaceStatus = null;
-var _localWorkspaceJob = null;
-var _localActionInFlight = false;
-
-var JOB_KINDS = {
-  'work-locally-stage': 'stage',
-  'work-locally-sync': 'sync',
-  'work-locally-discard': 'discard'
-};
-var JOB_MESSAGES = {
-  stage: 'Copying workspace locally...',
-  sync: 'Checking and syncing local changes...',
-  discard: 'Discarding local copy...'
-};
-var JOB_SUCCESS = {
-  stage: 'Workspace is ready locally',
-  sync: 'Local changes synced back',
-  discard: 'Local copy discarded'
-};
-
-function renderLocalWorkspace(data) {
-  _localWorkspaceStatus = data;
-  var container = document.getElementById('localWorkspaceContent');
-  if (!container) return;
-
-  // A running transfer reported by the server (any tab, any page load) is
-  // in-progress work — attach to its stream instead of guessing from state.
-  if (data && data.job && (!_localWorkspaceJob || _localWorkspaceJob.id !== data.job.id)) {
-    watchLocalWorkspaceJob(data.job.id, JOB_KINDS[data.job.type] || 'stage');
-    return;
-  }
-
-  if (_localWorkspaceJob) {
-    var p = _localWorkspaceJob.progress;
-    var detail = '';
-    if (p && p.total) {
-      detail = Number(p.current || 0).toLocaleString() + ' / ' + Number(p.total).toLocaleString() + ' files';
-      if (p.bytes_total) {
-        detail += ' · ' + formatBytesNav(p.bytes_current || 0) + ' of ' + formatBytesNav(p.bytes_total);
-      }
-    }
-    container.innerHTML = '<div style="font-size:13px;color:var(--text-secondary);">' +
-      '<span class="btn-spinner" style="display:inline-block;margin-right:7px;"></span>' +
-      escapeHtml(JOB_MESSAGES[_localWorkspaceJob.kind] || 'Updating local workspace...') +
-      (detail ? '<div style="font-size:11px;color:var(--text-dim);margin-top:6px;">' + escapeHtml(detail) + '</div>' : '') +
-      (p && p.current_file ? '<div style="font-family:monospace;font-size:10px;color:var(--text-ghost);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(p.current_file) + '</div>' : '') +
-      '<div style="font-size:11px;color:var(--text-dim);margin-top:6px;">Progress is also available in Jobs.</div></div>';
-    return;
-  }
-
-  if (!data || data.state === 'remote') {
-    container.innerHTML =
-      '<div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px;">' +
-      'Copy this workspace to fast local storage for intensive processing. When you finish, Vireo can check for conflicts and sync your changes back to the original folders.</div>' +
-      '<button id="workLocallyBtn" class="btn btn-secondary" data-local-action="stage">Work Locally</button>';
-    return;
-  }
-
-  if (data.state === 'staging') {
-    container.innerHTML =
-      '<div style="font-size:13px;color:var(--warning);margin-bottom:10px;">A previous local copy was interrupted and needs cleanup before you continue. The original files and the catalog were not changed.</div>' +
-      '<button class="btn btn-secondary" data-local-action="cleanup">Clean Up Incomplete Copy</button>';
-    return;
-  }
-
-  if (data.state === 'recovery') {
-    if (data.recovery_kind === 'sync') {
-      var pending = data.changes
-        ? (data.changes.created + data.changes.modified + data.changes.deleted) + ' local change(s) may not be published yet. '
-        : '';
-      container.innerHTML =
-        '<div style="font-size:13px;color:var(--warning);margin-bottom:10px;">A sync-back was interrupted after some files were already published to the original storage. ' +
-        escapeHtml(pending) + 'Finish syncing back to preserve every local edit.</div>' +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
-        '<button class="btn btn-secondary" data-local-action="sync">Finish Sync-back</button>' +
-        '<button class="btn btn-secondary" style="color:var(--danger);" data-local-action="discard-recovery-sync">Discard Unpublished Changes</button>' +
-        '</div>';
-      return;
-    }
-    var missing = (data.missing_local_paths || []).map(function(path) {
-      return '<div style="font-family:monospace;font-size:11px;">' + escapeHtml(path) + '</div>';
-    }).join('');
-    container.innerHTML =
-      '<div style="font-size:13px;color:var(--warning);margin-bottom:10px;">The managed local copy is missing or incomplete. The original files were not changed.</div>' +
-      (missing ? '<div style="padding:8px 10px;background:var(--bg-tertiary);border-radius:4px;margin-bottom:12px;color:var(--text-dim);">' + missing + '</div>' : '') +
-      '<button class="btn btn-secondary" data-local-action="discard-recovery">Return to Original Files</button>';
-    return;
-  }
-
-  if (data.state !== 'active') {
-    container.innerHTML = '<span style="color:var(--danger);font-size:13px;">Local workspace state is not recognized.</span>';
-    return;
-  }
-
-  var changes = data.changes || {created: 0, modified: 0, deleted: 0};
-  var changeTotal = changes.created + changes.modified + changes.deleted;
-  var syncAvailable = data.sync_available !== false && data.source_available && !data.changes_error;
-  var sourceState = data.source_available
-    ? '<span style="color:var(--success);">Source connected</span>'
-    : '<span style="color:var(--danger);">Source unavailable</span>';
-  var sourceList = (data.source_paths || []).map(function(path) {
-    return '<div style="font-family:monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' +
-      escapeAttr(path) + '">' + escapeHtml(path) + '</div>';
-  }).join('');
-  var changesSummary = data.changes_error
-    ? '<span style="color:var(--danger);">Changes unavailable</span>'
-    : changeTotal.toLocaleString() + ' local change' + (changeTotal === 1 ? '' : 's') +
-      '<div style="font-size:10px;color:var(--text-dim);">' + changes.created + ' new · ' + changes.modified + ' modified · ' + changes.deleted + ' deleted</div>';
-  container.innerHTML =
-    '<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px;">' +
-      '<div><div style="font-size:13px;color:var(--accent);font-weight:600;">Using local files</div>' +
-      '<div style="font-size:11px;color:var(--text-dim);margin-top:3px;">' +
-        Number(data.total_files || 0).toLocaleString() + ' files · ' + formatBytesNav(data.total_bytes || 0) + ' · ' + sourceState +
-      '</div></div>' +
-      '<div style="font-size:12px;color:var(--text-secondary);text-align:right;">' + changesSummary + '</div>' +
-    '</div>' +
-    '<div style="padding:8px 10px;background:var(--bg-tertiary);border-radius:4px;margin-bottom:12px;color:var(--text-dim);">' + sourceList + '</div>' +
-    '<div style="display:flex;gap:8px;flex-wrap:wrap;">' +
-      '<button class="btn btn-secondary" data-local-action="sync" ' + (syncAvailable ? '' : 'disabled') + '>Finish and Sync Back</button>' +
-      '<button class="btn btn-secondary" style="color:var(--danger);" data-local-action="discard">Discard Local Changes</button>' +
-    '</div>' +
-    (data.changes_error ? '<div style="font-size:11px;color:var(--danger);margin-top:7px;">' + escapeHtml(data.changes_error) + '</div>' : '') +
-    (!data.source_available ? '<div style="font-size:11px;color:var(--danger);margin-top:7px;">Reconnect the original storage before syncing back.</div>' : '');
-}
-
-async function loadLocalWorkspace() {
-  try {
-    var data = await Vireo.api.json('/api/workspaces/active/local-workspace', {}, {toast: false});
-    renderLocalWorkspace(data);
-    return data;
-  } catch (e) {
-    var container = document.getElementById('localWorkspaceContent');
-    if (container) container.innerHTML = '<span style="color:var(--danger);font-size:13px;">' + escapeHtml(e.message || 'Failed to read local workspace status') + '</span>';
-    return null;
-  }
-}
-
-function watchLocalWorkspaceJob(jobId, kind) {
-  if (_localWorkspaceJob && _localWorkspaceJob.id === jobId) return;
-  if (_localWorkspaceJob && _localWorkspaceJob.source) _localWorkspaceJob.source.close();
-  var watch = {id: jobId, kind: kind, progress: null, source: null};
-  _localWorkspaceJob = watch;
-  watch.source = safeEventSource('/api/jobs/' + encodeURIComponent(jobId) + '/stream', {
-    onProgress: function(p) {
-      if (_localWorkspaceJob !== watch) return;
-      watch.progress = p;
-      renderLocalWorkspace(_localWorkspaceStatus);
-    },
-    onComplete: async function(evt) {
-      if (_localWorkspaceJob !== watch) return;
-      _localWorkspaceJob = null;
-      if (evt.status === 'completed') {
-        showToast(JOB_SUCCESS[kind] || 'Done', 'success');
-      } else if (evt.status !== 'cancelled') {
-        var detail = (evt.errors && evt.errors.length) ? evt.errors[evt.errors.length - 1] : 'The job did not complete';
-        showToast(detail, 'error');
-      }
-      await loadLocalWorkspace();
-      await loadWsFolders();
-    },
-    onError: async function() {
-      if (_localWorkspaceJob !== watch) return;
-      _localWorkspaceJob = null;
-      await loadLocalWorkspace();
-    }
-  });
-  renderLocalWorkspace(_localWorkspaceStatus);
-}
-
-async function startWorkLocally() {
-  if (_localActionInFlight || _localWorkspaceJob) return;
-  if (!confirm('Copy every file in this workspace to Vireo\'s managed local storage?\n\nThe original files will not be changed until you choose Finish and Sync Back.')) return;
-  _localActionInFlight = true;
-  try {
-    var result = await Vireo.api.json('/api/workspaces/active/local-workspace/stage', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: '{}'
-    });
-    watchLocalWorkspaceJob(result.job_id, 'stage');
-  } catch (e) {
-    await loadLocalWorkspace();
-  } finally {
-    _localActionInFlight = false;
-  }
-}
-
-async function syncLocalWorkspace() {
-  if (_localActionInFlight || _localWorkspaceJob) return;
-  _localActionInFlight = true;
-  try {
-    // Re-read status so the confirmation describes what sync will actually
-    // do right now, not what the page knew when it loaded.
-    var data = await loadLocalWorkspace();
-    if (!data || data.job) return;
-    var isRecovery = data.state === 'recovery' && data.recovery_kind === 'sync';
-    if (data.state !== 'active' && !isRecovery) return;
-    var deleted = Number(((data.changes) || {}).deleted || 0);
-    var message;
-    if (isRecovery) {
-      message = 'Finish the interrupted sync-back now? Remaining local changes will be published to the original storage.';
-    } else {
-      message = 'Check the original storage for conflicts, sync all local changes back, and remove the local copy?';
-      if (deleted) {
-        message += '\n\nThis will delete ' + deleted + ' file' + (deleted === 1 ? '' : 's') + ' from the original storage.';
-      }
-    }
-    if (!confirm(message)) return;
-    var result = await Vireo.api.json('/api/workspaces/active/local-workspace/sync', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(isRecovery
-        ? {confirm_deletions: true, confirmed_deletion_count: deleted}
-        : {confirm_deletions: deleted > 0, confirmed_deletion_count: deleted})
-    });
-    watchLocalWorkspaceJob(result.job_id, 'sync');
-  } catch (e) {
-    // A 409 (state changed, deletion count changed, busy) leaves stale
-    // numbers behind — refresh so the next attempt confirms current facts.
-    await loadLocalWorkspace();
-  } finally {
-    _localActionInFlight = false;
-  }
-}
-
-async function discardLocalWorkspace(mode) {
-  if (_localActionInFlight || _localWorkspaceJob) return;
-  var expected = {
-    'cleanup': 'staging',
-    'discard': 'active',
-    'recovery': 'recovery',
-    'recovery-sync': 'recovery'
-  }[mode];
-  var confirmations = {
-    'discard': 'Discard every local change and return to the original files?\n\nThis cannot be undone. The original storage will not be modified.',
-    'recovery': 'Return this workspace to the original files?\n\nThe original storage will not be modified.',
-    'recovery-sync': 'Discard the local copy?\n\nChanges already published to the original storage stay in place. Local changes that were NOT yet published will be lost.'
-  };
-  if (confirmations[mode] && !confirm(confirmations[mode])) return;
-  _localActionInFlight = true;
-  try {
-    var result = await Vireo.api.json('/api/workspaces/active/local-workspace/discard', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        confirm: true,
-        expected_state: expected,
-        acknowledge_published: mode === 'recovery-sync'
-      })
-    });
-    watchLocalWorkspaceJob(result.job_id, 'discard');
-  } catch (e) {
-    await loadLocalWorkspace();
-  } finally {
-    _localActionInFlight = false;
-  }
-}
-
-document.getElementById('localWorkspaceContent').addEventListener('click', function(event) {
-  var button = event.target.closest('[data-local-action]');
-  if (!button || button.disabled) return;
-  var action = button.dataset.localAction;
-  if (action === 'stage') startWorkLocally();
-  else if (action === 'sync') syncLocalWorkspace();
-  else if (action === 'discard') discardLocalWorkspace('discard');
-  else if (action === 'cleanup') discardLocalWorkspace('cleanup');
-  else if (action === 'discard-recovery') discardLocalWorkspace('recovery');
-  else if (action === 'discard-recovery-sync') discardLocalWorkspace('recovery-sync');
-});
-
-loadLocalWorkspace();
-})();
 
 /* ---------- Subject Types ---------- */
 async function loadSubjectTypes() {
@@ -439,13 +177,32 @@ async function loadWsFolders() {
       var html = '';
       ws.folders.forEach(function(f) {
         _wsFoldersById[f.id] = f;
+        var local = window.vireoLocalFolders ? window.vireoLocalFolders.statusFor(f.id) : null;
+        var displayPath = local && local.display_path ? local.display_path : f.path;
         html += '<div class="setting-row">';
         html += '<label style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;">';
         html += '<input type="checkbox" class="folder-move-cb" value="' + f.id + '" onchange="updateMoveBtn()" style="accent-color:var(--accent);">';
-        html += '<span style="flex:1;min-width:0;font-family:monospace;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeAttr(f.path) + '">' + escapeHtml(f.path) + '</span>';
+        html += '<span style="flex:1;min-width:0;font-family:monospace;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeAttr(displayPath) + '">' + escapeHtml(displayPath) + '</span>';
         var n = f.workspace_photo_count || 0;
         html += '<span style="flex-shrink:0;color:var(--text-faint);font-size:12px;">' + n.toLocaleString() + ' photo' + (n === 1 ? '' : 's') + '</span>';
         html += '</label>';
+        if (local) {
+          if (local.state === 'remote') {
+            html += '<button onclick="vireoLocalFolders.stage(' + f.id + ')" class="btn btn-secondary" style="padding:4px 9px;font-size:11px;">Work Locally</button>';
+          } else if (local.state === 'staging') {
+            html += '<span style="font-size:11px;color:var(--warning);">Copying...</span>';
+          } else if (local.state === 'recovery' && local.recovery_kind !== 'sync') {
+            html += '<span style="font-size:11px;color:var(--warning);">Local copy needs cleanup</span>';
+            html += '<button onclick="vireoLocalFolders.discard(' + f.id + ')" class="btn btn-secondary" style="padding:4px 9px;font-size:11px;color:var(--danger);">Clean Up</button>';
+          } else {
+            var sharedCount = (local.workspace_ids || []).length;
+            html += '<span style="font-size:10px;color:var(--accent);background:rgba(36,229,202,0.1);padding:2px 7px;border-radius:3px;" title="' +
+              (sharedCount > 1 ? 'Shared by ' + sharedCount + ' workspaces' : 'Using managed local storage') + '">Local' +
+              (sharedCount > 1 ? ' · ' + sharedCount + ' workspaces' : '') + '</span>';
+            html += '<button onclick="vireoLocalFolders.sync(' + f.id + ')" class="btn btn-secondary" style="padding:4px 9px;font-size:11px;">Sync Back</button>';
+            html += '<button onclick="vireoLocalFolders.discard(' + f.id + ')" class="btn btn-secondary" style="padding:4px 9px;font-size:11px;color:var(--danger);">Discard</button>';
+          }
+        }
         html += '<button onclick="removeFolderFromWs(' + ws.id + ', ' + f.id + ')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;" title="Remove from workspace">&times;</button>';
         html += '</div>';
       });
@@ -685,6 +442,11 @@ async function doMoveFolders() {
     errEl.style.display = 'block';
   }
 }
+
+loadWsFolders();
+loadHistory();
+loadWorkspaces();
+loadSubjectTypes();
 
 </script>
 </body>
