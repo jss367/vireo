@@ -365,6 +365,11 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             "UPDATE photos SET companion_path = ? WHERE id = ?",
             (companion["filename"], primary["id"]),
         )
+        if vireo_dir:
+            # An unedited RAW display cache may have been rendered before the
+            # camera JPEG was paired. File mtimes cannot tell which source
+            # produced that cache, so discard it when the companion changes.
+            _invalidate_raw_display_cache(vireo_dir, primary["id"])
 
         # Transfer detections (and their cascaded predictions) from companion to primary.
         # Detection IDs are content-addressed on (photo_id, detector_model, box,
@@ -550,6 +555,21 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
     commit_with_retry(db.conn)
 
 
+def _invalidate_raw_display_cache(vireo_dir, photo_id):
+    display_file = os.path.join(
+        vireo_dir, "originals", f"{photo_id}.display.jpg",
+    )
+    if os.path.exists(display_file):
+        try:
+            os.remove(display_file)
+        except OSError:
+            log.debug(
+                "Could not delete stale RAW display rendition %s",
+                display_file,
+                exc_info=True,
+            )
+
+
 def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
     """Delete cached thumbnail / working copy / display / preview for a photo.
 
@@ -626,18 +646,7 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
         (photo_id,),
     )
 
-    display_file = os.path.join(
-        vireo_dir, "originals", f"{photo_id}.display.jpg",
-    )
-    if os.path.exists(display_file):
-        try:
-            os.remove(display_file)
-        except OSError:
-            log.debug(
-                "Could not delete stale RAW display rendition %s",
-                display_file,
-                exc_info=True,
-            )
+    _invalidate_raw_display_cache(vireo_dir, photo_id)
 
     # Preview pyramid + its LRU accounting. Only drop a preview_cache row
     # for sizes whose file was successfully removed (or was already

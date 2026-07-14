@@ -1130,6 +1130,36 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     assert db.get_photo_edit_recipe(photo["id"]) is None
 
 
+def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
+    """A newly paired camera JPEG must replace a pre-pairing RAW rendition."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(img_dir), name="photos")
+    raw_id = db.add_photo(
+        folder_id=folder_id, filename="IMG_002.cr3", extension=".cr3",
+        file_size=2000, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=folder_id, filename="IMG_002.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+    )
+
+    originals_dir = tmp_path / "originals"
+    originals_dir.mkdir()
+    display_cache = originals_dir / f"{raw_id}.display.jpg"
+    display_cache.write_bytes(b"pre-pairing RAW display")
+
+    _pair_raw_jpeg_companions(db, vireo_dir=str(tmp_path))
+
+    photo = db.get_photo(raw_id)
+    assert photo["companion_path"] == "IMG_002.jpg"
+    assert not display_cache.exists()
+
+
 def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
     """Pairing raw+JPEG must move edit-mask snapshot files to the primary id.
 
