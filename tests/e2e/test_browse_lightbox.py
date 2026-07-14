@@ -137,9 +137,13 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
     jpeg = _png_bytes((200, 100), "green")
     raw = _png_bytes((100, 200), "red")
     fail_raw = {"enabled": False}
+    hold_raw = {"enabled": False, "routes": []}
 
     def serve_pair(route):
         wants_raw = "source=raw" in route.request.url
+        if wants_raw and hold_raw["enabled"]:
+            hold_raw["routes"].append(route)
+            return
         if wants_raw and fail_raw["enabled"]:
             route.abort()
             return
@@ -194,6 +198,36 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
     control.click()
     expect(control).to_have_text("Viewing JPEG · Show RAW")
     assert image.evaluate("img => [img.naturalWidth, img.naturalHeight]") == [200, 100]
+
+    fail_raw["enabled"] = False
+    hold_raw["enabled"] = True
+    control.click()
+    expect(control).to_contain_text("Loading RAW")
+    for _ in range(50):
+        if hold_raw["routes"]:
+            break
+        page.wait_for_timeout(20)
+    assert hold_raw["routes"], "expected the RAW probe request to be held"
+    page.evaluate(
+        """dataUrl => {
+            window._lightboxCurrentId = -1;
+            document.getElementById('lightboxImg').src = dataUrl;
+        }""",
+        "data:image/png;base64," + _PNG_1X1,
+    )
+    page.wait_for_function(
+        """() => document.getElementById('lightboxImg').naturalWidth === 1"""
+    )
+    hold_raw["routes"].pop(0).fulfill(body=raw, content_type="image/png")
+    page.wait_for_timeout(100)
+    assert image.get_attribute("src").startswith("data:image/png;base64,")
+    assert page.evaluate(
+        """photoId => (
+            window._vireoPairSource(photoId) === 'jpeg' &&
+            !window._vireoPairPendingSourceByPhoto[String(photoId)]
+        )""",
+        photo_id,
+    )
 
 
 def test_browse_lightbox_filename_can_be_selected_without_resetting_zoom(

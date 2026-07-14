@@ -4139,13 +4139,33 @@ function _vireoPairAnchorImage(photoId) {
   return document.querySelector('.grid-card[data-id="' + key + '"] img');
 }
 
-function _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc) {
+function _vireoPairAnchorStillCurrent(anchor, photoId) {
+  if (!anchor) return false;
+  var key = String(photoId);
+  if (anchor.id === 'lightboxImg') return String(_lightboxCurrentId) === key;
+  if (anchor.id === 'detailImg') return String(window._detailPhotoId) === key;
+  var card = anchor.closest ? anchor.closest('.grid-card') : null;
+  return !card || String(card.getAttribute('data-id')) === key;
+}
+
+function _vireoCancelPairSourceChange(photoId, requested) {
   var key = String(photoId);
   if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
   delete _vireoPairPendingSourceByPhoto[key];
   window.vireoUpdatePairSourceControls(photoId);
-  if (anchor && oldSrc && anchor.isConnected) anchor.src = oldSrc;
-  if (typeof showToast === 'function') {
+}
+
+function _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc) {
+  var key = String(photoId);
+  if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
+  var anchorStillCurrent = (
+    anchor && anchor.isConnected &&
+    _vireoPairAnchorStillCurrent(anchor, photoId)
+  );
+  delete _vireoPairPendingSourceByPhoto[key];
+  window.vireoUpdatePairSourceControls(photoId);
+  if (anchorStillCurrent && oldSrc) anchor.src = oldSrc;
+  if (anchorStillCurrent && typeof showToast === 'function') {
     showToast('Could not load the ' + requested.toUpperCase() + ' source', 'error');
   }
 }
@@ -4201,8 +4221,11 @@ window.vireoTogglePairSource = function(photoId) {
   var probe = new Image();
   probe.onload = function() {
     if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
-    if (!anchor || !anchor.isConnected) {
-      _vireoCommitPairSource(photoId, requested, null);
+    if (
+      !anchor || !anchor.isConnected ||
+      !_vireoPairAnchorStillCurrent(anchor, photoId)
+    ) {
+      _vireoCancelPairSourceChange(photoId, requested);
       return;
     }
     function cleanup() {
@@ -4211,6 +4234,10 @@ window.vireoTogglePairSource = function(photoId) {
     }
     function loaded() {
       cleanup();
+      if (!_vireoPairAnchorStillCurrent(anchor, photoId)) {
+        _vireoCancelPairSourceChange(photoId, requested);
+        return;
+      }
       _vireoCommitPairSource(photoId, requested, anchor);
     }
     function failed() {
@@ -4219,7 +4246,12 @@ window.vireoTogglePairSource = function(photoId) {
     }
     anchor.addEventListener('load', loaded);
     anchor.addEventListener('error', failed);
-    anchor.src = targetUrl;
+    if (_vireoPairAnchorStillCurrent(anchor, photoId)) {
+      anchor.src = targetUrl;
+    } else {
+      cleanup();
+      _vireoCancelPairSourceChange(photoId, requested);
+    }
   };
   probe.onerror = function() {
     _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc);
