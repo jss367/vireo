@@ -2772,6 +2772,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # user's existing action keeps working; they can re-bind toggle_ui from
     # the shortcuts editor.
     cfg.migrate_toggle_ui_h_conflict()
+    # Existing users commonly have the previous Browse card defaults persisted
+    # verbatim. Add the new coordinate-source field only for that exact legacy
+    # list; customized card layouts remain unchanged.
+    cfg.migrate_browse_location_status_field()
     # One-time rewrite of the global pipeline.default_strategy (legacy
     # hardcoded strategy name) to pipeline.default_process_id (saved_processes
     # id). The workspace-side rewrite happens inside Database(); this covers
@@ -3224,6 +3228,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             p["species"] = species_map.get(p["id"], [])
         return photo_dicts
 
+    def _attach_location_statuses(db, photo_dicts):
+        """Attach the effective coordinate source used by Browse and Map UI."""
+        if not photo_dicts:
+            return photo_dicts
+        ids = [p["id"] for p in photo_dicts if isinstance(p.get("id"), int)]
+        statuses = db.get_photo_location_statuses(ids)
+        for photo in photo_dicts:
+            photo["location_status"] = statuses.get(photo.get("id"), "none")
+        return photo_dicts
+
     def _attach_species_representatives(db, photo_dicts):
         """Attach species representative state to photo dicts (in-place)."""
         if not photo_dicts:
@@ -3329,6 +3343,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         raw = request.args.get(name, "")
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
+    def _request_location_status_filter():
+        value = (request.args.get("location_status") or "").strip().lower()
+        if not value:
+            return None
+        if value not in {"exif", "assigned", "none"}:
+            raise ValueError(
+                "location_status must be 'exif', 'assigned', or 'none'"
+            )
+        return value
+
     @app.route("/api/browse/init")
     def api_browse_init():
         """Combined endpoint for browse page initial load — one request instead of five."""
@@ -3348,6 +3372,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
 
@@ -3364,8 +3389,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             keyword_whole_word=keyword_whole_word,
             color_label=color_label,
             flag=flag,
+            location_status=location_status,
         )
-        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
+        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
             total = db.count_photos()
         else:
             total = db.count_filtered_photos(
@@ -3378,12 +3404,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 keyword_whole_word=keyword_whole_word,
                 color_label=color_label,
                 flag=flag,
+                location_status=location_status,
             )
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
 
         photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
         _attach_species(db, photo_dicts)
         _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
@@ -4735,6 +4763,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
 
@@ -4751,10 +4780,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             keyword_whole_word=keyword_whole_word,
             color_label=color_label,
             flag=flag,
+            location_status=location_status,
         )
 
         # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
-        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
+        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
             total = db.count_photos()
         else:
             total = db.count_filtered_photos(
@@ -4767,9 +4797,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 keyword_whole_word=keyword_whole_word,
                 color_label=color_label,
                 flag=flag,
+                location_status=location_status,
             )
 
         photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
         _attach_species(db, photo_dicts)
         _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
@@ -4799,6 +4831,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
 
@@ -4813,6 +4846,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             keyword_whole_word=keyword_whole_word,
             color_label=color_label,
             flag=flag,
+            location_status=location_status,
         )
         return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
 
@@ -4830,6 +4864,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
         data = db.get_calendar_data(
@@ -4837,6 +4872,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             keyword_match_case=keyword_match_case,
             keyword_whole_word=keyword_whole_word,
             color_label=color_label, flag=flag,
+            location_status=location_status,
         )
         return jsonify(data)
 
@@ -4854,6 +4890,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
         return jsonify(
@@ -4868,6 +4905,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 collection_id=collection_id,
                 color_label=color_label,
                 flag=flag,
+                location_status=location_status,
             )
         )
 
@@ -4882,6 +4920,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("not found", 404)
 
         result = dict(photo)
+        _attach_location_statuses(db, [result])
 
         # Parse exif_data JSON into metadata field
         raw_exif = result.pop("exif_data", None)
@@ -4985,6 +5024,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo = db.get_photo(pid, verify_workspace=True)
             if photo:
                 photos.append(dict(photo))
+        _attach_location_statuses(db, photos)
         _attach_species(db, photos)
         _attach_species_representatives(db, photos)
         _attach_detections(db, photos)
@@ -5178,8 +5218,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
 
         total_photos = db.count_photos()
-        total_without_gps = db.count_photos_without_gps()
-        total_with_gps = total_photos - total_without_gps
+        total_without_coordinates = db.count_photos_without_coordinates()
+        total_geolocated = total_photos - total_without_coordinates
 
         photo_dicts = [dict(p) for p in photos]
         _attach_edit_recipes(db, photo_dicts)
@@ -5188,8 +5228,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "photos": photo_dicts,
             "total_filtered": len(photos),
             "total_photos": total_photos,
-            "total_with_gps": total_with_gps,
-            "total_without_gps": total_without_gps,
+            "total_geolocated": total_geolocated,
+            "total_without_coordinates": total_without_coordinates,
+            # Compatibility for older clients; new UI uses coordinate-neutral
+            # names because assigned locations are included in these totals.
+            "total_with_gps": total_geolocated,
+            "total_without_gps": total_without_coordinates,
         })
 
     @app.route("/api/species")
@@ -8612,6 +8656,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             return json_error(f"collection rules cannot be resolved: {e}", 400)
         photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
         _attach_species(db, photo_dicts)
         _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
@@ -23562,6 +23607,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_id = request.args.get("collection_id", None, type=int)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
         ids_only = request.args.get("ids_only", "").lower() in ("1", "true", "yes")
@@ -23586,7 +23632,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         candidate_photo_ids = None
         if collection_id is not None:
             candidate_photo_ids = db.get_collection_photo_ids(collection_id)
-        elif any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
+        elif any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
             candidate_photo_ids = db.get_photo_ids(
                 folder_id=folder_id,
                 rating_min=rating_min,
@@ -23597,6 +23643,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 keyword_whole_word=keyword_whole_word,
                 color_label=color_label,
                 flag=flag,
+                location_status=location_status,
             )
 
         if candidate_photo_ids == []:
@@ -23663,6 +23710,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo_dicts.append(dict(photos_map[pid]))
                     sims_by_pid[pid] = round(sim, 4)
             _attach_species(db, photo_dicts)
+            _attach_location_statuses(db, photo_dicts)
             _attach_species_representatives(db, photo_dicts)
             _attach_detections(db, photo_dicts)
             _attach_edit_recipes(db, photo_dicts)
