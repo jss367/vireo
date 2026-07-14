@@ -754,6 +754,145 @@
     return bulkResolveByFolder(bi, folder);
   }
 
+  // Locally prune the given resolved hashes from _lastScanResult so the
+  // next render drops matching buckets and unresolved groups. Avoids an
+  // expensive re-scan round-trip on libraries with thousands of dups.
+  // Mirrors bucket_unresolved_proposals and duplicate_scan aggregates.
+  function pruneResolvedHashesFromScan(resolvedHashes) {
+    if (!_lastScanResult) return;
+    _lastScanResult.proposals = (_lastScanResult.proposals || []).filter(
+      function(p) { return !resolvedHashes.has(p.file_hash); }
+    );
+    var proposalsByHash = {};
+    (_lastScanResult.proposals || []).forEach(function(p) {
+      proposalsByHash[p.file_hash] = p;
+    });
+    _lastScanResult.buckets = (_lastScanResult.buckets || []).map(function(b) {
+      var keptHashes = (b.file_hashes || []).filter(
+        function(h) { return !resolvedHashes.has(h); }
+      );
+      if (keptHashes.length === b.file_hashes.length) return b;
+      var keptProposals = keptHashes
+        .map(function(h) { return proposalsByHash[h]; })
+        .filter(function(p) { return p != null; });
+      var newTotalSize = keptProposals.reduce(function(n, p) {
+        return n + ((p.losers || []).length * ((p.winner || {}).file_size || 0));
+      }, 0);
+      var newExamples = keptProposals.slice(0, 3).map(function(p) {
+        return (p.winner || {}).filename || '';
+      });
+      return Object.assign({}, b, {
+        file_hashes: keptHashes,
+        group_count: keptHashes.length,
+        total_size: newTotalSize,
+        example_filenames: newExamples,
+      });
+    });
+    var prunedProposals = _lastScanResult.proposals;
+    _lastScanResult.group_count = prunedProposals.length;
+    _lastScanResult.loser_count = prunedProposals.reduce(function(n, p) {
+      return p.status === 'unresolved' ? n + (p.losers || []).length : n;
+    }, 0);
+    _lastScanResult.resolved_group_count = prunedProposals.reduce(function(n, p) {
+      return p.status === 'resolved' ? n + 1 : n;
+    }, 0);
+    _lastScanResult.resolved_loser_count = prunedProposals.reduce(function(n, p) {
+      return p.status === 'resolved' ? n + (p.losers || []).length : n;
+    }, 0);
+  }
+
+  // Swap the bucket's Keep-folder buttons for a single "Retry to Trash"
+  // button after a partial trash failure. Storing the pending photo IDs
+  // on the card (rather than piggybacking on the bucket's file_hashes)
+  // means the retry can call ``/api/duplicates/delete-loser-files``
+  // directly — the losers were already rejected by bulk-resolve, so
+  // re-running bulk-resolve on the same hashes is a no-op.
+  function showBucketTrashRetry(card, remainingIds) {
+    if (!card) return;
+    card.setAttribute('data-pending-trash', JSON.stringify(remainingIds));
+    var bi = card.getAttribute('data-bi');
+    var actions = card.querySelector('.bucket-actions');
+    if (!actions) return;
+    var n = remainingIds.length;
+    actions.innerHTML =
+      '<button class="keep-btn" data-retry-trash onclick="retryBucketTrash(this)">' +
+        'Retry ' + n + ' file' + (n === 1 ? '' : 's') + ' to Trash' +
+      '</button>' +
+      '<button class="keep-btn reveal-btn" onclick="revealBucketFolders(' + bi + ')" ' +
+        'title="Open all bucket folders in your OS file manager">' +
+        escapeHtml(window.VIREO_REVEAL_LABEL) +
+      '</button>';
+  }
+
+  async function retryBucketTrash(btn) {
+    var card = btn.closest('.bucket-card');
+    if (!card) return;
+    var raw = card.getAttribute('data-pending-trash');
+    if (!raw) return;
+    var ids;
+    try { ids = JSON.parse(raw); } catch (e) { return; }
+    if (!Array.isArray(ids) || ids.length === 0) return;
+
+    var bi = parseInt(card.getAttribute('data-bi'), 10);
+    var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+    var status = card.querySelector('[data-bucket-status]');
+    var actionBtns = card.querySelectorAll('.bucket-actions button');
+    Array.prototype.forEach.call(actionBtns, function(b) { b.disabled = true; });
+    card.classList.add('applying');
+    if (status) {
+      status.classList.add('trash-progress', 'compact');
+      status.hidden = false;
+    }
+
+    var pending = null;
+    var terminalError = null;
+    try {
+      var trashData = await trashLoserFilesInBatches(
+        ids,
+        function(progress) { updateTrashProgress(status, progress); }
+      );
+      var trashed = trashData.trashed || 0;
+      var failedNow = (trashData.failed || [])
+        .map(function(f) { return f.id; })
+        .filter(function(id) { return id != null; });
+      if (failedNow.length > 0) {
+        pending = failedNow;
+        showToast('Moved ' + trashed + ', ' + failedNow.length +
+                  ' still failed to Trash — retry when ready', 'error');
+      } else {
+        showToast('Moved ' + trashed + ' file' + (trashed === 1 ? '' : 's') +
+                  ' to Trash', 'success');
+      }
+    } catch (e) {
+      terminalError = e;
+      var s = e.trashSummary || {trashed: 0, failed: [], completed: 0};
+      var completed = s.completed || 0;
+      var unattempted = ids.slice(completed);
+      var failedInAttempted = (s.failed || [])
+        .map(function(f) { return f.id; })
+        .filter(function(id) { return id != null; });
+      pending = failedInAttempted.concat(unattempted);
+      showToast('Retry paused after ' + (s.trashed || 0) + ' of ' + ids.length +
+                ' more to Trash: ' + (e.message || 'error'), 'error');
+    }
+
+    card.classList.remove('applying');
+    if (pending && pending.length > 0) {
+      showBucketTrashRetry(card, pending);
+      return;
+    }
+    if (terminalError) return;
+    // Everything remaining trashed successfully — the whole bucket is
+    // now resolved on-disk. Prune it and re-render so the card goes away.
+    card.removeAttribute('data-pending-trash');
+    if (bucket && bucket.file_hashes) {
+      pruneResolvedHashesFromScan(new Set(bucket.file_hashes));
+    }
+    if (!_scanInProgress) {
+      renderResults(_lastScanResult);
+    }
+  }
+
   async function bulkResolveByFolder(bi, keepFolder) {
     var card = document.querySelector('.bucket-card[data-bi="' + bi + '"]');
     if (!card) return;
@@ -792,7 +931,7 @@
         (r.loser_ids || []).forEach(function(id) { loserIds.push(id); });
       });
 
-      var trashCallFailed = false;
+      var pendingTrashIds = null;
       if (deleteFiles && loserIds.length > 0) {
         if (status) {
           status.classList.add('trash-progress', 'compact');
@@ -806,22 +945,37 @@
           var trashed = trashData.trashed || 0;
           var trashFailed = (trashData.failed || []).length;
           var msg = 'Resolved ' + resolved.length + ', moved ' + trashed + ' to Trash';
-          if (trashFailed) msg += ', ' + trashFailed + ' trash failed — rescan to retry';
+          if (trashFailed) msg += ', ' + trashFailed + ' trash failed — retry when ready';
           if (skippedCount) msg += ', ' + skippedCount + ' skipped';
           showToast(msg, trashFailed ? 'error' : 'success');
-          // Partial trash failure: some files are still on disk while their
-          // DB rows have been rejected. Skip the local prune so the bucket
-          // card stays visible — otherwise the user has no in-page signal
-          // that those files still need cleanup.
-          if (trashFailed) trashCallFailed = true;
+          if (trashFailed) {
+            // Partial trash failure inside completed batches. The DB rows
+            // are already rejected (bulk-resolve ran first), so a retry
+            // must skip bulk-resolve and go straight to trash on the
+            // failed IDs.
+            pendingTrashIds = (trashData.failed || [])
+              .map(function(f) { return f.id; })
+              .filter(function(id) { return id != null; });
+          }
         } catch (e) {
-          // Trash call failed entirely — DB is resolved but the duplicate
-          // files are still on disk. Surface this and skip the local prune
-          // so the bucket card stays visible; otherwise the user thinks
-          // cleanup completed and has no path to retry without a rescan.
-          trashCallFailed = true;
-          showToast('Duplicates were resolved, but moving files to Trash failed: ' +
-                    (e.message || 'error') + ' — rescan to retry', 'error');
+          // Whole-batch failure mid-loop. Completed batches are already
+          // trashed + DB-deleted; remaining batches never fired. Any
+          // per-file failures inside completed batches also need retry.
+          // ``bulk-resolve`` already rejected every loser in the bucket,
+          // so re-clicking the Keep-folder button would find "fewer than 2
+          // non-rejected candidates" and skip — the retry has to trash
+          // the remaining loser IDs directly.
+          var s = e.trashSummary || {trashed: 0, failed: [], completed: 0};
+          var completed = s.completed || 0;
+          var trashedSoFar = s.trashed || 0;
+          var unattempted = loserIds.slice(completed);
+          var failedInAttempted = (s.failed || [])
+            .map(function(f) { return f.id; })
+            .filter(function(id) { return id != null; });
+          pendingTrashIds = failedInAttempted.concat(unattempted);
+          showToast('Resolved ' + resolved.length + ', moved ' + trashedSoFar +
+                    ' to Trash before pausing: ' + (e.message || 'error') +
+                    ' — retry when ready', 'error');
         }
       } else {
         var msg = 'Resolved ' + resolved.length + ' group' +
@@ -830,68 +984,19 @@
         showToast(msg, 'success');
       }
 
-      if (trashCallFailed) {
-        // Restore the card UI so the failure is visible and not stuck in
-        // the spinner state. We deliberately do not prune _lastScanResult
-        // here: a rescan is required to reconcile DB-rejected rows with
-        // the on-disk files that still need trashing.
+      if (pendingTrashIds && pendingTrashIds.length > 0) {
+        // Keep the card visible with a retry affordance that trashes the
+        // remaining IDs directly. Skipping the prune here is intentional:
+        // ``_lastScanResult`` still points at hashes whose winners are
+        // fine but whose losers still exist on disk, and re-rendering
+        // would drop the card and hide the retry.
         card.classList.remove('applying');
-        btns.forEach(function(b) { b.disabled = false; });
+        showBucketTrashRetry(card, pendingTrashIds);
         return;
       }
 
-      // Locally prune the resolved hashes from _lastScanResult so the next
-      // render drops this bucket and the matching unresolved groups. Avoids
-      // an expensive re-scan round-trip on libraries with thousands of dups.
       var resolvedHashes = new Set(resolved.map(function(r) { return r.file_hash; }));
-      _lastScanResult.proposals = (_lastScanResult.proposals || []).filter(
-        function(p) { return !resolvedHashes.has(p.file_hash); }
-      );
-      // Recompute total_size and example_filenames from the surviving
-      // proposals so a partially-pruned bucket card doesn't keep
-      // advertising the pre-resolution recoverable size or stale sample
-      // filenames. Mirrors bucket_unresolved_proposals in Python.
-      var proposalsByHash = {};
-      (_lastScanResult.proposals || []).forEach(function(p) {
-        proposalsByHash[p.file_hash] = p;
-      });
-      _lastScanResult.buckets = (_lastScanResult.buckets || []).map(function(b) {
-        var keptHashes = (b.file_hashes || []).filter(
-          function(h) { return !resolvedHashes.has(h); }
-        );
-        if (keptHashes.length === b.file_hashes.length) return b;
-        var keptProposals = keptHashes
-          .map(function(h) { return proposalsByHash[h]; })
-          .filter(function(p) { return p != null; });
-        var newTotalSize = keptProposals.reduce(function(n, p) {
-          return n + ((p.losers || []).length * ((p.winner || {}).file_size || 0));
-        }, 0);
-        var newExamples = keptProposals.slice(0, 3).map(function(p) {
-          return (p.winner || {}).filename || '';
-        });
-        return Object.assign({}, b, {
-          file_hashes: keptHashes,
-          group_count: keptHashes.length,
-          total_size: newTotalSize,
-          example_filenames: newExamples,
-        });
-      });
-      // renderResults reads stored aggregate counters in preference to
-      // counting from proposals, so recompute them here. Without this the
-      // summary bar still reports the pre-bulk-resolve totals (e.g. "Extras
-      // to reject" stays at the original count even after groups are gone).
-      // Mirrors the sums in vireo/duplicate_scan.py.
-      var prunedProposals = _lastScanResult.proposals;
-      _lastScanResult.group_count = prunedProposals.length;
-      _lastScanResult.loser_count = prunedProposals.reduce(function(n, p) {
-        return p.status === 'unresolved' ? n + (p.losers || []).length : n;
-      }, 0);
-      _lastScanResult.resolved_group_count = prunedProposals.reduce(function(n, p) {
-        return p.status === 'resolved' ? n + 1 : n;
-      }, 0);
-      _lastScanResult.resolved_loser_count = prunedProposals.reduce(function(n, p) {
-        return p.status === 'resolved' ? n + (p.losers || []).length : n;
-      }, 0);
+      pruneResolvedHashesFromScan(resolvedHashes);
       // Don't clobber an in-flight scan's UI: if the user clicked Scan
       // while bulk-resolve was awaiting, ``renderResults`` would hide the
       // progress spinner, re-enable the scan button, and paint stale
@@ -1113,15 +1218,25 @@
         'from your operating system\u2019s Trash.</div>';
   }
 
+  function isActionableSkip(s) {
+    // "file already missing" completes the DB row (see applyTrashBatchToCards)
+    // and its card renders "Cleaned up" like a successful trash. Counting it
+    // as skipped in the progress detail contradicts the card state — a
+    // cleanup of one already-gone file would render "Cleanup complete ·
+    // 0 moved · 1 skipped" while the card reads "Cleaned up".
+    return s.reason !== 'file already missing';
+  }
+
   async function trashLoserFilesInBatches(photoIds, onProgress, onBatch) {
     var summary = {trashed: 0, skipped: [], failed: [], completed: 0,
                    total: photoIds.length};
     for (var offset = 0; offset < photoIds.length; offset += TRASH_BATCH_SIZE) {
       var batch = photoIds.slice(offset, offset + TRASH_BATCH_SIZE);
+      var actionableSkipSoFar = summary.skipped.filter(isActionableSkip).length;
       var progress = {
         phase: 'moving', total: photoIds.length, completed: offset,
         batchStart: offset + 1, batchEnd: offset + batch.length,
-        trashed: summary.trashed, skipped: summary.skipped.length,
+        trashed: summary.trashed, skipped: actionableSkipSoFar,
         failed: summary.failed.length,
       };
       if (onProgress) onProgress(progress);
@@ -1147,18 +1262,16 @@
       summary.completed += batch.length;
       if (onBatch) onBatch(data, batch);
 
-      var hasActionableSkips = summary.skipped.some(function(s) {
-        return s.reason !== 'file already missing';
-      });
+      var actionableSkipCount = summary.skipped.filter(isActionableSkip).length;
       if (onProgress) onProgress({
         phase: summary.completed === photoIds.length
-          ? (summary.failed.length || hasActionableSkips
+          ? (summary.failed.length || actionableSkipCount
               ? 'complete_with_errors' : 'complete')
           : 'moving',
         total: photoIds.length, completed: summary.completed,
         batchStart: summary.completed === photoIds.length ? summary.completed : summary.completed + 1,
         batchEnd: Math.min(summary.completed + TRASH_BATCH_SIZE, photoIds.length),
-        trashed: summary.trashed, skipped: summary.skipped.length,
+        trashed: summary.trashed, skipped: actionableSkipCount,
         failed: summary.failed.length,
       });
     }
@@ -1256,9 +1369,7 @@
       var trashed = data.trashed || 0;
       var failed = (data.failed || []).length;
 
-      var actionableSkips = (data.skipped || []).filter(function(s) {
-        return s.reason !== 'file already missing';
-      }).length;
+      var actionableSkips = (data.skipped || []).filter(isActionableSkip).length;
       var msg = 'Moved ' + trashed + ' file' + (trashed === 1 ? '' : 's') + ' to Trash';
       if (actionableSkips) msg += ', ' + actionableSkips + ' skipped';
       if (failed) msg += ', ' + failed + ' failed';
