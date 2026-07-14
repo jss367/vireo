@@ -6539,6 +6539,13 @@ window.vireoRefreshEditRecipeCache = _lbRefreshEditRecipeCache;
 
 function openLightbox(photoId, filename, photoList, options) {
   var alreadyOpen = !!window._lbEscToken;
+  var transitionAlreadyPending = _lbVisualTransitionPending;
+  var reopeningVisiblePhoto = !!(
+    alreadyOpen &&
+    !transitionAlreadyPending &&
+    _lightboxCurrentId != null &&
+    String(_lightboxCurrentId) === String(photoId)
+  );
   options = options || {};
   var fallbackViewportState = options.fallbackViewportState || null;
   _lbFlushPendingAdjustmentSave();
@@ -6585,7 +6592,14 @@ function openLightbox(photoId, filename, photoList, options) {
   // photo's dimensions, true 1:1 scale, and normalized viewport center are
   // applied together from handleInitialImageLoad, before the browser's next
   // paint, so an off-center view never flashes through a centered state.
-  _lbVisualTransitionPending = alreadyOpen;
+  // Re-running an "Open in Lightbox" command for the photo that is already
+  // visible does not require an identity handoff. In particular, assigning
+  // the same img.src again is not guaranteed to emit load/error, so arming the
+  // transition lock here could leave every photo control inert indefinitely.
+  // Do retain the lock when this call supersedes a transition already in
+  // flight: _lightboxCurrentId then names the incoming photo, not necessarily
+  // the bitmap that is still visible.
+  _lbVisualTransitionPending = alreadyOpen && !reopeningVisiblePhoto;
   _lbSetPhotoTransitionPending(_lbVisualTransitionPending);
   // A previous open's deferred overlay closure captured the previous photo id
   // and metadata. If this open's image resolves before its own metadata does,
@@ -6866,7 +6880,7 @@ function openLightbox(photoId, filename, photoList, options) {
   img.onload = handleInitialImageLoad;
   img.onerror = handleInitialImageError;
   img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
-  if (!alreadyOpen) commitVisiblePhotoIdentity();
+  if (!_lbVisualTransitionPending) commitVisiblePhotoIdentity();
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
   inatBtn.onclick = function() { submitToInat(photoId); };

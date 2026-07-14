@@ -54,6 +54,50 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     expect(counter).to_contain_text(first_filename)
 
 
+def test_browse_lightbox_same_photo_reopen_does_not_lock_controls(live_server, page):
+    """Reopening the visible photo must not wait for a same-src load event."""
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+
+    page.locator(".grid-card").first.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth > 0;
+        }"""
+    )
+
+    state = page.evaluate(
+        """() => {
+            const current = window._lightboxPhotoList.find(
+                photo => photo.id === window._lightboxCurrentId
+            );
+            window.openLightbox(
+                current.id,
+                current.filename,
+                window._lightboxPhotoList
+            );
+            return {
+                pending: window._lbVisualTransitionPending,
+                actionsInert: document.getElementById('lightboxActions').inert,
+                adjustInert: document.getElementById('lightboxAdjustPanel').inert,
+            };
+        }"""
+    )
+
+    assert state == {
+        "pending": False,
+        "actionsInert": False,
+        "adjustInert": False,
+    }
+
+
 def test_browse_photo_id_deep_link_loads_target_folder_first_page(live_server, page):
     """Open in Browse must find a target that is not on global Browse page 1."""
     db = live_server["db"]
