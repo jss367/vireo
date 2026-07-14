@@ -99,6 +99,74 @@ def test_location_section_renders_empty(live_server, page):
     expect(section).to_be_visible()
     expect(page.locator("#locationInput")).to_be_visible()
     expect(page.locator("#locationFilled")).to_be_hidden()
+    expect(page.locator("#locationCoordinateStatus")).to_contain_text(
+        "No coordinates"
+    )
+
+
+def test_browse_cards_and_inspector_distinguish_coordinate_sources(
+    live_server, page
+):
+    """Cards and detail use three explicit, non-overlapping coordinate states."""
+    db = live_server["db"]
+    exif_id, assigned_id, none_id = live_server["data"]["photos"][:3]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET latitude = 37.7749, longitude = -122.4194 "
+            "WHERE id = ?",
+            (exif_id,),
+        )
+        cursor = db.conn.execute(
+            "INSERT INTO keywords (name, type, latitude, longitude) "
+            "VALUES ('Assigned Park', 'location', 40.7829, -73.9654)"
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (assigned_id, cursor.lastrowid),
+        )
+
+    page.goto(f"{live_server['url']}/browse")
+    expected = {
+        exif_id: "EXIF GPS",
+        assigned_id: "Assigned map location",
+        none_id: "No coordinates",
+    }
+    for photo_id, label in expected.items():
+        card_status = page.locator(
+            f".grid-card[data-id='{photo_id}'] .grid-location-status"
+        )
+        expect(card_status).to_contain_text(label)
+
+    page.locator(f".grid-card[data-id='{exif_id}']").click()
+    expect(page.locator("#locationCoordinateStatus")).to_contain_text("EXIF GPS")
+
+    page.locator(f".grid-card[data-id='{assigned_id}']").click()
+    expect(page.locator("#locationCoordinateStatus")).to_contain_text(
+        "Assigned map location"
+    )
+
+    page.locator(f".grid-card[data-id='{none_id}']").click()
+    expect(page.locator("#locationCoordinateStatus")).to_contain_text(
+        "No coordinates"
+    )
+
+
+def test_browse_coordinate_filter_deep_link(live_server, page):
+    """Map links can open Browse already filtered to photos without coordinates."""
+    db = live_server["db"]
+    exif_id = live_server["data"]["photos"][0]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET latitude = 37.7749, longitude = -122.4194 "
+            "WHERE id = ?",
+            (exif_id,),
+        )
+
+    page.goto(f"{live_server['url']}/browse?location_status=none")
+    expect(page.locator("#locationStatusFilter")).to_have_value("none")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    assert page.locator(f".grid-card[data-id='{exif_id}']").count() == 0
+    assert page.locator(".grid-location-status.none").count() > 0
 
 
 def test_freetext_enter_creates_location(live_server, page):

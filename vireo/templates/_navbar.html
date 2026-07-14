@@ -5375,11 +5375,19 @@ function _lbSaveViewportState(photoId) {
 }
 
 function _lbViewportStateForOpen(photoId, fallbackState) {
+  // Arrow navigation supplies the viewport from the photo being left. Treat
+  // that handoff as the current browse-session viewport, even when the target
+  // photo has an older cached viewport from an earlier visit. This keeps zoom
+  // continuous while moving left/right: zooming back out on one photo also
+  // means a previously visited photo opens zoomed out when navigating back.
+  if (fallbackState) {
+    return _lbCloneViewportState(fallbackState);
+  }
   var key = String(photoId);
   if (Object.prototype.hasOwnProperty.call(_lbViewportByPhotoId, key)) {
     return _lbCloneViewportState(_lbViewportByPhotoId[key]);
   }
-  return _lbCloneViewportState(fallbackState);
+  return null;
 }
 
 function _lbApplyViewportState(state) {

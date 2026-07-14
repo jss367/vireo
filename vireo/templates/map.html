@@ -597,9 +597,17 @@ async function loadPhotos() {
 
     if (data.photos.length === 0) {
       renderSidebar([]);
-      document.getElementById('mapStatus').textContent = focusPhotoId !== null
-        ? 'No map location found for this photo.'
-        : 'No geolocated photos found. Photos with GPS data in their EXIF metadata will appear here.';
+      var emptyStatus = document.getElementById('mapStatus');
+      if (focusPhotoId !== null) {
+        emptyStatus.textContent = 'No map location found for this photo.';
+      } else {
+        var emptyMessage = 'No geolocated photos found. Photos with EXIF GPS or an assigned map location will appear here.';
+        if (data.total_without_coordinates > 0) {
+          emptyMessage += ' <a href="/browse?location_status=none">Browse ' +
+            data.total_without_coordinates + ' without coordinates</a>.';
+        }
+        emptyStatus.innerHTML = emptyMessage;
+      }
       legendControl.update({});
       return;
     }
@@ -618,7 +626,7 @@ async function loadPhotos() {
 
       var provenanceLine = '';
       if (p.coord_source === 'keyword' && p.keyword_location_name) {
-        provenanceLine = '<div class="popup-provenance">\u{1F4CD} from location: '
+        provenanceLine = '<div class="popup-provenance">\u{1F4CD} from assigned location: '
           + escapeHtml(p.keyword_location_name) + '</div>';
       } else if (p.coord_source === 'exif') {
         provenanceLine = '<div class="popup-provenance">\u{1F4CD} from EXIF GPS</div>';
@@ -655,18 +663,18 @@ async function loadPhotos() {
       }
     }
 
-    /* GPS coverage stats — global (unfiltered) for consistency */
+    /* Map-coordinate coverage stats — global (unfiltered) for consistency */
     var totalFiltered = data.total_filtered;
-    var totalWithGps = data.total_with_gps;
+    var totalGeolocated = data.total_geolocated;
     var totalPhotos = data.total_photos;
-    var missingGps = data.total_without_gps;
-    var pct = totalPhotos > 0 ? Math.round((totalWithGps / totalPhotos) * 100) : 0;
+    var missingCoordinates = data.total_without_coordinates;
+    var pct = totalPhotos > 0 ? Math.round((totalGeolocated / totalPhotos) * 100) : 0;
 
     var statusEl = document.getElementById('mapStatus');
-    var parts = ['Showing ' + totalFiltered + ' of ' + totalWithGps + ' geolocated photos'];
-    parts.push(pct + '% GPS coverage');
-    if (missingGps > 0) {
-      parts.push('<a href="/browse?missing_gps=1">' + missingGps + ' missing GPS</a>');
+    var parts = ['Showing ' + totalFiltered + ' of ' + totalGeolocated + ' geolocated photos'];
+    parts.push(pct + '% map coverage');
+    if (missingCoordinates > 0) {
+      parts.push('<a href="/browse?location_status=none">' + missingCoordinates + ' without coordinates</a>');
     }
     if (focusPhotoId === null || photoMarkers[focusPhotoId]) {
       statusEl.innerHTML = parts.join(' &mdash; ');

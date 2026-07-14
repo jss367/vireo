@@ -436,8 +436,10 @@ def test_browse_lightbox_does_not_preload_when_full_already_uses_original(
     assert page.evaluate("window._lbOriginalPreload") is None
 
 
-def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page):
-    """Arrow navigation preserves pan/zoom per photo and carries it to unseen photos."""
+def test_browse_lightbox_carries_current_viewport_to_previously_seen_photo(
+    live_server, page
+):
+    """Arrow navigation uses the current viewport, not a target photo's old one."""
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
         'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
@@ -472,11 +474,17 @@ def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page)
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
             window._lbRecomputeNativeZoom();
-            window._lbApplyViewportState({zoom: 2.2, centerX: 0.24, centerY: 0.70});
+            window._lbApplyViewportState({
+                zoom: window._lbNativeZoom,
+                centerX: 0.24,
+                centerY: 0.70,
+                oneToOne: true,
+            });
             window._lbSaveViewportState(window._lightboxCurrentId);
             return window._lbViewportStateFromCurrent();
         }"""
     )
+    assert first_view["oneToOne"] is True
 
     page.locator("[title='Next (→)']").click()
     expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
@@ -494,19 +502,29 @@ def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page)
     assert abs(carried_view["centerX"] - first_view["centerX"]) < 0.03
     assert abs(carried_view["centerY"] - first_view["centerY"]) < 0.03
 
-    page.evaluate(
+    second_view = page.evaluate(
         """() => {
-            window._lbApplyViewportState({zoom: 2.2, centerX: 0.78, centerY: 0.30});
+            window._lbApplyViewportState({zoom: 1, centerX: 0.5, centerY: 0.5});
             window._lbSaveViewportState(window._lightboxCurrentId);
+            return window._lbViewportStateFromCurrent();
         }"""
     )
     page.locator("[title='Previous (←)']").click()
     expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbTryApplyPendingViewportState();
+        }"""
+    )
     page.wait_for_function("window._lbPendingViewportState === null")
-    restored_view = page.evaluate("window._lbViewportStateFromCurrent()")
-    assert abs(restored_view["zoom"] - first_view["zoom"]) < 0.05
-    assert abs(restored_view["centerX"] - first_view["centerX"]) < 0.03
-    assert abs(restored_view["centerY"] - first_view["centerY"]) < 0.03
+    returned_view = page.evaluate("window._lbViewportStateFromCurrent()")
+    assert abs(returned_view["zoom"] - second_view["zoom"]) < 0.05
+    assert abs(returned_view["centerX"] - second_view["centerX"]) < 0.03
+    assert abs(returned_view["centerY"] - second_view["centerY"]) < 0.03
+    assert abs(returned_view["zoom"] - first_view["zoom"]) > 0.5
 
 
 def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
@@ -624,18 +642,15 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     assert abs(carried["centerY"] - before["viewport"]["centerY"]) < 0.03
 
 
-def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
+def test_browse_lightbox_mid_transition_save_keeps_navigation_handoff(
     live_server, page
 ):
-    """A save while the outgoing bitmap is still frozen must not stomp the
-    incoming photo's intended inspection point.
+    """A save while the outgoing bitmap is frozen keeps the handed-off viewport.
 
     Regression: while _lbVisualTransitionPending is true, _lightboxCurrentId
     already points at the incoming photo but the DOM transform still belongs
-    to the outgoing bitmap. A save triggered by another arrow press or
-    closeLightbox in that window used to read the DOM and record the outgoing
-    transform under the incoming photo's id, replacing the state the next
-    open of that photo would otherwise restore.
+    to the outgoing bitmap. The save must use the pending navigation handoff,
+    rather than re-reading that transitional DOM state.
     """
     first_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
@@ -694,8 +709,8 @@ def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
         }"""
     )
 
-    # Prime a distinctive saved viewport for the incoming photo so we can
-    # tell "our intended state survives" from "outgoing DOM state leaked in".
+    # Prime a distinctive old viewport for the incoming photo. Navigation
+    # must ignore it in favor of the current outgoing viewport.
     incoming_id = page.evaluate("window.photos[1].id")
     intended = {"zoom": 2.5, "centerX": 0.80, "centerY": 0.15}
     page.evaluate(
@@ -736,21 +751,14 @@ def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
         incoming_id,
     )
 
-    # The stored state for the incoming photo must not be the outgoing
-    # bitmap's transform. It should be either the pending restore state that
-    # openLightbox armed for the incoming photo, or the pre-existing saved
-    # state we primed above — never the outgoing photo's centerX/centerY.
+    # The stored state for the incoming photo should be the pending handoff,
+    # not the stale per-photo viewport primed above.
     stored = saved_during_transition["stored"]
     assert stored is not None
-    # Guard against the specific regression: the outgoing photo's off-center
-    # inspection point (0.20, 0.75) must not be recorded under the incoming
-    # photo's id.
-    assert not (
-        abs(stored["centerX"] - outgoing["centerX"]) < 0.05
-        and abs(stored["centerY"] - outgoing["centerY"]) < 0.05
-    ), (
-        "outgoing DOM transform leaked into incoming photo's saved viewport"
-    )
+    assert abs(stored["zoom"] - outgoing["zoom"]) < 0.05
+    assert abs(stored["centerX"] - outgoing["centerX"]) < 0.05
+    assert abs(stored["centerY"] - outgoing["centerY"]) < 0.05
+    assert abs(stored["centerX"] - intended["centerX"]) > 0.1
 
     held_original.pop("route").fulfill(
         body=next_svg, content_type="image/svg+xml"
