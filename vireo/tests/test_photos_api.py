@@ -1306,6 +1306,70 @@ def test_original_serves_full_res_working_copy(app_and_db):
     assert resp.status_code == 200
 
 
+def test_unedited_raw_original_uses_camera_display_cache_not_working_copy(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """Opening an unedited RAW must not swap to the dark edit working copy."""
+    import io
+
+    import image_loader
+    from image_loader import RAW_DECODE_CAMERA_RENDERED
+    from PIL import Image
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo = db.get_photos()[0]
+    photo_id = photo["id"]
+
+    source_dir = tmp_path / "raw-source"
+    source_dir.mkdir()
+    source_path = source_dir / "source.NEF"
+    source_path.write_bytes(b"fake raw")
+    db.conn.execute(
+        "UPDATE folders SET path=? WHERE id=?",
+        (str(source_dir), photo["folder_id"]),
+    )
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (30, 30, 30)).save(working_path, "JPEG")
+    working_bytes = open(working_path, "rb").read()
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef', width=800, height=600,
+               working_copy_path=?
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+
+    calls = []
+
+    def camera_extract(source, output, **kwargs):
+        calls.append((os.fspath(source), os.fspath(output), kwargs))
+        Image.new("RGB", (800, 600), (220, 220, 220)).save(output, "JPEG")
+        return True
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", camera_extract)
+
+    first = client.get(f"/photos/{photo_id}/original")
+    second = client.get(f"/photos/{photo_id}/original")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(calls) == 1, "second request should reuse the display cache"
+    called_source, called_output, called_kwargs = calls[0]
+    assert called_source == str(source_path)
+    assert called_output.endswith(f"{photo_id}.display.jpg")
+    assert called_kwargs["raw_decode"] == RAW_DECODE_CAMERA_RENDERED
+    with Image.open(io.BytesIO(first.data)) as rendered:
+        assert rendered.getpixel((0, 0))[0] > 200
+    assert open(working_path, "rb").read() == working_bytes
+    assert db.get_photo(photo_id)["working_copy_path"] == f"working/{photo_id}.jpg"
+
+
 def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(app_and_db):
     """Original endpoint trusts RAW working copy when sensor dims slightly exceed wc.
 

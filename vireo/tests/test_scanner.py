@@ -2853,6 +2853,10 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     # Seed a preview file + accounting row, as /photos/<id>/preview would.
     preview_file = preview_dir / f"{photo_id}_1920.jpg"
     Image.new("RGB", (1920, 1440), color=(255, 0, 0)).save(str(preview_file), "JPEG")
+    originals_dir = vireo_dir / "originals"
+    originals_dir.mkdir()
+    display_file = originals_dir / f"{photo_id}.display.jpg"
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(display_file, "JPEG")
     file_bytes = preview_file.stat().st_size
     db.preview_cache_insert(photo_id, 1920, file_bytes)
     assert db.preview_cache_total_bytes() == file_bytes
@@ -2863,6 +2867,7 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
 
     assert not preview_file.exists(), "preview file should be deleted"
+    assert not display_file.exists(), "RAW display cache should be deleted"
     assert db.preview_cache_get(photo_id, 1920) is None, (
         "preview_cache row must be deleted alongside the file; "
         "leaving it inflates preview_cache_total_bytes and triggers "
