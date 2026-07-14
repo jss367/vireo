@@ -695,6 +695,27 @@ class Database:
                 PRIMARY KEY (workspace_id, folder_id)
             );
 
+            -- Folder-scoped managed local copies.  A root folder is a
+            -- library resource shared by every workspace that references it;
+            -- workspace-local status is derived from these rows rather than
+            -- owning a second copy of the lifecycle state.
+            CREATE TABLE IF NOT EXISTS local_folders (
+                root_folder_id INTEGER PRIMARY KEY REFERENCES folders(id) ON DELETE CASCADE,
+                state          TEXT NOT NULL,
+                created_at     REAL,
+                activated_at   REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS local_folder_mappings (
+                root_folder_id INTEGER NOT NULL REFERENCES local_folders(root_folder_id) ON DELETE CASCADE,
+                folder_id      INTEGER NOT NULL UNIQUE REFERENCES folders(id) ON DELETE CASCADE,
+                source_path    TEXT NOT NULL,
+                local_path     TEXT NOT NULL,
+                original_status TEXT NOT NULL DEFAULT 'ok',
+                is_root        INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (root_folder_id, folder_id)
+            );
+
             CREATE TABLE IF NOT EXISTS collections (
                 id          INTEGER PRIMARY KEY,
                 name        TEXT,
@@ -2197,6 +2218,12 @@ class Database:
         Older databases can contain child folders whose ``parent_id`` is NULL
         even though their paths clearly live below a parent. Path-prefix
         matching keeps recursive workspace roots working for those rows too.
+        Also includes folders whose ``local_folder_mappings.source_path`` lies
+        under the target: staging rebases a descendant's ``folders.path`` under
+        ``local-folders/``, so a pure ``folders.path`` walk would miss it and
+        leave a later ancestor link with no ``workspace_folders`` row for the
+        rebased descendant (:func:`workspace_local_root_ids` and
+        :func:`affected_workspace_ids` both key off that link).
         """
         row = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (folder_id,)
@@ -2213,7 +2240,32 @@ class Database:
         ).fetchall()
         ids = {folder_id}
         ids.update(r["id"] for r in rows)
+        ids.update(self._local_source_descendant_ids(row["path"]))
         return list(ids)
+
+    def _local_source_descendant_ids(self, root_path):
+        """Return folder ids whose local_folder_mappings.source_path is under root_path.
+
+        Staging rebases a descendant folder's ``folders.path`` under
+        ``local-folders/`` but preserves the original location in
+        ``local_folder_mappings.source_path``. Callers that walk descendants by
+        ``folders.path`` (workspace folder linking / materialization) union
+        this in so an ancestor added *after* the rebase still discovers the
+        rebased descendant; otherwise later ``workspace_status``,
+        ``affected_workspace_ids``, and ``workspace_local_root_ids`` reads
+        would omit that workspace and the UI would report the ancestor root
+        as fully remote.
+        """
+        if not root_path:
+            return []
+        prefix = _path_for_subtree_match(root_path) + "/"
+        rows = self.conn.execute(
+            """SELECT folder_id FROM local_folder_mappings
+               WHERE source_path = ?
+                  OR substr(REPLACE(source_path, '\\', '/'), 1, ?) = ?""",
+            (root_path, len(prefix), prefix),
+        ).fetchall()
+        return [int(r["folder_id"]) for r in rows]
 
     def _add_workspace_folder_no_commit(
             self, workspace_id, folder_id, *, is_root=True):
@@ -2280,7 +2332,14 @@ class Database:
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
 
     def _materialize_workspace_descendants(self, workspace_id):
-        """Ensure linked folders include all known path descendants."""
+        """Ensure linked folders include all known path descendants.
+
+        Also picks up descendants whose ``folders.path`` was rebased under
+        ``local-folders/`` by staging: a pure ``folders.path`` walk from the
+        ancestor root no longer reaches them, but their
+        ``local_folder_mappings.source_path`` still records the original
+        location and lets us bridge the gap.
+        """
         rows = self.conn.execute(
             """SELECT DISTINCT child.id
                FROM workspace_folders wf
@@ -2299,12 +2358,30 @@ class Database:
                  AND existing.folder_id IS NULL""",
             (workspace_id,),
         ).fetchall()
-        if not rows:
+        candidate_ids = {r["id"] for r in rows}
+        root_rows = self.conn.execute(
+            """SELECT f.path FROM workspace_folders wf
+               JOIN folders f ON f.id = wf.folder_id
+               WHERE wf.workspace_id = ?""",
+            (workspace_id,),
+        ).fetchall()
+        for root_row in root_rows:
+            candidate_ids.update(self._local_source_descendant_ids(root_row["path"]))
+        if candidate_ids:
+            existing = {
+                r["folder_id"]
+                for r in self.conn.execute(
+                    "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?",
+                    (workspace_id,),
+                ).fetchall()
+            }
+            candidate_ids -= existing
+        if not candidate_ids:
             return
         self.conn.executemany(
             """INSERT OR IGNORE INTO workspace_folders
                (workspace_id, folder_id, is_root) VALUES (?, ?, 0)""",
-            [(workspace_id, r["id"]) for r in rows],
+            [(workspace_id, fid) for fid in candidate_ids],
         )
         self.conn.commit()
         self._new_images_cache.invalidate_workspaces(self._db_path, [workspace_id])
@@ -2351,6 +2428,12 @@ class Database:
         workspace is correctly excluded. The ``folders.photo_count`` column is
         a direct-only count and would read as a misleading "0 photos" for a
         root whose images all live in subfolders.
+
+        Descendants whose ``folders.path`` has been rebased under
+        ``local-folders/`` by staging are matched via
+        ``local_folder_mappings.source_path`` too, otherwise the ancestor
+        workspace's root would underreport its photos while
+        ``workspace_folders`` still makes them visible.
         """
         self._materialize_workspace_descendants(workspace_id)
         return self.conn.execute(
@@ -2361,9 +2444,17 @@ class Database:
                    JOIN workspace_folders cwf
                      ON cwf.folder_id = cf.id
                     AND cwf.workspace_id = wf.workspace_id
+                   LEFT JOIN local_folder_mappings lfm
+                     ON lfm.folder_id = cf.id
                    WHERE cf.path = f.path
                       OR substr(
                            REPLACE(cf.path, '\\', '/'),
+                           1,
+                           length(RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/')
+                         ) = RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/'
+                      OR lfm.source_path = f.path
+                      OR substr(
+                           REPLACE(lfm.source_path, '\\', '/'),
                            1,
                            length(RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/')
                          ) = RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/'

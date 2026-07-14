@@ -6,6 +6,7 @@ import threading
 
 from db import Database
 from flask import Blueprint, jsonify, request
+from services.local_folder import workspace_local_root_ids
 from services.local_workspace import (
     LocalWorkspaceError,
     discard_local,
@@ -47,6 +48,23 @@ def create_local_workspace_blueprint(
 
     def _busy_error(busy, action):
         return json_error(f"Wait for the {busy['type']} job to finish before {action}", 409)
+
+    def _folder_sessions_error(db, workspace_id):
+        # The legacy workspace-scoped stage/sync/discard uses ``status()``,
+        # which only sees ``local_workspace_folders``. A folder-scoped session
+        # (``local_folder_mappings``) affecting one of this workspace's folders
+        # leaves ``status()`` reporting ``remote``, so a stale client or direct
+        # API caller could otherwise start a legacy stage that copies the
+        # already-rebased ``local-folders/`` path again — orphaning the folder
+        # manifest and ``local_folder_mappings`` from the catalog.
+        if workspace_local_root_ids(db, workspace_id):
+            return json_error(
+                "This workspace has folders working locally through the "
+                "shared folder-scoped workflow. Sync or discard those folder "
+                "sessions before using the legacy workspace-level action.",
+                409,
+            )
+        return None
 
     def _start_job_exclusive(workspace_id, job_type, work, validate):
         """Atomically validate workspace state and register its job."""
@@ -170,6 +188,9 @@ def create_local_workspace_blueprint(
                 return json_error(str(exc), 409)
             if current["state"] != "remote":
                 return json_error("This workspace is already staged locally", 409)
+            error = _folder_sessions_error(db, workspace_id)
+            if error is not None:
+                return error
             return None
 
         job_id, busy, validation_error = _start_job_exclusive(
@@ -289,6 +310,9 @@ def create_local_workspace_blueprint(
             is_sync_recovery = state == "recovery" and current.get("recovery_kind") == "sync"
             if state != "active" and not is_sync_recovery:
                 return json_error("This workspace is not working locally", 409)
+            error = _folder_sessions_error(db, workspace_id)
+            if error is not None:
+                return error
             if current.get("changes_error"):
                 return json_error(current["changes_error"], 409)
             deletion_count = (current.get("changes") or {}).get("deleted", 0)
@@ -358,6 +382,9 @@ def create_local_workspace_blueprint(
             state = current["state"]
             if state == "remote":
                 return json_error("This workspace is not working locally", 409)
+            error = _folder_sessions_error(db, workspace_id)
+            if error is not None:
+                return error
             # The client confirms against the state it rendered. A stale
             # page (e.g. a 'Clean Up Incomplete Copy' button left over from
             # before a stage finished) must never discard a healthy

@@ -89,11 +89,22 @@ from render_source import (
     working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
 )
 from schema import ensure_schema
+from services.local_folder import (
+    affected_workspace_ids as local_folder_workspace_ids,
+)
+from services.local_folder import (
+    local_root_for_folder,
+    local_root_under_folder,
+    local_roots_under_folder,
+    workspace_ids_for_folder_tree,
+    workspace_local_root_ids,
+)
 from services.local_workspace import (
     folder_has_local_workspace,
     has_local_workspace,
     stage_boundary_lock,
 )
+from web.local_folder import LOCAL_FOLDER_JOB_TYPES, create_local_folder_blueprint
 from web.local_workspace import LOCAL_WORKSPACE_JOB_TYPES, create_local_workspace_blueprint
 from web.pages import pages_blueprint
 from web.photo_labels import create_photo_labels_blueprint
@@ -4235,12 +4246,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if workspace_id is None:
             return None
         for job in app._job_runner.list_jobs():
-            if job.get("workspace_id") != workspace_id:
-                continue
             if job.get("status") not in ("queued", "running"):
                 continue
-            if job.get("type") in LOCAL_WORKSPACE_JOB_TYPES:
+            job_type = job.get("type")
+            if job_type in LOCAL_WORKSPACE_JOB_TYPES and job.get("workspace_id") == workspace_id:
                 return job
+            if job_type in LOCAL_FOLDER_JOB_TYPES:
+                if job.get("workspace_id") == workspace_id:
+                    return job
+                config = job.get("config") or {}
+                root_ids = (config.get("root_folder_ids") or []) if isinstance(config, dict) else []
+                db = _get_db()
+                if any(
+                    workspace_id in workspace_ids_for_folder_tree(db, int(root_id))
+                    for root_id in root_ids
+                ):
+                    return job
         return None
 
     def _invalidate_missing_originals_cache(workspace_ids=None):
@@ -4794,6 +4815,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # subsequent write must both run under stage_boundary_lock so a stage
         # claim cannot commit between them.
         with stage_boundary_lock():
+            local_root_id = local_root_for_folder(db, folder_id)
+            if local_root_id is not None:
+                return json_error(
+                    "Cannot relocate this folder while it has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
+            # Staging a descendant rebases its folders.path under local-folders/,
+            # so a folders.path subtree scan (as db.relocate_folder does) no
+            # longer sees it — while local_folder_mappings.source_path still
+            # points at the pre-relocation location. Without this check the
+            # relocate would rewrite the ancestor while the manifest keeps
+            # pointing at the old descendant path, so a later sync/discard
+            # could not restore or publish to the new location.
+            descendant_root_id = local_root_under_folder(db, folder_id)
+            if descendant_root_id is not None:
+                return json_error(
+                    "Cannot relocate this folder while a subfolder has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
             staged, owner_ws = folder_has_local_workspace(db, folder_id)
             if staged:
                 return json_error(
@@ -4854,6 +4896,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # cannot commit between them; the local_workspace_folders FK to
         # folders(id) ON DELETE CASCADE is the final safety net.
         with stage_boundary_lock():
+            local_root_id = local_root_for_folder(db, folder_id)
+            if local_root_id is not None:
+                return json_error(
+                    "Cannot delete this folder while it has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
+            descendant_root_id = local_root_under_folder(db, folder_id)
+            if descendant_root_id is not None:
+                return json_error(
+                    "Cannot delete this folder while a subfolder has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
             staged, owner_ws = folder_has_local_workspace(db, folder_id)
             if staged:
                 return json_error(
@@ -10503,6 +10559,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "Cannot delete a workspace with local work. Switch to it and sync or discard the local copy first.",
                     409,
                 )
+            # Only block when this workspace is the last remaining link to a
+            # local root. If other workspaces still share the local copy,
+            # deleting this workspace is equivalent to unlinking one non-final
+            # workspace_folders row — which the folder-unlink route already
+            # permits and delete_workspace cascades the same way.
+            for root_id in workspace_local_root_ids(db, ws_id):
+                if local_folder_workspace_ids(db, root_id) == [ws_id]:
+                    return json_error(
+                        "This workspace is the last one linked to a local folder. "
+                        "Sync or discard its local copy before deleting the workspace.",
+                        409,
+                    )
             db.delete_workspace(ws_id)
         # Drop this workspace's cached Missing Originals payload so a
         # later workspace that reuses this SQLite rowid can't be served
@@ -10633,7 +10701,47 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "Cannot change folder membership while working locally. Sync or discard the local copy first.",
                     409,
                 )
+            local_root_id = local_root_for_folder(db, folder_id)
+            if local_root_id is not None:
+                linked_workspaces = local_folder_workspace_ids(db, local_root_id)
+                if linked_workspaces == [ws_id]:
+                    return json_error(
+                        "This is the last workspace linked to a local folder. "
+                        "Sync or discard its local copy before removing it.",
+                        409,
+                    )
+            # Ancestor case: the folder being unlinked is not itself a staged
+            # root, but a descendant local session lives beneath it. Staging
+            # rebased the descendant's folders.path under local-folders/, so
+            # remove_workspace_folder_tree()'s folders.path subtree walk misses
+            # it and would leave a hidden non-root workspace_folders row that
+            # still contributes to affected_workspace_ids. Refuse when this
+            # workspace is the last remaining link (matches the exact-folder
+            # branch above); otherwise sweep the descendant session's rows
+            # ourselves after the standard subtree unlink.
+            descendant_root_ids = local_roots_under_folder(db, folder_id)
+            for descendant_id in descendant_root_ids:
+                linked_workspaces = local_folder_workspace_ids(db, descendant_id)
+                if linked_workspaces == [ws_id]:
+                    return json_error(
+                        "This workspace is the last one linked to a subfolder's "
+                        "local copy. Sync or discard the local copy before "
+                        "removing this folder.",
+                        409,
+                    )
             db.remove_workspace_folder_tree(ws_id, folder_id)
+            for descendant_id in descendant_root_ids:
+                rows = db.conn.execute(
+                    "SELECT folder_id FROM local_folder_mappings WHERE root_folder_id = ?",
+                    (descendant_id,),
+                ).fetchall()
+                for row in rows:
+                    db.conn.execute(
+                        "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                        (ws_id, int(row["folder_id"])),
+                    )
+            if descendant_root_ids:
+                db.conn.commit()
         # Unlinking a folder tree removes photos from the workspace's scope;
         # the cached ready payload would otherwise keep listing ghosts from
         # the now-detached folders until a manual rescan.
@@ -10674,6 +10782,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     409,
                 )
 
+            # Match the folder-unlink route: block moves that would abandon a
+            # local session and, for the ancestor case, remember descendant
+            # roots so we can sweep their rebased workspace_folders rows over
+            # to the target after the move. move_folders_to_workspace uses a
+            # folders.path subtree walk, so a rebased descendant hides from
+            # it and would otherwise be orphaned on the source workspace.
+            descendant_root_ids_by_folder: dict[int, list[int]] = {}
+            for fid in folder_ids:
+                local_root_id = local_root_for_folder(db, fid)
+                if local_root_id is not None:
+                    linked_workspaces = local_folder_workspace_ids(db, local_root_id)
+                    if linked_workspaces == [ws_id]:
+                        return json_error(
+                            "This is the last workspace linked to a local folder. "
+                            "Sync or discard its local copy before moving it.",
+                            409,
+                        )
+                descendant_ids = local_roots_under_folder(db, fid)
+                descendant_root_ids_by_folder[fid] = descendant_ids
+                for descendant_id in descendant_ids:
+                    linked_workspaces = local_folder_workspace_ids(db, descendant_id)
+                    if linked_workspaces == [ws_id]:
+                        return json_error(
+                            "This workspace is the last one linked to a subfolder's "
+                            "local copy. Sync or discard the local copy before "
+                            "moving this folder.",
+                            409,
+                        )
+
             # Validate source workspace and folder ownership before creating a
             # new workspace to avoid orphans if the move would fail.
             if new_ws_name:
@@ -10691,6 +10828,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 result = db.move_folders_to_workspace(ws_id, target_ws_id, folder_ids)
                 result["target_workspace_id"] = target_ws_id
+                # Transfer the rebased descendant rows the subtree walk missed
+                # so the target workspace can reach the shared local session
+                # through its new ancestor root and the source no longer keeps
+                # a hidden link to it.
+                swept = False
+                for descendant_ids in descendant_root_ids_by_folder.values():
+                    for descendant_id in descendant_ids:
+                        rows = db.conn.execute(
+                            "SELECT folder_id FROM local_folder_mappings WHERE root_folder_id = ?",
+                            (descendant_id,),
+                        ).fetchall()
+                        for row in rows:
+                            mapped_fid = int(row["folder_id"])
+                            db.conn.execute(
+                                "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                                (ws_id, mapped_fid),
+                            )
+                            db.conn.execute(
+                                """INSERT OR IGNORE INTO workspace_folders
+                                       (workspace_id, folder_id, is_root)
+                                   VALUES (?, ?, 0)""",
+                                (target_ws_id, mapped_fid),
+                            )
+                            swept = True
+                if swept:
+                    db.conn.commit()
                 # Moving folders changes membership on both source and target
                 # workspaces, so any cached missing-originals payloads for either
                 # side would go stale.
@@ -10815,6 +10978,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             invalidate_missing_originals=lambda ws_id: _invalidate_missing_originals_cache(
                 workspace_ids=[ws_id]
             ),
+        )
+    )
+    app.register_blueprint(
+        create_local_folder_blueprint(
+            _get_db,
+            json_error,
+            lambda: app._job_runner,
+            db_path,
+            os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            invalidate_missing_originals=_invalidate_missing_originals_cache,
         )
     )
 
@@ -18262,6 +18435,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # longer restore. Reject the job before enqueue.
         db_for_guard = _get_db()
         with stage_boundary_lock():
+            local_root_id = local_root_for_folder(db_for_guard, folder_id)
+            if local_root_id is not None:
+                return json_error(
+                    "Cannot move this folder while it has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
+            # A descendant local copy has already had its folders.path rebased
+            # under local-folders/, so a folders.path subtree walk from this
+            # ancestor no longer sees it — but local_folder_mappings.source_path
+            # still records the original location. Without this check the move
+            # job would move/delete the original source directory out from
+            # under the manifest, leaving sync/discard unable to restore.
+            descendant_root_id = local_root_under_folder(db_for_guard, folder_id)
+            if descendant_root_id is not None:
+                return json_error(
+                    "Cannot move this folder while a subfolder has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
             staged_here, staged_owner_ws = folder_has_local_workspace(
                 db_for_guard, folder_id,
             )
