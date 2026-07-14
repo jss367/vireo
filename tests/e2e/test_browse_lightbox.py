@@ -215,7 +215,17 @@ def test_browse_lightbox_preloads_current_original_after_preview_settles(
     live_server, page
 ):
     """The current photo's 100% source is decoded after a short dwell at Fit."""
-    svg = (
+    current_id = live_server["data"]["photos"][0]
+    live_server["db"].conn.execute(
+        "UPDATE photos SET width=4000, height=2000 WHERE id=?",
+        (current_id,),
+    )
+    live_server["db"].conn.commit()
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
         'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
     )
@@ -223,18 +233,18 @@ def test_browse_lightbox_preloads_current_original_after_preview_settles(
 
     def serve_original(route):
         original_requests.append(route.request.url)
-        route.fulfill(body=svg, content_type="image/svg+xml")
+        route.fulfill(body=original_svg, content_type="image/svg+xml")
 
     page.route(
         "**/photos/*/full",
-        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     page.route("**/photos/*/original", serve_original)
     page.goto(f"{live_server['url']}/browse")
     page.locator(".grid-card").first.dblclick()
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
 
-    current_id = page.evaluate("window._lightboxCurrentId")
+    assert page.evaluate("window._lightboxCurrentId") == current_id
     page.wait_for_function(
         """photoId => window._lbOriginalPreload && (
             window._lbOriginalPreload.photoId === photoId &&
@@ -245,6 +255,92 @@ def test_browse_lightbox_preloads_current_original_after_preview_settles(
 
     assert any(f"/photos/{current_id}/original" in url for url in original_requests)
     assert page.evaluate("window._lbCurrentSrcKey") == "full"
+
+
+def test_browse_lightbox_waits_for_fit_image_before_preloading_original(
+    live_server, page
+):
+    """A slow Fit render is not made slower by a competing original request."""
+    current_id = live_server["data"]["photos"][0]
+    db = live_server["db"]
+    db.conn.execute(
+        "UPDATE photos SET width=4000, height=2000 WHERE id=?",
+        (current_id,),
+    )
+    db.conn.commit()
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
+    )
+    held_full = {}
+    original_requests = []
+
+    def hold_full(route):
+        held_full["route"] = route
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/full", hold_full)
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function("window._lbFullUsesOriginal === false")
+    page.wait_for_timeout(800)
+
+    assert "route" in held_full
+    assert original_requests == []
+
+    held_full.pop("route").fulfill(body=full_svg, content_type="image/svg+xml")
+    page.wait_for_function(
+        """photoId => window._lbOriginalPreload && (
+            window._lbOriginalPreload.photoId === photoId &&
+            window._lbOriginalPreload.status === 'decoded'
+        )""",
+        arg=current_id,
+    )
+
+
+def test_browse_lightbox_skips_original_when_full_covers_one_to_one(
+    live_server, page
+):
+    """Small photos stay on /full at 100%, so warming /original is wasteful."""
+    current_id = live_server["data"]["photos"][0]
+    db = live_server["db"]
+    db.conn.execute(
+        "UPDATE photos SET width=1600, height=800 WHERE id=?",
+        (current_id,),
+    )
+    db.conn.commit()
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="800" '
+        'viewBox="0 0 1600 800"><rect width="1600" height="800" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function("window._lbNativeZoom !== null")
+    page.wait_for_timeout(800)
+
+    assert page.evaluate("window._lbPickSourceKey(window._lbNativeZoom)") == "full"
+    assert original_requests == []
+    assert page.evaluate("window._lbOriginalPreload") is None
 
 
 def test_browse_lightbox_does_not_preload_when_full_already_uses_original(

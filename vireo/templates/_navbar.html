@@ -8336,27 +8336,30 @@ function _lbCancelOriginalPreload() {
   _lbOriginalPreload = null;
 }
 
-function _lbScheduleOriginalPreload(photoId) {
-  _lbCancelOriginalPreload();
+function _lbShouldPreloadOriginal(photoId) {
   if (
     photoId == null ||
     _lightboxCurrentId !== photoId ||
-    _lbCurrentSrcKey === 'original' ||
+    _lbCurrentSrcKey !== 'full' ||
     _lbFullUsesOriginal !== false ||
-    _lbOriginalUnavailable
-  ) return;
+    _lbOriginalUnavailable ||
+    !_lbNativeZoom ||
+    _lbPickSourceKey(_lbNativeZoom) !== 'original'
+  ) return false;
+  var img = document.getElementById('lightboxImg');
+  return !!(img && img.complete && img.naturalWidth && img.naturalHeight);
+}
+
+function _lbScheduleOriginalPreload(photoId) {
+  _lbCancelOriginalPreload();
+  if (!_lbShouldPreloadOriginal(photoId)) return;
 
   // Give navigation and the neighboring fit-tier preloads first use of the
   // decoder. The dwell also prevents fast arrowing from starting expensive
   // full-resolution RAW extraction for every photo passed along the way.
   _lbOriginalPreloadTimer = setTimeout(function() {
     _lbOriginalPreloadTimer = null;
-    if (
-      _lightboxCurrentId !== photoId ||
-      _lbCurrentSrcKey === 'original' ||
-      _lbFullUsesOriginal !== false ||
-      _lbOriginalUnavailable
-    ) return;
+    if (!_lbShouldPreloadOriginal(photoId)) return;
 
     var url = _lbSrcUrl(photoId, 'original');
     var preload = new Image();
