@@ -379,6 +379,12 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         first_card.get_attribute("data-filename")
     )
     expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
+    expect(page.locator("#lightboxActions")).to_have_attribute("inert", "")
+
+    # Photo-targeted keyboard actions are suppressed along with the buttons;
+    # they must not mutate the incoming photo while the outgoing one is shown.
+    page.keyboard.press("p")
+    assert page.evaluate("window._lbFlagPendingWrites") == 0
 
     while_loading = page.evaluate(
         """() => {
@@ -411,6 +417,9 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         page.locator(".grid-card").nth(1).get_attribute("data-filename")
     )
     expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    assert page.evaluate(
+        "!document.getElementById('lightboxActions').inert"
+    )
     carried = page.evaluate("window._lbViewportStateFromCurrent()")
     assert abs(carried["centerX"] - before["viewport"]["centerX"]) < 0.03
     assert abs(carried["centerY"] - before["viewport"]["centerY"]) < 0.03
@@ -613,6 +622,13 @@ def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
     page.wait_for_function(
         "() => window._lbVisualTransitionPending === false",
         timeout=3000,
+    )
+    expect(page.locator("#lightboxFilename")).to_have_text(
+        page.locator(".grid-card").nth(1).get_attribute("data-filename")
+    )
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    assert page.evaluate(
+        "!document.getElementById('lightboxActions').inert"
     )
 
     # With the pending flag cleared, saving the current photo's viewport must
