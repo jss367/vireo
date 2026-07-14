@@ -35,6 +35,7 @@ def cleanup_cached_files_for_deleted_photos(
     vireo_dir = os.path.dirname(thumb_cache_dir)
     preview_dir = os.path.join(vireo_dir, "previews")
     working_dir = os.path.join(vireo_dir, "working")
+    originals_dir = os.path.join(vireo_dir, "originals")
     # Offline-cache layout: offline/{originals,xmp,companions}/{pid}{ext}.
     # The FK cascade drops the offline_originals row when the photo is
     # deleted, so we lose the exact stored paths — glob by photo id to
@@ -48,9 +49,10 @@ def cleanup_cached_files_for_deleted_photos(
     total = len(files)
     for idx, f in enumerate(files, start=1):
         pid = f["photo_id"]
-        # {id}.jpg lives in all three dirs (legacy full preview, thumb,
-        # working copy). {id}_{size}.jpg is sized preview variants.
-        for d in [thumb_cache_dir, preview_dir, working_dir]:
+        # {id}.jpg lives in these dirs as a legacy full preview, thumbnail,
+        # working copy, or prepared full-resolution render. {id}_{size}.jpg
+        # is used for sized preview variants.
+        for d in [thumb_cache_dir, preview_dir, working_dir, originals_dir]:
             cached = os.path.join(d, f"{pid}.jpg")
             if os.path.isfile(cached):
                 try:
@@ -61,6 +63,17 @@ def cleanup_cached_files_for_deleted_photos(
                         "delete — will be reclaimed by Clear Cache: %s",
                         cached, e,
                     )
+        for prepared_render in _glob.glob(
+            os.path.join(originals_dir, f"{pid}_*.jpg")
+        ):
+            try:
+                os.remove(prepared_render)
+            except OSError as e:
+                log.warning(
+                    "Failed to remove cached file %s after photo delete — "
+                    "will be reclaimed by Clear Cache: %s",
+                    prepared_render, e,
+                )
         for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
             try:
                 os.remove(variant)

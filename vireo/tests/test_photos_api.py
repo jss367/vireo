@@ -3016,7 +3016,6 @@ def test_edited_original_cache_write_is_atomic(client_with_photo, monkeypatch):
     app, db, photo_id = client_with_photo
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-    final_path = os.path.join(vireo_dir, "originals", f"{photo_id}.jpg")
     calls = []
     original_replace = app_module.os.replace
 
@@ -3032,9 +3031,11 @@ def test_edited_original_cache_write_is_atomic(client_with_photo, monkeypatch):
     assert calls
     tmp_path, dst_path, tmp_existed = calls[0]
     assert tmp_existed is True
-    assert dst_path == final_path
+    assert os.path.dirname(dst_path) == os.path.join(vireo_dir, "originals")
+    assert os.path.basename(dst_path).startswith(f"{photo_id}_")
+    assert dst_path.endswith(".jpg")
     assert not os.path.exists(tmp_path)
-    assert os.path.exists(final_path)
+    assert os.path.exists(dst_path)
 
 
 def test_cropped_preview_uses_original_when_working_copy_is_too_small(
@@ -4470,7 +4471,7 @@ def test_edited_original_uses_companion_when_raw_returns_undersized(
     ``preserve_highlights`` mode still falls back to the embedded
     thumb. The endpoint must compare the loaded dimensions against
     the photo's stored full-resolution dimensions and try the
-    companion JPEG before caching an undersized originals/<id>.jpg.
+    companion JPEG before caching an undersized full-resolution render.
     """
     import io
     import os

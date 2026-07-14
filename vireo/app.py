@@ -8,6 +8,7 @@ import argparse
 import contextlib
 import copy
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -2319,6 +2320,47 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchone()
         return row is not None
 
+    def _full_resolution_render_signature(photo, recipe):
+        """Describe every catalogued input to a cached inspection render.
+
+        The source size/mtime pair is refreshed by scans, the canonical recipe
+        JSON includes content-addressed local-mask references, and the edit-math
+        version invalidates bytes produced by older rendering code. Hashing the
+        signature into the JPEG filename lets /original safely reuse prepared
+        renders without a database table or cross-recipe cache race.
+        """
+        from image_edits import EDIT_MATH_VERSION, recipe_to_json
+
+        return {
+            "photo_id": int(photo["id"]),
+            "source_size": photo["file_size"],
+            "source_mtime": photo["file_mtime"],
+            "filename": photo["filename"],
+            "companion_path": photo["companion_path"],
+            "recipe": recipe_to_json(recipe),
+            "edit_math_version": EDIT_MATH_VERSION,
+        }
+
+    def _full_resolution_render_path(vireo_dir, photo, recipe):
+        signature = json.dumps(
+            _full_resolution_render_signature(photo, recipe),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        cache_key = hashlib.sha256(signature).hexdigest()[:16]
+        return os.path.join(
+            vireo_dir, "originals", f"{photo['id']}_{cache_key}.jpg",
+        )
+
+    def _prepared_full_resolution_render(vireo_dir, photo, recipe):
+        cache_path = _full_resolution_render_path(vireo_dir, photo, recipe)
+        try:
+            if not os.path.isfile(cache_path) or os.path.getsize(cache_path) <= 0:
+                return None
+        except OSError:
+            return None
+        return cache_path
+
     def _invalidate_photo_render_cache(db, photo_ids):
         """Drop cached rendered derivatives after an edit recipe changes."""
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
@@ -2400,12 +2442,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",
                     removed_preview_rows,
                 )
-            original_cache = os.path.join(originals_dir, f"{pid}.jpg")
-            try:
-                if os.path.exists(original_cache):
-                    os.remove(original_cache)
-            except OSError:
-                log.warning("Failed to remove stale original cache %s", original_cache)
+            original_paths = [
+                os.path.join(originals_dir, f"{pid}.jpg"),
+                *Path(originals_dir).glob(f"{pid}_*.jpg"),
+            ]
+            for original_path in original_paths:
+                try:
+                    if os.path.exists(original_path):
+                        os.remove(original_path)
+                except OSError:
+                    log.warning(
+                        "Failed to remove stale original cache %s",
+                        original_path,
+                    )
             external_cache = os.path.join(external_edits_dir, f"{pid}.jpg")
             external_meta = os.path.join(external_edits_dir, f"{pid}.json")
             for path in (external_cache, external_meta):
@@ -17888,6 +17937,169 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id})
 
+    @app.route("/api/jobs/prepare-full-resolution", methods=["POST"])
+    def api_job_prepare_full_resolution():
+        """Prepare selected photos for uninterrupted full-resolution review.
+
+        The job first copies source assets into Vireo's managed local cache,
+        then drives the exact /original render path used by the lightbox. RAW
+        working copies and edited full-resolution renders are therefore ready
+        before the user begins inspecting the selection.
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        raw_ids = body.get("photo_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return json_error("photo_ids must be a non-empty list of integers")
+
+        photo_ids = []
+        seen = set()
+        for raw_id in raw_ids:
+            if isinstance(raw_id, bool | float):
+                return json_error("photo_ids must contain only integers")
+            try:
+                photo_id = int(raw_id)
+            except (TypeError, ValueError):
+                return json_error("photo_ids must contain only integers")
+            if photo_id not in seen:
+                seen.add(photo_id)
+                photo_ids.append(photo_id)
+
+        db = _get_db()
+        runner = app._job_runner
+        active_ws = db._active_workspace_id
+        visible_set = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT p.id FROM photos p
+                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+                [active_ws, *chunk],
+            ).fetchall()
+            visible_set.update(row["id"] for row in rows)
+        photo_ids = [photo_id for photo_id in photo_ids if photo_id in visible_set]
+        if not photo_ids:
+            return json_error("no photos in the current workspace can be prepared")
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def work(job):
+            from offline_cache import cache_photo_original
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+            try:
+                photos_map = thread_db.get_photos_by_ids(photo_ids)
+                folders = {
+                    folder["id"]: folder["path"]
+                    for folder in thread_db.get_folder_tree()
+                }
+                ready = 0
+                copied = 0
+                reused = 0
+                failed = 0
+                copied_bytes = 0
+                total = len(photo_ids)
+                job["_start_time"] = time.time()
+                job["progress"]["total"] = total
+
+                for index, photo_id in enumerate(photo_ids, start=1):
+                    if runner.is_cancelled(job["id"]):
+                        break
+                    photo = photos_map.get(photo_id)
+                    filename = photo["filename"] if photo else f"Photo {photo_id}"
+                    error = None
+                    if not photo:
+                        error = "photo was not found"
+                    else:
+                        try:
+                            cached = cache_photo_original(
+                                thread_db, photo, vireo_dir, folders,
+                            )
+                            cache_status = cached.get("status")
+                            if cache_status == "cached":
+                                copied += 1
+                                copied_bytes += int(cached.get("bytes") or 0)
+                            elif cache_status == "skipped":
+                                reused += 1
+                            else:
+                                error = cache_status or "source could not be cached"
+
+                            if error is None:
+                                # Execute the canonical renderer inside an
+                                # isolated request context. This avoids a
+                                # second implementation drifting from the
+                                # lightbox's RAW/companion/edit fallbacks.
+                                with app.test_request_context(
+                                    f"/photos/{photo_id}/original"
+                                ):
+                                    request_db = _get_db()
+                                    request_db.set_active_workspace(active_ws)
+                                    response = app.make_response(
+                                        serve_original_photo(photo_id)
+                                    )
+                                    try:
+                                        if not 200 <= response.status_code < 300:
+                                            response.direct_passthrough = False
+                                            detail = response.get_data(
+                                                as_text=True,
+                                            ).strip()
+                                            error = detail or (
+                                                "full-resolution render failed "
+                                                f"with status {response.status_code}"
+                                            )
+                                    finally:
+                                        response.close()
+                        except Exception as exc:
+                            error = str(exc) or exc.__class__.__name__
+                            log.warning(
+                                "Full-resolution preparation failed for %s: %s",
+                                filename, exc, exc_info=True,
+                            )
+
+                    if error is None:
+                        ready += 1
+                    else:
+                        failed += 1
+                        job["errors"].append(f"{filename}: {error}")
+
+                    progress = {
+                        "current": index,
+                        "total": total,
+                        "current_file": filename,
+                        "rate": round(
+                            index
+                            / max(time.time() - job["_start_time"], 0.01),
+                            1,
+                        ),
+                        "phase": "Preparing full-resolution photos",
+                    }
+                    job["progress"].update(progress)
+                    runner.push_event(job["id"], "progress", progress)
+
+                return {
+                    "ok": failed == 0,
+                    "ready": ready,
+                    "copied": copied,
+                    "reused": reused,
+                    "failed": failed,
+                    "total": total,
+                    "bytes": copied_bytes,
+                    "errors": list(job["errors"]),
+                }
+            finally:
+                thread_db.close()
+
+        job_id = runner.start(
+            "prepare-full-resolution",
+            work,
+            config={"photo_ids": photo_ids},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id, "total": len(photo_ids)})
+
     @app.route("/api/jobs/move-folder", methods=["POST"])
     def api_job_move_folder():
         """Move an entire folder to a destination."""
@@ -24677,6 +24889,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         recipe = db.get_photo_edit_recipe(photo_id)
 
+        prepared_render = _prepared_full_resolution_render(
+            vireo_dir, photo, recipe,
+        )
+        if prepared_render:
+            return send_file(prepared_render, mimetype="image/jpeg")
+
         # Decide whether to trust the working copy as the full-res asset
         # by reading its actual on-disk dimensions, NOT the current
         # ``working_copy_max_size`` config — the cap may have changed
@@ -24800,6 +25018,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo,
                     vireo_dir,
                     {photo["folder_id"]: folder["path"]},
+                    prefer_cached=True,
                 )
                 companion_source = _full_res_companion_path(
                     folder["path"], using_offline_cache,
@@ -24875,7 +25094,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # camera preview rather than full-resolution pixels. For
                 # 1:1 edited views that's the wrong file to cache — try
                 # the full-size companion before saving an undersized
-                # originals/<id>.jpg.
+                # prepared full-resolution render cache.
                 expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
                 if _image_is_smaller_than_expected(img, expected_w, expected_h):
                     companion_fallback = _full_res_companion_path(
@@ -24943,7 +25162,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ),
             )
             originals_dir = os.path.join(vireo_dir, "originals")
-            cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
+            cache_path = _full_resolution_render_path(
+                vireo_dir, photo, recipe,
+            )
             os.makedirs(originals_dir, exist_ok=True)
             quality = cfg.load().get("working_copy_quality", 92)
             fd, tmp_path = tempfile.mkstemp(
@@ -24975,6 +25196,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo,
             vireo_dir,
             {photo["folder_id"]: folder["path"]},
+            prefer_cached=True,
         )
 
         from image_loader import (
@@ -25184,9 +25406,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _record_working_copy_failure(db, photo, image_path)
             return "Could not load image", 500
         originals_dir = os.path.join(vireo_dir, "originals")
-        cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
+        cache_path = _full_resolution_render_path(
+            vireo_dir, photo, recipe,
+        )
         os.makedirs(originals_dir, exist_ok=True)
-        img.save(cache_path, format="JPEG", quality=quality)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=f".{photo_id}.", suffix=".jpg.tmp", dir=originals_dir,
+        )
+        os.close(fd)
+        try:
+            img.save(tmp_path, format="JPEG", quality=quality)
+            os.replace(tmp_path, cache_path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
+        finally:
+            img.close()
         return send_file(cache_path, mimetype="image/jpeg")
 
     app.register_blueprint(create_photo_labels_blueprint(_get_db, json_error))

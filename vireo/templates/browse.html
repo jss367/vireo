@@ -1605,6 +1605,7 @@ body.sidebar-resizing {
       <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
       <button id="bestBatchBtn" onclick="openBestBatch()" title="Find and rank neighboring frames around the selected photo" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Best Batch</button>
       <button id="burstReviewBtn" onclick="openSelectedInBurstReview()" title="Open selected photos in burst review" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review Burst</button>
+      <button id="prepareFullResolutionBtn" onclick="prepareFullResolutionSelection()" title="Cache originals and full-resolution renders before inspecting detail" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Prepare Full Resolution</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
       <button onclick="makeAvailableOffline()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Make Offline</button>
@@ -7963,6 +7964,8 @@ function buildPhotoContextMenu(photoIds) {
       onClick: function() { openBestBatchForIds(photoIds, photoIds[0]); } },
     { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openSelectedInBurstReview(); } },
+    { label: 'Prepare Full Resolution',
+      onClick: function() { prepareFullResolutionSelection(photoIds); } },
     { separator: true },
     { label: 'Edit Photo', disabled: !one, disabledHint: hint,
       onClick: function() { openPhotoEditor(photoIds[0]); } },
@@ -8436,6 +8439,82 @@ async function makeAvailableOffline() {
     showToast('Offline caching started (' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's') + ')');
   } catch(err) {
     showToast('Offline cache failed: ' + err.message, 'error');
+  }
+}
+
+var _prepareFullResolutionJobId = null;
+
+function _setPrepareFullResolutionButton(running, current, total) {
+  var btn = document.getElementById('prepareFullResolutionBtn');
+  if (!btn) return;
+  btn.disabled = !!running;
+  if (running && current != null && total) {
+    btn.textContent = 'Preparing ' + current + '/' + total;
+  } else if (running) {
+    btn.textContent = 'Preparing…';
+  } else {
+    btn.textContent = 'Prepare Full Resolution';
+  }
+}
+
+async function prepareFullResolutionSelection(photoIds) {
+  var activeIds = Array.isArray(photoIds) ? photoIds.slice() : getActiveSelection();
+  if (!activeIds.length || _prepareFullResolutionJobId) return;
+  _setPrepareFullResolutionButton(true);
+  try {
+    var data = await safeFetch('/api/jobs/prepare-full-resolution', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: activeIds}),
+    });
+    _prepareFullResolutionJobId = data.job_id;
+    showToast(
+      'Preparing ' + activeIds.length.toLocaleString() +
+      ' photo' + (activeIds.length === 1 ? '' : 's') +
+      ' for full-resolution inspection…'
+    );
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(progress) {
+        _setPrepareFullResolutionButton(
+          true, progress.current || 0, progress.total || activeIds.length
+        );
+      },
+      onComplete: function(done) {
+        _prepareFullResolutionJobId = null;
+        _setPrepareFullResolutionButton(false);
+        var result = done.result || {};
+        if (done.status === 'cancelled') {
+          showToast('Full-resolution preparation was stopped.', 'error');
+          return;
+        }
+        var ready = result.ready || 0;
+        var failed = result.failed || 0;
+        var copied = result.copied || 0;
+        var summary = ready.toLocaleString() + ' ready';
+        if (copied) summary += ', ' + copied.toLocaleString() + ' copied locally';
+        if (failed) summary += ', ' + failed.toLocaleString() + ' failed';
+        showToast(
+          'Full-resolution preparation complete: ' + summary,
+          failed ? 'error' : 'success'
+        );
+        try {
+          window.dispatchEvent(new CustomEvent('vireo-job-done', {
+            detail: {job_id: data.job_id}
+          }));
+        } catch (_) {}
+      },
+      onError: function() {
+        _prepareFullResolutionJobId = null;
+        _setPrepareFullResolutionButton(false);
+      },
+    });
+  } catch(err) {
+    _prepareFullResolutionJobId = null;
+    _setPrepareFullResolutionButton(false);
+    showToast(
+      'Could not start full-resolution preparation: ' + err.message,
+      'error'
+    );
   }
 }
 
