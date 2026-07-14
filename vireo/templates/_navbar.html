@@ -7570,10 +7570,8 @@ function buildLightboxContextMenu(pid) {
   if (has('openInEditor')) {
     items = items.concat(window.buildOpenInEditorMenuItems([pid]));
   }
-  if (has('revealPhoto')) {
-    items.push({ label: window.VIREO_REVEAL_LABEL,
-      onClick: function() { window.revealPhoto(pid); } });
-  }
+  items.push({ label: window.VIREO_REVEAL_LABEL,
+    onClick: function() { revealLightboxPhoto(pid); } });
   if (has('copyPhotoPaths')) {
     items.push({ label: 'Copy Path',
       onClick: function() { window.copyPhotoPaths([pid]); } });
@@ -7584,6 +7582,33 @@ function buildLightboxContextMenu(pid) {
     onClick: function() { closeLightbox(); } });
 
   return items;
+}
+
+function revealLightboxPhoto(pid) {
+  // Browse and Review each expose their own reveal helpers. Other pages can
+  // also open the shared lightbox, so keep a direct API fallback here rather
+  // than hiding the action based on which page happened to launch it.
+  if (typeof window.revealPhoto === 'function') {
+    window.revealPhoto(pid);
+    return;
+  }
+  if (typeof window.revealReviewPhoto === 'function') {
+    window.revealReviewPhoto(pid);
+    return;
+  }
+  safeFetch('/api/files/reveal', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_id: pid}),
+  }, { toast: false }).then(function(data) {
+    if (typeof showRevealFeedback === 'function') showRevealFeedback(data);
+  }).catch(function(err) {
+    if (typeof showToast === 'function') {
+      showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
+    } else {
+      console.error('revealLightboxPhoto failed', err);
+    }
+  });
 }
 
 (function() {

@@ -120,6 +120,38 @@ def test_review_card_open_lightbox_opens_overlay(live_server, page):
     expect(page.locator("#lightboxOverlay")).to_be_visible()
 
 
+def test_review_lightbox_reveal_fires_endpoint(live_server, page):
+    """The shared lightbox keeps its reveal action outside Browse."""
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+
+    card = page.locator(".card[data-pred-id]").first
+    card.wait_for(state="visible")
+    card.click(button="right")
+    menu = page.locator(".vireo-ctx-menu")
+    menu.locator(".vireo-ctx-item", has_text="Open in Lightbox").click()
+    expect(page.locator("#lightboxOverlay")).to_be_visible()
+
+    page.evaluate(
+        """
+        const img = document.getElementById('lightboxImg');
+        img.dispatchEvent(new MouseEvent('contextmenu', {
+            bubbles: true, cancelable: true, clientX: 300, clientY: 300,
+            button: 2,
+        }));
+        """
+    )
+    lightbox_menu = page.locator(".vireo-ctx-menu")
+    reveal = lightbox_menu.locator(".vireo-ctx-item", has_text="Reveal in")
+    expect(reveal).to_be_visible()
+
+    with page.expect_response(
+        lambda r: "/api/files/reveal" in r.url and r.status == 200
+    ):
+        reveal.click()
+    expect(lightbox_menu).to_be_hidden()
+
+
 def test_review_lightbox_rating_chip_posts_batch(live_server, page):
     """Regression guard: rating chips in the lightbox context menu on /review
     must POST to /api/batch/rating via setReviewRating. Previously the menu
