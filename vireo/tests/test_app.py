@@ -57,6 +57,19 @@ def test_browse_page(app_and_db):
     assert 'function refreshPendingSyncBanner()' in html
 
 
+def test_browse_discloses_raw_jpeg_pairs_and_offers_source_switch(app_and_db):
+    """The paired-file behavior must be discoverable in Browse rather than
+    existing only as an internal ``companion_path`` or delete-dialog detail."""
+    app, _ = app_and_db
+    html = app.test_client().get("/browse").get_data(as_text=True)
+
+    assert "JPEG · RAW pair" in html
+    assert 'id="lightboxSourceControl"' in html
+    assert "Viewing JPEG · Show RAW" in html
+    assert "Has JPEG Companion" in html
+    assert "_vireoPairSourceByPhoto[key] = 'jpeg'" in html
+
+
 def test_api_add_keyword_accepts_existing_keyword_id(app_and_db):
     """POST /api/photos/<id>/keywords can attach an existing keyword by id."""
     app, db = app_and_db

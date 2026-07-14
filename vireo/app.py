@@ -1726,6 +1726,19 @@ def _migrate_edit_math_render_caches(app):
                 )
                 purge_failed = True
                 continue
+            try:
+                for name in os.listdir(thumb_dir):
+                    if not (
+                        name.startswith(f"{pid}_") and name.endswith(".jpg")
+                    ):
+                        continue
+                    try:
+                        os.remove(os.path.join(thumb_dir, name))
+                        invalidated_thumbs += 1
+                    except OSError:
+                        purge_failed = True
+            except FileNotFoundError:
+                pass
             db.conn.execute(
                 "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
             )
@@ -2277,6 +2290,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         return g.db
 
+    def _requested_pair_source(photo, folder_path):
+        """Resolve an explicit RAW/JPEG display choice for a paired photo.
+
+        Paired files remain one catalog record, but browser image requests can
+        select which physical source supplies the pixels with
+        ``?source=jpeg`` or ``?source=raw``. Invalid, unavailable, and
+        non-paired choices fall back to the established canonical rendering
+        path so old clients and ordinary photos are unchanged.
+        """
+        requested = (request.args.get("source") or "").strip().lower()
+        if requested not in {"jpeg", "raw"}:
+            return None, None
+
+        from image_loader import RAW_EXTENSIONS
+
+        primary_ext = os.path.splitext(photo["filename"])[1].lower()
+        if primary_ext not in RAW_EXTENSIONS or not photo["companion_path"]:
+            return None, None
+
+        if requested == "raw":
+            primary = os.path.join(folder_path, photo["filename"])
+            return ("raw", primary) if os.path.isfile(primary) else (None, None)
+
+        companion = os.path.join(folder_path, photo["companion_path"])
+        companion_ext = os.path.splitext(companion)[1].lower()
+        if companion_ext not in {".jpg", ".jpeg"} or not os.path.isfile(companion):
+            return None, None
+        return "jpeg", companion
+
     _invalid_preview_cache_paths = set()
 
     def _ensure_preview_cache_invalidations_table(db):
@@ -2338,6 +2380,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "Failed to remove stale thumbnail cache %s", thumb_cache,
                     exc_info=True,
                 )
+            try:
+                for name in os.listdir(thumb_dir):
+                    if not (
+                        name.startswith(f"{pid}_") and name.endswith(".jpg")
+                    ):
+                        continue
+                    variant = os.path.join(thumb_dir, name)
+                    try:
+                        os.remove(variant)
+                    except OSError:
+                        log.warning(
+                            "Failed to remove stale paired-source thumbnail %s",
+                            variant,
+                            exc_info=True,
+                        )
+            except FileNotFoundError:
+                pass
             if clear_thumb_path:
                 db.conn.execute(
                     "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
@@ -20249,7 +20308,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return resp
 
         thumb_dir = app.config["THUMB_CACHE_DIR"]
-        thumb_path = os.path.join(thumb_dir, filename)
 
         try:
             photo_id = int(filename.replace(".jpg", ""))
@@ -20281,6 +20339,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # legitimately own it.
             return "", 404
 
+        folder_row = db.get_folder(photo["folder_id"])
+        if not folder_row:
+            return "", 404
+        pair_source, pair_source_path = _requested_pair_source(
+            photo, folder_row["path"],
+        )
+        cache_filename = (
+            f"{photo_id}_{pair_source}.jpg" if pair_source else filename
+        )
+        thumb_path = os.path.join(thumb_dir, cache_filename)
+        try:
+            selected_source_mtime = (
+                os.path.getmtime(pair_source_path)
+                if pair_source_path else photo["file_mtime"]
+            )
+        except OSError:
+            selected_source_mtime = photo["file_mtime"]
+
         # Collapse existence + freshness probe into a single ``getmtime``
         # so a concurrent ``Clear cache`` (or parallel regeneration) that
         # unlinks the file between two separate syscalls can't surface as
@@ -20296,15 +20372,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # against, so prefer the fast path over false-positive
             # regeneration).
             fresh = (
-                photo["file_mtime"] is None
-                or cached_mtime >= photo["file_mtime"]
+                selected_source_mtime is None
+                or cached_mtime >= selected_source_mtime
             )
             if fresh:
-                return _send_cached(thumb_dir, filename)
+                return _send_cached(thumb_dir, cache_filename)
             log.info(
                 "Thumbnail for photo %s is stale (cached mtime %.0f < "
                 "source file_mtime %.0f) — regenerating",
-                photo_id, cached_mtime, photo["file_mtime"],
+                photo_id, cached_mtime, selected_source_mtime,
             )
             # ``generate_thumbnail`` short-circuits when the destination
             # file already exists (an "already done" optimization), so a
@@ -20326,13 +20402,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "file once. Next request will retry the unlink.",
                     thumb_path, exc_info=True,
                 )
-                return _send_cached(thumb_dir, filename)
+                return _send_cached(thumb_dir, cache_filename)
 
         # Self-heal path: regenerate on miss (or stale) when the photo
         # still exists.
-        folder_row = db.get_folder(photo["folder_id"])
-        if not folder_row:
-            return "", 404
         live_source = os.path.join(folder_row["path"], photo["filename"])
 
         # Resolve source via the canonical-path helper so we prefer the
@@ -20362,11 +20435,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             recipe = db.get_photo_edit_recipe(photo_id)
             thumb_size = cfg.load().get("thumbnail_size", 400)
-            source, _using_working_copy = _recipe_render_source(
-                photo, recipe, thumb_size, vireo_dir, folders,
-            )
+            if pair_source_path:
+                source = pair_source_path
+                _using_working_copy = False
+            else:
+                source, _using_working_copy = _recipe_render_source(
+                    photo, recipe, thumb_size, vireo_dir, folders,
+                )
             if (
                 not _using_working_copy
+                and pair_source != "jpeg"
                 and _has_current_working_copy_failure(
                     photo,
                     vireo_dir,
@@ -20392,8 +20470,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS
             raw_decode = (
                 RAW_DECODE_PRESERVE_HIGHLIGHTS
-                if recipe
-                and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+                if (
+                    pair_source == "raw"
+                    or (
+                        recipe
+                        and os.path.splitext(photo["filename"])[1].lower()
+                        in RAW_EXTENSIONS
+                    )
+                )
                 else None
             )
             min_source_size = None
@@ -20413,10 +20497,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 native_size=(
                     _recipe_source_dimensions(photo) if recipe else None
                 ),
+                cache_name=cache_filename,
             )
             if (
                 not result
                 and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS
+                and pair_source != "raw"
             ):
                 # libraw couldn't demosaic the RAW (unsupported variant,
                 # corrupt file, no usable embedded JPEG). Try the companion
@@ -20455,6 +20541,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 not result
                 and recipe
                 and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS
+                and pair_source != "raw"
             ):
                 result = _retry_thumbnail_with_working_copy(
                     db,
@@ -20491,9 +20578,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # as stale, triggering a regeneration loop on every fetch. The
         # ``photo`` dict was loaded from the row above, so its
         # ``file_mtime`` is the canonical source-of-truth value.
-        if photo["file_mtime"] is not None:
+        if selected_source_mtime is not None:
             try:
-                os.utime(result, (photo["file_mtime"], photo["file_mtime"]))
+                os.utime(result, (selected_source_mtime, selected_source_mtime))
             except OSError:
                 # Best-effort: a touch failure is non-fatal; the worst
                 # case is the next request regenerates again. We don't
@@ -20506,19 +20593,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Persist on-disk presence so the dashboard's coverage query
         # (`thumb_path IS NOT NULL`) reflects this regeneration. Stored
         # value is the bare filename, matching ``thumbnails.generate_all``.
-        try:
-            db.conn.execute(
-                "UPDATE photos SET thumb_path=? WHERE id=?",
-                (f"{photo_id}.jpg", photo_id),
-            )
-            db.conn.commit()
-        except Exception:
-            # Coverage column drift is recoverable via the backfill job;
-            # don't fail the request if the UPDATE racks up a transient
-            # SQLite error.
-            log.exception("Failed to persist thumb_path for photo %s", photo_id)
+        if not pair_source:
+            try:
+                db.conn.execute(
+                    "UPDATE photos SET thumb_path=? WHERE id=?",
+                    (f"{photo_id}.jpg", photo_id),
+                )
+                db.conn.commit()
+            except Exception:
+                # Coverage column drift is recoverable via the backfill job;
+                # don't fail the request if the UPDATE racks up a transient
+                # SQLite error.
+                log.exception("Failed to persist thumb_path for photo %s", photo_id)
 
-        return _send_cached(thumb_dir, filename)
+        return _send_cached(thumb_dir, cache_filename)
 
     @app.route("/api/species/<path:species_name>/clusters")
     def api_species_clusters(species_name):
@@ -24058,11 +24146,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         preview_dir = os.path.join(vireo_dir, "previews")
         cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
         recipe = db.get_photo_edit_recipe(photo_id)
+        folder_row = db.conn.execute(
+            "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
+        ).fetchone()
+        if not folder_row:
+            return "Not found", 404
+        pair_source, pair_source_path = _requested_pair_source(
+            photo, folder_row["path"],
+        )
+        # The established preview cache is keyed only by (photo_id, size).
+        # Explicit paired-source views bypass it so RAW and JPEG pixels can
+        # never contaminate one another. Browser caching still makes repeated
+        # viewing cheap; the ordinary unpaired path keeps the disk LRU.
+        bypass_cache = pair_source is not None
 
         # Reject corrupt zero-byte cache files (prior write interrupted).
         # Treat them as a miss so the regeneration path below produces a
         # real preview.
-        if os.path.exists(cache_path) and os.path.getsize(cache_path) == 0:
+        if (
+            not bypass_cache
+            and os.path.exists(cache_path)
+            and os.path.getsize(cache_path) == 0
+        ):
             try:
                 os.remove(cache_path)
             except OSError:
@@ -24074,7 +24179,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             cache_path in _invalid_preview_cache_paths
             or _is_preview_cache_invalid(db, photo_id, size)
         )
-        if stale_after_failed_invalidation and os.path.exists(cache_path):
+        if (
+            not bypass_cache
+            and stale_after_failed_invalidation
+            and os.path.exists(cache_path)
+        ):
             try:
                 os.remove(cache_path)
             except OSError:
@@ -24088,13 +24197,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 _clear_preview_cache_invalid(db, photo_id, size)
                 db.preview_cache_delete(photo_id, size)
                 stale_after_failed_invalidation = False
-        elif stale_after_failed_invalidation:
+        elif not bypass_cache and stale_after_failed_invalidation:
             _invalid_preview_cache_paths.discard(cache_path)
             _clear_preview_cache_invalid(db, photo_id, size)
             db.preview_cache_delete(photo_id, size)
             stale_after_failed_invalidation = False
         if (
-            recipe
+            not bypass_cache
+            and recipe
             and os.path.exists(cache_path)
             and not db.preview_cache_get(photo_id, size)
         ):
@@ -24112,7 +24222,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # OperationalError: database is locked, but that shouldn't turn a
         # valid cache hit into a 500 when the JPEG is right there on disk.
         if (
-            not stale_after_failed_invalidation
+            not bypass_cache
+            and not stale_after_failed_invalidation
             and db.preview_cache_get(photo_id, size)
             and os.path.exists(cache_path)
         ):
@@ -24130,7 +24241,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # file we just adopted (e.g. preview_cache_max_mb=0), but we can
         # still serve the response from memory — mirrors the miss path.
         if (
-            not stale_after_failed_invalidation
+            not bypass_cache
+            and not stale_after_failed_invalidation
             and not skip_untracked_preview_adoption
             and os.path.exists(cache_path)
         ):
@@ -24150,16 +24262,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             load_image,
         )
 
-        folder_row = db.conn.execute(
-            "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
-        ).fetchone()
-        if not folder_row:
-            return "Not found", 404
         folders = {folder_row["id"]: folder_row["path"]}
 
-        canonical, using_working_copy = _recipe_render_source(
-            photo, recipe, size, vireo_dir, folders,
-        )
+        if pair_source_path:
+            canonical = pair_source_path
+            using_working_copy = False
+        else:
+            canonical, using_working_copy = _recipe_render_source(
+                photo, recipe, size, vireo_dir, folders,
+            )
         selected_ext = os.path.splitext(canonical)[1].lower()
         if (
             not using_working_copy
@@ -24181,7 +24292,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         load_max_size = None if recipe and recipe.get("crop") else size
         raw_decode = (
             RAW_DECODE_PRESERVE_HIGHLIGHTS
-            if recipe and selected_ext in RAW_EXTENSIONS
+            if selected_ext in RAW_EXTENSIONS and (recipe or pair_source == "raw")
             else None
         )
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
@@ -24191,6 +24302,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             and selected_ext in RAW_EXTENSIONS
             and photo["width"]
             and photo["height"]
+            and pair_source != "raw"
         ):
             # _load_raw falls back to the embedded camera JPEG when libraw
             # can't demosaic the sensor data, even in preserve-highlights
@@ -24230,7 +24342,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             canonical = companion_abs
                         elif companion_img is not None:
                             companion_img.close()
-        if img is None and selected_ext in RAW_EXTENSIONS:
+        if (
+            img is None
+            and selected_ext in RAW_EXTENSIONS
+            and pair_source != "raw"
+        ):
             # libraw couldn't decode this RAW (unsupported variant, corrupt
             # file, no usable embedded JPEG). Try the companion JPEG before
             # 500ing so a sidecar that can satisfy the preview isn't refused
@@ -24292,18 +24408,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # lock / FK violations (photo deleted between lookup and insert).
         # The preview bytes are ready in memory — never fail the request
         # over bookkeeping.
-        try:
-            os.makedirs(preview_dir, exist_ok=True)
-            with open(cache_path, "wb") as f:
-                f.write(data)
-            _invalid_preview_cache_paths.discard(cache_path)
-            _clear_preview_cache_invalid(db, photo_id, size)
-            db.preview_cache_insert(photo_id, size, len(data))
-            evict_preview_cache_if_over_quota(db, vireo_dir)
-        except Exception as e:
-            log.warning(
-                "Failed to persist preview cache %s: %s", cache_path, e,
-            )
+        if not bypass_cache:
+            try:
+                os.makedirs(preview_dir, exist_ok=True)
+                with open(cache_path, "wb") as f:
+                    f.write(data)
+                _invalid_preview_cache_paths.discard(cache_path)
+                _clear_preview_cache_invalid(db, photo_id, size)
+                db.preview_cache_insert(photo_id, size, len(data))
+                evict_preview_cache_if_over_quota(db, vireo_dir)
+            except Exception as e:
+                log.warning(
+                    "Failed to persist preview cache %s: %s", cache_path, e,
+                )
 
         return Response(data, mimetype="image/jpeg")
 
@@ -24323,7 +24440,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         effective = _get_db().get_effective_config(cfg.load())
         pm = effective.get("preview_max_size")
         if pm == 0:
-            return redirect(f"/photos/{photo_id}/original")
+            source = (request.args.get("source") or "").strip().lower()
+            suffix = f"?source={source}" if source in {"jpeg", "raw"} else ""
+            return redirect(f"/photos/{photo_id}/original{suffix}")
         return _serve_preview(photo_id, int(pm or 1920))
 
     @app.route("/photos/<int:photo_id>/preview")
@@ -24676,6 +24795,58 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         recipe = db.get_photo_edit_recipe(photo_id)
+
+        pair_folder = db.conn.execute(
+            "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+        ).fetchone()
+        pair_source = pair_source_path = None
+        if pair_folder:
+            pair_source, pair_source_path = _requested_pair_source(
+                photo, pair_folder["path"],
+            )
+        if pair_source_path:
+            # A JPEG companion without a Vireo recipe is already browser
+            # displayable at full resolution; preserve its exact authored
+            # bytes. RAW and edited companion requests need a decoded JPEG
+            # response, but deliberately bypass the canonical/original cache
+            # because that cache has no source dimension in its key.
+            if pair_source == "jpeg" and not recipe:
+                return send_file(pair_source_path)
+
+            import io
+
+            from image_loader import (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                load_image,
+            )
+
+            load_kwargs = (
+                {"raw_decode": RAW_DECODE_PRESERVE_HIGHLIGHTS}
+                if pair_source == "raw" else {}
+            )
+            img = load_image(pair_source_path, max_size=None, **load_kwargs)
+            if img is None:
+                return "Could not load image", 500
+            if recipe:
+                import local_masks
+                from image_edits import apply_recipe_to_loaded_image
+
+                img = apply_recipe_to_loaded_image(
+                    img,
+                    recipe,
+                    native_size=_recipe_source_dimensions(photo),
+                    local_mask=local_masks.load_snapshot(
+                        vireo_dir, photo_id, recipe,
+                    ),
+                )
+            buf = io.BytesIO()
+            img.save(
+                buf,
+                format="JPEG",
+                quality=cfg.load().get("working_copy_quality", 92),
+            )
+            img.close()
+            return Response(buf.getvalue(), mimetype="image/jpeg")
 
         # Decide whether to trust the working copy as the full-res asset
         # by reading its actual on-disk dimensions, NOT the current

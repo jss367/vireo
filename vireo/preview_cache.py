@@ -61,6 +61,18 @@ def cleanup_cached_files_for_deleted_photos(
                         "delete — will be reclaimed by Clear Cache: %s",
                         cached, e,
                     )
+        # Paired RAW+JPEG views keep source-specific thumbnail variants next
+        # to the legacy/default thumbnail. They are disposable derivatives
+        # and must follow the photo out of the cache on delete as well.
+        for variant in _glob.glob(os.path.join(thumb_cache_dir, f"{pid}_*.jpg")):
+            try:
+                os.remove(variant)
+            except OSError as e:
+                log.warning(
+                    "Failed to remove thumbnail variant %s after photo "
+                    "delete — will be reclaimed by Clear Cache: %s",
+                    variant, e,
+                )
         for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
             try:
                 os.remove(variant)

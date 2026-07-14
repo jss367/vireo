@@ -334,6 +334,36 @@ body.sidebar-resizing {
   text-transform: uppercase;
   pointer-events: none;
 }
+.pair-source-badge {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  background: rgba(10, 14, 17, 0.84);
+  color: #f4f7f8;
+  border: 1px solid rgba(255, 255, 255, 0.52);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 3px 6px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+.detail-source-control {
+  display: none;
+  width: 100%;
+  margin: -4px 0 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-secondary));
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.detail-source-control:hover {
+  background: color-mix(in srgb, var(--accent) 20%, var(--bg-secondary));
+}
 .grid-card-info {
   padding: 8px 10px;
 }
@@ -1741,6 +1771,7 @@ body.sidebar-resizing {
       <button class="detail-close" onclick="closeDetail()">&times;</button>
       <img class="detail-preview single-only" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent, photos)">
       <div class="detail-filename single-only" id="detailFilename"></div>
+      <button class="detail-source-control single-only" id="detailSourceControl" type="button" onclick="event.stopPropagation(); vireoTogglePairSource(window._detailPhotoId);"></button>
 
       <div class="detail-section">
         <div class="detail-section-title">Rating <span class="batch-mixed" id="ratingMixed" hidden>· Mixed</span></div>
@@ -2600,6 +2631,9 @@ function renderPhotoCard(p, idx) {
   var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
   var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
   var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '';
+  var pairBadge = p.companion_path
+    ? '<span class="pair-source-badge" data-pair-source-id="' + p.id + '">JPEG · RAW pair</span>'
+    : '';
 
   // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
   var speciesBadgeHtml = '';
@@ -2625,6 +2659,7 @@ function renderPhotoCard(p, idx) {
       inatBadge +
       wildlifeBadge +
       representativeBadge +
+      pairBadge +
       speciesBadgeHtml +
     '</div>' +
     '<div class="grid-card-info">' +
@@ -3302,6 +3337,7 @@ var FIELD_OPS = {
   noise_estimate: ['is', 'is not', '>=', '<='],
   crop_complete: ['is', 'is not', '>=', '<='],
   has_mask: ['equals'],
+  has_jpeg_companion: ['equals'],
   active_mask_variant: ['is', 'is not', 'contains'],
   has_gps: ['equals'],
   has_location_keyword: ['equals'],
@@ -3329,6 +3365,7 @@ var FIELD_LABELS = {
   noise_estimate: 'Noise',
   crop_complete: 'Crop Complete',
   has_mask: 'Has Mask',
+  has_jpeg_companion: 'Has JPEG Companion',
   active_mask_variant: 'Mask Variant',
   has_gps: 'Has GPS',
   has_location_keyword: 'Has Location Keyword',
@@ -3371,7 +3408,7 @@ function defaultValueForRule(field, op) {
   if (field === 'active_mask_variant') return 'sam2-large';
   if (field === 'prediction_status') return 'pending';
   if (field === 'wildlife_excluded') return 0;
-  if (['has_mask', 'has_gps', 'has_location_keyword', 'location_keyword_missing',
+  if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword', 'location_keyword_missing',
        'inat_submitted', 'is_duplicate', 'needs_review'].indexOf(field) !== -1) return 1;
   return '';
 }
@@ -3603,7 +3640,7 @@ function renderRuleValueInput(r, i) {
   if (r.field === 'all') {
     return '<span style="flex:1;color:var(--text-ghost);font-size:12px;">Matches every photo in this workspace</span>';
   }
-  if (['has_mask', 'has_gps', 'has_location_keyword', 'wildlife_excluded',
+  if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword', 'wildlife_excluded',
        'location_keyword_missing', 'inat_submitted', 'is_duplicate',
        'needs_review'].indexOf(r.field) !== -1) {
     var boolVal = (r.value === true || r.value === 1 || r.value === '1' || r.value === 'true') ? '1' : '0';
@@ -3763,7 +3800,7 @@ function coerceRuleForSave(node) {
        'noise_estimate', 'crop_complete', 'prediction_confidence'].indexOf(node.field) !== -1) {
     val = parseFloat(val);
     if (isNaN(val)) val = 0;
-  } else if (['has_mask', 'has_gps', 'has_location_keyword',
+  } else if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword',
               'location_keyword_missing', 'inat_submitted', 'is_duplicate',
               'needs_review', 'all'].indexOf(node.field) !== -1) {
     val = (val === true || val === 1 || val === '1' || val === 'true') ? 1 : 0;
@@ -6278,6 +6315,12 @@ function renderDetail(photo) {
     window.vireoRememberPhotoEditRecipe(photo.id, photo.edit_recipe, {
       skipIfLocallyWritten: true,
     });
+  }
+  if (typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(photo);
+  }
+  if (typeof window.vireoUpdatePairSourceControls === 'function') {
+    window.vireoUpdatePairSourceControls(photo.id);
   }
   var detailThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
   document.getElementById('detailImg').src = detailThumb;

@@ -773,7 +773,8 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
     pid = db.add_photo(
-        folder_id=fid, filename=filename, extension=".jpg",
+        folder_id=fid, filename=filename,
+        extension=os.path.splitext(filename)[1].lower(),
         file_size=os.path.getsize(src),
         file_mtime=os.path.getmtime(src),
         width=800, height=600,
@@ -784,6 +785,73 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
         api_token="test-token-123",
     )
     return app, db, pid, str(thumb_dir)
+
+
+def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
+    tmp_path, monkeypatch,
+):
+    """Explicit paired-source requests must return the selected physical
+    file at thumbnail, preview, and original sizes without sharing caches.
+
+    The browser defaults paired photos to ``source=jpeg`` and lets the user
+    switch to ``source=raw``. Distinct, recognizable colors make a cache-key
+    mix-up or accidental RAW fallback immediately visible.
+    """
+    app, db, pid, thumb_dir = _make_app_with_real_photo(
+        tmp_path, monkeypatch, filename="bird.nef",
+    )
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=(SELECT folder_id FROM photos WHERE id=?)",
+        (pid,),
+    ).fetchone()["path"]
+    companion = os.path.join(folder, "bird.jpg")
+    Image.new("RGB", (800, 600), (20, 210, 40)).save(
+        companion, "JPEG", quality=95,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='bird.jpg' WHERE id=?", (pid,),
+    )
+    db.conn.commit()
+
+    import image_loader
+    import thumbnails
+
+    real_load = image_loader.load_image
+
+    def load_selected(path, max_size=None, **kwargs):
+        if str(path).lower().endswith(".nef"):
+            return Image.new("RGB", (800, 600), (210, 25, 35))
+        return real_load(path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", load_selected)
+    monkeypatch.setattr(thumbnails, "load_image", load_selected)
+
+    def center_rgb(response):
+        import io
+
+        with Image.open(io.BytesIO(response.data)) as rendered:
+            return rendered.convert("RGB").getpixel(
+                (rendered.width // 2, rendered.height // 2),
+            )
+
+    client = app.test_client()
+    jpeg_thumb = client.get(f"/thumbnails/{pid}.jpg?source=jpeg")
+    raw_thumb = client.get(f"/thumbnails/{pid}.jpg?source=raw")
+    assert center_rgb(jpeg_thumb)[1] > 180
+    assert center_rgb(raw_thumb)[0] > 180
+    assert os.path.isfile(os.path.join(thumb_dir, f"{pid}_jpeg.jpg"))
+    assert os.path.isfile(os.path.join(thumb_dir, f"{pid}_raw.jpg"))
+
+    jpeg_preview = client.get(f"/photos/{pid}/preview?size=1920&source=jpeg")
+    raw_preview = client.get(f"/photos/{pid}/preview?size=1920&source=raw")
+    assert center_rgb(jpeg_preview)[1] > 180
+    assert center_rgb(raw_preview)[0] > 180
+    assert db.preview_cache_get(pid, 1920) is None
+
+    jpeg_original = client.get(f"/photos/{pid}/original?source=jpeg")
+    raw_original = client.get(f"/photos/{pid}/original?source=raw")
+    assert center_rgb(jpeg_original)[1] > 180
+    assert center_rgb(raw_original)[0] > 180
 
 
 def test_serve_thumbnail_regenerates_on_cache_miss(tmp_path, monkeypatch):

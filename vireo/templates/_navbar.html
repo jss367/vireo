@@ -3453,6 +3453,9 @@ async function createWorkspace() {
   <div class="lightbox-flag-status" id="lightboxFlagStatus" aria-live="polite"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 160px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
   <div id="lightboxActions" class="lightbox-actions">
+    <button class="lb-action-btn lb-action-accent" id="lightboxSourceControl" style="display:none;" onclick="event.stopPropagation(); vireoTogglePairSource(_lightboxCurrentId);" title="Switch between the developed JPEG and RAW source">
+      Viewing JPEG · Show RAW
+    </button>
     <button class="lb-action-btn" id="lightboxToggleBoxes" onclick="event.stopPropagation(); toggleLightboxBoxes();" title="Toggle detection boxes (b)">
       Hide Boxes
     </button>
@@ -3980,6 +3983,18 @@ function _vireoUrlWithRenderVersion(url, photoId) {
   return _vireoUrlWithQueryParam(url, 'rv', version);
 }
 
+function _vireoUrlWithPhotoSource(url, source) {
+  // Source is a mutable choice, unlike cache-bust params. Remove any prior
+  // value before appending so toggling JPEG -> RAW cannot leave Flask reading
+  // the first of two conflicting ``source`` query parameters.
+  url = String(url || '')
+    .replace(/([?&])source=[^&]*(&?)/, function(match, prefix, suffix) {
+      return suffix ? prefix : '';
+    })
+    .replace(/[?&]$/, '');
+  return source ? _vireoUrlWithQueryParam(url, 'source', source) : url;
+}
+
 function _vireoCleanRenderSearch(search) {
   if (!search) return '';
   try {
@@ -4018,6 +4033,69 @@ function _vireoBumpRenderVersion(photoId) {
   return version;
 }
 
+// A RAW+JPEG pair stays one logical photo, but the user can choose which
+// physical file supplies the displayed pixels. A newly discovered pair starts
+// on JPEG because that file is commonly the photographer's developed result.
+var _vireoPairKnownByPhoto = {};
+var _vireoPairSourceByPhoto = {};
+
+window.vireoRememberPhotoPair = function(photo) {
+  if (!photo || photo.id == null) return;
+  var key = String(photo.id);
+  if (photo.companion_path) {
+    _vireoPairKnownByPhoto[key] = true;
+    if (!_vireoPairSourceByPhoto[key]) _vireoPairSourceByPhoto[key] = 'jpeg';
+  } else if (Object.prototype.hasOwnProperty.call(photo, 'companion_path')) {
+    delete _vireoPairKnownByPhoto[key];
+    delete _vireoPairSourceByPhoto[key];
+  }
+};
+
+function _vireoPairSource(photoId) {
+  return _vireoPairSourceByPhoto[String(photoId)] || null;
+}
+
+window.vireoUpdatePairSourceControls = function(photoId) {
+  if (photoId == null) return;
+  var key = String(photoId);
+  var paired = !!_vireoPairKnownByPhoto[key];
+  var source = _vireoPairSourceByPhoto[key] || 'jpeg';
+  var text = source === 'jpeg'
+    ? 'Viewing JPEG · Show RAW'
+    : 'Viewing RAW · Show JPEG';
+
+  var lightboxControl = document.getElementById('lightboxSourceControl');
+  if (lightboxControl && String(_lightboxCurrentId) === key) {
+    lightboxControl.style.display = paired ? '' : 'none';
+    lightboxControl.textContent = text;
+  }
+  var detailControl = document.getElementById('detailSourceControl');
+  if (detailControl && String(window._detailPhotoId) === key) {
+    detailControl.style.display = paired ? 'block' : 'none';
+    detailControl.textContent = paired
+      ? 'RAW + JPEG pair · ' + text
+      : '';
+  }
+  document.querySelectorAll('[data-pair-source-id="' + key + '"]').forEach(function(badge) {
+    badge.textContent = source === 'jpeg'
+      ? 'JPEG · RAW pair'
+      : 'RAW · JPEG pair';
+  });
+};
+
+window.vireoTogglePairSource = function(photoId) {
+  if (photoId == null || !_vireoPairKnownByPhoto[String(photoId)]) return;
+  var key = String(photoId);
+  _vireoPairSourceByPhoto[key] = _vireoPairSourceByPhoto[key] === 'raw'
+    ? 'jpeg'
+    : 'raw';
+  _vireoBumpRenderVersion(photoId);
+  window.vireoUpdatePairSourceControls(photoId);
+  if (typeof window.vireoRefreshPhotoRenders === 'function') {
+    window.vireoRefreshPhotoRenders([photoId]);
+  }
+};
+
 window.vireoRefreshPhotoRenders = function(photoIds) {
   if (!Array.isArray(photoIds)) photoIds = [photoIds];
   var idSet = {};
@@ -4032,9 +4110,9 @@ window.vireoRefreshPhotoRenders = function(photoIds) {
     var base = _vireoBaseRenderedUrl(attr);
     Object.keys(idSet).forEach(function(id) {
       if (
-        base === '/thumbnails/' + id + '.jpg' ||
-        base === '/photos/' + id + '/full' ||
-        base === '/photos/' + id + '/original' ||
+        base.indexOf('/thumbnails/' + id + '.jpg') === 0 ||
+        base.indexOf('/photos/' + id + '/full') === 0 ||
+        base.indexOf('/photos/' + id + '/original') === 0 ||
         base.indexOf('/photos/' + id + '/preview?') === 0
       ) {
         img.src = window.vireoRenderedUrl
@@ -4051,6 +4129,8 @@ window.vireoRefreshPhotoRenders = function(photoIds) {
 };
 
 window.vireoRenderedUrl = function(url, photoId) {
+  var source = photoId == null ? null : _vireoPairSource(photoId);
+  if (source) url = _vireoUrlWithPhotoSource(url, source);
   var recipe = photoId == null ? null : _lbEditRecipeByPhoto[String(photoId)];
   var recipeKey = _vireoEditRecipeCacheKey(recipe);
   if (recipeKey) url = _vireoUrlWithQueryParam(url, 'er', recipeKey);
@@ -4061,6 +4141,9 @@ window.vireoThumbnailUrl = function(photoOrId) {
   var photo = photoOrId && typeof photoOrId === 'object' ? photoOrId : null;
   var photoId = photo ? (photo.photo_id != null ? photo.photo_id : photo.id) : photoOrId;
   if (photoId == null) return '';
+  if (photo && typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(photo);
+  }
   if (
     photo &&
     Object.prototype.hasOwnProperty.call(photo, 'edit_recipe') &&
@@ -6586,6 +6669,12 @@ function openLightbox(photoId, filename, photoList, options) {
     document.dispatchEvent(new CustomEvent('lightbox:photochanged', { detail: { photoId: photoId } }));
   } catch(_) {}
   var currentFromList = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
+  if (currentFromList && typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(currentFromList);
+  }
+  if (typeof window.vireoUpdatePairSourceControls === 'function') {
+    window.vireoUpdatePairSourceControls(photoId);
+  }
   if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'flag')) {
     _lbRememberConfirmedFlag(photoId, currentFromList.flag);
   } else {
@@ -6672,6 +6761,17 @@ function openLightbox(photoId, filename, photoList, options) {
     .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(data) {
       if (!data || _lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+      var pairWasKnown = !!_vireoPairKnownByPhoto[String(photoId)];
+      if (typeof window.vireoRememberPhotoPair === 'function') {
+        window.vireoRememberPhotoPair(data);
+      }
+      if (typeof window.vireoUpdatePairSourceControls === 'function') {
+        window.vireoUpdatePairSourceControls(photoId);
+      }
+      if (!pairWasKnown && data.companion_path) {
+        _vireoBumpRenderVersion(photoId);
+        window.vireoRefreshPhotoRenders([photoId]);
+      }
       var editRecipeFresh = _lbEditRecipeWriteSeqFor(photoId) === editRecipeFetchSeq;
       var recipeKeyBefore = _vireoEditRecipeCacheKey(_lbEditRecipeByPhoto[String(photoId)]);
       if (!editRecipeFresh) {
