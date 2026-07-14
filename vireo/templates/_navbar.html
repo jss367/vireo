@@ -3618,6 +3618,7 @@ var _lbSessionFullLongEdge = null;  // last learned /full size across photos; be
 var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
 var _lbPending1To1Anchor = null; // optional client-space anchor for a deferred 1:1 snap
 var _lbOriginalUnavailable = false;  // true after /original fails; fall back to current decoded source dimensions
+var _lbFullUsesOriginal = null; // metadata-backed: preview_max_size=0 makes /full redirect to /original
 var _lbCurrentWildlifeExcluded = false;
 var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
 var _lbOpenSeq = 0;          // increments for every lightbox open so old metadata fetches cannot reapply after reopen
@@ -6653,6 +6654,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbPending1To1Anchor = null;
   _lbPendingViewportState = restoreViewportState;
   _lbOriginalUnavailable = false;
+  _lbFullUsesOriginal = null;
   _lbEditRecipe = null;
   _lbEditRecipeLoaded = false;
   _lbRenderedAdjustmentValues = _lbAdjustmentValues(null);
@@ -6700,6 +6702,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbApplyMaskVisibility();
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
+      _lbFullUsesOriginal = !!data.full_uses_original;
       _lbPhotoOrientation = _lbMetadataOrientation(data.metadata);
       var currentLayoutRecipe = _lbEditRecipeByPhoto[String(photoId)];
       _lbCurrentEditRecipe = _lbRecipeHasEdits(currentLayoutRecipe)
@@ -6730,6 +6733,7 @@ function openLightbox(photoId, filename, photoList, options) {
       if (!_lbVisualTransitionPending) {
         _lbRecomputeNativeZoom();
         if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
+        if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
       }
       // Detection boxes, the eye marker, and the mask overlay are children of
       // lightboxTransform. While _lbVisualTransitionPending is true the
@@ -8338,6 +8342,7 @@ function _lbScheduleOriginalPreload(photoId) {
     photoId == null ||
     _lightboxCurrentId !== photoId ||
     _lbCurrentSrcKey === 'original' ||
+    _lbFullUsesOriginal !== false ||
     _lbOriginalUnavailable
   ) return;
 
@@ -8349,6 +8354,7 @@ function _lbScheduleOriginalPreload(photoId) {
     if (
       _lightboxCurrentId !== photoId ||
       _lbCurrentSrcKey === 'original' ||
+      _lbFullUsesOriginal !== false ||
       _lbOriginalUnavailable
     ) return;
 

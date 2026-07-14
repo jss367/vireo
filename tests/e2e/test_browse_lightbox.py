@@ -247,6 +247,41 @@ def test_browse_lightbox_preloads_current_original_after_preview_settles(
     assert page.evaluate("window._lbCurrentSrcKey") == "full"
 
 
+def test_browse_lightbox_does_not_preload_when_full_already_uses_original(
+    live_server, page
+):
+    """Full-resolution preview mode must not request the original twice."""
+    db = live_server["db"]
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"preview_max_size": 0},
+    )
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function("window._lbFullUsesOriginal === true")
+    page.wait_for_timeout(800)
+
+    assert original_requests == []
+    assert page.evaluate("window._lbOriginalPreload") is None
+
+
 def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page):
     """Arrow navigation preserves pan/zoom per photo and carries it to unseen photos."""
     svg = (

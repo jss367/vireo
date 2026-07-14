@@ -517,6 +517,22 @@ def test_api_photo_detail(app_and_db):
     data = resp.get_json()
     assert data['filename'] == 'bird1.jpg'
     assert 'keywords' in data
+    assert data['full_uses_original'] is False
+
+
+def test_api_photo_detail_reports_full_resolution_preview_mode(app_and_db):
+    """Photo detail tells the lightbox when /full already serves /original."""
+    app, db = app_and_db
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"preview_max_size": 0},
+    )
+    pid = db.get_photos()[0]['id']
+
+    resp = app.test_client().get(f'/api/photos/{pid}')
+
+    assert resp.status_code == 200
+    assert resp.get_json()['full_uses_original'] is True
 
 
 def test_api_photo_detail_includes_on_disk_path(app_and_db):
