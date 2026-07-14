@@ -91,3 +91,72 @@ def test_browse_sidebar_max_width_reserves_room_for_detail_panel(live_server, pa
         f"Sidebar cap left only {remaining}px for the photo grid "
         f"(sidebar={sidebar_width}, detail={detail_width}, handle={resizer_width})"
     )
+
+
+def test_detail_sidebar_can_be_dragged_wider_and_remembers_width(live_server, page):
+    page.goto(live_server["url"] + "/browse")
+
+    detail_panel = page.locator("#detailPanel")
+    resizer = page.locator("#detailPanelResizer")
+    expect(resizer).to_be_visible()
+
+    initial_width = detail_panel.bounding_box()["width"]
+    handle_box = resizer.bounding_box()
+    page.mouse.move(
+        handle_box["x"] + handle_box["width"] / 2,
+        handle_box["y"] + min(100, handle_box["height"] / 2),
+    )
+    page.mouse.down()
+    page.mouse.move(
+        handle_box["x"] + handle_box["width"] / 2 - 140,
+        handle_box["y"] + min(100, handle_box["height"] / 2),
+    )
+    page.mouse.up()
+
+    expanded_width = detail_panel.bounding_box()["width"]
+    assert expanded_width >= initial_width + 130
+    expect(resizer).to_have_attribute("aria-valuenow", str(round(expanded_width)))
+
+    page.reload()
+    assert abs(detail_panel.bounding_box()["width"] - expanded_width) <= 1
+
+
+def test_detail_sidebar_resizer_supports_keyboard_without_moving_selection(
+    live_server, page
+):
+    page.goto(live_server["url"] + "/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    detail_panel = page.locator("#detailPanel")
+    resizer = page.locator("#detailPanelResizer")
+    initial_width = detail_panel.bounding_box()["width"]
+
+    resizer.focus()
+    resizer.press("ArrowLeft")
+
+    assert abs(detail_panel.bounding_box()["width"] - (initial_width + 10)) <= 1
+    expect(resizer).to_have_attribute("aria-valuenow", str(round(initial_width + 10)))
+    assert page.evaluate("selectedIndex") == -1
+    assert page.evaluate("selectedPhotoId") is None
+
+
+def test_detail_sidebar_max_width_reserves_room_for_grid(live_server, page):
+    page.set_viewport_size({"width": 1024, "height": 768})
+    page.goto(live_server["url"] + "/browse")
+
+    sidebar = page.locator("#browseSidebar")
+    sidebar_resizer = page.locator("#browseSidebarResizer")
+    detail_panel = page.locator("#detailPanel")
+    detail_resizer = page.locator("#detailPanelResizer")
+
+    detail_resizer.focus()
+    detail_resizer.press("End")
+
+    remaining = (
+        1024
+        - sidebar.bounding_box()["width"]
+        - sidebar_resizer.bounding_box()["width"]
+        - detail_resizer.bounding_box()["width"]
+        - detail_panel.bounding_box()["width"]
+    )
+    assert remaining >= 300, f"Detail sidebar left only {remaining}px for the photo grid"

@@ -34,9 +34,9 @@ body {
   padding: 12px 0;
   flex-shrink: 0;
 }
-.sidebar-resizer {
+.sidebar-resizer,
+.detail-panel-resizer {
   width: 7px;
-  margin-left: -4px;
   flex: 0 0 7px;
   position: relative;
   z-index: 3;
@@ -44,7 +44,10 @@ body {
   touch-action: none;
   outline: none;
 }
-.sidebar-resizer::after {
+.sidebar-resizer { margin-left: -4px; }
+.detail-panel-resizer { margin-right: -4px; }
+.sidebar-resizer::after,
+.detail-panel-resizer::after {
   content: '';
   position: absolute;
   top: 0;
@@ -56,7 +59,10 @@ body {
 }
 .sidebar-resizer:hover::after,
 .sidebar-resizer:focus-visible::after,
-.sidebar-resizer.dragging::after {
+.sidebar-resizer.dragging::after,
+.detail-panel-resizer:hover::after,
+.detail-panel-resizer:focus-visible::after,
+.detail-panel-resizer.dragging::after {
   background: var(--accent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
 }
@@ -397,7 +403,8 @@ body.sidebar-resizing {
 /* ---------- Detail Panel ---------- */
 .detail-panel {
   width: 340px;
-  min-width: 340px;
+  min-width: 280px;
+  max-width: 600px;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border-primary);
   overflow-y: auto;
@@ -1685,6 +1692,12 @@ body.sidebar-resizing {
     </div>
   </div>
 
+  <div class="detail-panel-resizer" id="detailPanelResizer" role="separator"
+       aria-label="Resize detail sidebar" aria-orientation="vertical"
+       aria-controls="detailPanel" aria-valuemin="280" aria-valuemax="600"
+       aria-valuenow="340" tabindex="0"
+       title="Drag to resize the detail sidebar"></div>
+
   <!-- Detail Panel -->
   <div class="detail-panel" id="detailPanel">
     <!-- Summary Dashboard (shown when no photo selected) -->
@@ -2035,12 +2048,25 @@ var BROWSE_SIDEBAR_DEFAULT_WIDTH = 260;
 var BROWSE_SIDEBAR_MIN_WIDTH = 200;
 var BROWSE_SIDEBAR_MAX_WIDTH = 600;
 var BROWSE_SIDEBAR_STORAGE_KEY = 'vireo.browse.sidebarWidth';
+var BROWSE_DETAIL_PANEL_DEFAULT_WIDTH = 340;
+var BROWSE_DETAIL_PANEL_MIN_WIDTH = 280;
+var BROWSE_DETAIL_PANEL_MAX_WIDTH = 600;
+var BROWSE_DETAIL_PANEL_STORAGE_KEY = 'vireo.browse.detailPanelWidth';
 // Room the resize cap must leave for the rest of the Browse layout: the
-// always-visible detail panel sibling (340px, fixed), the resize handle
-// itself (7px), and a minimum photo/content column so the grid stays usable.
-var BROWSE_DETAIL_PANEL_WIDTH = 340;
+// other adjustable sidebar, both resize handles, and a minimum photo/content
+// column so the grid stays usable.
 var BROWSE_SIDEBAR_HANDLE_WIDTH = 7;
 var BROWSE_MIN_CONTENT_WIDTH = 360;
+
+function currentBrowseSidebarWidth() {
+  var sidebar = document.getElementById('browseSidebar');
+  return sidebar ? sidebar.getBoundingClientRect().width : BROWSE_SIDEBAR_DEFAULT_WIDTH;
+}
+
+function currentBrowseDetailPanelWidth() {
+  var detailPanel = document.getElementById('detailPanel');
+  return detailPanel ? detailPanel.getBoundingClientRect().width : BROWSE_DETAIL_PANEL_DEFAULT_WIDTH;
+}
 
 function browseSidebarMaxWidth() {
   return Math.max(
@@ -2048,11 +2074,31 @@ function browseSidebarMaxWidth() {
     Math.min(
       BROWSE_SIDEBAR_MAX_WIDTH,
       window.innerWidth
-        - BROWSE_DETAIL_PANEL_WIDTH
-        - BROWSE_SIDEBAR_HANDLE_WIDTH
+        - currentBrowseDetailPanelWidth()
+        - (2 * BROWSE_SIDEBAR_HANDLE_WIDTH)
         - BROWSE_MIN_CONTENT_WIDTH
     )
   );
+}
+
+function browseDetailPanelMaxWidth() {
+  return Math.max(
+    BROWSE_DETAIL_PANEL_MIN_WIDTH,
+    Math.min(
+      BROWSE_DETAIL_PANEL_MAX_WIDTH,
+      window.innerWidth
+        - currentBrowseSidebarWidth()
+        - (2 * BROWSE_SIDEBAR_HANDLE_WIDTH)
+        - BROWSE_MIN_CONTENT_WIDTH
+    )
+  );
+}
+
+function updateBrowsePanelResizeLimits() {
+  var sidebarResizer = document.getElementById('browseSidebarResizer');
+  var detailResizer = document.getElementById('detailPanelResizer');
+  if (sidebarResizer) sidebarResizer.setAttribute('aria-valuemax', String(browseSidebarMaxWidth()));
+  if (detailResizer) detailResizer.setAttribute('aria-valuemax', String(browseDetailPanelMaxWidth()));
 }
 
 function setBrowseSidebarWidth(width, persist) {
@@ -2066,7 +2112,7 @@ function setBrowseSidebarWidth(width, persist) {
   sidebar.style.width = nextWidth + 'px';
   sidebar.style.flexBasis = nextWidth + 'px';
   resizer.setAttribute('aria-valuenow', String(nextWidth));
-  resizer.setAttribute('aria-valuemax', String(browseSidebarMaxWidth()));
+  updateBrowsePanelResizeLimits();
   if (persist) {
     try { localStorage.setItem(BROWSE_SIDEBAR_STORAGE_KEY, String(nextWidth)); } catch (e) {}
   }
@@ -2133,7 +2179,86 @@ function initBrowseSidebarResize() {
   });
 }
 
+function setBrowseDetailPanelWidth(width, persist) {
+  var detailPanel = document.getElementById('detailPanel');
+  var resizer = document.getElementById('detailPanelResizer');
+  if (!detailPanel || !resizer) return;
+  var nextWidth = Math.round(Math.max(
+    BROWSE_DETAIL_PANEL_MIN_WIDTH,
+    Math.min(browseDetailPanelMaxWidth(), Number(width) || BROWSE_DETAIL_PANEL_DEFAULT_WIDTH)
+  ));
+  detailPanel.style.width = nextWidth + 'px';
+  detailPanel.style.flexBasis = nextWidth + 'px';
+  resizer.setAttribute('aria-valuenow', String(nextWidth));
+  updateBrowsePanelResizeLimits();
+  if (persist) {
+    try { localStorage.setItem(BROWSE_DETAIL_PANEL_STORAGE_KEY, String(nextWidth)); } catch (e) {}
+  }
+  requestAnimationFrame(updateGridTail);
+}
+
+function initBrowseDetailPanelResize() {
+  var detailPanel = document.getElementById('detailPanel');
+  var resizer = document.getElementById('detailPanelResizer');
+  if (!detailPanel || !resizer) return;
+
+  var storedWidth = BROWSE_DETAIL_PANEL_DEFAULT_WIDTH;
+  try { storedWidth = Number(localStorage.getItem(BROWSE_DETAIL_PANEL_STORAGE_KEY)) || storedWidth; } catch (e) {}
+  setBrowseDetailPanelWidth(storedWidth, false);
+
+  resizer.addEventListener('pointerdown', function(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    var startX = e.clientX;
+    var startWidth = detailPanel.getBoundingClientRect().width;
+    resizer.setPointerCapture(e.pointerId);
+    resizer.classList.add('dragging');
+    document.body.classList.add('sidebar-resizing');
+
+    function onPointerMove(moveEvent) {
+      setBrowseDetailPanelWidth(startWidth + startX - moveEvent.clientX, false);
+    }
+    function stopDragging(upEvent) {
+      setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width, true);
+      resizer.classList.remove('dragging');
+      document.body.classList.remove('sidebar-resizing');
+      resizer.removeEventListener('pointermove', onPointerMove);
+      resizer.removeEventListener('pointerup', stopDragging);
+      resizer.removeEventListener('pointercancel', stopDragging);
+      if (resizer.hasPointerCapture(upEvent.pointerId)) {
+        resizer.releasePointerCapture(upEvent.pointerId);
+      }
+    }
+    resizer.addEventListener('pointermove', onPointerMove);
+    resizer.addEventListener('pointerup', stopDragging);
+    resizer.addEventListener('pointercancel', stopDragging);
+  });
+
+  resizer.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      e.stopPropagation();
+      var direction = e.key === 'ArrowLeft' ? 1 : -1;
+      var step = e.shiftKey ? 50 : 10;
+      setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width + direction * step, true);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseDetailPanelWidth(BROWSE_DETAIL_PANEL_MIN_WIDTH, true);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseDetailPanelWidth(browseDetailPanelMaxWidth(), true);
+    }
+  });
+
+  resizer.addEventListener('dblclick', function() {
+    setBrowseDetailPanelWidth(BROWSE_DETAIL_PANEL_DEFAULT_WIDTH, true);
+  });
+}
+
 initBrowseSidebarResize();
+initBrowseDetailPanelResize();
 
 function refreshPendingSyncBanner() {
   if (typeof checkPendingSync === 'function') {
@@ -4475,6 +4600,8 @@ function ensureViewportHydrated() {
 window.addEventListener('resize', function() {
   var sidebar = document.getElementById('browseSidebar');
   if (sidebar) setBrowseSidebarWidth(sidebar.getBoundingClientRect().width, false);
+  var detailPanel = document.getElementById('detailPanel');
+  if (detailPanel) setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width, false);
   // Column count and card heights change with width — re-estimate the tail
   requestAnimationFrame(updateGridTail);
 });
