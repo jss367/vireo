@@ -124,6 +124,34 @@ def local_root_for_folder(db, folder_id: int) -> int | None:
     return int(row["root_folder_id"]) if row else None
 
 
+def local_root_under_folder(db, folder_id: int) -> int | None:
+    """Return a local-session root whose source lives inside ``folder_id``.
+
+    Staging rebases the child folder row's ``folders.path`` under
+    ``local-folders/``, so a subtree scan on ``folders.path`` (as
+    ``delete_folder``/``relocate_folder`` do) no longer sees it — while
+    ``local_folder_mappings.source_path`` still records the original
+    location beneath the ancestor. Folder-level mutations must consult
+    the recorded ``source_path`` so ancestor deletes/relocates refuse
+    with 409 instead of tripping the parent_id FK when the row is gone.
+    """
+    row = db.conn.execute(
+        "SELECT path FROM folders WHERE id=?", (folder_id,)
+    ).fetchone()
+    if row is None or not row["path"]:
+        return None
+    folder_path = row["path"]
+    for entry in db.conn.execute(
+        "SELECT root_folder_id, source_path FROM local_folder_mappings WHERE is_root=1"
+    ).fetchall():
+        source = entry["source_path"]
+        if not source or source == folder_path:
+            continue
+        if _is_within(source, folder_path):
+            return int(entry["root_folder_id"])
+    return None
+
+
 def folder_has_local_copy(db, folder_id: int) -> bool:
     return local_root_for_folder(db, folder_id) is not None
 

@@ -93,6 +93,7 @@ from services.local_folder import (
 )
 from services.local_folder import (
     local_root_for_folder,
+    local_root_under_folder,
     workspace_ids_for_folder_tree,
     workspace_local_root_ids,
 )
@@ -4726,6 +4727,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if local_root_id is not None:
                 return json_error(
                     "Cannot delete this folder while it has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
+            descendant_root_id = local_root_under_folder(db, folder_id)
+            if descendant_root_id is not None:
+                return json_error(
+                    "Cannot delete this folder while a subfolder has a shared local copy. "
                     "Sync or discard the local copy from any linked workspace first.",
                     409,
                 )

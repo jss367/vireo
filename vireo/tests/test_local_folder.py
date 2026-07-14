@@ -9,6 +9,7 @@ from services.local_folder import (
     LocalWorkspaceError,
     discard_folder,
     folder_status,
+    local_root_under_folder,
     stage_folder,
     sync_folder,
     workspace_status,
@@ -226,3 +227,67 @@ def test_folder_scoped_http_cycle_and_shared_status(tmp_path, monkeypatch):
         assert response.status_code == 202
         assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
         assert (source / "bird.jpg").read_bytes() == b"edited"
+
+
+def test_local_root_under_folder_finds_descendant_session(tmp_path):
+    db = Database(str(tmp_path / "vireo.db"))
+    workspace_id = db.create_workspace("Ancestor")
+    parent = tmp_path / "nas" / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (child / "bird.jpg").write_bytes(b"content")
+    parent_id = db.add_folder(str(parent), name="parent", link_to_workspace=False)
+    child_id = db.add_folder(str(child), name="child", parent_id=parent_id, link_to_workspace=False)
+    db.add_workspace_folder(workspace_id, parent_id)
+    db.add_workspace_folder(workspace_id, child_id)
+    try:
+        assert local_root_under_folder(db, parent_id) is None
+        stage_folder(db, child_id, str(tmp_path / "vireo"))
+        # Child row has been rebased under local-folders/, so a folders.path
+        # subtree scan from the parent would miss it — the guard has to
+        # consult local_folder_mappings.source_path directly.
+        assert local_root_under_folder(db, parent_id) == child_id
+        assert local_root_under_folder(db, child_id) is None
+    finally:
+        db.close()
+
+
+def test_delete_ancestor_of_local_folder_refuses_with_409(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    parent = tmp_path / "nas" / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (child / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+    db = Database(db_path)
+    workspace_id = db.create_workspace("Ancestor")
+    parent_id = db.add_folder(str(parent), name="parent", link_to_workspace=False)
+    child_id = db.add_folder(str(child), name="child", parent_id=parent_id, link_to_workspace=False)
+    db.add_workspace_folder(workspace_id, parent_id)
+    db.add_workspace_folder(workspace_id, child_id)
+    db.set_active_workspace(workspace_id)
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        assert client.post(f"/api/workspaces/{workspace_id}/activate", json={}).status_code == 200
+        response = client.post(
+            "/api/workspaces/active/local-folders/stage", json={"folder_ids": [child_id]}
+        )
+        assert response.status_code == 202
+        assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
+
+        blocked = client.delete(f"/api/folders/{parent_id}")
+        assert blocked.status_code == 409
+        assert "subfolder" in blocked.get_json()["error"]
+
+        # The exact-folder guard still catches deletes of the staged child itself.
+        blocked_child = client.delete(f"/api/folders/{child_id}")
+        assert blocked_child.status_code == 409
+        assert "shared local copy" in blocked_child.get_json()["error"]
