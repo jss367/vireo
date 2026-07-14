@@ -3629,6 +3629,8 @@ var _lbPendingViewportState = null;
 var _lbVisualTransitionPending = false; // keep the outgoing bitmap/transform frozen until the incoming image is decoded
 var _lbDeferredOverlayApply = null; // detections/eye render withheld while _lbVisualTransitionPending; drained when the transition clears
 var _lbAdjacentPreloads = {}; // decoded immediate neighbors, keyed by photo id + source URL
+var _lbOriginalPreloadTimer = null; // short dwell before warming the current photo's 100% source
+var _lbOriginalPreload = null; // retained decoded original for an instant first 100% click
 var _lbEditRecipeByPhoto = {};
 var _lbEditRecipeKnownByPhoto = {};
 var _lbEditRecipeWriteSeq = 0;
@@ -4405,6 +4407,7 @@ function _lbSetEditBusy(busy) {
 
 function _lbReloadCurrentRenderAfterEdit(photoId) {
   if (_lightboxCurrentId !== photoId) return;
+  _lbCancelOriginalPreload();
   var img = document.getElementById('lightboxImg');
   var wrap = document.getElementById('lightboxWrap');
   if (!img) return;
@@ -4435,6 +4438,7 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
     }
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
+    _lbScheduleOriginalPreload(photoId);
   };
   img.onerror = function() {
     img.onload = null;
@@ -5118,6 +5122,7 @@ function _lbRefreshVisiblePhotoImages(photoId) {
 
 function _lbReloadEditedSource(photoId, seq) {
   if (_lightboxCurrentId !== photoId) return;
+  _lbCancelOriginalPreload();
   var img = document.getElementById('lightboxImg');
   if (!img) return;
   var key = _lbCurrentSrcKey || 'full';
@@ -5131,6 +5136,7 @@ function _lbReloadEditedSource(photoId, seq) {
     _lbClearAdjustmentPreview();
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
+    if (key === 'full') _lbScheduleOriginalPreload(photoId);
   });
   img.src = _lbSrcUrl(photoId, key);
 }
@@ -6524,6 +6530,7 @@ window.vireoRefreshEditRecipeCache = _lbRefreshEditRecipeCache;
 function openLightbox(photoId, filename, photoList, options) {
   var alreadyOpen = !!window._lbEscToken;
   options = options || {};
+  _lbCancelOriginalPreload();
   var fallbackViewportState = options.fallbackViewportState || null;
   _lbFlushPendingAdjustmentSave();
   if (alreadyOpen && _lightboxCurrentId != null) {
@@ -6786,6 +6793,7 @@ function openLightbox(photoId, filename, photoList, options) {
     _lbApplyTransform();
     _lbFlushDeferredOverlayApply();
     _lbPrimeAdjacentPhotos(_lbCurrentSrcKey);
+    if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
   }
   function handleInitialImageError() {
     if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
@@ -7088,6 +7096,7 @@ function closeLightbox(e) {
   _lbClearPendingViewportRestore();
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
+  _lbCancelOriginalPreload();
   _lbClearAdjacentPreloads();
   _lbClearAdjustmentPreview();
   var adjustPanel = document.getElementById('lightboxAdjustPanel');
@@ -8310,6 +8319,66 @@ function _lbClearAdjacentPreloads() {
   _lbAdjacentPreloads = {};
 }
 
+function _lbCancelOriginalPreload() {
+  if (_lbOriginalPreloadTimer) {
+    clearTimeout(_lbOriginalPreloadTimer);
+    _lbOriginalPreloadTimer = null;
+  }
+  if (_lbOriginalPreload && _lbOriginalPreload.img) {
+    _lbOriginalPreload.img.onload = null;
+    _lbOriginalPreload.img.onerror = null;
+    _lbOriginalPreload.img.removeAttribute('src');
+  }
+  _lbOriginalPreload = null;
+}
+
+function _lbScheduleOriginalPreload(photoId) {
+  _lbCancelOriginalPreload();
+  if (
+    photoId == null ||
+    _lightboxCurrentId !== photoId ||
+    _lbCurrentSrcKey === 'original' ||
+    _lbOriginalUnavailable
+  ) return;
+
+  // Give navigation and the neighboring fit-tier preloads first use of the
+  // decoder. The dwell also prevents fast arrowing from starting expensive
+  // full-resolution RAW extraction for every photo passed along the way.
+  _lbOriginalPreloadTimer = setTimeout(function() {
+    _lbOriginalPreloadTimer = null;
+    if (
+      _lightboxCurrentId !== photoId ||
+      _lbCurrentSrcKey === 'original' ||
+      _lbOriginalUnavailable
+    ) return;
+
+    var url = _lbSrcUrl(photoId, 'original');
+    var preload = new Image();
+    var entry = {
+      img: preload,
+      photoId: photoId,
+      sourceKey: 'original',
+      url: url,
+      status: 'loading'
+    };
+    _lbOriginalPreload = entry;
+    preload.fetchPriority = 'low';
+    var supportsDecode = typeof preload.decode === 'function';
+    preload.onload = function() {
+      if (!supportsDecode) entry.status = 'decoded';
+    };
+    preload.onerror = function() { entry.status = 'failed'; };
+    preload.src = url;
+    if (supportsDecode) {
+      preload.decode().then(function() {
+        entry.status = 'decoded';
+      }).catch(function() {
+        // onload/onerror remains the fallback for WebViews with incomplete decode support.
+      });
+    }
+  }, 400);
+}
+
 function _lbPrimeAdjacentPhotos(sourceKey) {
   if (_lightboxPhotoList.length < 2 || _lightboxCurrentId == null) {
     _lbClearAdjacentPreloads();
@@ -8403,6 +8472,10 @@ function _lbScheduleSourceSwap(targetZoom) {
         // case img.naturalWidth belongs to a DIFFERENT source than our closure's
         // `key`, so bail rather than record wrong dims or recalibrate stale state.
         if (_lbCurrentSrcKey !== key) return;
+        // Keep the decoded background original alive until the visible image
+        // has adopted it; releasing it earlier can make some WebViews decode
+        // the same full-resolution bytes a second time on the first 100% click.
+        if (key === 'original') _lbCancelOriginalPreload();
         if (!_lbPhotoW && key === 'original' && img.naturalWidth) {
           _lbPhotoW = img.naturalWidth;
           _lbPhotoH = img.naturalHeight;

@@ -211,6 +211,42 @@ def test_browse_lightbox_predecodes_adjacent_photo_for_current_source_tier(
     assert page.evaluate("window._lightboxCurrentId") != next_id
 
 
+def test_browse_lightbox_preloads_current_original_after_preview_settles(
+    live_server, page
+):
+    """The current photo's 100% source is decoded after a short dwell at Fit."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=svg, content_type="image/svg+xml")
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+
+    current_id = page.evaluate("window._lightboxCurrentId")
+    page.wait_for_function(
+        """photoId => window._lbOriginalPreload && (
+            window._lbOriginalPreload.photoId === photoId &&
+            window._lbOriginalPreload.status === 'decoded'
+        )""",
+        arg=current_id,
+    )
+
+    assert any(f"/photos/{current_id}/original" in url for url in original_requests)
+    assert page.evaluate("window._lbCurrentSrcKey") == "full"
+
+
 def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page):
     """Arrow navigation preserves pan/zoom per photo and carries it to unseen photos."""
     svg = (
