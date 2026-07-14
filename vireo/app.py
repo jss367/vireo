@@ -25069,9 +25069,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Unedited RAW primaries use their camera-rendered full-size preview
         # when available. Edited renders took the recipe branch above and keep
         # using the highlight-preserving RAW path.
-        source_for_extraction = image_path
-        if resolved_ext not in RAW_EXTENSIONS and companion_for_extraction:
-            source_for_extraction = companion_for_extraction
+        source_for_extraction = companion_for_extraction or image_path
 
         extraction_decode = (
             RAW_DECODE_CAMERA_RENDERED

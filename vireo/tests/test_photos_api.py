@@ -4447,16 +4447,13 @@ def test_original_falls_back_to_companion_when_raw_extraction_fails(
     assert resp.mimetype == "image/jpeg"
 
 
-def test_original_uses_companion_when_raw_extract_returns_undersized(
+def test_unedited_raw_original_prefers_full_size_companion(
     client_with_photo, monkeypatch,
 ):
-    """``extract_working_copy`` returns True even when ``_load_raw`` falls
-    back to a small embedded JPEG, so a successful extract can still
-    produce a working copy that's a fraction of the sensor's full
-    resolution. /photos/<id>/original must detect that fallback and
-    re-extract from the companion JPEG before caching it as the
-    working copy — otherwise every later 1:1 request silently serves
-    the downscaled preview even though a full-size sidecar exists.
+    """A full-size companion is already the camera-rendered display source.
+
+    Prefer it before decoding the RAW so cameras whose embedded preview is
+    undersized do not fall through to a differently toned libraw demosaic.
     """
     import io
     import os
@@ -4496,32 +4493,21 @@ def test_original_uses_companion_when_raw_extract_returns_undersized(
     real_extract = image_loader.extract_working_copy
     extract_calls = []
 
-    def extract_with_size_fallback(source, output, *args, **kwargs):
+    def track_companion_extract(source, output, *args, **kwargs):
         extract_calls.append(str(source))
         if str(source).lower().endswith(".nef"):
-            # Stand in for `_load_raw` returning the embedded JPEG when
-            # libraw can't demosaic the RAW: write an undersized JPEG
-            # and return True (matches the current contract).
-            os.makedirs(os.path.dirname(output), exist_ok=True)
-            Image.new("RGB", (1600, 1067), (200, 50, 50)).save(
-                output, "JPEG", quality=85,
-            )
-            return True
+            raise AssertionError("unedited display should prefer companion JPEG")
         return real_extract(source, output, *args, **kwargs)
 
-    monkeypatch.setattr(image_loader, "extract_working_copy", extract_with_size_fallback)
+    monkeypatch.setattr(image_loader, "extract_working_copy", track_companion_extract)
 
     client = app.test_client()
     resp = client.get(f"/photos/{photo_id}/original")
 
     assert resp.status_code == 200, resp.get_data(as_text=True)
     assert resp.mimetype == "image/jpeg"
-    # Both sources must be tried — RAW first, then companion after the
-    # undersized output is detected.
-    assert len(extract_calls) == 2
-    assert extract_calls[0].lower().endswith(".nef")
-    assert extract_calls[1].lower().endswith(".jpg")
-    # The persisted working copy must be the full-size companion render.
+    assert extract_calls == [companion_path]
+    # The persisted display cache must be the full-size companion render.
     with Image.open(io.BytesIO(resp.data)) as img:
         assert max(img.size) >= 5400
 
