@@ -370,6 +370,19 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             # camera JPEG was paired. File mtimes cannot tell which source
             # produced that cache, so discard it when the companion changes.
             _invalidate_raw_display_cache(vireo_dir, primary["id"])
+            thumb_dir = thumb_cache_dir or os.path.join(vireo_dir, "thumbnails")
+            jpeg_variant = os.path.join(
+                thumb_dir, f"{primary['id']}_jpeg.jpg",
+            )
+            try:
+                if os.path.exists(jpeg_variant):
+                    os.remove(jpeg_variant)
+            except OSError:
+                log.debug(
+                    "Could not delete stale companion thumbnail %s",
+                    jpeg_variant,
+                    exc_info=True,
+                )
 
         # Transfer detections (and their cascaded predictions) from companion to primary.
         # Detection IDs are content-addressed on (photo_id, detector_model, box,

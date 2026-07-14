@@ -1018,6 +1018,43 @@ def test_scan_pairs_raw_and_jpeg(tmp_path):
     assert photo["companion_path"] == "IMG_001.jpg"
 
 
+def test_rescan_changed_companion_invalidates_jpeg_thumbnail_variant(tmp_path):
+    """Re-pairing a changed companion drops its source-specific thumbnail
+    even when the replacement preserves filesystem mtime."""
+    from db import Database
+    from scanner import scan
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+    jpeg_path = img_dir / "IMG_001.jpg"
+    Image.new("RGB", (200, 100), color="green").save(jpeg_path)
+    (img_dir / "IMG_001.cr3").write_bytes(b"\x00" * 200)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db = Database(str(vireo_dir / "test.db"))
+    scan(
+        str(img_dir), db, vireo_dir=str(vireo_dir),
+        thumb_cache_dir=str(thumb_dir),
+    )
+    primary = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='IMG_001.cr3'",
+    ).fetchone()
+    variant = thumb_dir / f"{primary['id']}_jpeg.jpg"
+    variant.write_bytes(b"stale companion pixels")
+
+    original_mtime = jpeg_path.stat().st_mtime
+    Image.new("RGB", (200, 100), color="blue").save(jpeg_path)
+    os.utime(jpeg_path, (original_mtime, original_mtime))
+    scan(
+        str(img_dir), db, vireo_dir=str(vireo_dir),
+        thumb_cache_dir=str(thumb_dir),
+    )
+
+    assert not variant.exists()
+
+
 def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     """Importing raws after JPEGs matches them to existing photo records."""
     import os
