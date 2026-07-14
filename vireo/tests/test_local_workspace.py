@@ -1699,6 +1699,11 @@ def test_status_endpoint_does_not_surface_unrelated_workspace_jobs(tmp_path, mon
         finally:
             hold.set()
 
+        # Let the scan job finish before posting to /stage. Without this
+        # wait, `_busy_job` may still see the scan as running on slow CI
+        # runners (mac-latest) and reject the stage attempt with 409.
+        wait_for_job_via_client(client, job_id)
+
         # Sanity-check the whitelist: a real transfer job still surfaces.
         stage_response = client.post("/api/workspaces/active/local-workspace/stage", json={})
         assert stage_response.status_code == 202
