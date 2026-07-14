@@ -37,13 +37,21 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import urllib.parse
 import urllib.request
+
+import certifi
 
 logger = logging.getLogger(__name__)
 
 _PLACE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 _GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
+
+# PyInstaller's embedded Python does not reliably discover a system CA bundle
+# on macOS.  Use the CA bundle shipped with Vireo instead of depending on the
+# interpreter's build-time OpenSSL paths.
+_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
 # Google statuses that mean "no match" — we return ``None`` silently.
 _EMPTY_STATUSES = {"ZERO_RESULTS", "NOT_FOUND"}
@@ -63,7 +71,7 @@ def _get_json(url: str) -> dict:
 
     Kept tiny so tests can monkeypatch ``urllib.request.urlopen`` directly.
     """
-    with urllib.request.urlopen(url, timeout=10) as f:
+    with urllib.request.urlopen(url, timeout=10, context=_SSL_CONTEXT) as f:
         body = f.read()
     return json.loads(body)
 

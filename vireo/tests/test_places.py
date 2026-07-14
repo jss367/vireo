@@ -45,6 +45,23 @@ def _make_fake_urlopen(payload: dict, captured_urls: list | None = None):
     return fake_urlopen
 
 
+def test_http_requests_use_bundled_ca_bundle(monkeypatch):
+    """Packaged builds must not rely on Python's build-time CA paths."""
+    from vireo import places
+
+    captured = {}
+
+    def fake_urlopen(url, *args, **kwargs):
+        captured.update(kwargs)
+        return _FakeResponse({"status": "ZERO_RESULTS"})
+
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen", fake_urlopen)
+
+    assert places.place_details("missing", "FAKE_KEY") is None
+    assert captured["context"] is places._SSL_CONTEXT
+    assert places._SSL_CONTEXT.cert_store_stats()["x509_ca"] > 0
+
+
 def test_place_details_parses_response(monkeypatch):
     """Place Details OK response is normalized into the wrapper's dict shape."""
     from vireo import places
@@ -233,7 +250,7 @@ def test_reverse_geocode_raises_transient_on_network_failure(monkeypatch):
     transient — wrapper raises PlacesTransientError chained from the cause."""
     from vireo import places
 
-    def boom(url, timeout=10):
+    def boom(url, timeout=10, context=None):
         raise urllib.error.URLError("simulated network failure")
 
     monkeypatch.setattr("vireo.places.urllib.request.urlopen", boom)
