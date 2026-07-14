@@ -24772,7 +24772,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     c_w, c_h = _cimg.size
             except Exception:
                 return None
-            if c_w >= orig_w and c_h >= orig_h:
+            # Camera JPEGs commonly omit a narrow sensor border. Match the
+            # tolerance used by camera-rendered RAW loading so a near-full
+            # sidecar remains the preferred tone-consistent display source.
+            if c_w >= orig_w * 0.99 and c_h >= orig_h * 0.99:
                 return companion_abs
             return None
 

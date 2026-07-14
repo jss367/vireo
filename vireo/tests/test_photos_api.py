@@ -4517,13 +4517,14 @@ def test_original_falls_back_to_companion_when_raw_extraction_fails(
     assert resp.mimetype == "image/jpeg"
 
 
-def test_unedited_raw_original_prefers_full_size_companion(
+def test_unedited_raw_original_prefers_near_full_companion(
     client_with_photo, monkeypatch,
 ):
-    """A full-size companion is already the camera-rendered display source.
+    """A near-full companion is already the camera-rendered display source.
 
     Prefer it before decoding the RAW so cameras whose embedded preview is
-    undersized do not fall through to a differently toned libraw demosaic.
+    just shy of sensor dimensions do not fall through to a differently toned
+    libraw demosaic.
     """
     import io
     import os
@@ -4542,7 +4543,7 @@ def test_unedited_raw_original_prefers_full_size_companion(
     with open(raw_path, "wb") as f:
         f.write(b"unsupported raw")
     companion_path = os.path.join(folder_path, "source.JPG")
-    Image.new("RGB", (6000, 4000), (90, 140, 180)).save(
+    Image.new("RGB", (5976, 3984), (90, 140, 180)).save(
         companion_path, "JPEG", quality=85,
     )
 
@@ -4577,7 +4578,7 @@ def test_unedited_raw_original_prefers_full_size_companion(
     assert resp.status_code == 200, resp.get_data(as_text=True)
     assert resp.mimetype == "image/jpeg"
     assert extract_calls == [companion_path]
-    # The persisted display cache must be the full-size companion render.
+    # The persisted display cache must be the near-full companion render.
     with Image.open(io.BytesIO(resp.data)) as img:
         assert max(img.size) >= 5400
 
