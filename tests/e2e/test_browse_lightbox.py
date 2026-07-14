@@ -48,6 +48,43 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     expect(counter).to_contain_text(first_filename)
 
 
+def test_browse_lightbox_filename_can_be_selected_without_resetting_zoom(
+    live_server, page
+):
+    """Selecting the filename must not bubble into the lightbox zoom/close handlers."""
+    page.goto(f"{live_server['url']}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_filename = first_card.get_attribute("data-filename")
+    first_card.dblclick()
+
+    overlay = page.locator("#lightboxOverlay")
+    filename_display = page.locator("#lightboxFilename")
+    expect(overlay).to_have_class("lightbox-overlay active")
+    expect(filename_display).to_have_text(first_filename)
+
+    page.evaluate(
+        """() => {
+            window._lbNativeZoom = 2;
+            window._lbSetZoom(2, null, null);
+        }"""
+    )
+
+    # A click is part of both double-click and drag-to-select interactions. It
+    # previously reached closeLightbox(), which reset _lbZoom to fit.
+    filename_display.click()
+
+    expect(overlay).to_have_class("lightbox-overlay active")
+    assert page.evaluate("window._lbZoom") == 2
+    assert filename_display.evaluate(
+        "el => getComputedStyle(el).userSelect"
+    ) == "text"
+    assert filename_display.evaluate(
+        "el => getComputedStyle(el).cursor"
+    ) == "text"
+
+
 def test_browse_photo_id_deep_link_loads_target_folder_first_page(live_server, page):
     """Open in Browse must find a target that is not on global Browse page 1."""
     db = live_server["db"]

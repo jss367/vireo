@@ -963,6 +963,10 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   background: rgba(0,0,0,0.6);
   padding: 4px 12px;
   border-radius: 4px;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+  z-index: 10001;
 }
 
 /* ---------- Pipeline Inspector ---------- */
@@ -3449,7 +3453,10 @@ async function createWorkspace() {
       <div id="lightboxEye" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;"></div>
     </div>
   </div>
-  <div class="lightbox-filename" id="lightboxFilename"></div>
+  <div class="lightbox-filename" id="lightboxFilename"
+       onmousedown="event.stopPropagation();"
+       onclick="event.stopPropagation();"
+       title="Select and copy filename"></div>
   <div class="lightbox-flag-status" id="lightboxFlagStatus" aria-live="polite"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 160px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
   <div id="lightboxActions" class="lightbox-actions">
