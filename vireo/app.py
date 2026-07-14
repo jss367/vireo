@@ -25017,6 +25017,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if source_is_older:
                     return send_file(display_cache_path, mimetype="image/jpeg")
 
+        if (
+            primary_is_raw
+            and trusted_wc_path
+            and not os.path.isfile(image_path)
+            and not companion_for_extraction
+        ):
+            # Preserve offline behavior without repeatedly retrying a missing
+            # RAW. A camera-rendered display cache or companion still wins
+            # above when available; otherwise the edit-quality working copy
+            # is the best usable full-resolution fallback.
+            return send_file(trusted_wc_path, mimetype="image/jpeg")
+
         has_current_raw_failure = (
             (not using_offline_cache or resolved_ext in RAW_EXTENSIONS)
             and _has_current_working_copy_failure(

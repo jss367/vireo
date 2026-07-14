@@ -1383,7 +1383,9 @@ def test_unedited_raw_original_uses_camera_display_cache_not_working_copy(
     assert db.get_photo(photo_id)["working_copy_path"] == f"working/{photo_id}.jpg"
 
 
-def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(app_and_db):
+def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(
+    app_and_db, monkeypatch,
+):
     """Original endpoint trusts RAW working copy when sensor dims slightly exceed wc.
 
     Stored RAW sensor dimensions can legitimately exceed embedded-JPEG-derived
@@ -1394,6 +1396,7 @@ def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(app
     just slower — and burst-review zoom would loop on every request.
     """
     import config as cfg
+    import image_loader
 
     app, db = app_and_db
     client = app.test_client()
@@ -1426,6 +1429,12 @@ def test_original_trusts_raw_working_copy_even_when_smaller_than_stored_dims(app
         (f"working/{pid}.jpg", pid),
     )
     db.conn.commit()
+
+    def fail_missing_raw_retry(*args, **kwargs):
+        raise AssertionError("missing RAW source should use the trusted working copy")
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", fail_missing_raw_retry)
+    monkeypatch.setattr(image_loader, "load_image", fail_missing_raw_retry)
 
     resp = client.get(f"/photos/{pid}/original")
     assert resp.status_code == 200
