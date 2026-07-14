@@ -807,9 +807,20 @@
   // means the retry can call ``/api/duplicates/delete-loser-files``
   // directly — the losers were already rejected by bulk-resolve, so
   // re-running bulk-resolve on the same hashes is a no-op.
-  function showBucketTrashRetry(card, remainingIds) {
+  //
+  // ``resolvedHashes`` is the subset of bucket.file_hashes that
+  // bulk-resolve actually resolved (i.e. excluding any it returned in
+  // ``skipped``). The retry uses it to prune _lastScanResult so a
+  // partial resolve doesn't drop the skipped hashes' unresolved groups
+  // from the page.
+  function showBucketTrashRetry(card, remainingIds, resolvedHashes) {
     if (!card) return;
     card.setAttribute('data-pending-trash', JSON.stringify(remainingIds));
+    if (resolvedHashes) {
+      var hashList = Array.isArray(resolvedHashes)
+        ? resolvedHashes : Array.from(resolvedHashes);
+      card.setAttribute('data-pending-resolved-hashes', JSON.stringify(hashList));
+    }
     var bi = card.getAttribute('data-bi');
     var actions = card.querySelector('.bucket-actions');
     if (!actions) return;
@@ -833,8 +844,20 @@
     try { ids = JSON.parse(raw); } catch (e) { return; }
     if (!Array.isArray(ids) || ids.length === 0) return;
 
-    var bi = parseInt(card.getAttribute('data-bi'), 10);
-    var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+    // Recover the resolved-hash subset stashed by the initial
+    // bulkResolveByFolder failure path. Falling back to
+    // ``bucket.file_hashes`` would over-prune whenever bulk-resolve
+    // returned any hashes in ``skipped`` — those groups were never
+    // resolved and must stay visible on the page.
+    var resolvedHashes = null;
+    var rawHashes = card.getAttribute('data-pending-resolved-hashes');
+    if (rawHashes) {
+      try {
+        var parsed = JSON.parse(rawHashes);
+        if (Array.isArray(parsed)) resolvedHashes = parsed;
+      } catch (e) { /* fall through */ }
+    }
+
     var status = card.querySelector('[data-bucket-status]');
     var actionBtns = card.querySelectorAll('.bucket-actions button');
     Array.prototype.forEach.call(actionBtns, function(b) { b.disabled = true; });
@@ -878,15 +901,27 @@
 
     card.classList.remove('applying');
     if (pending && pending.length > 0) {
-      showBucketTrashRetry(card, pending);
+      // Re-arm with the same resolved-hash subset so a later successful
+      // retry still knows which hashes to prune.
+      showBucketTrashRetry(card, pending, resolvedHashes);
       return;
     }
     if (terminalError) return;
     // Everything remaining trashed successfully — the whole bucket is
     // now resolved on-disk. Prune it and re-render so the card goes away.
     card.removeAttribute('data-pending-trash');
-    if (bucket && bucket.file_hashes) {
-      pruneResolvedHashesFromScan(new Set(bucket.file_hashes));
+    card.removeAttribute('data-pending-resolved-hashes');
+    var hashesToPrune = resolvedHashes;
+    if (!hashesToPrune) {
+      // Legacy fallback for cards that were retry-armed before this data
+      // attribute existed. In practice these only appear when bulk-resolve
+      // resolved every hash in the bucket, so bucket.file_hashes matches.
+      var bi = parseInt(card.getAttribute('data-bi'), 10);
+      var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+      hashesToPrune = (bucket && bucket.file_hashes) || [];
+    }
+    if (hashesToPrune.length > 0) {
+      pruneResolvedHashesFromScan(new Set(hashesToPrune));
     }
     if (!_scanInProgress) {
       renderResults(_lastScanResult);
@@ -984,19 +1019,23 @@
         showToast(msg, 'success');
       }
 
+      var resolvedHashList = resolved.map(function(r) { return r.file_hash; });
+
       if (pendingTrashIds && pendingTrashIds.length > 0) {
         // Keep the card visible with a retry affordance that trashes the
         // remaining IDs directly. Skipping the prune here is intentional:
         // ``_lastScanResult`` still points at hashes whose winners are
         // fine but whose losers still exist on disk, and re-rendering
-        // would drop the card and hide the retry.
+        // would drop the card and hide the retry. Pass the resolved-hash
+        // subset so the retry only prunes what bulk-resolve actually
+        // resolved — any hashes bulk-resolve returned in ``skipped`` were
+        // never resolved and must stay visible until the user acts on them.
         card.classList.remove('applying');
-        showBucketTrashRetry(card, pendingTrashIds);
+        showBucketTrashRetry(card, pendingTrashIds, resolvedHashList);
         return;
       }
 
-      var resolvedHashes = new Set(resolved.map(function(r) { return r.file_hash; }));
-      pruneResolvedHashesFromScan(resolvedHashes);
+      pruneResolvedHashesFromScan(new Set(resolvedHashList));
       // Don't clobber an in-flight scan's UI: if the user clicked Scan
       // while bulk-resolve was awaiting, ``renderResults`` would hide the
       // progress spinner, re-enable the scan button, and paint stale
