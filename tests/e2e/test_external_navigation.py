@@ -25,16 +25,19 @@ def _item(photo_id=1, *, url=INAT_UPLOAD_URL, duplicate=False):
     }
 
 
-def _mock_tauri(page, *, fail_open=False):
+def _mock_tauri(page, *, fail_open=False, fail_copy=False):
     page.evaluate(
         """
-        failOpen => {
+        options => {
           window.__externalTest = { invokes: [], windowOpenCalls: [] };
           window.__TAURI_INTERNALS__ = {
             invoke: (command, args) => {
               window.__externalTest.invokes.push({ command, args });
-              if (failOpen && command === 'open_external_url') {
+              if (options.failOpen && command === 'open_external_url') {
                 return Promise.reject(new Error('browser launch failed'));
+              }
+              if (options.failCopy && command === 'plugin:clipboard-manager|write_text') {
+                return Promise.reject(new Error('clipboard write failed'));
               }
               return Promise.resolve(null);
             }
@@ -45,7 +48,7 @@ def _mock_tauri(page, *, fail_open=False):
           };
         }
         """,
-        fail_open,
+        {"failOpen": fail_open, "failCopy": fail_copy},
     )
 
 
@@ -69,7 +72,7 @@ def test_native_quick_open_reviews_checked_metadata_before_opening(live_server, 
     expect(page.locator("#inatIncludeDate0")).to_be_checked()
     expect(page.locator("#inatIncludeLocation0")).to_be_checked()
 
-    page.locator("#inatCards button", has_text="Open Upload Page").click()
+    page.locator("#inatCards a", has_text="Open Upload Page").click()
     page.wait_for_function(
         "window.__externalTest.invokes.some(call => "
         "call.command === 'open_external_url')"
@@ -93,7 +96,7 @@ def test_quick_open_can_omit_all_metadata_for_generic_upload(live_server, page):
     page.locator("#inatIncludeTaxon0").uncheck()
     page.locator("#inatIncludeDate0").uncheck()
     page.locator("#inatIncludeLocation0").uncheck()
-    page.locator("#inatCards button", has_text="Open Upload Page").click()
+    page.locator("#inatCards a", has_text="Open Upload Page").click()
     page.wait_for_function(
         "window.__externalTest.invokes.some(call => "
         "call.command === 'open_external_url')"
@@ -110,7 +113,7 @@ def test_native_open_failure_stays_put_and_offers_retry_and_copy(live_server, pa
     _mock_tauri(page, fail_open=True)
 
     page.evaluate("item => openInatQuickModal([item], [])", _item())
-    page.locator("#inatCards button", has_text="Open Upload Page").click()
+    page.locator("#inatCards a", has_text="Open Upload Page").click()
 
     assert len(_open_commands(page)) == 1
     assert page.evaluate("window.__externalTest.windowOpenCalls") == []
@@ -149,6 +152,28 @@ def test_browser_popup_block_never_replaces_vireo(live_server, page):
     expect(page.locator("#externalOpenModalUrl")).to_have_value(INAT_URL)
 
 
+def test_quick_upload_uses_real_link_when_tauri_bridge_is_missing(live_server, page):
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate("delete window.__TAURI_INTERNALS__")
+    fallback_base = f"{live_server['url']}/fake-inaturalist-upload"
+    page.evaluate(
+        "item => openInatQuickModal([item], [])",
+        _item(url=fallback_base),
+    )
+
+    link = page.locator("#inatCards a", has_text="Open Upload Page")
+    with page.expect_popup() as popup_info:
+        link.click()
+
+    popup = popup_info.value
+    popup.wait_for_url(fallback_base + "?**")
+    assert popup.url == (
+        fallback_base
+        + "?taxon_name=Corvus%20corax&observed_on=2026-07-12&lat=47.61&lng=-122.33"
+    )
+    expect(page.locator("#externalOpenModal")).to_have_count(0)
+
+
 def test_delegated_handler_covers_unannotated_external_links(live_server, page):
     page.goto(f"{live_server['url']}/settings")
     original_url = page.url
@@ -179,7 +204,7 @@ def test_internal_links_are_not_claimed_by_external_handler(live_server, page):
 
 def test_batch_quick_uploads_require_explicit_per_item_open(live_server, page):
     page.goto(f"{live_server['url']}/browse")
-    _mock_tauri(page)
+    _mock_tauri(page, fail_copy=True)
     items = [
         _item(1),
         _item(
@@ -191,7 +216,7 @@ def test_batch_quick_uploads_require_explicit_per_item_open(live_server, page):
 
     assert _open_commands(page) == []
     expect(page.locator("#inatModal")).to_have_class("modal-overlay open")
-    expect(page.locator("#inatCards button", has_text="Open Upload")).to_have_count(2)
+    expect(page.locator("#inatCards a", has_text="Open Upload")).to_have_count(2)
     expect(page.locator("#inatCards button", has_text="Copy URL")).to_have_count(2)
 
     # Copy still has a DOM fallback when clipboard permission is unavailable;
@@ -213,6 +238,46 @@ def test_batch_quick_uploads_require_explicit_per_item_open(live_server, page):
     )
     page.locator("#inatCards button", has_text="Copy URL").first.click()
     page.wait_for_function("window.__externalTest.execCopyCalls === 1")
+
+
+def test_native_copy_url_uses_system_clipboard_plugin(live_server, page):
+    page.goto(f"{live_server['url']}/browse")
+    _mock_tauri(page)
+    page.evaluate("item => openInatQuickModal([item], [])", _item())
+    page.evaluate(
+        """
+        () => {
+          Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: { writeText: () => Promise.reject(new Error('should not run')) }
+          });
+          window.__externalTest.execCopyCalls = 0;
+          document.execCommand = () => {
+            window.__externalTest.execCopyCalls += 1;
+            return true;
+          };
+        }
+        """
+    )
+
+    page.locator("#inatCards button", has_text="Copy URL").click()
+    page.wait_for_function(
+        "window.__externalTest.invokes.some(call => "
+        "call.command === 'plugin:clipboard-manager|write_text')"
+    )
+
+    copy_commands = page.evaluate(
+        "window.__externalTest.invokes.filter(call => "
+        "call.command === 'plugin:clipboard-manager|write_text')"
+    )
+    assert copy_commands == [
+        {
+            "command": "plugin:clipboard-manager|write_text",
+            "args": {"text": INAT_URL},
+        }
+    ]
+    assert page.evaluate("window.__externalTest.execCopyCalls") == 0
+    expect(page.locator("#toastContainer")).to_contain_text("URL copied.")
 
 
 def test_batch_quick_open_preserves_preparation_failures(live_server, page):
