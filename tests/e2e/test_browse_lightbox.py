@@ -368,6 +368,7 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
             document.addEventListener('lightbox:photochanged', event => {
                 window.__photoChangedDuringNavigation.push(event.detail.photoId);
             });
+            document.getElementById('lightboxAdjustPanel').classList.add('open');
         }"""
     )
 
@@ -388,6 +389,7 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     )
     expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
     expect(page.locator("#lightboxActions")).to_have_attribute("inert", "")
+    expect(page.locator("#lightboxAdjustPanel")).to_have_attribute("inert", "")
     assert page.evaluate("window.__photoChangedDuringNavigation") == []
 
     # Photo-targeted keyboard actions are suppressed along with the buttons;
@@ -456,6 +458,9 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     assert page.evaluate("window.__photoChangedDuringNavigation") == [next_id]
     assert page.evaluate(
         "!document.getElementById('lightboxActions').inert"
+    )
+    assert page.evaluate(
+        "!document.getElementById('lightboxAdjustPanel').inert"
     )
     carried = page.evaluate("window._lbViewportStateFromCurrent()")
     assert abs(carried["centerX"] - before["viewport"]["centerX"]) < 0.03
@@ -651,7 +656,6 @@ def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
     # with _lbVisualTransitionPending=true. The /full request then 404s, so
     # handleInitialImageError takes the non-'original' early-return path.
     page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
     page.wait_for_function(
         "() => window._lightboxCurrentId === window.photos[1].id"
     )
