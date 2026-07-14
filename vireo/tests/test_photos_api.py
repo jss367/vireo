@@ -65,6 +65,57 @@ def test_api_photos_pagination(app_and_db):
     assert len(data['photos']) == 1
 
 
+def test_api_photos_reports_and_filters_coordinate_sources(app_and_db):
+    """Browse separates embedded GPS, assigned map coordinates, and neither."""
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    exif_id, assigned_id, none_id = [photo["id"] for photo in photos]
+    with db.conn:
+        db.conn.execute(
+            "UPDATE photos SET latitude = 37.7749, longitude = -122.4194 "
+            "WHERE id = ?",
+            (exif_id,),
+        )
+        cursor = db.conn.execute(
+            "INSERT INTO keywords (name, type, latitude, longitude) "
+            "VALUES ('Assigned Park', 'location', 40.7829, -73.9654)"
+        )
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (assigned_id, cursor.lastrowid),
+        )
+
+    client = app.test_client()
+    response = client.get("/api/photos?sort=name")
+    assert response.status_code == 200
+    statuses = {
+        photo["id"]: photo["location_status"]
+        for photo in response.get_json()["photos"]
+    }
+    assert statuses == {
+        exif_id: "exif",
+        assigned_id: "assigned",
+        none_id: "none",
+    }
+
+    for status, expected_id in (
+        ("exif", exif_id),
+        ("assigned", assigned_id),
+        ("none", none_id),
+    ):
+        filtered = client.get(f"/api/photos?location_status={status}&sort=name")
+        assert filtered.status_code == 200
+        body = filtered.get_json()
+        assert body["total"] == 1
+        assert [photo["id"] for photo in body["photos"]] == [expected_id]
+
+        ids = client.get(f"/api/photos/ids?location_status={status}&sort=name")
+        assert ids.status_code == 200
+        assert ids.get_json()["photo_ids"] == [expected_id]
+
+    assert client.get("/api/photos?location_status=gpsish").status_code == 400
+
+
 def test_api_photos_filter_folder(app_and_db):
     """GET /api/photos?folder_id= filters by folder."""
     app, db = app_and_db
@@ -873,9 +924,13 @@ def test_api_photos_geo_returns_geolocated(app_and_db):
     assert 'photos' in data
     assert 'total_filtered' in data
     assert 'total_with_gps' in data
+    assert 'total_geolocated' in data
+    assert 'total_without_coordinates' in data
     assert 'total_photos' in data
     assert data['total_filtered'] == 1
     assert data['total_with_gps'] == 1
+    assert data['total_geolocated'] == 1
+    assert data['total_without_coordinates'] == 2
     assert data['total_photos'] == 3
     assert len(data['photos']) == 1
     assert data['photos'][0]['latitude'] == 37.77

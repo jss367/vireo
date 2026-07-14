@@ -1781,7 +1781,7 @@ async function loadConfig() {
     document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
     document.getElementById('cfgOpenInBrowser').checked = cfg.open_in_browser === true;
     // Load browse card fields
-    loadCardFieldCheckboxes(cfg.browse_card_fields || ["filename", "rating", "flag", "sharpness"]);
+    loadCardFieldCheckboxes(cfg.browse_card_fields || ["filename", "location_status", "rating", "flag", "sharpness"]);
     // Load detection settings
     var dc = Math.round((cfg.detector_confidence != null ? cfg.detector_confidence : 0.20) * 100);
     document.getElementById('cfgDetectorConf').value = dc;
@@ -1897,6 +1897,7 @@ async function loadConfig() {
 
 var CARD_FIELD_OPTIONS = [
   { id: 'filename', label: 'Filename', desc: 'Photo filename' },
+  { id: 'location_status', label: 'Coordinate source', desc: 'EXIF GPS, assigned map location, or no coordinates' },
   { id: 'rating', label: 'Rating', desc: 'Star rating' },
   { id: 'flag', label: 'Flag', desc: 'Flagged / rejected indicator' },
   { id: 'sharpness', label: 'Sharpness', desc: 'Sharpness score' },
