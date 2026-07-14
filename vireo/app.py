@@ -2320,7 +2320,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchone()
         return row is not None
 
-    def _full_resolution_render_signature(photo, recipe):
+    def _full_resolution_render_signature(photo, recipe, companion_state=None):
         """Describe every catalogued input to a cached inspection render.
 
         The source size/mtime pair is refreshed by scans, the canonical recipe
@@ -2337,13 +2337,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "source_mtime": photo["file_mtime"],
             "filename": photo["filename"],
             "companion_path": photo["companion_path"],
+            "companion_state": companion_state,
             "recipe": recipe_to_json(recipe),
             "edit_math_version": EDIT_MATH_VERSION,
         }
 
-    def _full_resolution_render_path(vireo_dir, photo, recipe):
+    def _full_resolution_render_path(
+        vireo_dir, photo, recipe, companion_state=None,
+    ):
         signature = json.dumps(
-            _full_resolution_render_signature(photo, recipe),
+            _full_resolution_render_signature(
+                photo, recipe, companion_state,
+            ),
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
@@ -2352,8 +2357,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             vireo_dir, "originals", f"{photo['id']}_{cache_key}.jpg",
         )
 
-    def _prepared_full_resolution_render(vireo_dir, photo, recipe):
-        cache_path = _full_resolution_render_path(vireo_dir, photo, recipe)
+    def _prepared_full_resolution_render(
+        vireo_dir, photo, recipe, companion_state=None,
+    ):
+        cache_path = _full_resolution_render_path(
+            vireo_dir, photo, recipe, companion_state,
+        )
         try:
             if not os.path.isfile(cache_path) or os.path.getsize(cache_path) <= 0:
                 return None
@@ -24949,8 +24958,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
         )
 
+        folder = db.conn.execute(
+            "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+        ).fetchone()
+        if not folder:
+            return "Not found", 404
+
+        def _file_render_state(path):
+            if not path:
+                return None
+            try:
+                stat = os.stat(path)
+            except OSError:
+                return None
+            return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+        companion_state = None
+        if photo["companion_path"]:
+            offline_row = db.offline_original_get(photo_id)
+            cached_companion = (
+                os.path.join(vireo_dir, offline_row["companion_path"])
+                if offline_row and offline_row["companion_path"]
+                else None
+            )
+            companion_state = {
+                "source": _file_render_state(
+                    os.path.join(folder["path"], photo["companion_path"]),
+                ),
+                "cached": _file_render_state(cached_companion),
+            }
+
         prepared_render = _prepared_full_resolution_render(
-            vireo_dir, photo, recipe,
+            vireo_dir, photo, recipe, companion_state,
         )
         if prepared_render:
             return send_file(prepared_render, mimetype="image/jpeg")
@@ -25059,11 +25098,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 load_image,
             )
 
-            folder = db.conn.execute(
-                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-            ).fetchone()
-            if not folder:
-                return "Not found", 404
             # For edited RAW primaries, a "trusted" working copy can still
             # predate the highlight-preserving RAW decode (the migration
             # purges previews and thumbnails but not working copies). Force
@@ -25223,7 +25257,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             originals_dir = os.path.join(vireo_dir, "originals")
             cache_path = _full_resolution_render_path(
-                vireo_dir, photo, recipe,
+                vireo_dir, photo, recipe, companion_state,
             )
             os.makedirs(originals_dir, exist_ok=True)
             quality = cfg.load().get("working_copy_quality", 92)
@@ -25249,11 +25283,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return send_file(trusted_wc_path, mimetype="image/jpeg")
 
         # Resolve original file path
-        folder = db.conn.execute(
-            "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-        ).fetchone()
-        if not folder:
-            return "Not found", 404
         from offline_cache import resolve_original_path
         image_path, using_offline_cache = resolve_original_path(
             db,
@@ -25574,7 +25603,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             tmp_prefix = f".{photo_id}.display."
         else:
             cache_path = _full_resolution_render_path(
-                vireo_dir, photo, recipe,
+                vireo_dir, photo, recipe, companion_state,
             )
             cache_dir = os.path.dirname(cache_path)
             tmp_prefix = f".{photo_id}."
