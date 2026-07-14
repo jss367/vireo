@@ -68,6 +68,8 @@ def test_browse_discloses_raw_jpeg_pairs_and_offers_source_switch(app_and_db):
     assert "Viewing JPEG · Show RAW" in html
     assert "Has JPEG Companion" in html
     assert "_vireoPairSourceByPhoto[key] = 'jpeg'" in html
+    assert "_vireoPairPendingSourceByPhoto" in html
+    assert "A failed request leaves the old source intact" in html
 
 
 def test_api_add_keyword_accepts_existing_keyword_id(app_and_db):

@@ -526,15 +526,26 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .lightbox-overlay.lb-hide-info .lightbox-zoom-badge {
   display: none !important;
 }
-.lightbox-actions {
+.lightbox-bottom-bar {
   position: absolute;
+  left: 24px;
   right: 24px;
   bottom: 16px;
+  z-index: 10000;
   display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  pointer-events: none;
+}
+.lightbox-actions {
+  display: flex;
+  flex: 1 1 520px;
+  min-width: 0;
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
-  max-width: calc(100vw - 48px);
   padding: 8px;
   border-radius: 6px;
   background: rgba(0, 0, 0, 0.62);
@@ -542,6 +553,11 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.42);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+  pointer-events: auto;
+}
+.lightbox-actions.lb-photo-transition-pending,
+.lightbox-adjust-panel.lb-photo-transition-pending {
+  opacity: 0.55;
 }
 .lifelist-lb-panel { display:flex; flex-direction:column; gap:6px; align-items:stretch; padding:4px 8px; border-radius:4px; background:rgba(12,14,16,0.88); border:1px solid rgba(255,255,255,0.42); color:#f4f7f8; font-size:12px; font-weight:650; text-shadow:0 1px 1px rgba(0,0,0,0.75); }
 .lifelist-lb-row { display:flex; align-items:center; gap:8px; justify-content:space-between; }
@@ -954,15 +970,20 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   line-height: 1.4;
 }
 .lightbox-filename {
-  position: absolute;
-  bottom: 16px;
-  left: 50%;
-  transform: translateX(-50%);
+  flex: 0 1 min(35vw, 420px);
+  max-width: min(35vw, 420px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-muted);
   font-size: 13px;
   background: rgba(0,0,0,0.6);
   padding: 4px 12px;
   border-radius: 4px;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+  pointer-events: auto;
 }
 
 /* ---------- Pipeline Inspector ---------- */
@@ -3439,7 +3460,7 @@ async function createWorkspace() {
   <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
   <div id="lightboxPrev" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Previous (←)">&#9664;</div>
   <div id="lightboxNext" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
-  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (Math.abs(_lbZoom - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
+  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!_lbVisualTransitionPending && Math.abs(_lbZoom - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
     <div class="lightbox-transform" id="lightboxTransform">
       <img id="lightboxImg" src="" alt="">
@@ -3449,10 +3470,14 @@ async function createWorkspace() {
       <div id="lightboxEye" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;"></div>
     </div>
   </div>
-  <div class="lightbox-filename" id="lightboxFilename"></div>
   <div class="lightbox-flag-status" id="lightboxFlagStatus" aria-live="polite"></div>
   <div id="lightboxCounter" style="display:none;position:absolute;top:16px;left:50%;transform:translateX(-50%);max-width:calc(100vw - 160px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:rgba(255,255,255,0.6);font-size:13px;background:rgba(0,0,0,0.5);padding:3px 10px;border-radius:4px;"></div>
-  <div id="lightboxActions" class="lightbox-actions">
+  <div class="lightbox-bottom-bar">
+    <div class="lightbox-filename" id="lightboxFilename"
+         onmousedown="event.stopPropagation();"
+         onclick="event.stopPropagation();"
+         title="Select and copy filename"></div>
+    <div id="lightboxActions" class="lightbox-actions">
     <button class="lb-action-btn lb-action-accent" id="lightboxSourceControl" style="display:none;" onclick="event.stopPropagation(); vireoTogglePairSource(_lightboxCurrentId);" title="Switch between the developed JPEG and RAW source">
       Viewing JPEG · Show RAW
     </button>
@@ -3494,6 +3519,7 @@ async function createWorkspace() {
       Edit Photo
     </button>
     <button class="lb-action-btn lb-action-danger" onclick="lightboxDelete()" title="Delete photo">Delete</button>
+    </div>
   </div>
   <div class="lightbox-adjust-panel" id="lightboxAdjustPanel" onclick="event.stopPropagation();">
     <div class="lb-adjust-header">
@@ -3621,6 +3647,7 @@ var _lbSessionFullLongEdge = null;  // last learned /full size across photos; be
 var _lbPending1To1 = false;  // true when z/click was pressed with unknown nativeZoom; upgrade to true 1:1 once learned
 var _lbPending1To1Anchor = null; // optional client-space anchor for a deferred 1:1 snap
 var _lbOriginalUnavailable = false;  // true after /original fails; fall back to current decoded source dimensions
+var _lbFullUsesOriginal = null; // metadata-backed: preview_max_size=0 makes /full redirect to /original
 var _lbCurrentWildlifeExcluded = false;
 var _lbFlagEditSeq = 0;      // increments for local flag writes so stale metadata fetches cannot overwrite the chip
 var _lbOpenSeq = 0;          // increments for every lightbox open so old metadata fetches cannot reapply after reopen
@@ -3632,12 +3659,24 @@ var _lbPendingViewportState = null;
 var _lbVisualTransitionPending = false; // keep the outgoing bitmap/transform frozen until the incoming image is decoded
 var _lbDeferredOverlayApply = null; // detections/eye render withheld while _lbVisualTransitionPending; drained when the transition clears
 var _lbAdjacentPreloads = {}; // decoded immediate neighbors, keyed by photo id + source URL
+var _lbOriginalPreloadTimer = null; // short dwell before warming the current photo's 100% source
+var _lbOriginalPreload = null; // retained decoded original for an instant first 100% click
 var _lbEditRecipeByPhoto = {};
 var _lbEditRecipeKnownByPhoto = {};
 var _lbEditRecipeWriteSeq = 0;
 var _lbEditRecipeWriteSeqByPhoto = {};
 var _lbPhotoDataByPhoto = {};
 var _lbRenderVersionByPhoto = {};
+
+function _lbSetPhotoTransitionPending(pending) {
+  ['lightboxActions', 'lightboxAdjustPanel', 'syncLightboxPanel'].forEach(function(id) {
+    var controls = document.getElementById(id);
+    if (!controls) return;
+    controls.classList.toggle('lb-photo-transition-pending', !!pending);
+    controls.inert = !!pending;
+    controls.setAttribute('aria-busy', pending ? 'true' : 'false');
+  });
+}
 
 // --- Species Representative panel, shared across every page's lightbox.
 // Driven by the `life_list` block on GET /api/photos/<id> (cached in
@@ -4038,6 +4077,7 @@ function _vireoBumpRenderVersion(photoId) {
 // on JPEG because that file is commonly the photographer's developed result.
 var _vireoPairKnownByPhoto = {};
 var _vireoPairSourceByPhoto = {};
+var _vireoPairPendingSourceByPhoto = {};
 
 window.vireoRememberPhotoPair = function(photo) {
   if (!photo || photo.id == null) return;
@@ -4060,14 +4100,18 @@ window.vireoUpdatePairSourceControls = function(photoId) {
   var key = String(photoId);
   var paired = !!_vireoPairKnownByPhoto[key];
   var source = _vireoPairSourceByPhoto[key] || 'jpeg';
-  var text = source === 'jpeg'
-    ? 'Viewing JPEG · Show RAW'
-    : 'Viewing RAW · Show JPEG';
+  var pending = _vireoPairPendingSourceByPhoto[key] || null;
+  var text = pending
+    ? 'Viewing ' + source.toUpperCase() + ' · Loading ' + pending.toUpperCase() + '…'
+    : (source === 'jpeg'
+      ? 'Viewing JPEG · Show RAW'
+      : 'Viewing RAW · Show JPEG');
 
   var lightboxControl = document.getElementById('lightboxSourceControl');
   if (lightboxControl && String(_lightboxCurrentId) === key) {
     lightboxControl.style.display = paired ? '' : 'none';
     lightboxControl.textContent = text;
+    lightboxControl.disabled = !!pending;
   }
   var detailControl = document.getElementById('detailSourceControl');
   if (detailControl && String(window._detailPhotoId) === key) {
@@ -4075,6 +4119,7 @@ window.vireoUpdatePairSourceControls = function(photoId) {
     detailControl.textContent = paired
       ? 'RAW + JPEG pair · ' + text
       : '';
+    detailControl.disabled = !!pending;
   }
   document.querySelectorAll('[data-pair-source-id="' + key + '"]').forEach(function(badge) {
     badge.textContent = source === 'jpeg'
@@ -4083,17 +4128,96 @@ window.vireoUpdatePairSourceControls = function(photoId) {
   });
 };
 
-window.vireoTogglePairSource = function(photoId) {
-  if (photoId == null || !_vireoPairKnownByPhoto[String(photoId)]) return;
+function _vireoPairAnchorImage(photoId) {
   var key = String(photoId);
-  _vireoPairSourceByPhoto[key] = _vireoPairSourceByPhoto[key] === 'raw'
-    ? 'jpeg'
-    : 'raw';
-  _vireoBumpRenderVersion(photoId);
+  if (String(_lightboxCurrentId) === key) {
+    return document.getElementById('lightboxImg');
+  }
+  if (String(window._detailPhotoId) === key) {
+    return document.getElementById('detailImg');
+  }
+  return document.querySelector('.grid-card[data-id="' + key + '"] img');
+}
+
+function _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc) {
+  var key = String(photoId);
+  if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
+  delete _vireoPairPendingSourceByPhoto[key];
   window.vireoUpdatePairSourceControls(photoId);
+  if (anchor && oldSrc && anchor.isConnected) anchor.src = oldSrc;
+  if (typeof showToast === 'function') {
+    showToast('Could not load the ' + requested.toUpperCase() + ' source', 'error');
+  }
+}
+
+function _vireoCommitPairSource(photoId, requested, anchor) {
+  var key = String(photoId);
+  if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
+  _vireoPairSourceByPhoto[key] = requested;
+  delete _vireoPairPendingSourceByPhoto[key];
+  window.vireoUpdatePairSourceControls(photoId);
+  if (
+    anchor && anchor.id === 'lightboxImg' &&
+    String(_lightboxCurrentId) === key
+  ) {
+    _lbFullLongEdge = Math.max(anchor.naturalWidth || 0, anchor.naturalHeight || 0) || null;
+    _lbNativeZoom = null;
+    _lbRecomputeNativeZoom();
+    _lbApplyTransform();
+    _lbApplyBoxesVisibility();
+    _lbApplyEyeVisibility();
+    _lbApplyMaskVisibility();
+  }
   if (typeof window.vireoRefreshPhotoRenders === 'function') {
     window.vireoRefreshPhotoRenders([photoId]);
   }
+}
+
+window.vireoTogglePairSource = function(photoId) {
+  if (photoId == null || !_vireoPairKnownByPhoto[String(photoId)]) return;
+  var key = String(photoId);
+  if (_vireoPairPendingSourceByPhoto[key]) return;
+  var requested = _vireoPairSourceByPhoto[key] === 'raw'
+    ? 'jpeg'
+    : 'raw';
+  var anchor = _vireoPairAnchorImage(photoId);
+  var oldSrc = anchor ? (anchor.getAttribute('src') || anchor.src || '') : '';
+  var base = oldSrc ? _vireoBaseRenderedUrl(oldSrc) : '/thumbnails/' + key + '.jpg';
+  _vireoBumpRenderVersion(photoId);
+  var targetUrl = window.vireoRenderedUrl(base, photoId, requested);
+  _vireoPairPendingSourceByPhoto[key] = requested;
+  window.vireoUpdatePairSourceControls(photoId);
+
+  // Validate the target without disturbing the currently displayed pixels.
+  // Once it is decoded, swap the visible anchor and commit the label/state only
+  // from that image's load event. A failed request leaves the old source intact.
+  var probe = new Image();
+  probe.onload = function() {
+    if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
+    if (!anchor || !anchor.isConnected) {
+      _vireoCommitPairSource(photoId, requested, null);
+      return;
+    }
+    function cleanup() {
+      anchor.removeEventListener('load', loaded);
+      anchor.removeEventListener('error', failed);
+    }
+    function loaded() {
+      cleanup();
+      _vireoCommitPairSource(photoId, requested, anchor);
+    }
+    function failed() {
+      cleanup();
+      _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc);
+    }
+    anchor.addEventListener('load', loaded);
+    anchor.addEventListener('error', failed);
+    anchor.src = targetUrl;
+  };
+  probe.onerror = function() {
+    _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc);
+  };
+  probe.src = targetUrl;
 };
 
 window.vireoRefreshPhotoRenders = function(photoIds) {
@@ -4128,8 +4252,8 @@ window.vireoRefreshPhotoRenders = function(photoIds) {
   } catch (_) {}
 };
 
-window.vireoRenderedUrl = function(url, photoId) {
-  var source = photoId == null ? null : _vireoPairSource(photoId);
+window.vireoRenderedUrl = function(url, photoId, sourceOverride) {
+  var source = sourceOverride || (photoId == null ? null : _vireoPairSource(photoId));
   if (source) url = _vireoUrlWithPhotoSource(url, source);
   var recipe = photoId == null ? null : _lbEditRecipeByPhoto[String(photoId)];
   var recipeKey = _vireoEditRecipeCacheKey(recipe);
@@ -4488,6 +4612,7 @@ function _lbSetEditBusy(busy) {
 
 function _lbReloadCurrentRenderAfterEdit(photoId) {
   if (_lightboxCurrentId !== photoId) return;
+  _lbCancelOriginalPreload();
   var img = document.getElementById('lightboxImg');
   var wrap = document.getElementById('lightboxWrap');
   if (!img) return;
@@ -4518,6 +4643,7 @@ function _lbReloadCurrentRenderAfterEdit(photoId) {
     }
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
+    _lbScheduleOriginalPreload(photoId);
   };
   img.onerror = function() {
     img.onload = null;
@@ -5201,6 +5327,7 @@ function _lbRefreshVisiblePhotoImages(photoId) {
 
 function _lbReloadEditedSource(photoId, seq) {
   if (_lightboxCurrentId !== photoId) return;
+  _lbCancelOriginalPreload();
   var img = document.getElementById('lightboxImg');
   if (!img) return;
   var key = _lbCurrentSrcKey || 'full';
@@ -5214,6 +5341,7 @@ function _lbReloadEditedSource(photoId, seq) {
     _lbClearAdjustmentPreview();
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
+    if (key === 'full') _lbScheduleOriginalPreload(photoId);
   });
   img.src = _lbSrcUrl(photoId, key);
 }
@@ -5451,11 +5579,19 @@ function _lbSaveViewportState(photoId) {
 }
 
 function _lbViewportStateForOpen(photoId, fallbackState) {
+  // Arrow navigation supplies the viewport from the photo being left. Treat
+  // that handoff as the current browse-session viewport, even when the target
+  // photo has an older cached viewport from an earlier visit. This keeps zoom
+  // continuous while moving left/right: zooming back out on one photo also
+  // means a previously visited photo opens zoomed out when navigating back.
+  if (fallbackState) {
+    return _lbCloneViewportState(fallbackState);
+  }
   var key = String(photoId);
   if (Object.prototype.hasOwnProperty.call(_lbViewportByPhotoId, key)) {
     return _lbCloneViewportState(_lbViewportByPhotoId[key]);
   }
-  return _lbCloneViewportState(fallbackState);
+  return null;
 }
 
 function _lbApplyViewportState(state) {
@@ -5663,7 +5799,9 @@ function _lbRecordFlag(photoId, flag) {
   var p = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   if (p) p.flag = normalized;
   _lbRememberConfirmedFlag(photoId, normalized);
-  if (_lightboxCurrentId === photoId) _lbSetFlagStatus(normalized);
+  if (_lightboxCurrentId === photoId && !_lbVisualTransitionPending) {
+    _lbSetFlagStatus(normalized);
+  }
 }
 
 function _lbCacheFlag(photoId, flag) {
@@ -5809,7 +5947,12 @@ function _lbOrientationSwapsAxes(orientation) {
 }
 
 function _lbSourceOverlaysAvailable() {
-  return !_lbRecipeHasGeometricEdit(_lbCurrentEditRecipe);
+  var pairUsesJpeg = (
+    _lightboxCurrentId != null &&
+    _vireoPairKnownByPhoto[String(_lightboxCurrentId)] &&
+    _vireoPairSource(_lightboxCurrentId) === 'jpeg'
+  );
+  return !pairUsesJpeg && !_lbRecipeHasGeometricEdit(_lbCurrentEditRecipe);
 }
 
 function _lbApplyBoxesVisibility() {
@@ -6606,7 +6749,15 @@ window.vireoRefreshEditRecipeCache = _lbRefreshEditRecipeCache;
 
 function openLightbox(photoId, filename, photoList, options) {
   var alreadyOpen = !!window._lbEscToken;
+  var transitionAlreadyPending = _lbVisualTransitionPending;
+  var reopeningVisiblePhoto = !!(
+    alreadyOpen &&
+    !transitionAlreadyPending &&
+    _lightboxCurrentId != null &&
+    String(_lightboxCurrentId) === String(photoId)
+  );
   options = options || {};
+  _lbCancelOriginalPreload();
   var fallbackViewportState = options.fallbackViewportState || null;
   _lbFlushPendingAdjustmentSave();
   if (alreadyOpen && _lightboxCurrentId != null) {
@@ -6652,7 +6803,15 @@ function openLightbox(photoId, filename, photoList, options) {
   // photo's dimensions, true 1:1 scale, and normalized viewport center are
   // applied together from handleInitialImageLoad, before the browser's next
   // paint, so an off-center view never flashes through a centered state.
-  _lbVisualTransitionPending = alreadyOpen;
+  // Re-running an "Open in Lightbox" command for the photo that is already
+  // visible does not require an identity handoff. In particular, assigning
+  // the same img.src again is not guaranteed to emit load/error, so arming the
+  // transition lock here could leave every photo control inert indefinitely.
+  // Do retain the lock when this call supersedes a transition already in
+  // flight: _lightboxCurrentId then names the incoming photo, not necessarily
+  // the bitmap that is still visible.
+  _lbVisualTransitionPending = alreadyOpen && !reopeningVisiblePhoto;
+  _lbSetPhotoTransitionPending(_lbVisualTransitionPending);
   // A previous open's deferred overlay closure captured the previous photo id
   // and metadata. If this open's image resolves before its own metadata does,
   // draining that stale closure would render the previous photo's detections
@@ -6665,9 +6824,6 @@ function openLightbox(photoId, filename, photoList, options) {
   // resolve "the photo I was just looking at".
   if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
   _lbApplyEditButtonState();
-  try {
-    document.dispatchEvent(new CustomEvent('lightbox:photochanged', { detail: { photoId: photoId } }));
-  } catch(_) {}
   var currentFromList = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   if (currentFromList && typeof window.vireoRememberPhotoPair === 'function') {
     window.vireoRememberPhotoPair(currentFromList);
@@ -6684,7 +6840,7 @@ function openLightbox(photoId, filename, photoList, options) {
     _lbForgetConfirmedFlag(photoId);
   }
   _lbCurrentWildlifeExcluded = !!(currentFromList && currentFromList.wildlife_excluded);
-  _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
+  if (!alreadyOpen) _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
 
   var overlay = document.getElementById('lightboxOverlay');
   var img = document.getElementById('lightboxImg');
@@ -6693,6 +6849,39 @@ function openLightbox(photoId, filename, photoList, options) {
   var similarBtn = document.getElementById('lightboxSimilar');
   var inatBtn = document.getElementById('lightboxInat');
   var wrap = document.getElementById('lightboxWrap');
+
+  // The browser keeps painting the outgoing bitmap while a newly assigned
+  // image source loads. Keep the visible filename and position paired with
+  // that bitmap, then advance all three in the image-load task before the next
+  // paint. Internal navigation state still advances immediately, so rapid
+  // arrow presses continue to target the right photo.
+  var visibleIdentityCommitted = false;
+  function commitVisiblePhotoIdentity() {
+    label.textContent = filename || '';
+    _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
+    _lbApplyWildlifeExcludedButton();
+    var counter = document.getElementById('lightboxCounter');
+    if (_lightboxPhotoList.length > 1) {
+      var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === photoId; });
+      var counterFilename = filename || (currentFromList && currentFromList.filename) || '';
+      counter.textContent = (idx + 1) + ' / ' + _lightboxPhotoList.length
+        + (counterFilename ? ' \u00b7 ' + counterFilename : '');
+      counter.title = counterFilename;
+      counter.style.display = '';
+    } else {
+      counter.title = '';
+      counter.style.display = 'none';
+    }
+    if (!visibleIdentityCommitted) {
+      visibleIdentityCommitted = true;
+      try {
+        document.dispatchEvent(new CustomEvent('lightbox:photochanged', {
+          detail: { photoId: photoId }
+        }));
+      } catch(_) {}
+    }
+  }
+
   // Reset pan for the new photo, but keep a 1:1 transform during arrow
   // navigation so the outgoing image does not visibly snap back to fit before
   // the replacement finishes loading.
@@ -6735,6 +6924,7 @@ function openLightbox(photoId, filename, photoList, options) {
   _lbPending1To1Anchor = null;
   _lbPendingViewportState = restoreViewportState;
   _lbOriginalUnavailable = false;
+  _lbFullUsesOriginal = null;
   _lbEditRecipe = null;
   _lbEditRecipeLoaded = false;
   _lbRenderedAdjustmentValues = _lbAdjustmentValues(null);
@@ -6793,6 +6983,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbApplyMaskVisibility();
       _lbPhotoW = data.width || null;
       _lbPhotoH = data.height || null;
+      _lbFullUsesOriginal = !!data.full_uses_original;
       _lbPhotoOrientation = _lbMetadataOrientation(data.metadata);
       var currentLayoutRecipe = _lbEditRecipeByPhoto[String(photoId)];
       _lbCurrentEditRecipe = _lbRecipeHasEdits(currentLayoutRecipe)
@@ -6823,6 +7014,7 @@ function openLightbox(photoId, filename, photoList, options) {
       if (!_lbVisualTransitionPending) {
         _lbRecomputeNativeZoom();
         if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
+        if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
       }
       // Detection boxes, the eye marker, and the mask overlay are children of
       // lightboxTransform. While _lbVisualTransitionPending is true the
@@ -6856,6 +7048,7 @@ function openLightbox(photoId, filename, photoList, options) {
     img.onload = null;
     img.onerror = null;
     if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+    commitVisiblePhotoIdentity();
     // Only record the /full tier size if the currently loaded source is still /full.
     // A quick user zoom can trigger a debounced swap to a higher tier before /full
     // finishes loading, which would otherwise make us record the swapped source's
@@ -6869,6 +7062,7 @@ function openLightbox(photoId, filename, photoList, options) {
       _lbPhotoH = img.naturalHeight;
     }
     _lbVisualTransitionPending = false;
+    _lbSetPhotoTransitionPending(false);
     _lbRecomputeNativeZoom();
     if (
       _lbCurrentSrcKey === 'full' &&
@@ -6886,6 +7080,7 @@ function openLightbox(photoId, filename, photoList, options) {
     _lbApplyTransform();
     _lbFlushDeferredOverlayApply();
     _lbPrimeAdjacentPhotos(_lbCurrentSrcKey);
+    if (_lbCurrentSrcKey === 'full') _lbScheduleOriginalPreload(photoId);
   }
   function handleInitialImageError() {
     if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
@@ -6895,10 +7090,12 @@ function openLightbox(photoId, filename, photoList, options) {
       // No further fallback tier is available. Clear the pending visual
       // transition — otherwise the metadata callback would keep skipping
       // layout updates and _lbSaveViewportState would keep treating the
-      // incoming photo as mid-transition even though the UI already points
-      // at it. Apply any deferred viewport state so the layout reflects
-      // the incoming photo instead of the frozen outgoing bitmap.
+      // incoming photo as mid-transition. Apply any deferred viewport state
+      // so the layout reflects the incoming photo instead of the frozen
+      // outgoing bitmap.
+      commitVisiblePhotoIdentity();
       _lbVisualTransitionPending = false;
+      _lbSetPhotoTransitionPending(false);
       _lbRecomputeNativeZoom();
       if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
       _lbApplyTransform();
@@ -6915,7 +7112,7 @@ function openLightbox(photoId, filename, photoList, options) {
   img.onload = handleInitialImageLoad;
   img.onerror = handleInitialImageError;
   img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
-  label.textContent = filename || '';
+  if (!_lbVisualTransitionPending) commitVisiblePhotoIdentity();
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
   inatBtn.onclick = function() { submitToInat(photoId); };
@@ -6946,19 +7143,6 @@ function openLightbox(photoId, filename, photoList, options) {
   // pages that don't run the pipeline still get the lightbox unchanged.
   _lbLoadMaskVariants(photoId);
 
-  // Show position indicator if navigating a list
-  var counter = document.getElementById('lightboxCounter');
-  if (_lightboxPhotoList.length > 1) {
-    var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === photoId; });
-    var counterFilename = filename || (currentFromList && currentFromList.filename) || '';
-    counter.textContent = (idx + 1) + ' / ' + _lightboxPhotoList.length
-      + (counterFilename ? ' \u00b7 ' + counterFilename : '');
-    counter.title = counterFilename;
-    counter.style.display = '';
-  } else {
-    counter.title = '';
-    counter.style.display = 'none';
-  }
 }
 
 function lightboxNav(delta) {
@@ -7071,6 +7255,7 @@ function toggleLightboxZoom(e) {
     if (!wrap.contains(e.target) && e.target !== wrap) return;
 
     e.preventDefault();
+    if (_lbVisualTransitionPending) return;
     // Trackpad pinch: e.ctrlKey === true; zoom factor more sensitive.
     var scale = e.ctrlKey ? 0.02 : 0.0015;
     var zoomFactor = Math.exp(-e.deltaY * scale);
@@ -7129,6 +7314,7 @@ function toggleLightboxZoom(e) {
   document.addEventListener('mousedown', function(e) {
     // Right-click (button 2) opens the context menu — never start a pan.
     if (e.button !== 0) return;
+    if (_lbVisualTransitionPending) return;
     var wrap = document.getElementById('lightboxWrap');
     if (!wrap || _lbZoom <= 1.001) return;
     if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
@@ -7184,10 +7370,12 @@ function closeLightbox(e) {
   _lbPanX = 0;
   _lbPanY = 0;
   _lbVisualTransitionPending = false;
+  _lbSetPhotoTransitionPending(false);
   _lbDeferredOverlayApply = null;
   _lbClearPendingViewportRestore();
   if (_lbSwapTimer) { clearTimeout(_lbSwapTimer); _lbSwapTimer = null; }
   _lbDesiredSrcKey = null;
+  _lbCancelOriginalPreload();
   _lbClearAdjacentPreloads();
   _lbClearAdjustmentPreview();
   var adjustPanel = document.getElementById('lightboxAdjustPanel');
@@ -7329,6 +7517,7 @@ function buildLightboxContextMenu(pid) {
     // handler in full control.)
     e.preventDefault();
     e.stopPropagation();
+    if (_lbVisualTransitionPending) return;
     var pid = _lightboxCurrentId;
     if (!pid) return;
     openContextMenu(e, buildLightboxContextMenu(pid));
@@ -7541,7 +7730,12 @@ async function lightboxToggleWildlifeExcluded() {
 
 function lightboxDelete() {
   var overlay = document.getElementById('lightboxOverlay');
-  if (!_lightboxCurrentId || !overlay || !overlay.classList.contains('active')) return;
+  if (
+    _lbVisualTransitionPending ||
+    !_lightboxCurrentId ||
+    !overlay ||
+    !overlay.classList.contains('active')
+  ) return;
   var currentId = _lightboxCurrentId;
   var p = _lightboxPhotoList.find(function(x) { return x.id === currentId; });
   var companionCount = (p && p.companion_path) ? 1 : 0;
@@ -7977,8 +8171,26 @@ document.addEventListener('keydown', function(e) {
     (e.target && e.target.isContentEditable);
   // Editable check must come before arrow handling so arrows inside form
   // fields (e.g. the mask-variant <select>) change the value, not the photo.
-  if (!editable0 && e.key === 'ArrowRight') { lightboxNav(1); e.preventDefault(); }
-  if (!editable0 && e.key === 'ArrowLeft') { lightboxNav(-1); e.preventDefault(); }
+  if (!editable0 && e.key === 'ArrowRight') {
+    lightboxNav(1);
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    return;
+  }
+  if (!editable0 && e.key === 'ArrowLeft') {
+    lightboxNav(-1);
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    return;
+  }
+  // The outgoing photo is still visible while the incoming source decodes.
+  // Suppress photo-targeted shortcuts until the visible identity commits so
+  // ratings, edits, and zoom operations cannot affect a hidden photo.
+  if (_lbVisualTransitionPending && e.key !== 'Escape') {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    return;
+  }
   if (!editable0 && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !lightboxKeyMatchesConfiguredBrowseShortcut(e)) {
     if (e.key.toLowerCase() === 'f') {
       requestLightboxFullscreen();
@@ -8202,6 +8414,17 @@ function _lbDisplayDimsForRecipe(width, height, recipe) {
 function _lbLayoutDims() {
   var img = document.getElementById('lightboxImg');
   if (!img) return null;
+  // A developed companion may have been cropped or resized independently of
+  // its RAW primary. Use the pixels that actually loaded so the lightbox never
+  // stretches the JPEG into the RAW row's catalog dimensions.
+  if (
+    _lightboxCurrentId != null &&
+    _vireoPairKnownByPhoto[String(_lightboxCurrentId)] &&
+    _vireoPairSource(_lightboxCurrentId) === 'jpeg' &&
+    img.naturalWidth && img.naturalHeight
+  ) {
+    return { w: img.naturalWidth, h: img.naturalHeight };
+  }
   // While /original is available, keep the transform layer in original photo
   // coordinates even if the currently displayed tier is /full. That matches the
   // sharp natural-layout path and avoids recalibrating pan/zoom when the source swaps.
@@ -8410,6 +8633,73 @@ function _lbClearAdjacentPreloads() {
   _lbAdjacentPreloads = {};
 }
 
+function _lbCancelOriginalPreload() {
+  if (_lbOriginalPreloadTimer) {
+    clearTimeout(_lbOriginalPreloadTimer);
+    _lbOriginalPreloadTimer = null;
+  }
+  if (_lbOriginalPreload && _lbOriginalPreload.img) {
+    _lbOriginalPreload.img.onload = null;
+    _lbOriginalPreload.img.onerror = null;
+    _lbOriginalPreload.img.removeAttribute('src');
+  }
+  _lbOriginalPreload = null;
+}
+
+function _lbShouldPreloadOriginal(photoId) {
+  if (
+    photoId == null ||
+    _lightboxCurrentId !== photoId ||
+    _lbCurrentSrcKey !== 'full' ||
+    _lbFullUsesOriginal !== false ||
+    _lbOriginalUnavailable ||
+    _lbZoom > 1.001 ||
+    (_lbDesiredSrcKey && _lbDesiredSrcKey !== 'full') ||
+    !_lbNativeZoom ||
+    _lbPickSourceKey(_lbNativeZoom) !== 'original'
+  ) return false;
+  var img = document.getElementById('lightboxImg');
+  return !!(img && img.complete && img.naturalWidth && img.naturalHeight);
+}
+
+function _lbScheduleOriginalPreload(photoId) {
+  _lbCancelOriginalPreload();
+  if (!_lbShouldPreloadOriginal(photoId)) return;
+
+  // Give navigation and the neighboring fit-tier preloads first use of the
+  // decoder. The dwell also prevents fast arrowing from starting expensive
+  // full-resolution RAW extraction for every photo passed along the way.
+  _lbOriginalPreloadTimer = setTimeout(function() {
+    _lbOriginalPreloadTimer = null;
+    if (!_lbShouldPreloadOriginal(photoId)) return;
+
+    var url = _lbSrcUrl(photoId, 'original');
+    var preload = new Image();
+    var entry = {
+      img: preload,
+      photoId: photoId,
+      sourceKey: 'original',
+      url: url,
+      status: 'loading'
+    };
+    _lbOriginalPreload = entry;
+    preload.fetchPriority = 'low';
+    var supportsDecode = typeof preload.decode === 'function';
+    preload.onload = function() {
+      if (!supportsDecode) entry.status = 'decoded';
+    };
+    preload.onerror = function() { entry.status = 'failed'; };
+    preload.src = url;
+    if (supportsDecode) {
+      preload.decode().then(function() {
+        entry.status = 'decoded';
+      }).catch(function() {
+        // onload/onerror remains the fallback for WebViews with incomplete decode support.
+      });
+    }
+  }, 400);
+}
+
 function _lbPrimeAdjacentPhotos(sourceKey) {
   if (_lightboxPhotoList.length < 2 || _lightboxCurrentId == null) {
     _lbClearAdjacentPreloads();
@@ -8468,6 +8758,9 @@ function _lbScheduleSourceSwap(targetZoom) {
   if (!_lightboxCurrentId) return;
   var desired = _lbPickSourceKey(targetZoom);
   _lbDesiredSrcKey = desired;
+  if (_lbZoom > 1.001 && desired !== 'original') {
+    _lbCancelOriginalPreload();
+  }
   if (desired === _lbCurrentSrcKey) {
     _lbPrimeAdjacentPhotos(desired);
     return;
@@ -8503,6 +8796,10 @@ function _lbScheduleSourceSwap(targetZoom) {
         // case img.naturalWidth belongs to a DIFFERENT source than our closure's
         // `key`, so bail rather than record wrong dims or recalibrate stale state.
         if (_lbCurrentSrcKey !== key) return;
+        // Keep the decoded background original alive until the visible image
+        // has adopted it; releasing it earlier can make some WebViews decode
+        // the same full-resolution bytes a second time on the first 100% click.
+        if (key === 'original') _lbCancelOriginalPreload();
         if (!_lbPhotoW && key === 'original' && img.naturalWidth) {
           _lbPhotoW = img.naturalWidth;
           _lbPhotoH = img.naturalHeight;
@@ -8949,11 +9246,15 @@ function nativeMenuLightboxOpen() {
 }
 
 function nativeMenuActivePhotoIds() {
-  if (
-    nativeMenuLightboxOpen() &&
-    typeof _lightboxCurrentId !== 'undefined' &&
-    _lightboxCurrentId != null
-  ) {
+  if (nativeMenuLightboxOpen()) {
+    // Navigation advances the internal id before the incoming bitmap is
+    // visible. Do not let native Photo menu commands target that hidden photo.
+    if (typeof _lbVisualTransitionPending !== 'undefined' && _lbVisualTransitionPending) {
+      return [];
+    }
+    if (typeof _lightboxCurrentId === 'undefined' || _lightboxCurrentId == null) {
+      return [];
+    }
     return [_lightboxCurrentId];
   }
   if (

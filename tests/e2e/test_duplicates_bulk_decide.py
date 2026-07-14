@@ -157,3 +157,179 @@ def test_duplicates_bulk_decide_keep_folder_resolves_all_groups(live_server, pag
         assert flags[wid] == "none", f"winner {wid}"
     for lid in loser_ids:
         assert flags[lid] == "rejected", f"loser {lid}"
+
+
+def test_bulk_decide_delete_files_offers_retry_after_batch_failure(
+    live_server, page
+):
+    """A whole-batch trash failure preserves the completed batches and
+    swaps the Keep-folder buttons for a Retry button that trashes only
+    the leftover loser IDs.
+
+    Before this fix, re-clicking the Keep-folder button re-ran
+    ``bulk-resolve`` on hashes whose losers were already rejected in the
+    first attempt — the resolver saw "fewer than 2 non-rejected
+    candidates" and skipped, so the retry could not clean up the files
+    still on disk without a full rescan.
+    """
+    folder_a, folder_b = "/tmp/dupbulkretryA", "/tmp/dupbulkretryB"
+    _file_hashes, _winner_ids, loser_ids = _seed_scan_with_buckets(
+        live_server["db"], folder_a, folder_b, n_groups=30
+    )
+
+    trash_calls = []
+
+    def handle_trash(route):
+        ids = route.request.post_data_json["photo_ids"]
+        trash_calls.append(list(ids))
+        # First batch succeeds; second batch fails so the loop throws.
+        # After the retry Keep button is clicked, the third call succeeds.
+        if len(trash_calls) == 2:
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body='{"ok": false, "error": "boom"}',
+            )
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "ok": True,
+                "trashed": len(ids),
+                "skipped": [],
+                "failed": [],
+            }),
+        )
+
+    page.route("**/api/duplicates/delete-loser-files", handle_trash)
+    page.on("dialog", lambda d: d.accept())
+    page.goto(f"{live_server['url']}/duplicates")
+    expect(page.locator(".bucket-card")).to_have_count(1)
+
+    # Opt into the trash step, then click Keep folder A.
+    page.locator("input[data-delete-toggle]").check()
+    page.locator(".keep-btn:not(.reveal-btn)").first.click()
+
+    retry_btn = page.locator(".bucket-card button[data-retry-trash]")
+    expect(retry_btn).to_be_visible()
+    expect(retry_btn).to_contain_text("Retry 5 files to Trash")
+    # Bucket card is still on screen so the user has an affordance to
+    # finish cleanup without rescanning.
+    expect(page.locator(".bucket-card")).to_have_count(1)
+
+    # First attempt: batch 1 (25) succeeded, batch 2 (5) 500'd.
+    assert [len(b) for b in trash_calls] == [25, 5]
+
+    retry_btn.click()
+
+    # Retry sends exactly the 5 remaining IDs (the tail from the second
+    # batch), not the 25 already trashed.
+    expect(page.locator(".bucket-card")).to_have_count(0)
+    assert [len(b) for b in trash_calls] == [25, 5, 5]
+    assert trash_calls[2] == trash_calls[1]
+    # And every loser ID we seeded ends up in some trash call.
+    trashed_in_first = set(trash_calls[0])
+    trashed_in_retry = set(trash_calls[2])
+    assert trashed_in_first | trashed_in_retry == set(loser_ids)
+
+
+def test_bulk_decide_retry_preserves_hashes_that_bulk_resolve_skipped(
+    live_server, page
+):
+    """When bulk-resolve returns some hashes in ``skipped`` and the trash
+    step pauses mid-loop, a successful Retry must only prune the hashes
+    bulk-resolve actually resolved.
+
+    Before this fix ``retryBucketTrash`` pruned ``bucket.file_hashes``
+    wholesale on success, dropping the skipped hashes' unresolved groups
+    from the page even though bulk-resolve had never touched them — the
+    user had to run a full rescan before those groups reappeared.
+    """
+    folder_a, folder_b = "/tmp/dupbulkskipretryA", "/tmp/dupbulkskipretryB"
+    file_hashes, _winner_ids, loser_ids = _seed_scan_with_buckets(
+        live_server["db"], folder_a, folder_b, n_groups=30
+    )
+
+    # bulk-resolve resolves the first 27 hashes and returns the last 3
+    # in ``skipped`` (e.g. keep-folder copy missing at the time).
+    resolved_indices = list(range(27))
+    skipped_hashes = file_hashes[27:]
+
+    def handle_resolve(route):
+        resolved_payload = [
+            {"file_hash": file_hashes[i], "loser_ids": [loser_ids[i]]}
+            for i in resolved_indices
+        ]
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "ok": True,
+                "resolved": resolved_payload,
+                "skipped": [
+                    {"file_hash": h, "reason": "keep-folder copy missing"}
+                    for h in skipped_hashes
+                ],
+            }),
+        )
+
+    trash_calls = []
+
+    def handle_trash(route):
+        ids = route.request.post_data_json["photo_ids"]
+        trash_calls.append(list(ids))
+        # Batch 1 (25) succeeds; batch 2 (2) 500s so the loop throws.
+        # Retry sends the 2 remaining IDs and succeeds.
+        if len(trash_calls) == 2:
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body='{"ok": false, "error": "boom"}',
+            )
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "ok": True,
+                "trashed": len(ids),
+                "skipped": [],
+                "failed": [],
+            }),
+        )
+
+    page.route("**/api/duplicates/bulk-resolve", handle_resolve)
+    page.route("**/api/duplicates/delete-loser-files", handle_trash)
+    page.on("dialog", lambda d: d.accept())
+    page.goto(f"{live_server['url']}/duplicates")
+    expect(page.locator(".bucket-card")).to_have_count(1)
+
+    page.locator("input[data-delete-toggle]").check()
+    page.locator(".keep-btn:not(.reveal-btn)").first.click()
+
+    retry_btn = page.locator(".bucket-card button[data-retry-trash]")
+    expect(retry_btn).to_be_visible()
+    # 27 losers to trash, batches of 25 → batch 1 (25) success, batch 2
+    # (2) 500. The retry button offers exactly those 2 tail IDs.
+    expect(retry_btn).to_contain_text("Retry 2 files to Trash")
+    assert [len(b) for b in trash_calls] == [25, 2]
+
+    retry_btn.click()
+
+    # After the successful retry, only the 27 bulk-resolve-resolved hashes
+    # are pruned. The 3 hashes bulk-resolve returned in ``skipped`` are
+    # still shown in the bucket, so the user can act on them without
+    # rescanning.
+    bucket = page.locator(".bucket-card")
+    expect(bucket).to_have_count(1)
+    expect(bucket).to_contain_text("3 duplicate groups")
+    # Sanity: retry sent only the 2 previously-failed IDs.
+    assert [len(b) for b in trash_calls] == [25, 2, 2]
+    assert trash_calls[2] == trash_calls[1]
+    # And the union of trashed IDs matches exactly the 27 resolved losers
+    # — no skipped-hash loser was accidentally trashed either.
+    trashed_in_first = set(trash_calls[0])
+    trashed_in_retry = set(trash_calls[2])
+    resolved_loser_ids = {loser_ids[i] for i in resolved_indices}
+    assert trashed_in_first | trashed_in_retry == resolved_loser_ids

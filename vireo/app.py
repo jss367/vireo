@@ -8,6 +8,7 @@ import argparse
 import contextlib
 import copy
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -2295,9 +2296,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         Paired files remain one catalog record, but browser image requests can
         select which physical source supplies the pixels with
-        ``?source=jpeg`` or ``?source=raw``. Invalid, unavailable, and
-        non-paired choices fall back to the established canonical rendering
-        path so old clients and ordinary photos are unchanged.
+        ``?source=jpeg`` or ``?source=raw``. Invalid and non-paired choices
+        fall back to the established canonical rendering path so old clients
+        and ordinary photos are unchanged. A known pair with a missing
+        requested file returns the source name with no path so routes can fail
+        explicitly instead of showing RAW pixels under a JPEG label.
         """
         requested = (request.args.get("source") or "").strip().lower()
         if requested not in {"jpeg", "raw"}:
@@ -2311,12 +2314,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if requested == "raw":
             primary = os.path.join(folder_path, photo["filename"])
-            return ("raw", primary) if os.path.isfile(primary) else (None, None)
+            return "raw", primary if os.path.isfile(primary) else None
 
         companion = os.path.join(folder_path, photo["companion_path"])
         companion_ext = os.path.splitext(companion)[1].lower()
         if companion_ext not in {".jpg", ".jpeg"} or not os.path.isfile(companion):
-            return None, None
+            return "jpeg", None
         return "jpeg", companion
 
     _invalid_preview_cache_paths = set()
@@ -2360,6 +2363,56 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             (photo_id, size),
         ).fetchone()
         return row is not None
+
+    def _full_resolution_render_signature(photo, recipe, file_state=None):
+        """Describe every catalogued input to a cached inspection render.
+
+        The source size/mtime pair is refreshed by scans, the canonical recipe
+        JSON includes content-addressed local-mask references, and the edit-math
+        version invalidates bytes produced by older rendering code. Hashing the
+        signature into the JPEG filename lets /original safely reuse prepared
+        renders without a database table or cross-recipe cache race.
+        """
+        from image_edits import EDIT_MATH_VERSION, recipe_to_json
+
+        return {
+            "photo_id": int(photo["id"]),
+            "source_size": photo["file_size"],
+            "source_mtime": photo["file_mtime"],
+            "filename": photo["filename"],
+            "companion_path": photo["companion_path"],
+            "file_state": file_state,
+            "recipe": recipe_to_json(recipe),
+            "edit_math_version": EDIT_MATH_VERSION,
+        }
+
+    def _full_resolution_render_path(
+        vireo_dir, photo, recipe, file_state=None,
+    ):
+        signature = json.dumps(
+            _full_resolution_render_signature(
+                photo, recipe, file_state,
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        cache_key = hashlib.sha256(signature).hexdigest()[:16]
+        return os.path.join(
+            vireo_dir, "originals", f"{photo['id']}_{cache_key}.jpg",
+        )
+
+    def _prepared_full_resolution_render(
+        vireo_dir, photo, recipe, file_state=None,
+    ):
+        cache_path = _full_resolution_render_path(
+            vireo_dir, photo, recipe, file_state,
+        )
+        try:
+            if not os.path.isfile(cache_path) or os.path.getsize(cache_path) <= 0:
+                return None
+        except OSError:
+            return None
+        return cache_path
 
     def _invalidate_photo_render_cache(db, photo_ids):
         """Drop cached rendered derivatives after an edit recipe changes."""
@@ -2459,12 +2512,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",
                     removed_preview_rows,
                 )
-            original_cache = os.path.join(originals_dir, f"{pid}.jpg")
-            try:
-                if os.path.exists(original_cache):
-                    os.remove(original_cache)
-            except OSError:
-                log.warning("Failed to remove stale original cache %s", original_cache)
+            original_paths = [
+                os.path.join(originals_dir, f"{pid}.jpg"),
+                *Path(originals_dir).glob(f"{pid}_*.jpg"),
+            ]
+            for original_path in original_paths:
+                try:
+                    if os.path.exists(original_path):
+                        os.remove(original_path)
+                except OSError:
+                    log.warning(
+                        "Failed to remove stale original cache %s",
+                        original_path,
+                    )
             external_cache = os.path.join(external_edits_dir, f"{pid}.jpg")
             external_meta = os.path.join(external_edits_dir, f"{pid}.json")
             for path in (external_cache, external_meta):
@@ -2831,6 +2891,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # user's existing action keeps working; they can re-bind toggle_ui from
     # the shortcuts editor.
     cfg.migrate_toggle_ui_h_conflict()
+    # Existing users commonly have the previous Browse card defaults persisted
+    # verbatim. Add the new coordinate-source field only for that exact legacy
+    # list; customized card layouts remain unchanged.
+    cfg.migrate_browse_location_status_field()
     # One-time rewrite of the global pipeline.default_strategy (legacy
     # hardcoded strategy name) to pipeline.default_process_id (saved_processes
     # id). The workspace-side rewrite happens inside Database(); this covers
@@ -3283,6 +3347,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             p["species"] = species_map.get(p["id"], [])
         return photo_dicts
 
+    def _attach_location_statuses(db, photo_dicts):
+        """Attach the effective coordinate source used by Browse and Map UI."""
+        if not photo_dicts:
+            return photo_dicts
+        ids = [p["id"] for p in photo_dicts if isinstance(p.get("id"), int)]
+        statuses = db.get_photo_location_statuses(ids)
+        for photo in photo_dicts:
+            photo["location_status"] = statuses.get(photo.get("id"), "none")
+        return photo_dicts
+
     def _attach_species_representatives(db, photo_dicts):
         """Attach species representative state to photo dicts (in-place)."""
         if not photo_dicts:
@@ -3388,6 +3462,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         raw = request.args.get(name, "")
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
+    def _request_location_status_filter():
+        value = (request.args.get("location_status") or "").strip().lower()
+        if not value:
+            return None
+        if value not in {"exif", "assigned", "none"}:
+            raise ValueError(
+                "location_status must be 'exif', 'assigned', or 'none'"
+            )
+        return value
+
     @app.route("/api/browse/init")
     def api_browse_init():
         """Combined endpoint for browse page initial load — one request instead of five."""
@@ -3407,6 +3491,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
 
@@ -3423,8 +3508,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             keyword_whole_word=keyword_whole_word,
             color_label=color_label,
             flag=flag,
+            location_status=location_status,
         )
-        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
+        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
             total = db.count_photos()
         else:
             total = db.count_filtered_photos(
@@ -3437,12 +3523,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 keyword_whole_word=keyword_whole_word,
                 color_label=color_label,
                 flag=flag,
+                location_status=location_status,
             )
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
 
         photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
         _attach_species(db, photo_dicts)
         _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
@@ -4794,6 +4882,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
 
@@ -4810,10 +4899,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             keyword_whole_word=keyword_whole_word,
             color_label=color_label,
             flag=flag,
+            location_status=location_status,
         )
 
         # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
-        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
+        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
             total = db.count_photos()
         else:
             total = db.count_filtered_photos(
@@ -4826,9 +4916,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 keyword_whole_word=keyword_whole_word,
                 color_label=color_label,
                 flag=flag,
+                location_status=location_status,
             )
 
         photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
         _attach_species(db, photo_dicts)
         _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
@@ -4858,6 +4950,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
 
@@ -4872,6 +4965,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             keyword_whole_word=keyword_whole_word,
             color_label=color_label,
             flag=flag,
+            location_status=location_status,
         )
         return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
 
@@ -4889,6 +4983,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
         data = db.get_calendar_data(
@@ -4896,6 +4991,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             keyword_match_case=keyword_match_case,
             keyword_whole_word=keyword_whole_word,
             color_label=color_label, flag=flag,
+            location_status=location_status,
         )
         return jsonify(data)
 
@@ -4913,6 +5009,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
         return jsonify(
@@ -4927,6 +5024,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 collection_id=collection_id,
                 color_label=color_label,
                 flag=flag,
+                location_status=location_status,
             )
         )
 
@@ -4941,6 +5039,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("not found", 404)
 
         result = dict(photo)
+        _attach_location_statuses(db, [result])
 
         # Parse exif_data JSON into metadata field
         raw_exif = result.pop("exif_data", None)
@@ -4984,6 +5083,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # detail panel can render the filled state without a second roundtrip.
         result["location"] = _serialize_photo_location(db, photo_id)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
+        # The shared lightbox normally warms /original after /full settles.
+        # In full-resolution preview mode /full already redirects to /original,
+        # so tell the client not to repeat that potentially expensive RAW work.
+        import config as cfg
+        result["full_uses_original"] = (
+            db.get_effective_config(cfg.load()).get("preview_max_size") == 0
+        )
 
         # Read XMP sidecar keywords
         folder = db.conn.execute(
@@ -5044,6 +5150,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo = db.get_photo(pid, verify_workspace=True)
             if photo:
                 photos.append(dict(photo))
+        _attach_location_statuses(db, photos)
         _attach_species(db, photos)
         _attach_species_representatives(db, photos)
         _attach_detections(db, photos)
@@ -5237,8 +5344,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
 
         total_photos = db.count_photos()
-        total_without_gps = db.count_photos_without_gps()
-        total_with_gps = total_photos - total_without_gps
+        total_without_coordinates = db.count_photos_without_coordinates()
+        total_geolocated = total_photos - total_without_coordinates
 
         photo_dicts = [dict(p) for p in photos]
         _attach_edit_recipes(db, photo_dicts)
@@ -5247,8 +5354,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "photos": photo_dicts,
             "total_filtered": len(photos),
             "total_photos": total_photos,
-            "total_with_gps": total_with_gps,
-            "total_without_gps": total_without_gps,
+            "total_geolocated": total_geolocated,
+            "total_without_coordinates": total_without_coordinates,
+            # Compatibility for older clients; new UI uses coordinate-neutral
+            # names because assigned locations are included in these totals.
+            "total_with_gps": total_geolocated,
+            "total_without_gps": total_without_coordinates,
         })
 
     @app.route("/api/species")
@@ -8671,6 +8782,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             return json_error(f"collection rules cannot be resolved: {e}", 400)
         photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
         _attach_species(db, photo_dicts)
         _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
@@ -17947,6 +18059,169 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id})
 
+    @app.route("/api/jobs/prepare-full-resolution", methods=["POST"])
+    def api_job_prepare_full_resolution():
+        """Prepare selected photos for uninterrupted full-resolution review.
+
+        The job first copies source assets into Vireo's managed local cache,
+        then drives the exact /original render path used by the lightbox. RAW
+        working copies and edited full-resolution renders are therefore ready
+        before the user begins inspecting the selection.
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        raw_ids = body.get("photo_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return json_error("photo_ids must be a non-empty list of integers")
+
+        photo_ids = []
+        seen = set()
+        for raw_id in raw_ids:
+            if isinstance(raw_id, bool | float):
+                return json_error("photo_ids must contain only integers")
+            try:
+                photo_id = int(raw_id)
+            except (TypeError, ValueError):
+                return json_error("photo_ids must contain only integers")
+            if photo_id not in seen:
+                seen.add(photo_id)
+                photo_ids.append(photo_id)
+
+        db = _get_db()
+        runner = app._job_runner
+        active_ws = db._active_workspace_id
+        visible_set = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT p.id FROM photos p
+                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+                [active_ws, *chunk],
+            ).fetchall()
+            visible_set.update(row["id"] for row in rows)
+        photo_ids = [photo_id for photo_id in photo_ids if photo_id in visible_set]
+        if not photo_ids:
+            return json_error("no photos in the current workspace can be prepared")
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def work(job):
+            from offline_cache import cache_photo_original
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+            try:
+                photos_map = thread_db.get_photos_by_ids(photo_ids)
+                folders = {
+                    folder["id"]: folder["path"]
+                    for folder in thread_db.get_folder_tree()
+                }
+                ready = 0
+                copied = 0
+                reused = 0
+                failed = 0
+                copied_bytes = 0
+                total = len(photo_ids)
+                job["_start_time"] = time.time()
+                job["progress"]["total"] = total
+
+                for index, photo_id in enumerate(photo_ids, start=1):
+                    if runner.is_cancelled(job["id"]):
+                        break
+                    photo = photos_map.get(photo_id)
+                    filename = photo["filename"] if photo else f"Photo {photo_id}"
+                    error = None
+                    if not photo:
+                        error = "photo was not found"
+                    else:
+                        try:
+                            cached = cache_photo_original(
+                                thread_db, photo, vireo_dir, folders,
+                            )
+                            cache_status = cached.get("status")
+                            if cache_status == "cached":
+                                copied += 1
+                                copied_bytes += int(cached.get("bytes") or 0)
+                            elif cache_status == "skipped":
+                                reused += 1
+                            else:
+                                error = cache_status or "source could not be cached"
+
+                            if error is None:
+                                # Execute the canonical renderer inside an
+                                # isolated request context. This avoids a
+                                # second implementation drifting from the
+                                # lightbox's RAW/companion/edit fallbacks.
+                                with app.test_request_context(
+                                    f"/photos/{photo_id}/original"
+                                ):
+                                    request_db = _get_db()
+                                    request_db.set_active_workspace(active_ws)
+                                    response = app.make_response(
+                                        serve_original_photo(photo_id)
+                                    )
+                                    try:
+                                        if not 200 <= response.status_code < 300:
+                                            response.direct_passthrough = False
+                                            detail = response.get_data(
+                                                as_text=True,
+                                            ).strip()
+                                            error = detail or (
+                                                "full-resolution render failed "
+                                                f"with status {response.status_code}"
+                                            )
+                                    finally:
+                                        response.close()
+                        except Exception as exc:
+                            error = str(exc) or exc.__class__.__name__
+                            log.warning(
+                                "Full-resolution preparation failed for %s: %s",
+                                filename, exc, exc_info=True,
+                            )
+
+                    if error is None:
+                        ready += 1
+                    else:
+                        failed += 1
+                        job["errors"].append(f"{filename}: {error}")
+
+                    progress = {
+                        "current": index,
+                        "total": total,
+                        "current_file": filename,
+                        "rate": round(
+                            index
+                            / max(time.time() - job["_start_time"], 0.01),
+                            1,
+                        ),
+                        "phase": "Preparing full-resolution photos",
+                    }
+                    job["progress"].update(progress)
+                    runner.push_event(job["id"], "progress", progress)
+
+                return {
+                    "ok": failed == 0,
+                    "ready": ready,
+                    "copied": copied,
+                    "reused": reused,
+                    "failed": failed,
+                    "total": total,
+                    "bytes": copied_bytes,
+                    "errors": list(job["errors"]),
+                }
+            finally:
+                thread_db.close()
+
+        job_id = runner.start(
+            "prepare-full-resolution",
+            work,
+            config={"photo_ids": photo_ids},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id, "total": len(photo_ids)})
+
     @app.route("/api/jobs/move-folder", methods=["POST"])
     def api_job_move_folder():
         """Move an entire folder to a destination."""
@@ -20345,6 +20620,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         pair_source, pair_source_path = _requested_pair_source(
             photo, folder_row["path"],
         )
+        if pair_source and not pair_source_path:
+            return "", 404
         cache_filename = (
             f"{photo_id}_{pair_source}.jpg" if pair_source else filename
         )
@@ -23650,6 +23927,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_id = request.args.get("collection_id", None, type=int)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
         ids_only = request.args.get("ids_only", "").lower() in ("1", "true", "yes")
@@ -23674,7 +23952,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         candidate_photo_ids = None
         if collection_id is not None:
             candidate_photo_ids = db.get_collection_photo_ids(collection_id)
-        elif any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
+        elif any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
             candidate_photo_ids = db.get_photo_ids(
                 folder_id=folder_id,
                 rating_min=rating_min,
@@ -23685,6 +23963,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 keyword_whole_word=keyword_whole_word,
                 color_label=color_label,
                 flag=flag,
+                location_status=location_status,
             )
 
         if candidate_photo_ids == []:
@@ -23751,6 +24030,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo_dicts.append(dict(photos_map[pid]))
                     sims_by_pid[pid] = round(sim, 4)
             _attach_species(db, photo_dicts)
+            _attach_location_statuses(db, photo_dicts)
             _attach_species_representatives(db, photo_dicts)
             _attach_detections(db, photo_dicts)
             _attach_edit_recipes(db, photo_dicts)
@@ -24154,6 +24434,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         pair_source, pair_source_path = _requested_pair_source(
             photo, folder_row["path"],
         )
+        if pair_source and not pair_source_path:
+            return "Not found", 404
         # The established preview cache is keyed only by (photo_id, size).
         # Explicit paired-source views bypass it so RAW and JPEG pixels can
         # never contaminate one another. Browser caching still makes repeated
@@ -24795,21 +25077,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         recipe = db.get_photo_edit_recipe(photo_id)
+        from image_loader import RAW_EXTENSIONS
 
-        pair_folder = db.conn.execute(
+        primary_is_raw = (
+            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        )
+
+        folder = db.conn.execute(
             "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
         ).fetchone()
-        pair_source = pair_source_path = None
-        if pair_folder:
-            pair_source, pair_source_path = _requested_pair_source(
-                photo, pair_folder["path"],
-            )
+        if not folder:
+            return "Not found", 404
+
+        pair_source, pair_source_path = _requested_pair_source(
+            photo, folder["path"],
+        )
+        if pair_source and not pair_source_path:
+            return "Not found", 404
         if pair_source_path:
-            # A JPEG companion without a Vireo recipe is already browser
-            # displayable at full resolution; preserve its exact authored
-            # bytes. RAW and edited companion requests need a decoded JPEG
-            # response, but deliberately bypass the canonical/original cache
-            # because that cache has no source dimension in its key.
+            # Explicit pair views bypass the canonical prepared-render cache,
+            # whose key has no RAW/JPEG source dimension.
             if pair_source == "jpeg" and not recipe:
                 return send_file(pair_source_path)
 
@@ -24847,6 +25134,49 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             img.close()
             return Response(buf.getvalue(), mimetype="image/jpeg")
+
+        def _file_render_state(path):
+            if not path:
+                return None
+            try:
+                stat = os.stat(path)
+            except OSError:
+                return None
+            return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+        offline_row = db.offline_original_get(photo_id)
+        cached_original = (
+            os.path.join(vireo_dir, offline_row["original_path"])
+            if offline_row and offline_row["original_path"]
+            else None
+        )
+        file_state = {
+            "primary": {
+                "source": _file_render_state(
+                    os.path.join(folder["path"], photo["filename"]),
+                ),
+                "cached": _file_render_state(cached_original),
+            },
+            "companion": None,
+        }
+        if photo["companion_path"]:
+            cached_companion = (
+                os.path.join(vireo_dir, offline_row["companion_path"])
+                if offline_row and offline_row["companion_path"]
+                else None
+            )
+            file_state["companion"] = {
+                "source": _file_render_state(
+                    os.path.join(folder["path"], photo["companion_path"]),
+                ),
+                "cached": _file_render_state(cached_companion),
+            }
+
+        prepared_render = _prepared_full_resolution_render(
+            vireo_dir, photo, recipe, file_state,
+        )
+        if prepared_render:
+            return send_file(prepared_render, mimetype="image/jpeg")
 
         # Decide whether to trust the working copy as the full-res asset
         # by reading its actual on-disk dimensions, NOT the current
@@ -24938,7 +25268,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     c_w, c_h = _cimg.size
             except Exception:
                 return None
-            if c_w >= orig_w and c_h >= orig_h:
+            # Camera JPEGs commonly omit a narrow sensor border. Match the
+            # tolerance used by camera-rendered RAW loading so a near-full
+            # sidecar remains the preferred tone-consistent display source.
+            if c_w >= orig_w * 0.99 and c_h >= orig_h * 0.99:
                 return companion_abs
             return None
 
@@ -24949,19 +25282,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 load_image,
             )
 
-            folder = db.conn.execute(
-                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-            ).fetchone()
-            if not folder:
-                return "Not found", 404
             # For edited RAW primaries, a "trusted" working copy can still
             # predate the highlight-preserving RAW decode (the migration
             # purges previews and thumbnails but not working copies). Force
             # the RAW path so the recipe runs over preserve-highlights bytes,
             # not the older clipped-JPEG working copy.
-            primary_is_raw = (
-                os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
-            )
             image_path = None if primary_is_raw else trusted_wc_path
             using_offline_cache = False
             if image_path is None:
@@ -24971,6 +25296,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo,
                     vireo_dir,
                     {photo["folder_id"]: folder["path"]},
+                    prefer_cached=True,
                 )
                 companion_source = _full_res_companion_path(
                     folder["path"], using_offline_cache,
@@ -25046,7 +25372,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # camera preview rather than full-resolution pixels. For
                 # 1:1 edited views that's the wrong file to cache — try
                 # the full-size companion before saving an undersized
-                # originals/<id>.jpg.
+                # prepared full-resolution render cache.
                 expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
                 if _image_is_smaller_than_expected(img, expected_w, expected_h):
                     companion_fallback = _full_res_companion_path(
@@ -25114,7 +25440,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ),
             )
             originals_dir = os.path.join(vireo_dir, "originals")
-            cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
+            cache_path = _full_resolution_render_path(
+                vireo_dir, photo, recipe, file_state,
+            )
             os.makedirs(originals_dir, exist_ok=True)
             quality = cfg.load().get("working_copy_quality", 92)
             fd, tmp_path = tempfile.mkstemp(
@@ -25131,31 +25459,66 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             img.close()
             return send_file(cache_path, mimetype="image/jpeg")
 
-        if trusted_wc_path:
+        # A RAW working copy is an edit-quality, highlight-preserving source.
+        # It deliberately looks flatter/darker than the camera-rendered JPEG
+        # used by thumbnails and previews, so it must not be used as the
+        # unedited lightbox rendition while the source is available.
+        if trusted_wc_path and not primary_is_raw:
             return send_file(trusted_wc_path, mimetype="image/jpeg")
 
         # Resolve original file path
-        folder = db.conn.execute(
-            "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-        ).fetchone()
-        if not folder:
-            return "Not found", 404
         from offline_cache import resolve_original_path
         image_path, using_offline_cache = resolve_original_path(
             db,
             photo,
             vireo_dir,
             {photo["folder_id"]: folder["path"]},
+            prefer_cached=True,
         )
 
-        from image_loader import (
-            RAW_DECODE_PRESERVE_HIGHLIGHTS,
-            RAW_EXTENSIONS,
-        )
         resolved_ext = os.path.splitext(image_path)[1].lower()
         companion_for_extraction = _full_res_companion_path(
             folder["path"], using_offline_cache
         )
+
+        # Keep unedited RAW display bytes separate from the edit-quality
+        # working copy. The suffix is intentionally distinct from the legacy
+        # originals/<id>.jpg render cache so an upgrade cannot reuse a dark
+        # highlight-preserving render produced by an older version.
+        display_cache_path = None
+        if primary_is_raw:
+            display_cache_path = os.path.join(
+                vireo_dir, "originals", f"{photo_id}.display.jpg",
+            )
+            if os.path.exists(display_cache_path):
+                try:
+                    source_mtimes = [
+                        os.path.getmtime(path)
+                        for path in (image_path, companion_for_extraction)
+                        if path and os.path.exists(path)
+                    ]
+                    source_is_older = (
+                        not source_mtimes
+                        or os.path.getmtime(display_cache_path)
+                        >= max(source_mtimes)
+                    )
+                except OSError:
+                    source_is_older = False
+                if source_is_older:
+                    return send_file(display_cache_path, mimetype="image/jpeg")
+
+        if (
+            primary_is_raw
+            and trusted_wc_path
+            and not os.path.isfile(image_path)
+            and not companion_for_extraction
+        ):
+            # Preserve offline behavior without repeatedly retrying a missing
+            # RAW. A camera-rendered display cache or companion still wins
+            # above when available; otherwise the edit-quality working copy
+            # is the best usable full-resolution fallback.
+            return send_file(trusted_wc_path, mimetype="image/jpeg")
+
         has_current_raw_failure = (
             (not using_offline_cache or resolved_ext in RAW_EXTENSIONS)
             and _has_current_working_copy_failure(
@@ -25177,6 +25540,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 image_path = companion_for_extraction
                 resolved_ext = os.path.splitext(image_path)[1].lower()
             else:
+                if primary_is_raw and trusted_wc_path:
+                    return send_file(trusted_wc_path, mimetype="image/jpeg")
                 log.info(
                     "Skipping original-image extraction for photo %s; RAW working-copy "
                     "extraction already failed for current source mtime",
@@ -25191,23 +25556,61 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Extract full-res working copy (on-demand upgrade)
         from image_loader import (
+            RAW_DECODE_CAMERA_RENDERED,
             RAW_DECODE_PRESERVE_HIGHLIGHTS,
             RAW_EXTENSIONS,
             extract_working_copy,
             load_image,
         )
-        wc_rel = f"working/{photo_id}.jpg"
-        wc_abs = os.path.join(vireo_dir, wc_rel)
+        if primary_is_raw:
+            wc_rel = None
+            wc_abs = display_cache_path
+            os.makedirs(os.path.dirname(wc_abs), exist_ok=True)
+        else:
+            wc_rel = f"working/{photo_id}.jpg"
+            wc_abs = os.path.join(vireo_dir, wc_rel)
         quality = cfg.load().get("working_copy_quality", 92)
 
-        # Prefer companion JPEG only for non-RAW sources. RAW primaries should
-        # be decoded through extract_working_copy's highlight-preserving RAW
-        # path rather than replaced with a camera-rendered JPEG.
-        source_for_extraction = image_path
-        if resolved_ext not in RAW_EXTENSIONS and companion_for_extraction:
-            source_for_extraction = companion_for_extraction
+        # Unedited RAW primaries use their camera-rendered full-size preview
+        # when available. Edited renders took the recipe branch above and keep
+        # using the highlight-preserving RAW path.
+        source_for_extraction = companion_for_extraction or image_path
 
-        if extract_working_copy(source_for_extraction, wc_abs, max_size=0, quality=quality):
+        extraction_decode = (
+            RAW_DECODE_CAMERA_RENDERED
+            if primary_is_raw
+            else RAW_DECODE_PRESERVE_HIGHLIGHTS
+        )
+
+        def _extract_original_copy(source_path):
+            output_path = wc_abs
+            tmp_path = None
+            if primary_is_raw:
+                fd, tmp_path = tempfile.mkstemp(
+                    prefix=f".{photo_id}.display.",
+                    suffix=".jpg.tmp",
+                    dir=os.path.dirname(wc_abs),
+                )
+                os.close(fd)
+                output_path = tmp_path
+            try:
+                extracted = extract_working_copy(
+                    source_path,
+                    output_path,
+                    max_size=0,
+                    quality=quality,
+                    raw_decode=extraction_decode,
+                )
+                if extracted and tmp_path:
+                    os.replace(tmp_path, wc_abs)
+                    tmp_path = None
+                return extracted
+            finally:
+                if tmp_path:
+                    with contextlib.suppress(OSError):
+                        os.unlink(tmp_path)
+
+        if _extract_original_copy(source_for_extraction):
             # Update DB so future requests are fast; also backfill
             # dimensions if missing so the full-res shortcut works next time
             from PIL import Image as _PILImage
@@ -25242,10 +25645,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "from companion JPEG",
                         photo_id, uw, uh, expected_w, expected_h,
                     )
-                    if extract_working_copy(
-                        companion_for_extraction, wc_abs,
-                        max_size=0, quality=quality,
-                    ):
+                    if _extract_original_copy(companion_for_extraction):
                         with _PILImage.open(wc_abs) as upgraded:
                             uw, uh = upgraded.size
                     else:
@@ -25253,17 +25653,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "Companion re-extraction failed for photo %s; "
                             "keeping undersized RAW working copy", photo_id,
                         )
-            updates = ["working_copy_path=?"]
-            params = [wc_rel]
-            if not photo["width"] or not photo["height"]:
-                updates.extend(["width=?", "height=?"])
-                params.extend([uw, uh])
-            params.append(photo_id)
-            db.conn.execute(
-                f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
-                params,
-            )
-            db.conn.commit()
+            if primary_is_raw and trusted_wc_path:
+                expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
+                display_is_near_full = (
+                    expected_w <= 0
+                    or expected_h <= 0
+                    or (
+                        uw >= expected_w * 0.99
+                        and uh >= expected_h * 0.99
+                    )
+                )
+                if not display_is_near_full:
+                    # RAW extraction can report success after falling back to
+                    # a preview-sized embedded JPEG. Do not persist that as
+                    # the 1:1 display cache when a trusted full-res copy is
+                    # already available, and mark the RAW retry so later
+                    # requests take the fast fallback path.
+                    with contextlib.suppress(OSError):
+                        os.unlink(wc_abs)
+                    _record_working_copy_failure(
+                        db, photo, source_for_extraction,
+                    )
+                    return send_file(trusted_wc_path, mimetype="image/jpeg")
+            if not primary_is_raw:
+                updates = ["working_copy_path=?"]
+                params = [wc_rel]
+                if not photo["width"] or not photo["height"]:
+                    updates.extend(["width=?", "height=?"])
+                    params.extend([uw, uh])
+                params.append(photo_id)
+                db.conn.execute(
+                    f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
+                    params,
+                )
+                db.conn.commit()
             return send_file(wc_abs, mimetype="image/jpeg")
 
         # extract_working_copy failed on a RAW source: try the full-res
@@ -25275,24 +25698,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             resolved_ext in RAW_EXTENSIONS
             and companion_for_extraction
             and companion_for_extraction != source_for_extraction
-            and extract_working_copy(
-                companion_for_extraction, wc_abs, max_size=0, quality=quality,
-            )
+            and _extract_original_copy(companion_for_extraction)
         ):
             from PIL import Image as _PILImage
             with _PILImage.open(wc_abs) as upgraded:
                 uw, uh = upgraded.size
-            updates = ["working_copy_path=?"]
-            params = [wc_rel]
-            if not photo["width"] or not photo["height"]:
-                updates.extend(["width=?", "height=?"])
-                params.extend([uw, uh])
-            params.append(photo_id)
-            db.conn.execute(
-                f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
-                params,
-            )
-            db.conn.commit()
+            if not primary_is_raw:
+                updates = ["working_copy_path=?"]
+                params = [wc_rel]
+                if not photo["width"] or not photo["height"]:
+                    updates.extend(["width=?", "height=?"])
+                    params.extend([uw, uh])
+                params.append(photo_id)
+                db.conn.execute(
+                    f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
+                    params,
+                )
+                db.conn.commit()
             log.info(
                 "RAW extraction failed for photo %s original; served "
                 "companion JPEG instead", photo_id,
@@ -25301,7 +25723,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Fallback: serve via load_image
         raw_decode = (
-            RAW_DECODE_PRESERVE_HIGHLIGHTS
+            RAW_DECODE_CAMERA_RENDERED
             if resolved_ext in RAW_EXTENSIONS
             else None
         )
@@ -25353,11 +25775,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 image_path = companion_for_extraction
         if img is None:
             _record_working_copy_failure(db, photo, image_path)
+            if primary_is_raw and trusted_wc_path:
+                # Source/offline bytes are unavailable. A working copy is less
+                # faithful to the camera rendition, but remains the best usable
+                # full-resolution fallback and preserves offline behavior.
+                return send_file(trusted_wc_path, mimetype="image/jpeg")
             return "Could not load image", 500
-        originals_dir = os.path.join(vireo_dir, "originals")
-        cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
-        os.makedirs(originals_dir, exist_ok=True)
-        img.save(cache_path, format="JPEG", quality=quality)
+        if primary_is_raw:
+            cache_path = display_cache_path
+            cache_dir = os.path.dirname(cache_path)
+            tmp_prefix = f".{photo_id}.display."
+        else:
+            cache_path = _full_resolution_render_path(
+                vireo_dir, photo, recipe, file_state,
+            )
+            cache_dir = os.path.dirname(cache_path)
+            tmp_prefix = f".{photo_id}."
+        os.makedirs(cache_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=tmp_prefix,
+            suffix=".jpg.tmp",
+            dir=cache_dir,
+        )
+        os.close(fd)
+        try:
+            img.save(tmp_path, format="JPEG", quality=quality)
+            os.replace(tmp_path, cache_path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
+        finally:
+            img.close()
         return send_file(cache_path, mimetype="image/jpeg")
 
     app.register_blueprint(create_photo_labels_blueprint(_get_db, json_error))

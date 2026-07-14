@@ -853,6 +853,11 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
     assert center_rgb(jpeg_original)[1] > 180
     assert center_rgb(raw_original)[0] > 180
 
+    os.remove(companion)
+    assert client.get(f"/thumbnails/{pid}.jpg?source=jpeg").status_code == 404
+    assert client.get(f"/photos/{pid}/preview?size=1920&source=jpeg").status_code == 404
+    assert client.get(f"/photos/{pid}/original?source=jpeg").status_code == 404
+
 
 def test_serve_thumbnail_regenerates_on_cache_miss(tmp_path, monkeypatch):
     """When the thumbnail JPEG is missing on disk but the photo exists,
