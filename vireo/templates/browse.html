@@ -2649,6 +2649,12 @@ function renderCardInfo(p) {
 
 function renderPhotoCard(p, idx) {
   var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+  var isRawJpegPair = typeof window.vireoPhotoIsRawJpegPair === 'function'
+    ? window.vireoPhotoIsRawJpegPair(p)
+    : false;
+  if (typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(p);
+  }
   var pairSource = _vireoPairSource(p.id) || 'jpeg';
   if (
     typeof window.vireoRememberPhotoEditRecipe === 'function' &&
@@ -2659,7 +2665,7 @@ function renderPhotoCard(p, idx) {
     });
   }
   var hideDetectionOverlays = (
-    (p.companion_path && pairSource === 'jpeg') ||
+    (isRawJpegPair && pairSource === 'jpeg') ||
     (
       typeof window.vireoPhotoHasOrientationEdit === 'function' &&
       window.vireoPhotoHasOrientationEdit(p.id)
@@ -2686,7 +2692,7 @@ function renderPhotoCard(p, idx) {
   var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
   var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
   var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '';
-  var pairBadge = p.companion_path
+  var pairBadge = isRawJpegPair
     ? '<span class="pair-source-badge" data-pair-source-id="' + p.id + '">'
       + (pairSource === 'raw' ? 'RAW · JPEG pair' : 'JPEG · RAW pair')
       + '</span>'

@@ -252,6 +252,70 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
     )
 
 
+def test_non_raw_jpeg_companions_do_not_enable_pair_controls(
+    live_server, page, tmp_path,
+):
+    """Sidecars and reverse pair records must not become RAW/JPEG switches."""
+    db = live_server["db"]
+    folder_path = tmp_path / "non-pair"
+    folder_path.mkdir()
+    folder_id = db.add_folder(str(folder_path), name="non-pair")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="developed.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+        width=200,
+        height=100,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='developed.nef' WHERE id=?",
+        (photo_id,),
+    )
+    db.conn.commit()
+
+    image_requests = []
+
+    def serve_image(route):
+        image_requests.append(route.request.url)
+        route.fulfill(body=_png_bytes((200, 100), "green"), content_type="image/png")
+
+    page.route(
+        re.compile(
+            rf"/(thumbnails/{photo_id}\.jpg|photos/{photo_id}/(full|original|preview))"
+        ),
+        serve_image,
+    )
+    page.goto(f"{live_server['url']}/browse?photo_id={photo_id}")
+
+    card = page.locator(f'.grid-card[data-id="{photo_id}"]')
+    expect(card).to_be_visible()
+    expect(card.locator(".pair-source-badge")).to_have_count(0)
+    assert page.evaluate(
+        """() => [
+            window.vireoPhotoIsRawJpegPair({
+                filename: 'developed.jpg', extension: '.jpg',
+                companion_path: 'developed.nef'
+            }),
+            window.vireoPhotoIsRawJpegPair({
+                filename: 'capture.nef', extension: '.nef',
+                companion_path: 'capture.xmp'
+            }),
+            window.vireoPhotoIsRawJpegPair({
+                filename: 'capture.NEF', companion_path: 'capture.JPEG'
+            })
+        ]"""
+    ) == [False, False, True]
+
+    card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    expect(page.locator("#lightboxSourceControl")).to_be_hidden()
+    assert page.evaluate("photoId => window._vireoPairSource(photoId)", photo_id) is None
+    assert image_requests
+    assert all("source=" not in request_url for request_url in image_requests)
+
+
 def test_browse_lightbox_filename_can_be_selected_without_resetting_zoom(
     live_server, page
 ):

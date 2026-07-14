@@ -4079,10 +4079,34 @@ var _vireoPairKnownByPhoto = {};
 var _vireoPairSourceByPhoto = {};
 var _vireoPairPendingSourceByPhoto = {};
 
+window.vireoPhotoIsRawJpegPair = function(photo) {
+  if (!photo || !photo.companion_path) return false;
+  var rawExtensions = {
+    '.nef': true,
+    '.cr2': true,
+    '.cr3': true,
+    '.arw': true,
+    '.raf': true,
+    '.dng': true,
+    '.rw2': true,
+    '.orf': true
+  };
+  var primaryName = photo.filename || '';
+  var primaryMatch = String(primaryName).toLowerCase().match(/(\.[^.\/\\]+)$/);
+  var primaryExt = primaryMatch ? primaryMatch[1] : '';
+  if (!primaryExt) {
+    primaryExt = String(photo.extension || '').toLowerCase();
+    if (primaryExt && primaryExt.charAt(0) !== '.') primaryExt = '.' + primaryExt;
+  }
+  var companionMatch = String(photo.companion_path).toLowerCase().match(/(\.[^.\/\\]+)$/);
+  var companionExt = companionMatch ? companionMatch[1] : '';
+  return !!rawExtensions[primaryExt] && (companionExt === '.jpg' || companionExt === '.jpeg');
+};
+
 window.vireoRememberPhotoPair = function(photo) {
   if (!photo || photo.id == null) return;
   var key = String(photo.id);
-  if (photo.companion_path) {
+  if (window.vireoPhotoIsRawJpegPair(photo)) {
     _vireoPairKnownByPhoto[key] = true;
     if (!_vireoPairSourceByPhoto[key]) _vireoPairSourceByPhoto[key] = 'jpeg';
   } else if (Object.prototype.hasOwnProperty.call(photo, 'companion_path')) {
@@ -7001,7 +7025,7 @@ function openLightbox(photoId, filename, photoList, options) {
       if (typeof window.vireoUpdatePairSourceControls === 'function') {
         window.vireoUpdatePairSourceControls(photoId);
       }
-      if (!pairWasKnown && data.companion_path) {
+      if (!pairWasKnown && _vireoPairKnownByPhoto[String(photoId)]) {
         var pairImg = document.getElementById('lightboxImg');
         var pairLoad = function() {
           pairImg.removeEventListener('load', pairLoad);
