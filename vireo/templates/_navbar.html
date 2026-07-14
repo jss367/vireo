@@ -3442,7 +3442,7 @@ async function createWorkspace() {
   <span class="lightbox-close" onclick="closeLightbox(event)">&times;</span>
   <div id="lightboxPrev" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(-1);" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Previous (←)">&#9664;</div>
   <div id="lightboxNext" class="lightbox-nav" onclick="event.stopPropagation(); lightboxNav(1);" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:36px;color:rgba(255,255,255,0.5);cursor:pointer;padding:16px;user-select:none;z-index:10001;" title="Next (→)">&#9654;</div>
-  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (Math.abs(_lbZoom - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
+  <div class="lightbox-img-wrap" id="lightboxWrap" onclick="event.stopPropagation(); if (!_lbVisualTransitionPending && Math.abs(_lbZoom - 1.0) < 0.001 && !window._lightboxZoomHandled) toggleLightboxZoom(event); window._lightboxZoomHandled = false;">
     <span class="lightbox-zoom-badge" id="lightboxZoomBadge" style="display:none;">1:1</span>
     <div class="lightbox-transform" id="lightboxTransform">
       <img id="lightboxImg" src="" alt="">
@@ -7000,6 +7000,7 @@ function toggleLightboxZoom(e) {
     if (!wrap.contains(e.target) && e.target !== wrap) return;
 
     e.preventDefault();
+    if (_lbVisualTransitionPending) return;
     // Trackpad pinch: e.ctrlKey === true; zoom factor more sensitive.
     var scale = e.ctrlKey ? 0.02 : 0.0015;
     var zoomFactor = Math.exp(-e.deltaY * scale);
@@ -7058,6 +7059,7 @@ function toggleLightboxZoom(e) {
   document.addEventListener('mousedown', function(e) {
     // Right-click (button 2) opens the context menu — never start a pan.
     if (e.button !== 0) return;
+    if (_lbVisualTransitionPending) return;
     var wrap = document.getElementById('lightboxWrap');
     if (!wrap || _lbZoom <= 1.001) return;
     if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
@@ -7259,6 +7261,7 @@ function buildLightboxContextMenu(pid) {
     // handler in full control.)
     e.preventDefault();
     e.stopPropagation();
+    if (_lbVisualTransitionPending) return;
     var pid = _lightboxCurrentId;
     if (!pid) return;
     openContextMenu(e, buildLightboxContextMenu(pid));
@@ -8897,11 +8900,15 @@ function nativeMenuLightboxOpen() {
 }
 
 function nativeMenuActivePhotoIds() {
-  if (
-    nativeMenuLightboxOpen() &&
-    typeof _lightboxCurrentId !== 'undefined' &&
-    _lightboxCurrentId != null
-  ) {
+  if (nativeMenuLightboxOpen()) {
+    // Navigation advances the internal id before the incoming bitmap is
+    // visible. Do not let native Photo menu commands target that hidden photo.
+    if (typeof _lbVisualTransitionPending !== 'undefined' && _lbVisualTransitionPending) {
+      return [];
+    }
+    if (typeof _lightboxCurrentId === 'undefined' || _lightboxCurrentId == null) {
+      return [];
+    }
     return [_lightboxCurrentId];
   }
   if (

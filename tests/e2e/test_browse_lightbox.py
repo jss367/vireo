@@ -386,6 +386,33 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     page.keyboard.press("p")
     assert page.evaluate("window._lbFlagPendingWrites") == 0
 
+    interaction_state = page.evaluate(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            const beforeZoom = window._lbZoom;
+            img.dispatchEvent(new WheelEvent('wheel', {
+                bubbles: true, cancelable: true, deltaY: -120,
+                clientX: 400, clientY: 300,
+            }));
+            img.dispatchEvent(new MouseEvent('contextmenu', {
+                bubbles: true, cancelable: true, button: 2,
+                clientX: 400, clientY: 300,
+            }));
+            img.dispatchEvent(new MouseEvent('click', {
+                bubbles: true, cancelable: true, button: 0,
+                clientX: 400, clientY: 300,
+            }));
+            return {
+                beforeZoom: beforeZoom,
+                afterZoom: window._lbZoom,
+                nativePhotoIds: window.nativeMenuActivePhotoIds(),
+            };
+        }"""
+    )
+    assert interaction_state["afterZoom"] == interaction_state["beforeZoom"]
+    assert interaction_state["nativePhotoIds"] == []
+    expect(page.locator(".vireo-ctx-menu")).to_have_count(0)
+
     while_loading = page.evaluate(
         """() => {
             const transform = document.getElementById('lightboxTransform');
