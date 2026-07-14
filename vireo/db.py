@@ -6686,6 +6686,71 @@ class Database:
             "detected_count": detected_count,
         }
 
+    @staticmethod
+    def _append_location_status_filter(conditions, location_status):
+        """Add a Browse coordinate-source predicate using the photo alias ``p``.
+
+        ``exif`` means the original photo has a complete EXIF coordinate pair.
+        ``assigned`` means EXIF GPS is absent or incomplete but a linked,
+        structured location supplies a complete pair. ``none`` means neither
+        source can place the photo on the map.
+        """
+        if location_status is None:
+            return
+        assigned_exists = """EXISTS (
+            SELECT 1 FROM photo_keywords pk_location_status
+            JOIN keywords k_location_status
+              ON k_location_status.id = pk_location_status.keyword_id
+            WHERE pk_location_status.photo_id = p.id
+              AND k_location_status.type = 'location'
+              AND k_location_status.latitude IS NOT NULL
+              AND k_location_status.longitude IS NOT NULL
+        )"""
+        no_exif = "(p.latitude IS NULL OR p.longitude IS NULL)"
+        if location_status == "exif":
+            conditions.append(
+                "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
+            )
+        elif location_status == "assigned":
+            conditions.append(f"{no_exif} AND {assigned_exists}")
+        elif location_status == "none":
+            conditions.append(f"{no_exif} AND NOT {assigned_exists}")
+        else:
+            raise ValueError(
+                "location_status must be 'exif', 'assigned', or 'none'"
+            )
+
+    def get_photo_location_statuses(self, photo_ids):
+        """Return ``{photo_id: exif|assigned|none}`` for the requested photos."""
+        if not photo_ids:
+            return {}
+        result = {}
+        for chunk in _chunks(list(dict.fromkeys(photo_ids))):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""
+                SELECT p.id,
+                       CASE
+                         WHEN p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+                           THEN 'exif'
+                         WHEN EXISTS (
+                           SELECT 1 FROM photo_keywords pk
+                           JOIN keywords k ON k.id = pk.keyword_id
+                           WHERE pk.photo_id = p.id
+                             AND k.type = 'location'
+                             AND k.latitude IS NOT NULL
+                             AND k.longitude IS NOT NULL
+                         ) THEN 'assigned'
+                         ELSE 'none'
+                       END AS location_status
+                FROM photos p
+                WHERE p.id IN ({placeholders})
+                """,
+                list(chunk),
+            ).fetchall()
+            result.update({row["id"]: row["location_status"] for row in rows})
+        return result
+
     def get_calendar_data(
         self,
         year,
@@ -6696,6 +6761,7 @@ class Database:
         keyword_whole_word=False,
         color_label=None,
         flag=None,
+        location_status=None,
     ):
         """Return daily photo counts for a given year, scoped to active workspace."""
         ws = self._ws_id()
@@ -6718,6 +6784,7 @@ class Database:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
+        self._append_location_status_filter(conditions, location_status)
         if keyword is not None:
             kw_clause, kw_params = _keyword_token_clause(
                 keyword,
@@ -6778,6 +6845,7 @@ class Database:
         keyword_whole_word=False,
         color_label=None,
         flag=None,
+        location_status=None,
     ):
         """Return paginated, filtered photo list scoped to active workspace."""
         conditions = ["wf.workspace_id = ?"]
@@ -6801,6 +6869,7 @@ class Database:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
+        self._append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -6865,6 +6934,7 @@ class Database:
         keyword_whole_word=False,
         color_label=None,
         flag=None,
+        location_status=None,
     ):
         """Return all filtered photo IDs scoped to active workspace."""
         conditions = ["wf.workspace_id = ?"]
@@ -6888,6 +6958,7 @@ class Database:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
+        self._append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -6941,6 +7012,7 @@ class Database:
         keyword_whole_word=False,
         color_label=None,
         flag=None,
+        location_status=None,
     ):
         """Return count of photos matching the given filters, scoped to active workspace."""
         conditions = ["wf.workspace_id = ?"]
@@ -6964,6 +7036,7 @@ class Database:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
+        self._append_location_status_filter(conditions, location_status)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -7008,6 +7081,7 @@ class Database:
         collection_id=None,
         color_label=None,
         flag=None,
+        location_status=None,
     ):
         """Return summary stats for the browse panel, scoped to active workspace and filters."""
         ws = self._ws_id()
@@ -7033,6 +7107,7 @@ class Database:
         if flag is not None:
             conditions.append("COALESCE(p.flag, 'none') = ?")
             where_params.append(flag)
+        self._append_location_status_filter(conditions, location_status)
 
         # When browsing a collection, restrict photos to those matching the
         # collection's rules by using a subquery from _build_collection_query.
@@ -7447,6 +7522,10 @@ class Database:
         ]
 
     def count_photos_without_gps(self):
+        """Backward-compatible alias for :meth:`count_photos_without_coordinates`."""
+        return self.count_photos_without_coordinates()
+
+    def count_photos_without_coordinates(self):
         """Count photos in the active workspace that the map can't plot.
 
         A photo IS plottable when either its EXIF lat/lng are both present
