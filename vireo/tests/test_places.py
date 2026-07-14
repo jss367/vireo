@@ -62,6 +62,24 @@ def test_http_requests_use_bundled_ca_bundle(monkeypatch):
     assert places._SSL_CONTEXT.cert_store_stats()["x509_ca"] > 0
 
 
+def test_ssl_context_preserves_configured_roots_and_adds_bundled_roots(monkeypatch):
+    """The bundled roots augment rather than replace environment defaults."""
+    from vireo import places
+
+    class FakeContext:
+        loaded_cafiles = []
+
+        def load_verify_locations(self, *, cafile):
+            self.loaded_cafiles.append(cafile)
+
+    context = FakeContext()
+    monkeypatch.setattr(places.ssl, "create_default_context", lambda: context)
+    monkeypatch.setattr(places.certifi, "where", lambda: "/bundled/cacert.pem")
+
+    assert places._create_ssl_context() is context
+    assert context.loaded_cafiles == ["/bundled/cacert.pem"]
+
+
 def test_place_details_parses_response(monkeypatch):
     """Place Details OK response is normalized into the wrapper's dict shape."""
     from vireo import places

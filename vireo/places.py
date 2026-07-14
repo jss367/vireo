@@ -48,10 +48,17 @@ logger = logging.getLogger(__name__)
 _PLACE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 _GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 
-# PyInstaller's embedded Python does not reliably discover a system CA bundle
-# on macOS.  Use the CA bundle shipped with Vireo instead of depending on the
-# interpreter's build-time OpenSSL paths.
-_SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+def _create_ssl_context():
+    """Return a trust context containing configured and bundled CA roots."""
+    context = ssl.create_default_context()
+    # PyInstaller's embedded Python does not reliably discover a system CA
+    # bundle on macOS. Add Vireo's bundled roots without discarding system,
+    # SSL_CERT_FILE, or SSL_CERT_DIR roots needed by managed environments.
+    context.load_verify_locations(cafile=certifi.where())
+    return context
+
+
+_SSL_CONTEXT = _create_ssl_context()
 
 # Google statuses that mean "no match" — we return ``None`` silently.
 _EMPTY_STATUSES = {"ZERO_RESULTS", "NOT_FOUND"}
