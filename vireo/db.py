@@ -15641,10 +15641,12 @@ class Database:
                 has = "p.mask_path IS NOT NULL"
                 return (has if _truthy(value) else f"NOT ({has})"), []
             if field == "has_jpeg_companion":
+                # SQLite LIKE is case-insensitive for ASCII by default, so
+                # LOWER() would be redundant here.
                 has = (
                     "p.companion_path IS NOT NULL AND "
-                    "(LOWER(p.companion_path) LIKE '%.jpg' OR "
-                    "LOWER(p.companion_path) LIKE '%.jpeg')"
+                    "(p.companion_path LIKE '%.jpg' OR "
+                    "p.companion_path LIKE '%.jpeg')"
                 )
                 return (f"({has})" if _truthy(value) else f"NOT ({has})"), []
             if field == "active_mask_variant":

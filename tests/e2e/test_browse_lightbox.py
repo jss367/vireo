@@ -136,7 +136,7 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
 
     jpeg = _png_bytes((200, 100), "green")
     raw = _png_bytes((100, 200), "red")
-    fail_raw = {"enabled": False}
+    fail_raw = {"enabled": False, "attempts": 0}
     hold_raw = {"enabled": False, "routes": []}
 
     def serve_pair(route):
@@ -145,6 +145,7 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
             hold_raw["routes"].append(route)
             return
         if wants_raw and fail_raw["enabled"]:
+            fail_raw["attempts"] += 1
             route.abort()
             return
         body = raw if wants_raw else jpeg
@@ -217,7 +218,16 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
     control.click()
     expect(control).to_have_text("Viewing JPEG · Show RAW")
     fail_raw["enabled"] = True
+    attempts_before = fail_raw["attempts"]
     control.click()
+    for _ in range(50):
+        if fail_raw["attempts"] > attempts_before:
+            break
+        page.wait_for_timeout(100)
+    assert fail_raw["attempts"] > attempts_before, (
+        "Expected the RAW source request to be attempted so the abort "
+        "path is exercised before asserting the state is unchanged."
+    )
     expect(control).to_have_text("Viewing JPEG · Show RAW")
     assert image.evaluate("img => [img.naturalWidth, img.naturalHeight]") == [200, 100]
 
