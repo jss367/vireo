@@ -1727,25 +1727,18 @@ def _migrate_edit_math_render_caches(app):
                 )
                 purge_failed = True
                 continue
-            try:
-                for name in os.listdir(thumb_dir):
-                    if not (
-                        name.startswith(f"{pid}_") and name.endswith(".jpg")
-                    ):
-                        continue
-                    try:
-                        os.remove(os.path.join(thumb_dir, name))
+            for source in ("raw", "jpeg"):
+                variant = os.path.join(thumb_dir, f"{pid}_{source}.jpg")
+                try:
+                    if os.path.exists(variant):
+                        os.remove(variant)
                         invalidated_thumbs += 1
-                    except OSError:
-                        purge_failed = True
-            except FileNotFoundError:
-                pass
-            except OSError:
-                log.warning(
-                    "Failed to list thumbnail variants during edit-math "
-                    "migration", exc_info=True,
-                )
-                purge_failed = True
+                except OSError:
+                    log.warning(
+                        "Failed to remove paired thumbnail %s during "
+                        "edit-math migration", variant, exc_info=True,
+                    )
+                    purge_failed = True
             db.conn.execute(
                 "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
             )
@@ -2457,23 +2450,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "Failed to remove stale thumbnail cache %s", thumb_cache,
                     exc_info=True,
                 )
-            try:
-                for name in os.listdir(thumb_dir):
-                    if not (
-                        name.startswith(f"{pid}_") and name.endswith(".jpg")
-                    ):
-                        continue
-                    variant = os.path.join(thumb_dir, name)
-                    try:
+            for source in ("raw", "jpeg"):
+                variant = os.path.join(thumb_dir, f"{pid}_{source}.jpg")
+                try:
+                    if os.path.exists(variant):
                         os.remove(variant)
-                    except OSError:
-                        log.warning(
-                            "Failed to remove stale paired-source thumbnail %s",
-                            variant,
-                            exc_info=True,
-                        )
-            except FileNotFoundError:
-                pass
+                except OSError:
+                    log.warning(
+                        "Failed to remove stale paired-source thumbnail %s",
+                        variant,
+                        exc_info=True,
+                    )
             if clear_thumb_path:
                 db.conn.execute(
                     "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),

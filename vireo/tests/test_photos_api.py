@@ -5725,10 +5725,16 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     plain_preview = preview_dir / f"{pid_plain}_1920.jpg"
     edited_thumb = thumb_dir / f"{pid_edited}.jpg"
     plain_thumb = thumb_dir / f"{pid_plain}.jpg"
+    edited_raw_thumb = thumb_dir / f"{pid_edited}_raw.jpg"
+    edited_jpeg_thumb = thumb_dir / f"{pid_edited}_jpeg.jpg"
+    plain_raw_thumb = thumb_dir / f"{pid_plain}_raw.jpg"
     edited_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"o" * 1024)
     plain_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"p" * 1024)
     edited_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"t" * 1024)
     plain_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"u" * 1024)
+    edited_raw_thumb.write_bytes(b"stale raw")
+    edited_jpeg_thumb.write_bytes(b"stale jpeg")
+    plain_raw_thumb.write_bytes(b"plain raw")
     db.preview_cache_insert(pid_edited, 1920, edited_preview.stat().st_size)
     db.preview_cache_insert(pid_plain, 1920, plain_preview.stat().st_size)
     db.conn.execute(
@@ -5747,6 +5753,8 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     # Edited photo: preview and thumb gone, thumb_path cleared, no row.
     assert not edited_preview.exists()
     assert not edited_thumb.exists()
+    assert not edited_raw_thumb.exists()
+    assert not edited_jpeg_thumb.exists()
     assert db.preview_cache_get(pid_edited, 1920) is None
     edited_row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (pid_edited,),
@@ -5756,6 +5764,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     # Plain photo: cache survives because no recipe → output bytes unchanged.
     assert plain_preview.exists()
     assert plain_thumb.exists()
+    assert plain_raw_thumb.exists()
     assert db.preview_cache_get(pid_plain, 1920) is not None
     plain_row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (pid_plain,),
@@ -5905,65 +5914,6 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
         db2.conn.close()
 
     # Once the dir becomes readable, a later boot completes the migration.
-    monkeypatch.setattr(app_module.os, "listdir", real_listdir)
-    app_module._migrate_edit_math_render_caches(fake_app)
-    db3 = Database(db_path)
-    try:
-        assert db3.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
-    finally:
-        db3.conn.close()
-
-
-def test_edit_math_version_migration_survives_unreadable_thumbnail_dir(
-    tmp_path, monkeypatch,
-):
-    """A transient thumbnail-directory listing failure is retryable and must
-    not prevent app startup during edit-math cache migration."""
-    import os
-    from types import SimpleNamespace
-
-    import app as app_module
-    from db import Database
-    from image_edits import EDIT_MATH_VERSION
-
-    vireo_dir = tmp_path / "vireo"
-    thumb_dir = vireo_dir / "thumbnails"
-    thumb_dir.mkdir(parents=True)
-    (vireo_dir / "previews").mkdir()
-    db_path = str(vireo_dir / "vireo.db")
-
-    db = Database(db_path)
-    ws_id = db.ensure_default_workspace()
-    db.set_active_workspace(ws_id)
-    fid = db.add_folder(str(tmp_path), name="photos")
-    pid = db.add_photo(
-        folder_id=fid, filename="edited.jpg", extension=".jpg",
-        file_size=100, file_mtime=0.0, width=40, height=30,
-    )
-    db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
-    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
-    db.conn.commit()
-    db.conn.close()
-
-    real_listdir = app_module.os.listdir
-
-    def failing_listdir(path):
-        if os.path.abspath(path) == os.path.abspath(str(thumb_dir)):
-            raise PermissionError(path)
-        return real_listdir(path)
-
-    monkeypatch.setattr(app_module.os, "listdir", failing_listdir)
-    fake_app = SimpleNamespace(
-        config={"THUMB_CACHE_DIR": str(thumb_dir), "DB_PATH": db_path},
-    )
-    app_module._migrate_edit_math_render_caches(fake_app)
-
-    db2 = Database(db_path)
-    try:
-        assert db2.get_meta("edit_math_version") == str(EDIT_MATH_VERSION - 1)
-    finally:
-        db2.conn.close()
-
     monkeypatch.setattr(app_module.os, "listdir", real_listdir)
     app_module._migrate_edit_math_render_caches(fake_app)
     db3 = Database(db_path)
