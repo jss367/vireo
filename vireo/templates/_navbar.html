@@ -6596,9 +6596,6 @@ function openLightbox(photoId, filename, photoList, options) {
   // resolve "the photo I was just looking at".
   if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
   _lbApplyEditButtonState();
-  try {
-    document.dispatchEvent(new CustomEvent('lightbox:photochanged', { detail: { photoId: photoId } }));
-  } catch(_) {}
   var currentFromList = _lightboxPhotoList.find(function(x) { return x.id === photoId; });
   if (currentFromList && Object.prototype.hasOwnProperty.call(currentFromList, 'flag')) {
     _lbRememberConfirmedFlag(photoId, currentFromList.flag);
@@ -6624,6 +6621,7 @@ function openLightbox(photoId, filename, photoList, options) {
   // that bitmap, then advance all three in the image-load task before the next
   // paint. Internal navigation state still advances immediately, so rapid
   // arrow presses continue to target the right photo.
+  var visibleIdentityCommitted = false;
   function commitVisiblePhotoIdentity() {
     label.textContent = filename || '';
     _lbSetFlagStatus(_lbConfirmedFlagFor(photoId));
@@ -6639,6 +6637,14 @@ function openLightbox(photoId, filename, photoList, options) {
     } else {
       counter.title = '';
       counter.style.display = 'none';
+    }
+    if (!visibleIdentityCommitted) {
+      visibleIdentityCommitted = true;
+      try {
+        document.dispatchEvent(new CustomEvent('lightbox:photochanged', {
+          detail: { photoId: photoId }
+        }));
+      } catch(_) {}
     }
   }
 

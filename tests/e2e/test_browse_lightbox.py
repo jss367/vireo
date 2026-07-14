@@ -362,6 +362,14 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
             };
         }"""
     )
+    page.evaluate(
+        """() => {
+            window.__photoChangedDuringNavigation = [];
+            document.addEventListener('lightbox:photochanged', event => {
+                window.__photoChangedDuringNavigation.push(event.detail.photoId);
+            });
+        }"""
+    )
 
     page.keyboard.press("ArrowRight")
     page.wait_for_function("() => window._lbVisualTransitionPending === true")
@@ -380,6 +388,7 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     )
     expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
     expect(page.locator("#lightboxActions")).to_have_attribute("inert", "")
+    assert page.evaluate("window.__photoChangedDuringNavigation") == []
 
     # Photo-targeted keyboard actions are suppressed along with the buttons;
     # they must not mutate the incoming photo while the outgoing one is shown.
@@ -444,6 +453,7 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         page.locator(".grid-card").nth(1).get_attribute("data-filename")
     )
     expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    assert page.evaluate("window.__photoChangedDuringNavigation") == [next_id]
     assert page.evaluate(
         "!document.getElementById('lightboxActions').inert"
     )
