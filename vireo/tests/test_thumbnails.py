@@ -812,6 +812,10 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
         "UPDATE photos SET companion_path='bird.jpg' WHERE id=?", (pid,),
     )
     db.conn.commit()
+    # Catalog edits are authored against RAW coordinates. The JPEG companion
+    # is already a developed image and must remain landscape rather than
+    # receiving this RAW-only rotation a second time.
+    db.set_photo_edit_recipe(pid, {"rotation": 90})
 
     import image_loader
     import thumbnails
@@ -830,43 +834,53 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
     monkeypatch.setattr(image_loader, "load_image", load_selected)
     monkeypatch.setattr(thumbnails, "load_image", load_selected)
 
-    def center_rgb(response):
+    def fetch_render(url):
         import io
 
-        with Image.open(io.BytesIO(response.data)) as rendered:
-            return rendered.convert("RGB").getpixel(
-                (rendered.width // 2, rendered.height // 2),
-            )
-
-    client = app.test_client()
-
-    def fetch_center(url):
-        """Fetch a URL and return its center RGB, closing the response so
+        """Fetch image pixels and dimensions, closing the response so
         Windows doesn't hold the sent file open (werkzeug's FileWrapper
         keeps the fd until Response.close())."""
         resp = client.get(url)
         try:
-            return resp.status_code, center_rgb(resp) if resp.status_code == 200 else None
+            assert resp.status_code == 200
+            with Image.open(io.BytesIO(resp.data)) as rendered:
+                rgb = rendered.convert("RGB").getpixel(
+                    (rendered.width // 2, rendered.height // 2),
+                )
+                return rgb, rendered.size
         finally:
             resp.close()
 
-    jpeg_thumb_status, jpeg_thumb_rgb = fetch_center(f"/thumbnails/{pid}.jpg?source=jpeg")
-    raw_thumb_status, raw_thumb_rgb = fetch_center(f"/thumbnails/{pid}.jpg?source=raw")
+    client = app.test_client()
+    jpeg_thumb_url = f"/thumbnails/{pid}.jpg?source=jpeg"
+    raw_thumb_url = f"/thumbnails/{pid}.jpg?source=raw"
+    jpeg_thumb_rgb, jpeg_thumb_size = fetch_render(jpeg_thumb_url)
+    raw_thumb_rgb, raw_thumb_size = fetch_render(raw_thumb_url)
     assert jpeg_thumb_rgb[1] > 180
     assert raw_thumb_rgb[0] > 180
+    assert jpeg_thumb_size == (400, 300)
+    assert raw_thumb_size == (300, 400)
     assert os.path.isfile(os.path.join(thumb_dir, f"{pid}_jpeg.jpg"))
     assert os.path.isfile(os.path.join(thumb_dir, f"{pid}_raw.jpg"))
 
-    _, jpeg_preview_rgb = fetch_center(f"/photos/{pid}/preview?size=1920&source=jpeg")
-    _, raw_preview_rgb = fetch_center(f"/photos/{pid}/preview?size=1920&source=raw")
+    jpeg_preview_url = f"/photos/{pid}/preview?size=1920&source=jpeg"
+    raw_preview_url = f"/photos/{pid}/preview?size=1920&source=raw"
+    jpeg_preview_rgb, jpeg_preview_size = fetch_render(jpeg_preview_url)
+    raw_preview_rgb, raw_preview_size = fetch_render(raw_preview_url)
     assert jpeg_preview_rgb[1] > 180
     assert raw_preview_rgb[0] > 180
+    assert jpeg_preview_size == (800, 600)
+    assert raw_preview_size == (600, 800)
     assert db.preview_cache_get(pid, 1920) is None
 
-    _, jpeg_original_rgb = fetch_center(f"/photos/{pid}/original?source=jpeg")
-    _, raw_original_rgb = fetch_center(f"/photos/{pid}/original?source=raw")
+    jpeg_original_url = f"/photos/{pid}/original?source=jpeg"
+    raw_original_url = f"/photos/{pid}/original?source=raw"
+    jpeg_original_rgb, jpeg_original_size = fetch_render(jpeg_original_url)
+    raw_original_rgb, raw_original_size = fetch_render(raw_original_url)
     assert jpeg_original_rgb[1] > 180
     assert raw_original_rgb[0] > 180
+    assert jpeg_original_size == (800, 600)
+    assert raw_original_size == (600, 800)
 
     os.remove(companion)
     assert client.get(f"/thumbnails/{pid}.jpg?source=jpeg").status_code == 404
@@ -903,8 +917,8 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
         f"/photos/{pid}/original",
     ):
         joiner = "&" if "?" in endpoint else "?"
-        jpeg_rgb = center_rgb(client.get(endpoint + joiner + "source=jpeg"))
-        raw_rgb = center_rgb(client.get(endpoint + joiner + "source=raw"))
+        jpeg_rgb, _ = fetch_render(endpoint + joiner + "source=jpeg")
+        raw_rgb, _ = fetch_render(endpoint + joiner + "source=raw")
         assert jpeg_rgb[1] > 180 and jpeg_rgb[2] > 180
         assert raw_rgb[0] > 180 and raw_rgb[2] > 180
 

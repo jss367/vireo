@@ -20722,13 +20722,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         try:
             recipe = db.get_photo_edit_recipe(photo_id)
+            # Edit recipes and local masks are stored in the primary RAW's
+            # coordinate space. A developed companion may already be cropped,
+            # rotated, or resized, so applying that geometry again would render
+            # the selected JPEG incorrectly. JPEG pair views intentionally show
+            # the companion as-authored; RAW pair views retain the catalog edit.
+            render_recipe = None if pair_source == "jpeg" else recipe
             thumb_size = cfg.load().get("thumbnail_size", 400)
             if pair_source_path:
                 source = pair_source_path
                 _using_working_copy = False
             else:
                 source, _using_working_copy = _recipe_render_source(
-                    photo, recipe, thumb_size, vireo_dir, folders,
+                    photo, render_recipe, thumb_size, vireo_dir, folders,
                 )
             if (
                 not _using_working_copy
@@ -20761,7 +20767,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if (
                     pair_source == "raw"
                     or (
-                        recipe
+                        render_recipe
                         and os.path.splitext(photo["filename"])[1].lower()
                         in RAW_EXTENSIONS
                     )
@@ -20770,7 +20776,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             min_source_size = None
             if raw_decode and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS:
-                load_max_size = None if recipe and recipe.get("crop") else thumb_size
+                load_max_size = (
+                    None
+                    if render_recipe and render_recipe.get("crop")
+                    else thumb_size
+                )
                 min_source_size = _scaled_recipe_source_dimensions(
                     photo, load_max_size,
                 )
@@ -20779,11 +20789,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 source,
                 thumb_dir,
                 size=thumb_size,
-                recipe=recipe,
+                recipe=render_recipe,
                 raw_decode=raw_decode,
                 min_source_size=min_source_size,
                 native_size=(
-                    _recipe_source_dimensions(photo) if recipe else None
+                    _recipe_source_dimensions(photo) if render_recipe else None
                 ),
                 cache_name=cache_filename,
             )
@@ -20817,17 +20827,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             companion_abs,
                             thumb_dir,
                             size=thumb_size,
-                            recipe=recipe,
+                            recipe=render_recipe,
                             native_size=(
                                 _recipe_source_dimensions(photo)
-                                if recipe else None
+                                if render_recipe else None
                             ),
                         )
                         if result:
                             source = companion_abs
             if (
                 not result
-                and recipe
+                and render_recipe
                 and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS
                 and pair_source != "raw"
             ):
@@ -20838,7 +20848,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     thumb_dir,
                     thumb_size,
                     cfg.load().get("thumbnail_quality", 85),
-                    recipe,
+                    render_recipe,
                     vireo_dir,
                 )
                 if result:
@@ -24447,6 +24457,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         if pair_source and not pair_source_path:
             return "Not found", 404
+        # Recipes and local masks use primary-RAW coordinates. The selected
+        # developed JPEG may have different geometry and should be displayed
+        # as-authored rather than receiving the RAW edit a second time.
+        render_recipe = None if pair_source == "jpeg" else recipe
         # The established preview cache is keyed only by (photo_id, size).
         # Explicit paired-source views bypass it so RAW and JPEG pixels can
         # never contaminate one another. Browser caching still makes repeated
@@ -24562,7 +24576,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             using_working_copy = False
         else:
             canonical, using_working_copy = _recipe_render_source(
-                photo, recipe, size, vireo_dir, folders,
+                photo, render_recipe, size, vireo_dir, folders,
             )
         selected_ext = os.path.splitext(canonical)[1].lower()
         if (
@@ -24582,10 +24596,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo_id,
             )
             return "Could not load image", 500
-        load_max_size = None if recipe and recipe.get("crop") else size
+        load_max_size = (
+            None
+            if render_recipe and render_recipe.get("crop")
+            else size
+        )
         raw_decode = (
             RAW_DECODE_PRESERVE_HIGHLIGHTS
-            if selected_ext in RAW_EXTENSIONS and (recipe or pair_source == "raw")
+            if (
+                selected_ext in RAW_EXTENSIONS
+                and (render_recipe or pair_source == "raw")
+            )
             else None
         )
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
@@ -24662,7 +24683,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         canonical = companion_abs
             if img is None:
                 wc_path = _working_copy_path_if_satisfies(
-                    photo, recipe, size, vireo_dir, rel_slack=0.01,
+                    photo, render_recipe, size, vireo_dir, rel_slack=0.01,
                 )
                 if wc_path and os.path.abspath(wc_path) != os.path.abspath(canonical):
                     log.info(
@@ -24677,14 +24698,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
-        if recipe:
+        if render_recipe:
             import local_masks
             from image_edits import apply_recipe_to_loaded_image
             img = apply_recipe_to_loaded_image(
-                img, recipe, max_size=size,
+                img, render_recipe, max_size=size,
                 native_size=_recipe_source_dimensions(photo),
                 local_mask=local_masks.load_snapshot(
-                    vireo_dir, photo_id, recipe,
+                    vireo_dir, photo_id, render_recipe,
                 ),
             )
 
@@ -25108,7 +25129,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if pair_source_path:
             # Explicit pair views bypass the canonical prepared-render cache,
             # whose key has no RAW/JPEG source dimension.
-            if pair_source == "jpeg" and not recipe:
+            # The companion is already the photographer's developed result.
+            # Its geometry can differ from the RAW, so never apply the RAW's
+            # recipe or local mask in that coordinate space.
+            if pair_source == "jpeg":
                 return send_file(pair_source_path)
 
             import io
