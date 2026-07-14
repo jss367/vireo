@@ -4170,31 +4170,35 @@ function _vireoPairSourceLoadFailed(photoId, requested, anchor, oldSrc) {
   }
 }
 
+function _vireoPairSourceImageLoaded(photoId, requested, anchor) {
+  var key = String(photoId);
+  if (
+    !anchor || anchor.id !== 'lightboxImg' ||
+    String(_lightboxCurrentId) !== key
+  ) return;
+  _lbFullLongEdge = _lbCurrentSrcKey === 'full'
+    ? (Math.max(anchor.naturalWidth || 0, anchor.naturalHeight || 0) || null)
+    : null;
+  _lbNativeZoom = null;
+  _lbRecomputeNativeZoom();
+  _lbApplyTransform();
+  if (requested === 'raw') {
+    _lbLoadDetections(photoId);
+    _lbRenderEyeCrosshair(_lbPhotoDataByPhoto[key]);
+    _lbLoadMaskVariants(photoId);
+  }
+  _lbApplyBoxesVisibility();
+  _lbApplyEyeVisibility();
+  _lbApplyMaskVisibility();
+}
+
 function _vireoCommitPairSource(photoId, requested, anchor) {
   var key = String(photoId);
   if (_vireoPairPendingSourceByPhoto[key] !== requested) return;
   _vireoPairSourceByPhoto[key] = requested;
   delete _vireoPairPendingSourceByPhoto[key];
   window.vireoUpdatePairSourceControls(photoId);
-  if (
-    anchor && anchor.id === 'lightboxImg' &&
-    String(_lightboxCurrentId) === key
-  ) {
-    _lbFullLongEdge = _lbCurrentSrcKey === 'full'
-      ? (Math.max(anchor.naturalWidth || 0, anchor.naturalHeight || 0) || null)
-      : null;
-    _lbNativeZoom = null;
-    _lbRecomputeNativeZoom();
-    _lbApplyTransform();
-    if (requested === 'raw') {
-      _lbLoadDetections(photoId);
-      _lbRenderEyeCrosshair(_lbPhotoDataByPhoto[key]);
-      _lbLoadMaskVariants(photoId);
-    }
-    _lbApplyBoxesVisibility();
-    _lbApplyEyeVisibility();
-    _lbApplyMaskVisibility();
-  }
+  _vireoPairSourceImageLoaded(photoId, requested, anchor);
   if (typeof window.vireoRefreshPhotoRenders === 'function') {
     window.vireoRefreshPhotoRenders([photoId]);
   }
@@ -6998,6 +7002,18 @@ function openLightbox(photoId, filename, photoList, options) {
         window.vireoUpdatePairSourceControls(photoId);
       }
       if (!pairWasKnown && data.companion_path) {
+        var pairImg = document.getElementById('lightboxImg');
+        var pairLoad = function() {
+          pairImg.removeEventListener('load', pairLoad);
+          pairImg.removeEventListener('error', pairError);
+          _vireoPairSourceImageLoaded(photoId, 'jpeg', pairImg);
+        };
+        var pairError = function() {
+          pairImg.removeEventListener('load', pairLoad);
+          pairImg.removeEventListener('error', pairError);
+        };
+        pairImg.addEventListener('load', pairLoad);
+        pairImg.addEventListener('error', pairError);
         _vireoBumpRenderVersion(photoId);
         window.vireoRefreshPhotoRenders([photoId]);
       }

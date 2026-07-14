@@ -158,6 +158,20 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
 
     card = page.locator(f'.grid-card[data-id="{photo_id}"]')
     expect(card).to_be_visible()
+    jpeg_card_html = page.evaluate(
+        """photoId => {
+            const photo = Object.assign({}, window.photos.find(p => p.id === photoId), {
+                detections: [{x: 0.1, y: 0.2, w: 0.3, h: 0.4, confidence: 0.95}]
+            });
+            const previous = window.showDetectionBoxes;
+            window.showDetectionBoxes = true;
+            const html = window.renderPhotoCard(photo, 0);
+            window.showDetectionBoxes = previous;
+            return html;
+        }""",
+        photo_id,
+    )
+    assert 'style="display:none;left:' in jpeg_card_html
     card.dblclick()
 
     control = page.locator("#lightboxSourceControl")
@@ -185,12 +199,20 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
     expect(card.locator(".pair-source-badge")).to_have_text("RAW · JPEG pair")
     rebuilt = page.evaluate(
         """photoId => {
-            const photo = window.photos.find(p => p.id === photoId);
-            return window.renderPhotoCard(photo, 0);
+            const photo = Object.assign({}, window.photos.find(p => p.id === photoId), {
+                detections: [{x: 0.1, y: 0.2, w: 0.3, h: 0.4, confidence: 0.95}]
+            });
+            const previous = window.showDetectionBoxes;
+            window.showDetectionBoxes = true;
+            const html = window.renderPhotoCard(photo, 0);
+            window.showDetectionBoxes = previous;
+            return html;
         }""",
         photo_id,
     )
     assert "RAW · JPEG pair" in rebuilt
+    assert 'class="det-box"' in rebuilt
+    assert 'style="display:none;left:' not in rebuilt
 
     control.click()
     expect(control).to_have_text("Viewing JPEG · Show RAW")

@@ -2649,6 +2649,7 @@ function renderCardInfo(p) {
 
 function renderPhotoCard(p, idx) {
   var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+  var pairSource = _vireoPairSource(p.id) || 'jpeg';
   if (
     typeof window.vireoRememberPhotoEditRecipe === 'function' &&
     Object.prototype.hasOwnProperty.call(p, 'edit_recipe')
@@ -2658,8 +2659,11 @@ function renderPhotoCard(p, idx) {
     });
   }
   var hideDetectionOverlays = (
-    typeof window.vireoPhotoHasOrientationEdit === 'function' &&
-    window.vireoPhotoHasOrientationEdit(p.id)
+    (p.companion_path && pairSource === 'jpeg') ||
+    (
+      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+      window.vireoPhotoHasOrientationEdit(p.id)
+    )
   );
 
   // Detection box overlays — render one per detection in the photo
@@ -2682,7 +2686,6 @@ function renderPhotoCard(p, idx) {
   var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
   var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
   var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '';
-  var pairSource = _vireoPairSource(p.id) || 'jpeg';
   var pairBadge = p.companion_path
     ? '<span class="pair-source-badge" data-pair-source-id="' + p.id + '">'
       + (pairSource === 'raw' ? 'RAW · JPEG pair' : 'JPEG · RAW pair')
@@ -2726,8 +2729,14 @@ document.addEventListener('lightbox:renderchanged', function(e) {
   var ids = e && e.detail && Array.isArray(e.detail.photoIds) ? e.detail.photoIds : [];
   ids.forEach(function(id) {
     var hideDetectionOverlays = (
-      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
-      window.vireoPhotoHasOrientationEdit(id)
+      (
+        _vireoPairKnownByPhoto[String(id)] &&
+        _vireoPairSource(id) === 'jpeg'
+      ) ||
+      (
+        typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+        window.vireoPhotoHasOrientationEdit(id)
+      )
     );
     document.querySelectorAll('.grid-card[data-id="' + id + '"] .det-box').forEach(function(box) {
       box.style.display = hideDetectionOverlays ? 'none' : '';
