@@ -45,6 +45,41 @@ def _make_fake_urlopen(payload: dict, captured_urls: list | None = None):
     return fake_urlopen
 
 
+def test_http_requests_use_bundled_ca_bundle(monkeypatch):
+    """Packaged builds must not rely on Python's build-time CA paths."""
+    from vireo import places
+
+    captured = {}
+
+    def fake_urlopen(url, *args, **kwargs):
+        captured.update(kwargs)
+        return _FakeResponse({"status": "ZERO_RESULTS"})
+
+    monkeypatch.setattr("vireo.places.urllib.request.urlopen", fake_urlopen)
+
+    assert places.place_details("missing", "FAKE_KEY") is None
+    assert captured["context"] is places._SSL_CONTEXT
+    assert places._SSL_CONTEXT.cert_store_stats()["x509_ca"] > 0
+
+
+def test_ssl_context_preserves_configured_roots_and_adds_bundled_roots(monkeypatch):
+    """The bundled roots augment rather than replace environment defaults."""
+    from vireo import places
+
+    class FakeContext:
+        loaded_cafiles = []
+
+        def load_verify_locations(self, *, cafile):
+            self.loaded_cafiles.append(cafile)
+
+    context = FakeContext()
+    monkeypatch.setattr(places.ssl, "create_default_context", lambda: context)
+    monkeypatch.setattr(places.certifi, "where", lambda: "/bundled/cacert.pem")
+
+    assert places._create_ssl_context() is context
+    assert context.loaded_cafiles == ["/bundled/cacert.pem"]
+
+
 def test_place_details_parses_response(monkeypatch):
     """Place Details OK response is normalized into the wrapper's dict shape."""
     from vireo import places
@@ -233,7 +268,7 @@ def test_reverse_geocode_raises_transient_on_network_failure(monkeypatch):
     transient — wrapper raises PlacesTransientError chained from the cause."""
     from vireo import places
 
-    def boom(url, timeout=10):
+    def boom(url, timeout=10, context=None):
         raise urllib.error.URLError("simulated network failure")
 
     monkeypatch.setattr("vireo.places.urllib.request.urlopen", boom)
