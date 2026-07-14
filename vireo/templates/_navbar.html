@@ -7483,7 +7483,12 @@ async function lightboxToggleWildlifeExcluded() {
 
 function lightboxDelete() {
   var overlay = document.getElementById('lightboxOverlay');
-  if (!_lightboxCurrentId || !overlay || !overlay.classList.contains('active')) return;
+  if (
+    _lbVisualTransitionPending ||
+    !_lightboxCurrentId ||
+    !overlay ||
+    !overlay.classList.contains('active')
+  ) return;
   var currentId = _lightboxCurrentId;
   var p = _lightboxPhotoList.find(function(x) { return x.id === currentId; });
   var companionCount = (p && p.companion_path) ? 1 : 0;

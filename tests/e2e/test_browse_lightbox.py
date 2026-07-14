@@ -427,6 +427,8 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     assert interaction_state["afterZoom"] == interaction_state["beforeZoom"]
     assert interaction_state["nativePhotoIds"] == []
     expect(page.locator(".vireo-ctx-menu")).to_have_count(0)
+    page.evaluate("window.lightboxDelete()")
+    expect(page.locator("#deleteModal")).not_to_have_class("modal-overlay open")
 
     while_loading = page.evaluate(
         """() => {
