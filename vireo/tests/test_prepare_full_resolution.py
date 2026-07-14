@@ -187,6 +187,16 @@ def test_preferred_offline_source_rejects_stale_companion(client_with_photo):
     assert used_cache is False
     assert source_path == os.path.join(folder_path, photo["filename"])
 
+    assert cache_photo_original(
+        db, photo, vireo_dir, folders,
+    )["status"] == "cached"
+    os.unlink(companion_path)
+    source_path, used_cache = resolve_original_path(
+        db, photo, vireo_dir, folders, prefer_cached=True,
+    )
+    assert used_cache is False
+    assert source_path == os.path.join(folder_path, photo["filename"])
+
 
 def test_prepare_full_resolution_validates_photo_ids(client_with_photo):
     app, _db, photo_id = client_with_photo

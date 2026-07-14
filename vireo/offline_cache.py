@@ -91,10 +91,13 @@ def resolve_original_path(
     cached = offline_original_abs(vireo_dir, offline_row)
     companion_is_current = True
     if photo["companion_path"] and folder_id in folders:
+        source_original = os.path.join(
+            folders[folder_id], photo["filename"],
+        )
         source_companion = os.path.join(
             folders[folder_id], photo["companion_path"],
         )
-        if os.path.isfile(source_companion):
+        if os.path.isfile(source_original):
             cached_companion = (
                 os.path.join(vireo_dir, offline_row["companion_path"])
                 if offline_row and offline_row["companion_path"]
