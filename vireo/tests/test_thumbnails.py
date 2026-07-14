@@ -909,6 +909,90 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
         assert raw_rgb[0] > 180 and raw_rgb[2] > 180
 
 
+def test_pair_source_ignored_for_jpeg_primary_with_raw_companion(
+    tmp_path, monkeypatch,
+):
+    """A JPEG primary with a RAW companion is not a RAW+JPEG pair — the server
+    must silently ignore ?source= overrides and always serve the canonical
+    JPEG pixels, matching the client behavior of not exposing a toggle."""
+    app, db, pid, _ = _make_app_with_real_photo(
+        tmp_path, monkeypatch, filename="developed.jpg",
+    )
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=(SELECT folder_id FROM photos WHERE id=?)",
+        (pid,),
+    ).fetchone()["path"]
+    companion = os.path.join(folder, "developed.nef")
+    Image.new("RGB", (400, 300), (10, 10, 10)).save(companion, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET companion_path='developed.nef' WHERE id=?", (pid,),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    # For a JPEG primary, both source overrides must fall through to the
+    # canonical render path (which serves the primary JPEG) rather than 404
+    # or reach into the RAW companion.
+    for suffix in ("?source=jpeg", "?source=raw", ""):
+        resp = client.get(f"/thumbnails/{pid}.jpg{suffix}")
+        assert resp.status_code == 200, (suffix, resp.status_code)
+    for suffix in ("?source=jpeg", "?source=raw"):
+        resp = client.get(f"/photos/{pid}/preview?size=1920&source={suffix.split('=')[1]}")
+        assert resp.status_code == 200, (suffix, resp.status_code)
+        resp = client.get(f"/photos/{pid}/original{suffix}")
+        assert resp.status_code == 200, (suffix, resp.status_code)
+
+
+def test_pair_source_gated_for_raw_primary_with_non_jpeg_companion(
+    tmp_path, monkeypatch,
+):
+    """A RAW primary paired with a non-JPEG sidecar (e.g. an XMP) is not a
+    RAW+JPEG pair. ``?source=raw`` should still serve RAW pixels since the
+    primary itself is RAW, but ``?source=jpeg`` has no valid target and must
+    fail cleanly — the client must not present a toggle UI for these."""
+    app, db, pid, _ = _make_app_with_real_photo(
+        tmp_path, monkeypatch, filename="bird.nef",
+    )
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=(SELECT folder_id FROM photos WHERE id=?)",
+        (pid,),
+    ).fetchone()["path"]
+    sidecar = os.path.join(folder, "bird.xmp")
+    with open(sidecar, "w") as fh:
+        fh.write("<x:xmpmeta/>")
+    db.conn.execute(
+        "UPDATE photos SET companion_path='bird.xmp' WHERE id=?", (pid,),
+    )
+    db.conn.commit()
+
+    import image_loader
+
+    real_load = image_loader.load_image
+
+    def load_selected(path, max_size=None, **kwargs):
+        if str(path).lower().endswith(".nef"):
+            return Image.new("RGB", (800, 600), (200, 30, 30))
+        return real_load(path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", load_selected)
+    import thumbnails
+    monkeypatch.setattr(thumbnails, "load_image", load_selected)
+
+    client = app.test_client()
+    # source=raw is honored (primary is RAW).
+    assert client.get(f"/thumbnails/{pid}.jpg?source=raw").status_code == 200
+    assert (
+        client.get(f"/photos/{pid}/preview?size=1920&source=raw").status_code == 200
+    )
+    assert client.get(f"/photos/{pid}/original?source=raw").status_code == 200
+    # source=jpeg has no target (companion is not JPEG) — fail cleanly, not 500.
+    assert client.get(f"/thumbnails/{pid}.jpg?source=jpeg").status_code == 404
+    assert (
+        client.get(f"/photos/{pid}/preview?size=1920&source=jpeg").status_code == 404
+    )
+    assert client.get(f"/photos/{pid}/original?source=jpeg").status_code == 404
+
+
 def test_serve_thumbnail_regenerates_on_cache_miss(tmp_path, monkeypatch):
     """When the thumbnail JPEG is missing on disk but the photo exists,
     the route must regenerate it and serve it — never 404 — and the
