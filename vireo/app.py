@@ -94,6 +94,7 @@ from services.local_folder import (
 from services.local_folder import (
     local_root_for_folder,
     local_root_under_folder,
+    local_roots_under_folder,
     workspace_ids_for_folder_tree,
     workspace_local_root_ids,
 )
@@ -10527,7 +10528,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "Sync or discard its local copy before removing it.",
                         409,
                     )
+            # Ancestor case: the folder being unlinked is not itself a staged
+            # root, but a descendant local session lives beneath it. Staging
+            # rebased the descendant's folders.path under local-folders/, so
+            # remove_workspace_folder_tree()'s folders.path subtree walk misses
+            # it and would leave a hidden non-root workspace_folders row that
+            # still contributes to affected_workspace_ids. Refuse when this
+            # workspace is the last remaining link (matches the exact-folder
+            # branch above); otherwise sweep the descendant session's rows
+            # ourselves after the standard subtree unlink.
+            descendant_root_ids = local_roots_under_folder(db, folder_id)
+            for descendant_id in descendant_root_ids:
+                linked_workspaces = local_folder_workspace_ids(db, descendant_id)
+                if linked_workspaces == [ws_id]:
+                    return json_error(
+                        "This workspace is the last one linked to a subfolder's "
+                        "local copy. Sync or discard the local copy before "
+                        "removing this folder.",
+                        409,
+                    )
             db.remove_workspace_folder_tree(ws_id, folder_id)
+            for descendant_id in descendant_root_ids:
+                rows = db.conn.execute(
+                    "SELECT folder_id FROM local_folder_mappings WHERE root_folder_id = ?",
+                    (descendant_id,),
+                ).fetchall()
+                for row in rows:
+                    db.conn.execute(
+                        "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                        (ws_id, int(row["folder_id"])),
+                    )
+            if descendant_root_ids:
+                db.conn.commit()
         # Unlinking a folder tree removes photos from the workspace's scope;
         # the cached ready payload would otherwise keep listing ghosts from
         # the now-detached folders until a manual rescan.

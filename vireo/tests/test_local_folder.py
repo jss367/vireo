@@ -10,6 +10,7 @@ from services.local_folder import (
     discard_folder,
     folder_status,
     local_root_under_folder,
+    local_roots_under_folder,
     stage_folder,
     sync_folder,
     workspace_status,
@@ -357,6 +358,215 @@ def test_relocate_ancestor_of_local_folder_refuses_with_409(tmp_path, monkeypatc
     )
     assert blocked_child.status_code == 409
     assert "shared local copy" in blocked_child.get_json()["error"]
+
+
+def test_local_roots_under_folder_enumerates_every_descendant_session(tmp_path):
+    """The plural variant must return every descendant session so the ancestor
+    unlink guard can check each session's linked-workspace list independently
+    and the workspace status aggregator can surface all of them at once."""
+    db = Database(str(tmp_path / "vireo.db"))
+    workspace_id = db.create_workspace("Ancestor")
+    parent = tmp_path / "nas" / "parent"
+    child_a = parent / "childA"
+    child_b = parent / "childB"
+    child_a.mkdir(parents=True)
+    child_b.mkdir(parents=True)
+    (child_a / "one.jpg").write_bytes(b"a")
+    (child_b / "two.jpg").write_bytes(b"b")
+    parent_id = db.add_folder(str(parent), name="parent", link_to_workspace=False)
+    child_a_id = db.add_folder(str(child_a), name="childA", parent_id=parent_id, link_to_workspace=False)
+    child_b_id = db.add_folder(str(child_b), name="childB", parent_id=parent_id, link_to_workspace=False)
+    db.add_workspace_folder(workspace_id, parent_id)
+    try:
+        assert local_roots_under_folder(db, parent_id) == []
+        stage_folder(db, child_a_id, str(tmp_path / "vireo"))
+        stage_folder(db, child_b_id, str(tmp_path / "vireo"))
+        assert local_roots_under_folder(db, parent_id) == sorted([child_a_id, child_b_id])
+        # Singular variant keeps returning a match (any one) for the guards
+        # that only need to know whether any descendant session exists.
+        assert local_root_under_folder(db, parent_id) in {child_a_id, child_b_id}
+    finally:
+        db.close()
+
+
+def test_workspace_status_surfaces_descendant_local_session(tmp_path):
+    """A workspace linking an ancestor sees the descendant session as its own
+    status item. Without this, /api/workspaces/active/local-folders reports
+    the workspace as fully remote and would offer Work Locally instead of
+    sync/discard controls while another workspace's session is active."""
+    db = Database(str(tmp_path / "vireo.db"))
+    parent_ws = db.create_workspace("Parent")
+    child_ws = db.create_workspace("Child")
+    parent = tmp_path / "nas" / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (child / "bird.jpg").write_bytes(b"original")
+    parent_id = db.add_folder(str(parent), name="parent", link_to_workspace=False)
+    child_id = db.add_folder(str(child), name="child", parent_id=parent_id, link_to_workspace=False)
+    db.add_workspace_folder(parent_ws, parent_id)
+    db.add_workspace_folder(child_ws, child_id)
+    try:
+        before = workspace_status(db, parent_ws, str(tmp_path / "vireo"))
+        assert before["state"] == "remote"
+        assert before["local_folder_count"] == 0
+
+        stage_folder(db, child_id, str(tmp_path / "vireo"))
+
+        after = workspace_status(db, parent_ws, str(tmp_path / "vireo"))
+        assert after["state"] == "mixed"
+        assert after["local_folder_count"] == 1
+        assert after["folder_count"] == 2  # /parent (remote) + descendant session
+        descendant_items = [item for item in after["folders"] if item["state"] != "remote"]
+        assert len(descendant_items) == 1
+        assert descendant_items[0]["root_folder_id"] == child_id
+        assert descendant_items[0]["source_path"] == str(child)
+        # The owning workspace still sees its own session directly.
+        owning = workspace_status(db, child_ws, str(tmp_path / "vireo"))
+        assert owning["state"] == "active"
+    finally:
+        db.close()
+
+
+def test_ancestor_workspace_can_sync_descendant_local_session(tmp_path, monkeypatch):
+    """A workspace linked to an ancestor of a staged folder must be able to
+    sync/discard the descendant session — the workspace-status surface makes
+    the session actionable in that workspace's UI, so the HTTP layer has to
+    accept the descendant's root_folder_id as a valid folder_ids target."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    parent = tmp_path / "nas" / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (child / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+    db = Database(db_path)
+    parent_ws = db.create_workspace("Parent")
+    child_ws = db.create_workspace("Child")
+    parent_id = db.add_folder(str(parent), name="parent", link_to_workspace=False)
+    child_id = db.add_folder(str(child), name="child", parent_id=parent_id, link_to_workspace=False)
+    db.add_workspace_folder(parent_ws, parent_id)
+    db.add_workspace_folder(child_ws, child_id)
+    db.set_active_workspace(child_ws)
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        assert client.post(f"/api/workspaces/{child_ws}/activate", json={}).status_code == 200
+        stage = client.post(
+            "/api/workspaces/active/local-folders/stage",
+            json={"folder_ids": [child_id]},
+        )
+        assert stage.status_code == 202
+        assert wait_for_job_via_client(client, stage.get_json()["job_id"])["status"] == "completed"
+
+        assert client.post(f"/api/workspaces/{parent_ws}/activate", json={}).status_code == 200
+        status = client.get("/api/workspaces/active/local-folders").get_json()
+        assert status["state"] == "mixed"
+        descendant_items = [item for item in status["folders"] if item["state"] != "remote"]
+        assert descendant_items and descendant_items[0]["root_folder_id"] == child_id
+
+        # Edit the local copy from the ancestor workspace's side and sync.
+        check_db = Database(db_path)
+        local_path = check_db.get_folder(child_id)["path"]
+        check_db.close()
+        Path(local_path, "bird.jpg").write_bytes(b"edited from parent workspace")
+
+        response = client.post(
+            "/api/workspaces/active/local-folders/sync",
+            json={"folder_ids": [child_id], "confirmed_deletion_counts": {str(child_id): 0}},
+        )
+        assert response.status_code == 202
+        assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
+        assert (child / "bird.jpg").read_bytes() == b"edited from parent workspace"
+
+
+def test_unlink_ancestor_of_shared_local_session_cleans_phantom_rows(tmp_path):
+    """Unlinking an ancestor while a descendant has a shared local copy must
+    also drop the workspace_folders row that materialization created for the
+    rebased descendant. Without the sweep, remove_workspace_folder_tree()'s
+    folders.path subtree walk misses the descendant (its path was rebased
+    under local-folders/) and leaves a hidden non-root row that still counts
+    toward affected_workspace_ids but no longer appears in the folder UI."""
+    from app import create_app
+    from services.local_folder import affected_workspace_ids
+
+    parent = tmp_path / "nas" / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (child / "bird.jpg").write_bytes(b"original")
+    thumbs = tmp_path / "thumbs"
+    thumbs.mkdir()
+    db_path = str(tmp_path / "vireo.db")
+
+    setup = Database(db_path)
+    parent_ws = setup.create_workspace("Parent")
+    child_ws = setup.create_workspace("Child")
+    parent_id = setup.add_folder(str(parent), name="parent", link_to_workspace=False)
+    child_id = setup.add_folder(str(child), name="child", parent_id=parent_id, link_to_workspace=False)
+    setup.add_workspace_folder(parent_ws, parent_id)
+    setup.add_workspace_folder(child_ws, child_id)
+    # Materialize descendants so the parent workspace inherits the child row
+    # the same way get_workspace_folders/materialize would have from the UI.
+    setup._materialize_workspace_descendants(parent_ws)
+    stage_folder(setup, child_id, str(tmp_path / "vireo"))
+    assert affected_workspace_ids(setup, child_id) == sorted([parent_ws, child_ws])
+    setup.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        assert client.post(f"/api/workspaces/{parent_ws}/activate", json={}).status_code == 200
+        response = client.delete(f"/api/workspaces/{parent_ws}/folders/{parent_id}")
+        assert response.status_code == 200
+
+    check_db = Database(db_path)
+    try:
+        row = check_db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id=? AND folder_id=?",
+            (parent_ws, child_id),
+        ).fetchone()
+        assert row is None, "phantom workspace_folders row survived ancestor unlink"
+        assert affected_workspace_ids(check_db, child_id) == [child_ws]
+    finally:
+        check_db.close()
+
+
+def test_unlink_ancestor_refuses_when_last_link_to_descendant_session(tmp_path):
+    """When only one workspace is linked to a descendant local session, the
+    ancestor-unlink guard must refuse just like the exact-folder branch.
+    Otherwise the unlink would orphan the local session (no workspaces
+    linked, but the manifest and folder rebasing still in place)."""
+    from app import create_app
+
+    parent = tmp_path / "nas" / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (child / "bird.jpg").write_bytes(b"original")
+    thumbs = tmp_path / "thumbs"
+    thumbs.mkdir()
+    db_path = str(tmp_path / "vireo.db")
+
+    setup = Database(db_path)
+    workspace_id = setup.create_workspace("Only")
+    parent_id = setup.add_folder(str(parent), name="parent", link_to_workspace=False)
+    child_id = setup.add_folder(str(child), name="child", parent_id=parent_id, link_to_workspace=False)
+    setup.add_workspace_folder(workspace_id, parent_id)
+    setup._materialize_workspace_descendants(workspace_id)
+    stage_folder(setup, child_id, str(tmp_path / "vireo"))
+    setup.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        assert client.post(f"/api/workspaces/{workspace_id}/activate", json={}).status_code == 200
+        response = client.delete(f"/api/workspaces/{workspace_id}/folders/{parent_id}")
+        assert response.status_code == 409
+        assert "subfolder" in response.get_json()["error"]
 
 
 def test_move_folder_job_rejects_ancestor_of_local_folder(tmp_path, monkeypatch):

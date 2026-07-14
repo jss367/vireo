@@ -15,6 +15,7 @@ from services.local_folder import (
     stage_folder,
     sync_folder,
     workspace_ids_for_folder_tree,
+    workspace_local_root_ids,
     workspace_status,
 )
 from services.local_workspace import local_state as legacy_local_state
@@ -42,16 +43,30 @@ def create_local_folder_blueprint(
 
     def _requested_roots(db, workspace_id, body, *, local_only=False):
         active_roots = set(_active_root_ids(db, workspace_id))
+        # A workspace can reach a shared local copy through a recursive
+        # ancestor (workspace A links /parent while workspace B stages
+        # /parent/child). workspace_status surfaces those descendant sessions
+        # in the folder-scoped local status; sync/discard has to accept the
+        # descendant's root_folder_id as a valid target too or the UI would
+        # show sync/discard controls that always 404.
+        descendant_local_roots: set[int] = set()
+        if local_only:
+            covered = {
+                local_root_for_folder(db, folder_id)
+                for folder_id in active_roots
+            } - {None}
+            descendant_local_roots = set(
+                workspace_local_root_ids(db, workspace_id)
+            ) - covered
         requested = body.get("folder_ids")
         if requested is None:
             if local_only:
-                return sorted(
-                    {
-                        local_root_for_folder(db, folder_id)
-                        for folder_id in active_roots
-                        if local_root_for_folder(db, folder_id) is not None
-                    }
-                ), None
+                active_local = {
+                    local_root_for_folder(db, folder_id)
+                    for folder_id in active_roots
+                    if local_root_for_folder(db, folder_id) is not None
+                }
+                return sorted(active_local | descendant_local_roots), None
             return sorted(active_roots), None
         if not isinstance(requested, list) or not requested:
             return None, json_error("folder_ids must be a non-empty list", 400)
@@ -61,12 +76,17 @@ def create_local_folder_blueprint(
                 folder_id = int(raw)
             except (TypeError, ValueError):
                 return None, json_error("folder_ids must contain integers", 400)
-            if folder_id not in active_roots:
-                return None, json_error(
-                    f"Folder {folder_id} is not a root of the active workspace", 404
-                )
-            covering = local_root_for_folder(db, folder_id)
-            result.append(covering if local_only and covering is not None else folder_id)
+            if folder_id in active_roots:
+                covering = local_root_for_folder(db, folder_id)
+                result.append(covering if local_only and covering is not None else folder_id)
+                continue
+            if local_only and folder_id in descendant_local_roots:
+                # The descendant session's root_folder_id is already a local root.
+                result.append(folder_id)
+                continue
+            return None, json_error(
+                f"Folder {folder_id} is not a root of the active workspace", 404
+            )
         return sorted(set(result)), None
 
     def _busy_job(db, root_ids, initiating_workspace_id):
@@ -105,11 +125,16 @@ def create_local_folder_blueprint(
 
         jobs = []
         active_roots = set(_active_root_ids(db, workspace_id))
+        # Include descendant local sessions (workspace A links /parent while
+        # workspace B stages /parent/child): workspace_status surfaces them,
+        # so an in-flight sync/discard against those roots has to appear in
+        # A's jobs list too — otherwise the UI shows a stale "active" state
+        # after the owning workspace kicks off a sync.
         local_roots = {
             local_root_for_folder(db, folder_id)
             for folder_id in active_roots
             if local_root_for_folder(db, folder_id) is not None
-        }
+        } | set(workspace_local_root_ids(db, workspace_id))
         for job in get_runner().list_jobs():
             if job.get("status") not in {"queued", "running"}:
                 continue

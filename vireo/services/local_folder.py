@@ -124,23 +124,25 @@ def local_root_for_folder(db, folder_id: int) -> int | None:
     return int(row["root_folder_id"]) if row else None
 
 
-def local_root_under_folder(db, folder_id: int) -> int | None:
-    """Return a local-session root whose source lives inside ``folder_id``.
+def local_roots_under_folder(db, folder_id: int) -> list[int]:
+    """Return every local-session root whose source lives inside ``folder_id``.
 
     Staging rebases the child folder row's ``folders.path`` under
     ``local-folders/``, so a subtree scan on ``folders.path`` (as
     ``delete_folder``/``relocate_folder`` do) no longer sees it — while
     ``local_folder_mappings.source_path`` still records the original
-    location beneath the ancestor. Folder-level mutations must consult
-    the recorded ``source_path`` so ancestor deletes/relocates refuse
-    with 409 instead of tripping the parent_id FK when the row is gone.
+    location beneath the ancestor. Callers that must consider every
+    affected descendant session (workspace status aggregation, ancestor
+    unlink cleanup) use this; guards that only need to refuse on any
+    match use :func:`local_root_under_folder` for a cheap short-circuit.
     """
     row = db.conn.execute(
         "SELECT path FROM folders WHERE id=?", (folder_id,)
     ).fetchone()
     if row is None or not row["path"]:
-        return None
+        return []
     folder_path = row["path"]
+    result: set[int] = set()
     for entry in db.conn.execute(
         "SELECT root_folder_id, source_path FROM local_folder_mappings WHERE is_root=1"
     ).fetchall():
@@ -148,8 +150,20 @@ def local_root_under_folder(db, folder_id: int) -> int | None:
         if not source or source == folder_path:
             continue
         if _is_within(source, folder_path):
-            return int(entry["root_folder_id"])
-    return None
+            result.add(int(entry["root_folder_id"]))
+    return sorted(result)
+
+
+def local_root_under_folder(db, folder_id: int) -> int | None:
+    """Return one local-session root whose source lives inside ``folder_id``.
+
+    Short-circuit variant of :func:`local_roots_under_folder`; guards that
+    only need to know whether *any* descendant session exists (delete,
+    relocate, move) use this to refuse with 409 instead of enumerating
+    every match.
+    """
+    roots = local_roots_under_folder(db, folder_id)
+    return roots[0] if roots else None
 
 
 def folder_has_local_copy(db, folder_id: int) -> bool:
@@ -508,6 +522,26 @@ def workspace_status(db, workspace_id: int, vireo_dir: str) -> dict:
         items.append(status)
         if status["state"] != "remote":
             seen_sessions.add(status["root_folder_id"])
+    # A workspace can also reach a shared local copy through a recursive
+    # ancestor: e.g. this workspace links /parent while another workspace
+    # stages /parent/child. Staging rebased the child's folders.path under
+    # local-folders/, so the loop above (keyed on the user-facing root)
+    # sees folder_status(/parent) as remote and would report the workspace
+    # as fully remote — hiding local work and offering Work Locally instead
+    # of sync/discard. Surface each descendant session as its own item so
+    # the UI reflects that this workspace's catalog is partly rebased.
+    for local_root_id in workspace_local_root_ids(db, workspace_id):
+        if local_root_id in seen_sessions:
+            continue
+        descendant_status = folder_status(db, local_root_id, vireo_dir)
+        descendant_status["requested_folder_id"] = local_root_id
+        descendant_status["display_path"] = descendant_status.get("source_path") or ""
+        # Photo count belongs to the user-facing ancestor root's tally;
+        # counting it again here would double-count.
+        descendant_status["workspace_photo_count"] = 0
+        items.append(descendant_status)
+        if descendant_status["state"] != "remote":
+            seen_sessions.add(descendant_status["root_folder_id"])
     local_count = sum(1 for item in items if item["state"] != "remote")
     state = "remote" if local_count == 0 else "active" if local_count == len(items) else "mixed"
     return {
