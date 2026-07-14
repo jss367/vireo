@@ -12,6 +12,7 @@ from services.local_folder import (
     discard_folder,
     folder_status,
     local_root_for_folder,
+    local_root_under_folder,
     stage_folder,
     sync_folder,
     workspace_ids_for_folder_tree,
@@ -160,9 +161,25 @@ def create_local_folder_blueprint(
         root_ids, request_error = _requested_roots(db, workspace_id, body)
         if request_error is not None:
             return request_error
-        root_ids = [root_id for root_id in root_ids if local_root_for_folder(db, root_id) is None]
+        # Filter out roots already covered by a local session — either exactly
+        # (this root is a staged local root) or as an ancestor of one (a
+        # descendant is staged, so the workspace has partial local coverage
+        # here already). stage_folder() would otherwise reject the ancestor
+        # case with an "overlaps existing local copy" error mid-job, failing
+        # the whole bulk stage and leaving the sibling remote roots unstaged.
+        remaining = []
+        for root_id in root_ids:
+            if local_root_for_folder(db, root_id) is not None:
+                continue
+            if local_root_under_folder(db, root_id) is not None:
+                continue
+            remaining.append(root_id)
+        root_ids = remaining
         if not root_ids:
-            return json_error("The selected folders are already local", 409)
+            return json_error(
+                "The selected folders are already local or contain a folder working locally",
+                409,
+            )
         runner = get_runner()
 
         def work(job):

@@ -871,3 +871,79 @@ def test_workspace_ids_for_folder_tree_includes_ancestor_linked_workspaces(tmp_p
         assert sorted(result) == sorted([parent_ws, child_ws])
     finally:
         db.close()
+
+
+def test_bulk_stage_skips_ancestor_of_descendant_local_session(tmp_path):
+    """Bulk "Make All Folders Local" from the workspace UI derives its root list
+    from the workspace's user-facing roots. If one of those roots already
+    contains a descendant local session (workspace A links ``/parent`` and
+    another workspace has ``/parent/child`` staged), staging ``/parent`` would
+    deterministically fail with an "overlaps existing local copy" error and
+    take the whole job — including the sibling remote roots — down with it.
+    The endpoint must filter out ancestor-of-descendant roots the same way it
+    filters exact-match local roots, so sibling remote roots still get staged
+    and the reason the ancestor was skipped is reported synchronously."""
+    from app import create_app
+
+    parent = tmp_path / "nas" / "parent"
+    child = parent / "child"
+    other = tmp_path / "nas" / "other"
+    child.mkdir(parents=True)
+    other.mkdir(parents=True)
+    (child / "bird.jpg").write_bytes(b"original")
+    (other / "fox.jpg").write_bytes(b"original")
+    thumbs = tmp_path / "thumbs"
+    thumbs.mkdir()
+    db_path = str(tmp_path / "vireo.db")
+
+    setup = Database(db_path)
+    workspace_id = setup.create_workspace("Mixed")
+    parent_id = setup.add_folder(str(parent), name="parent", link_to_workspace=False)
+    child_id = setup.add_folder(
+        str(child), name="child", parent_id=parent_id, link_to_workspace=False,
+    )
+    other_id = setup.add_folder(str(other), name="other", link_to_workspace=False)
+    setup.add_workspace_folder(workspace_id, parent_id)
+    setup.add_workspace_folder(workspace_id, other_id)
+    setup._materialize_workspace_descendants(workspace_id)
+    # Stage the child from a second workspace so this workspace reaches the
+    # local session through its ancestor root.
+    other_ws = setup.create_workspace("Staging")
+    setup.add_workspace_folder(other_ws, child_id)
+    stage_folder(setup, child_id, str(tmp_path / "vireo"))
+    setup.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        assert client.post(f"/api/workspaces/{workspace_id}/activate", json={}).status_code == 200
+
+        # Explicit stage of the ancestor root alone: must 409 synchronously.
+        blocked = client.post(
+            "/api/workspaces/active/local-folders/stage",
+            json={"folder_ids": [parent_id]},
+        )
+        assert blocked.status_code == 409, blocked.get_json()
+        assert "already local" in blocked.get_json()["error"] or "working locally" in blocked.get_json()["error"]
+
+        # Implicit bulk stage (no folder_ids): must skip the ancestor and
+        # stage only the sibling remote root, not enqueue a job that fails.
+        response = client.post(
+            "/api/workspaces/active/local-folders/stage", json={},
+        )
+        assert response.status_code == 202, response.get_json()
+        body = response.get_json()
+        assert body["folder_ids"] == [other_id]
+        assert wait_for_job_via_client(client, body["job_id"])["status"] == "completed"
+
+    check_db = Database(db_path)
+    try:
+        # Sibling got staged; ancestor's user-facing path is unchanged.
+        # ``create_app`` derives ``vireo_dir`` from the thumbnail cache's
+        # parent, so the staged local-folders/ tree lives alongside it.
+        assert check_db.get_folder(other_id)["path"].startswith(
+            str(tmp_path / "local-folders")
+        )
+        assert check_db.get_folder(parent_id)["path"] == str(parent)
+    finally:
+        check_db.close()
