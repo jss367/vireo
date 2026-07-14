@@ -617,6 +617,21 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
         # external cache wipe). Keep the column in sync so the pipeline
         # planner's "thumb_path IS NULL" gate matches disk reality.
         thumb_removed = True
+    # Explicit RAW/JPEG pair views use source-specific thumbnail names. They
+    # derive from the same source bytes and must be invalidated alongside the
+    # legacy thumbnail, especially when a hash change preserves file mtime.
+    for source in ("raw", "jpeg"):
+        variant_path = os.path.join(thumb_dir, f"{photo_id}_{source}.jpg")
+        if not os.path.exists(variant_path):
+            continue
+        try:
+            os.remove(variant_path)
+        except OSError:
+            log.debug(
+                "Could not delete stale paired thumbnail %s",
+                variant_path,
+                exc_info=True,
+            )
     if thumb_removed:
         # Mirror the working_copy_path / preview_cache cleanup below: any
         # path that drops the cached thumbnail file must also clear

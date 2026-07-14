@@ -2781,6 +2781,10 @@ def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
     thumb_path = str(cache_dir / f"{photo_id}.jpg")
     generate_thumbnail(photo_id, img_path, str(cache_dir))
     assert os.path.exists(thumb_path)
+    raw_variant = cache_dir / f"{photo_id}_raw.jpg"
+    jpeg_variant = cache_dir / f"{photo_id}_jpeg.jpg"
+    raw_variant.write_bytes(b"stale raw thumbnail")
+    jpeg_variant.write_bytes(b"stale jpeg thumbnail")
 
     # Replace file content (same filename, different pixels → new hash + new mtime)
     time.sleep(0.05)
@@ -2804,6 +2808,8 @@ def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
         "Scanner must invalidate the cached thumbnail when file content changes; "
         "leaving it on disk is how thumbnail/full-image mismatches get baked in."
     )
+    assert not raw_variant.exists()
+    assert not jpeg_variant.exists()
 
 
 def test_rescan_clears_thumb_path_column_when_content_changes(tmp_path):
