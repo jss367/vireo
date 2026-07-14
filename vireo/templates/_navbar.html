@@ -3641,7 +3641,7 @@ var _lbPhotoDataByPhoto = {};
 var _lbRenderVersionByPhoto = {};
 
 function _lbSetPhotoTransitionPending(pending) {
-  ['lightboxActions', 'lightboxAdjustPanel'].forEach(function(id) {
+  ['lightboxActions', 'lightboxAdjustPanel', 'syncLightboxPanel'].forEach(function(id) {
     var controls = document.getElementById(id);
     if (!controls) return;
     controls.classList.toggle('lb-photo-transition-pending', !!pending);
