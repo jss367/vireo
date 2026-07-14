@@ -351,6 +351,22 @@ body.sidebar-resizing {
   margin-top: 4px;
 }
 .grid-card-rating { font-size: 12px; color: var(--warning); }
+.grid-location-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.grid-location-status.exif { color: var(--accent); }
+.grid-location-status.assigned { color: var(--info); }
+.grid-location-status.none { color: var(--text-ghost); }
 .grid-card-flag {
   font-size: 10px;
   padding: 1px 5px;
@@ -972,6 +988,21 @@ body.sidebar-resizing {
   font-size: 11px;
   color: var(--warning);
 }
+.coordinate-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0 0 8px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 5px;
+  padding: 7px 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.coordinate-status.exif { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-secondary)); }
+.coordinate-status.assigned { border-color: color-mix(in srgb, var(--info) 45%, var(--border-secondary)); }
+.coordinate-status.none { color: var(--text-ghost); }
 /* Google Places autocomplete dropdown z-index — must sit above the detail panel. */
 .pac-container { z-index: 10000 !important; }
 .detail-summary {
@@ -1548,6 +1579,12 @@ body.sidebar-resizing {
         <option value="blue">Blue</option>
         <option value="purple">Purple</option>
       </select>
+      <select id="locationStatusFilter" onchange="applyFilters()" title="Filter by coordinate source" style="font-size:12px;">
+        <option value="">Coordinates: Any</option>
+        <option value="exif">EXIF GPS</option>
+        <option value="assigned">Assigned map location</option>
+        <option value="none">No coordinates</option>
+      </select>
       <select id="sortSelect" onchange="applyFilters()" title="Sort order">
         <option value="date">Capture date (oldest)</option>
         <option value="date_desc">Capture date (newest)</option>
@@ -1775,6 +1812,7 @@ body.sidebar-resizing {
 
       <div class="detail-section location-section" id="locationSection">
         <div class="detail-section-title">Location</div>
+        <div id="locationCoordinateStatus" class="coordinate-status none"></div>
         <div id="locationFilled" class="single-only" hidden></div>
         <div id="locationEmpty">
           <div class="keyword-autocomplete">
@@ -2001,7 +2039,7 @@ var selectionKeywordMissingById = {};
 var selectionKeywordPresentById = {};
 var selectionKeywordNameById = {};
 var showDetectionBoxes = false;
-var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
+var cardFields = ["filename", "location_status", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
 // Which photo ids we've confirmed color-label state for. `colorLabels[id]`
@@ -2444,6 +2482,7 @@ function bindKeywordAutocomplete(inputId, dropdownId, submitFn) {
 function hasActiveBrowseFilter() {
   var searchInput = document.getElementById('searchInput');
   var colorFilter = document.getElementById('colorFilter');
+  var locationStatusFilter = document.getElementById('locationStatusFilter');
   var dateFrom = document.getElementById('dateFrom');
   var dateTo = document.getElementById('dateTo');
   return !!(
@@ -2455,6 +2494,7 @@ function hasActiveBrowseFilter() {
     flagFilter ||
     (searchInput && searchInput.value.trim()) ||
     (colorFilter && colorFilter.value) ||
+    (locationStatusFilter && locationStatusFilter.value) ||
     (dateFrom && dateFrom.value) ||
     (dateTo && dateTo.value)
   );
@@ -2503,6 +2543,16 @@ function renderCardField(field, p) {
   switch (field) {
     case 'filename':
       return '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>';
+    case 'location_status':
+      var locationStatus = p.location_status || 'none';
+      var locationLabels = {
+        exif: ['📍', 'EXIF GPS', 'Embedded GPS coordinates from the photo'],
+        assigned: ['●', 'Assigned map location', 'Map coordinates from an assigned Vireo location'],
+        none: ['⊘', 'No coordinates', 'No EXIF GPS or assigned map coordinates']
+      };
+      var locationLabel = locationLabels[locationStatus] || locationLabels.none;
+      return '<span class="grid-location-status ' + locationStatus + '" title="' + escapeAttr(locationLabel[2]) + '">' +
+        locationLabel[0] + ' ' + locationLabel[1] + '</span>';
     case 'rating':
       if (p.rating > 0) {
         var stars = '';
@@ -2835,7 +2885,17 @@ async function bootstrapBrowse() {
   var bootstrapSucceeded = false;
   try {
     applyBrowseConfig(await _cfgPromise);
-    var data = await safeFetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
+    var pageParams = new URLSearchParams(window.location.search);
+    var initialLocationStatus = pageParams.get('location_status') || '';
+    if (!initialLocationStatus && pageParams.get('missing_gps') === '1') {
+      initialLocationStatus = 'none';
+    }
+    if (['exif', 'assigned', 'none'].indexOf(initialLocationStatus) !== -1) {
+      document.getElementById('locationStatusFilter').value = initialLocationStatus;
+    }
+    var initParams = buildCurrentBrowseParams();
+    initParams.set('per_page', perPage);
+    var data = await safeFetch('/api/browse/init?' + initParams.toString());
 
     // Populate everything from a single response
     photos = data.photos || [];
@@ -3902,6 +3962,9 @@ function buildCurrentBrowseParams() {
   var colorFilter = document.getElementById('colorFilter').value;
   if (colorFilter) params.set('color_label', colorFilter);
 
+  var locationStatus = document.getElementById('locationStatusFilter').value;
+  if (locationStatus) params.set('location_status', locationStatus);
+
   var dateFrom = document.getElementById('dateFrom').value;
   var dateTo = document.getElementById('dateTo').value;
   if (dateFrom) params.set('date_from', dateFrom);
@@ -4062,6 +4125,8 @@ async function loadCalendarData() {
   if (flagFilter) params.set('flag', flagFilter);
   var colorFilter = document.getElementById('colorFilter').value;
   if (colorFilter) params.set('color_label', colorFilter);
+  var locationStatus = document.getElementById('locationStatusFilter').value;
+  if (locationStatus) params.set('location_status', locationStatus);
   appendKeywordSearchParams(params);
 
   calendarData = await safeFetch('/api/photos/calendar?' + params.toString());
@@ -4208,6 +4273,12 @@ function calendarChangeYear(delta) {
 }
 
 function applyFilters() {
+  var locationStatus = document.getElementById('locationStatusFilter').value;
+  var url = new URL(window.location.href);
+  if (locationStatus) url.searchParams.set('location_status', locationStatus);
+  else url.searchParams.delete('location_status');
+  url.searchParams.delete('missing_gps');
+  window.history.replaceState({}, '', url.pathname + url.search);
   if (timelineMode) loadCalendarData();
   activeCollectionId = null;
   reloadBrowseResults();
@@ -4304,6 +4375,8 @@ function appendClipSearchScopeParams(params) {
 
   var colorFilter = document.getElementById('colorFilter').value;
   if (colorFilter) params.set('color_label', colorFilter);
+  var locationStatus = document.getElementById('locationStatusFilter').value;
+  if (locationStatus) params.set('location_status', locationStatus);
 
   var dateFrom = document.getElementById('dateFrom').value;
   var dateTo = document.getElementById('dateTo').value;
@@ -6283,6 +6356,7 @@ function renderDetail(photo) {
   var detailThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
   document.getElementById('detailImg').src = detailThumb;
   document.getElementById('detailFilename').textContent = photo.filename;
+  renderCoordinateStatus(photo);
 
   // Rating stars
   var ratingHtml = '';
@@ -6567,6 +6641,8 @@ async function loadSummary() {
   if (flagFilter) params.set('flag', flagFilter);
   var colorFilter = document.getElementById('colorFilter').value;
   if (colorFilter) params.set('color_label', colorFilter);
+  var locationStatus = document.getElementById('locationStatusFilter').value;
+  if (locationStatus) params.set('location_status', locationStatus);
   var dateFrom = document.getElementById('dateFrom').value;
   var dateTo = document.getElementById('dateTo').value;
   if (dateFrom) params.set('date_from', dateFrom);
@@ -6809,6 +6885,27 @@ function _batchColorLoaded(ids) {
 function renderBatchInspector(ids, opts) {
   opts = opts || {};
   var known = _batchAllLoaded(ids);
+
+  var coordinateEl = document.getElementById('locationCoordinateStatus');
+  if (coordinateEl) {
+    if (!known) {
+      coordinateEl.className = 'coordinate-status none';
+      coordinateEl.textContent = 'Coordinate sources are mixed or still loading for this selection.';
+    } else {
+      var counts = {exif: 0, assigned: 0, none: 0};
+      ids.forEach(function(id) {
+        var p = photos.find(function(photo) { return photo.id === id; });
+        var status = p && counts[p.location_status] != null ? p.location_status : 'none';
+        counts[status]++;
+      });
+      coordinateEl.className = 'coordinate-status';
+      coordinateEl.textContent = [
+        counts.exif + ' EXIF GPS',
+        counts.assigned + ' assigned map location' + (counts.assigned === 1 ? '' : 's'),
+        counts.none + ' without coordinates'
+      ].join(' · ');
+    }
+  }
 
   var rs = known ? _batchRatingState(ids) : { unanimous: false, value: 0 };
   var r = rs.unanimous ? rs.value : 0;
@@ -7080,7 +7177,28 @@ async function _afterLocationMutation(photoIds, detailPhotoId) {
     await filterByCollection(activeCollectionId);
     return;
   }
-  if (photoIds && photoIds.length) refreshGridCards(photoIds);
+  if (document.getElementById('locationStatusFilter').value) {
+    resetAndLoad();
+    return;
+  }
+  if (photoIds && photoIds.length) {
+    var loadedIds = new Set(photos.map(function(photo) { return photo.id; }));
+    var idsToRefresh = photoIds.filter(function(id) { return loadedIds.has(id); });
+    try {
+      for (var offset = 0; offset < idsToRefresh.length; offset += 500) {
+        var statusData = await safeFetch('/api/photos/by-ids', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({photo_ids: idsToRefresh.slice(offset, offset + 500)})
+        }, {toast: false});
+        (statusData.photos || []).forEach(function(updated) {
+          var local = photos.find(function(photo) { return photo.id === updated.id; });
+          if (local) local.location_status = updated.location_status || 'none';
+        });
+      }
+    } catch (e) {}
+    refreshGridCards(idsToRefresh);
+  }
   // If a multi-selection is still active, keep the batch inspector rendered.
   // Falling through to loadDetail(anchor) would strip .batch-mode and rewire
   // the rating stars to setRating(anchorId, i) — collapsing the panel to the
@@ -7272,6 +7390,31 @@ function clearExifSuggestion() {
   sugg.hidden = true;
   sugg.innerHTML = '';
   if (sugg.dataset) delete sugg.dataset.photoId;
+}
+
+function formatCoordinatePair(latitude, longitude) {
+  if (latitude == null || longitude == null) return '';
+  return Number(latitude).toFixed(5) + ', ' + Number(longitude).toFixed(5);
+}
+
+function renderCoordinateStatus(photo) {
+  var el = document.getElementById('locationCoordinateStatus');
+  if (!el) return;
+  var status = photo && photo.location_status ? photo.location_status : 'none';
+  var text;
+  if (status === 'exif') {
+    text = '📍 EXIF GPS — ' + formatCoordinatePair(photo.latitude, photo.longitude) +
+      '. Embedded in the original photo and used on the map.';
+  } else if (status === 'assigned') {
+    var loc = photo.location || {};
+    var coords = formatCoordinatePair(loc.latitude, loc.longitude);
+    text = '● Assigned map location' + (coords ? ' — ' + coords : '') +
+      '. The original photo does not contain a complete EXIF GPS pair.';
+  } else {
+    text = '⊘ No coordinates — this photo has no complete EXIF GPS pair or assigned map location.';
+  }
+  el.className = 'coordinate-status ' + status;
+  el.textContent = text;
 }
 
 function renderLocationFilled(loc) {

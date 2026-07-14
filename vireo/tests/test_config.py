@@ -718,6 +718,35 @@ def test_migrate_toggle_ui_h_conflict_no_config_file(tmp_path, monkeypatch):
     assert cfg.MIGRATION_TOGGLE_UI_H_CONFLICT in raw["_migrations_applied"]
 
 
+def test_migrate_browse_location_status_rewrites_exact_legacy_default(
+    tmp_path, monkeypatch
+):
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "browse_card_fields": ["filename", "rating", "flag", "sharpness"],
+    })
+
+    assert cfg.migrate_browse_location_status_field() is True
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["browse_card_fields"] == [
+        "filename", "location_status", "rating", "flag", "sharpness"
+    ]
+    assert cfg.MIGRATION_BROWSE_LOCATION_STATUS in raw["_migrations_applied"]
+
+
+def test_migrate_browse_location_status_preserves_custom_layout(
+    tmp_path, monkeypatch
+):
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    custom = ["filename", "species"]
+    _write_raw(cfg.CONFIG_PATH, {"browse_card_fields": custom})
+
+    assert cfg.migrate_browse_location_status_field() is False
+    assert _read_raw(cfg.CONFIG_PATH)["browse_card_fields"] == custom
+
+
 def test_migrate_eye_detect_default_off_rewrites_legacy_true(
     tmp_path, monkeypatch
 ):

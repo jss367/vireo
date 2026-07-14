@@ -145,22 +145,22 @@ def run(session):
             "(document.getElementById('mapStatus') || {}).textContent || ''"
         )
         # The status bar either shows the explicit "No geolocated photos
-        # found" message or "Showing 0 of 0 geolocated photos | 0% GPS
+        # found" message or "Showing 0 of 0 geolocated photos | 0% map
         # coverage".  Match those exact zero shapes — a substring check
-        # for "0%" would also match "100% GPS coverage", and "Showing 0"
+        # for "0%" would also match "100% map coverage", and "Showing 0"
         # would match "Showing 0 of 100" (visible-after-filtering, not a
         # zero-GPS state).
         zero_gps_status = (
             "No geolocated" in status_text
             or (
                 re.search(r"\bShowing 0 of 0\b", status_text) is not None
-                and re.search(r"(?<!\d)0% GPS coverage\b", status_text) is not None
+                and re.search(r"(?<!\d)0% map coverage\b", status_text) is not None
             )
         )
         session.assert_that(
             zero_gps_status,
-            "expected zero-GPS status ('No geolocated' message or "
-            f"'Showing 0 of 0' + '0% GPS coverage'), got {status_text!r}",
+            "expected zero-coordinate status ('No geolocated' message or "
+            f"'Showing 0 of 0' + '0% map coverage'), got {status_text!r}",
         )
 
         sidebar_text = session.eval(
