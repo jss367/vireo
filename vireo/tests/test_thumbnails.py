@@ -839,23 +839,34 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
             )
 
     client = app.test_client()
-    jpeg_thumb = client.get(f"/thumbnails/{pid}.jpg?source=jpeg")
-    raw_thumb = client.get(f"/thumbnails/{pid}.jpg?source=raw")
-    assert center_rgb(jpeg_thumb)[1] > 180
-    assert center_rgb(raw_thumb)[0] > 180
+
+    def fetch_center(url):
+        """Fetch a URL and return its center RGB, closing the response so
+        Windows doesn't hold the sent file open (werkzeug's FileWrapper
+        keeps the fd until Response.close())."""
+        resp = client.get(url)
+        try:
+            return resp.status_code, center_rgb(resp) if resp.status_code == 200 else None
+        finally:
+            resp.close()
+
+    jpeg_thumb_status, jpeg_thumb_rgb = fetch_center(f"/thumbnails/{pid}.jpg?source=jpeg")
+    raw_thumb_status, raw_thumb_rgb = fetch_center(f"/thumbnails/{pid}.jpg?source=raw")
+    assert jpeg_thumb_rgb[1] > 180
+    assert raw_thumb_rgb[0] > 180
     assert os.path.isfile(os.path.join(thumb_dir, f"{pid}_jpeg.jpg"))
     assert os.path.isfile(os.path.join(thumb_dir, f"{pid}_raw.jpg"))
 
-    jpeg_preview = client.get(f"/photos/{pid}/preview?size=1920&source=jpeg")
-    raw_preview = client.get(f"/photos/{pid}/preview?size=1920&source=raw")
-    assert center_rgb(jpeg_preview)[1] > 180
-    assert center_rgb(raw_preview)[0] > 180
+    _, jpeg_preview_rgb = fetch_center(f"/photos/{pid}/preview?size=1920&source=jpeg")
+    _, raw_preview_rgb = fetch_center(f"/photos/{pid}/preview?size=1920&source=raw")
+    assert jpeg_preview_rgb[1] > 180
+    assert raw_preview_rgb[0] > 180
     assert db.preview_cache_get(pid, 1920) is None
 
-    jpeg_original = client.get(f"/photos/{pid}/original?source=jpeg")
-    raw_original = client.get(f"/photos/{pid}/original?source=raw")
-    assert center_rgb(jpeg_original)[1] > 180
-    assert center_rgb(raw_original)[0] > 180
+    _, jpeg_original_rgb = fetch_center(f"/photos/{pid}/original?source=jpeg")
+    _, raw_original_rgb = fetch_center(f"/photos/{pid}/original?source=raw")
+    assert jpeg_original_rgb[1] > 180
+    assert raw_original_rgb[0] > 180
 
     os.remove(companion)
     assert client.get(f"/thumbnails/{pid}.jpg?source=jpeg").status_code == 404
