@@ -25076,13 +25076,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if primary_is_raw
             else RAW_DECODE_PRESERVE_HIGHLIGHTS
         )
-        if extract_working_copy(
-            source_for_extraction,
-            wc_abs,
-            max_size=0,
-            quality=quality,
-            raw_decode=extraction_decode,
-        ):
+
+        def _extract_original_copy(source_path):
+            output_path = wc_abs
+            tmp_path = None
+            if primary_is_raw:
+                fd, tmp_path = tempfile.mkstemp(
+                    prefix=f".{photo_id}.display.",
+                    suffix=".jpg.tmp",
+                    dir=os.path.dirname(wc_abs),
+                )
+                os.close(fd)
+                output_path = tmp_path
+            try:
+                extracted = extract_working_copy(
+                    source_path,
+                    output_path,
+                    max_size=0,
+                    quality=quality,
+                    raw_decode=extraction_decode,
+                )
+                if extracted and tmp_path:
+                    os.replace(tmp_path, wc_abs)
+                    tmp_path = None
+                return extracted
+            finally:
+                if tmp_path:
+                    with contextlib.suppress(OSError):
+                        os.unlink(tmp_path)
+
+        if _extract_original_copy(source_for_extraction):
             # Update DB so future requests are fast; also backfill
             # dimensions if missing so the full-res shortcut works next time
             from PIL import Image as _PILImage
@@ -25117,11 +25140,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "from companion JPEG",
                         photo_id, uw, uh, expected_w, expected_h,
                     )
-                    if extract_working_copy(
-                        companion_for_extraction, wc_abs,
-                        max_size=0, quality=quality,
-                        raw_decode=extraction_decode,
-                    ):
+                    if _extract_original_copy(companion_for_extraction):
                         with _PILImage.open(wc_abs) as upgraded:
                             uw, uh = upgraded.size
                     else:
@@ -25152,13 +25171,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             resolved_ext in RAW_EXTENSIONS
             and companion_for_extraction
             and companion_for_extraction != source_for_extraction
-            and extract_working_copy(
-                companion_for_extraction,
-                wc_abs,
-                max_size=0,
-                quality=quality,
-                raw_decode=extraction_decode,
-            )
+            and _extract_original_copy(companion_for_extraction)
         ):
             from PIL import Image as _PILImage
             with _PILImage.open(wc_abs) as upgraded:
@@ -25234,21 +25247,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if img is not None:
                 image_path = companion_for_extraction
         if img is None:
+            _record_working_copy_failure(db, photo, image_path)
             if primary_is_raw and trusted_wc_path:
                 # Source/offline bytes are unavailable. A working copy is less
                 # faithful to the camera rendition, but remains the best usable
                 # full-resolution fallback and preserves offline behavior.
                 return send_file(trusted_wc_path, mimetype="image/jpeg")
-            _record_working_copy_failure(db, photo, image_path)
             return "Could not load image", 500
         if primary_is_raw:
             cache_path = display_cache_path
             os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=f".{photo_id}.display.",
+                suffix=".jpg.tmp",
+                dir=os.path.dirname(cache_path),
+            )
+            os.close(fd)
+            try:
+                img.save(tmp_path, format="JPEG", quality=quality)
+                os.replace(tmp_path, cache_path)
+            except Exception:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+                raise
         else:
             originals_dir = os.path.join(vireo_dir, "originals")
             cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
             os.makedirs(originals_dir, exist_ok=True)
-        img.save(cache_path, format="JPEG", quality=quality)
+            img.save(cache_path, format="JPEG", quality=quality)
         img.close()
         return send_file(cache_path, mimetype="image/jpeg")
 

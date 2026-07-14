@@ -1346,13 +1346,21 @@ def test_unedited_raw_original_uses_camera_display_cache_not_working_copy(
     db.conn.commit()
 
     calls = []
+    replacements = []
+    import app as app_module
+    real_replace = app_module.os.replace
 
     def camera_extract(source, output, **kwargs):
         calls.append((os.fspath(source), os.fspath(output), kwargs))
         Image.new("RGB", (800, 600), (220, 220, 220)).save(output, "JPEG")
         return True
 
+    def tracking_replace(source, destination):
+        replacements.append((os.fspath(source), os.fspath(destination)))
+        return real_replace(source, destination)
+
     monkeypatch.setattr(image_loader, "extract_working_copy", camera_extract)
+    monkeypatch.setattr(app_module.os, "replace", tracking_replace)
 
     first = client.get(f"/photos/{photo_id}/original")
     second = client.get(f"/photos/{photo_id}/original")
@@ -1362,8 +1370,13 @@ def test_unedited_raw_original_uses_camera_display_cache_not_working_copy(
     assert len(calls) == 1, "second request should reuse the display cache"
     called_source, called_output, called_kwargs = calls[0]
     assert called_source == str(source_path)
-    assert called_output.endswith(f"{photo_id}.display.jpg")
+    assert called_output.endswith(".jpg.tmp")
     assert called_kwargs["raw_decode"] == RAW_DECODE_CAMERA_RENDERED
+    display_path = os.path.join(
+        vireo_dir, "originals", f"{photo_id}.display.jpg",
+    )
+    assert replacements == [(called_output, display_path)]
+    assert not os.path.exists(called_output)
     with Image.open(io.BytesIO(first.data)) as rendered:
         assert rendered.getpixel((0, 0))[0] > 200
     assert open(working_path, "rb").read() == working_bytes
@@ -4389,6 +4402,63 @@ def test_original_refreshes_failure_marker_when_stale_retry_fails(
     assert row["age_seconds"] is not None and row["age_seconds"] < 60
 
 
+def test_original_records_raw_failure_before_working_copy_fallback(
+    client_with_photo, monkeypatch,
+):
+    """A usable fallback must not leave repeated RAW retries unthrottled."""
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder_path = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
+        "WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()["path"]
+    raw_path = os.path.join(folder_path, "failed.NEF")
+    with open(raw_path, "wb") as raw_file:
+        raw_file.write(b"unsupported raw")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (40, 80, 120)).save(working_path, "JPEG")
+    working_rel = f"working/{photo_id}.jpg"
+    file_mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='failed.NEF', extension='.nef',
+               width=800, height=600, file_mtime=?,
+               working_copy_path=?, working_copy_failed_at=NULL,
+               working_copy_failed_mtime=NULL,
+               working_copy_failed_source=NULL
+           WHERE id=?""",
+        (file_mtime, working_rel, photo_id),
+    )
+    db.conn.commit()
+
+    monkeypatch.setattr(image_loader, "extract_working_copy", lambda *a, **k: False)
+    monkeypatch.setattr(image_loader, "load_image", lambda *a, **k: None)
+
+    response = app.test_client().get(f"/photos/{photo_id}/original")
+
+    assert response.status_code == 200
+    with open(working_path, "rb") as working_file:
+        assert response.data == working_file.read()
+    row = db.conn.execute(
+        """SELECT working_copy_failed_at, working_copy_failed_mtime,
+                  working_copy_failed_source
+           FROM photos WHERE id=?""",
+        (photo_id,),
+    ).fetchone()
+    assert row["working_copy_failed_at"] is not None
+    assert row["working_copy_failed_mtime"] == file_mtime
+    assert row["working_copy_failed_source"] == "source"
+
+
 def test_original_falls_back_to_companion_when_raw_extraction_fails(
     client_with_photo, monkeypatch,
 ):
@@ -4558,7 +4628,7 @@ def test_edited_original_uses_companion_when_raw_returns_undersized(
     db.conn.commit()
     # An edit recipe routes the request through the highlight-preserving
     # decode path that the new size-validation guards.
-    db.set_photo_edit_recipe(photo_id, {"rotation": 0})
+    db.set_photo_edit_recipe(photo_id, {"rotation": 90})
 
     load_calls = []
 
