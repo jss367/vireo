@@ -4663,6 +4663,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "Sync or discard the local copy from any linked workspace first.",
                     409,
                 )
+            # Staging a descendant rebases its folders.path under local-folders/,
+            # so a folders.path subtree scan (as db.relocate_folder does) no
+            # longer sees it — while local_folder_mappings.source_path still
+            # points at the pre-relocation location. Without this check the
+            # relocate would rewrite the ancestor while the manifest keeps
+            # pointing at the old descendant path, so a later sync/discard
+            # could not restore or publish to the new location.
+            descendant_root_id = local_root_under_folder(db, folder_id)
+            if descendant_root_id is not None:
+                return json_error(
+                    "Cannot relocate this folder while a subfolder has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
             staged, owner_ws = folder_has_local_workspace(db, folder_id)
             if staged:
                 return json_error(
@@ -17993,6 +18007,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if local_root_id is not None:
                 return json_error(
                     "Cannot move this folder while it has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
+            # A descendant local copy has already had its folders.path rebased
+            # under local-folders/, so a folders.path subtree walk from this
+            # ancestor no longer sees it — but local_folder_mappings.source_path
+            # still records the original location. Without this check the move
+            # job would move/delete the original source directory out from
+            # under the manifest, leaving sync/discard unable to restore.
+            descendant_root_id = local_root_under_folder(db_for_guard, folder_id)
+            if descendant_root_id is not None:
+                return json_error(
+                    "Cannot move this folder while a subfolder has a shared local copy. "
                     "Sync or discard the local copy from any linked workspace first.",
                     409,
                 )

@@ -291,3 +291,98 @@ def test_delete_ancestor_of_local_folder_refuses_with_409(tmp_path, monkeypatch)
         blocked_child = client.delete(f"/api/folders/{child_id}")
         assert blocked_child.status_code == 409
         assert "shared local copy" in blocked_child.get_json()["error"]
+
+
+def _stage_child_under_parent(tmp_path):
+    """Build a parent/child folder tree with the child staged locally."""
+    from app import create_app
+
+    parent = tmp_path / "nas" / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (child / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+    db = Database(db_path)
+    workspace_id = db.create_workspace("Ancestor")
+    parent_id = db.add_folder(str(parent), name="parent", link_to_workspace=False)
+    child_id = db.add_folder(
+        str(child), name="child", parent_id=parent_id, link_to_workspace=False,
+    )
+    db.add_workspace_folder(workspace_id, parent_id)
+    db.add_workspace_folder(workspace_id, child_id)
+    db.set_active_workspace(workspace_id)
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    client = app.test_client()
+    assert (
+        client.post(f"/api/workspaces/{workspace_id}/activate", json={}).status_code == 200
+    )
+    response = client.post(
+        "/api/workspaces/active/local-folders/stage", json={"folder_ids": [child_id]},
+    )
+    assert response.status_code == 202
+    assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
+    return client, parent, parent_id, child_id
+
+
+def test_relocate_ancestor_of_local_folder_refuses_with_409(tmp_path, monkeypatch):
+    """POST /api/folders/<ancestor>/relocate must refuse when a descendant
+    has a shared local copy. Without the guard, ``db.relocate_folder`` walks
+    the parent's ``folders.path`` subtree — which no longer includes the
+    rebased child — and rewrites the parent while
+    ``local_folder_mappings.source_path`` and the manifest keep pointing at
+    the old descendant location, so a later sync/discard cannot land at the
+    new source path."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    client, parent, parent_id, child_id = _stage_child_under_parent(tmp_path)
+
+    new_parent = tmp_path / "nas" / "renamed"
+    new_parent.mkdir()
+    blocked = client.post(
+        f"/api/folders/{parent_id}/relocate", json={"path": str(new_parent)},
+    )
+    assert blocked.status_code == 409
+    assert "subfolder" in blocked.get_json()["error"]
+
+    # The exact-folder guard still catches relocates of the staged child itself.
+    other = tmp_path / "nas" / "renamed_child"
+    other.mkdir()
+    blocked_child = client.post(
+        f"/api/folders/{child_id}/relocate", json={"path": str(other)},
+    )
+    assert blocked_child.status_code == 409
+    assert "shared local copy" in blocked_child.get_json()["error"]
+
+
+def test_move_folder_job_rejects_ancestor_of_local_folder(tmp_path, monkeypatch):
+    """POST /api/jobs/move-folder must refuse when a descendant has a shared
+    local copy. Without the guard the job would move the parent source
+    directory on disk (physically moving the original child location too)
+    while ``local_folder_mappings.source_path`` still records the old path,
+    so sync/discard would have no destination to publish or restore to."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    client, parent, parent_id, child_id = _stage_child_under_parent(tmp_path)
+
+    destination = tmp_path / "moved"
+    destination.mkdir()
+    blocked = client.post(
+        "/api/jobs/move-folder",
+        json={"folder_id": parent_id, "destination": str(destination)},
+    )
+    assert blocked.status_code == 409
+    assert "subfolder" in blocked.get_json()["error"]
+
+    # The exact-folder guard still catches moves of the staged child itself.
+    destination_child = tmp_path / "moved_child"
+    destination_child.mkdir()
+    blocked_child = client.post(
+        "/api/jobs/move-folder",
+        json={"folder_id": child_id, "destination": str(destination_child)},
+    )
+    assert blocked_child.status_code == 409
+    assert "shared local copy" in blocked_child.get_json()["error"]
