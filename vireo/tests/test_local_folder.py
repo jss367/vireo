@@ -578,6 +578,64 @@ def test_ancestor_workspace_can_sync_descendant_local_session(tmp_path, monkeypa
         assert (child / "bird.jpg").read_bytes() == b"edited from parent workspace"
 
 
+def test_ancestor_workspace_photo_count_survives_descendant_rebase(tmp_path):
+    """When a workspace links an ancestor of a descendant that is then staged
+    locally, the ancestor root's ``workspace_photo_count`` must still include
+    the rebased descendant's photos. ``get_workspace_folder_roots`` counts
+    photos by matching ``folders.path`` against the root's path, but staging
+    moves the descendant's ``folders.path`` under ``local-folders/`` while
+    ``workspace_folders`` membership still makes those photos visible. Before
+    the fix the ancestor row reported 0 (or too few) photos, so the workspace
+    page underreported the images affected by remove/move confirmations."""
+    db = Database(str(tmp_path / "vireo.db"))
+    parent_ws = db.create_workspace("Parent")
+    child_ws = db.create_workspace("Child")
+    parent = tmp_path / "nas" / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (child / "bird.jpg").write_bytes(b"original")
+    (child / "fox.jpg").write_bytes(b"original")
+    parent_id = db.add_folder(str(parent), name="parent", link_to_workspace=False)
+    child_id = db.add_folder(str(child), name="child", parent_id=parent_id, link_to_workspace=False)
+    db.add_photo(child_id, "bird.jpg", ".jpg", 1000, 1.0)
+    db.add_photo(child_id, "fox.jpg", ".jpg", 1000, 1.0)
+    db.add_workspace_folder(parent_ws, parent_id)
+    db.add_workspace_folder(child_ws, child_id)
+    # get_workspace_folder_roots materializes descendants itself, so the
+    # ancestor workspace's link to the child folder exists before staging.
+    try:
+        before = {
+            row["path"]: row["workspace_photo_count"]
+            for row in db.get_workspace_folder_roots(parent_ws)
+        }
+        assert before[str(parent)] == 2
+
+        stage_folder(db, child_id, str(tmp_path / "vireo"))
+
+        after = {
+            row["path"]: row["workspace_photo_count"]
+            for row in db.get_workspace_folder_roots(parent_ws)
+        }
+        # The ancestor's user-facing path is unchanged (only the descendant
+        # was rebased under local-folders/), so its count should still match
+        # the pre-stage total.
+        assert after.get(str(parent)) == 2, (
+            "ancestor root undercounts photos after descendant rebase: "
+            f"{after!r}"
+        )
+
+        # The staging workspace's own root count is unaffected — its root is
+        # the rebased folder itself and its ``cf.path == f.path`` predicate
+        # still matches.
+        child_roots = {
+            row["id"]: row["workspace_photo_count"]
+            for row in db.get_workspace_folder_roots(child_ws)
+        }
+        assert child_roots[child_id] == 2
+    finally:
+        db.close()
+
+
 def test_unlink_ancestor_of_shared_local_session_cleans_phantom_rows(tmp_path):
     """Unlinking an ancestor while a descendant has a shared local copy must
     also drop the workspace_folders row that materialization created for the

@@ -2428,6 +2428,12 @@ class Database:
         workspace is correctly excluded. The ``folders.photo_count`` column is
         a direct-only count and would read as a misleading "0 photos" for a
         root whose images all live in subfolders.
+
+        Descendants whose ``folders.path`` has been rebased under
+        ``local-folders/`` by staging are matched via
+        ``local_folder_mappings.source_path`` too, otherwise the ancestor
+        workspace's root would underreport its photos while
+        ``workspace_folders`` still makes them visible.
         """
         self._materialize_workspace_descendants(workspace_id)
         return self.conn.execute(
@@ -2438,9 +2444,17 @@ class Database:
                    JOIN workspace_folders cwf
                      ON cwf.folder_id = cf.id
                     AND cwf.workspace_id = wf.workspace_id
+                   LEFT JOIN local_folder_mappings lfm
+                     ON lfm.folder_id = cf.id
                    WHERE cf.path = f.path
                       OR substr(
                            REPLACE(cf.path, '\\', '/'),
+                           1,
+                           length(RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/')
+                         ) = RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/'
+                      OR lfm.source_path = f.path
+                      OR substr(
+                           REPLACE(lfm.source_path, '\\', '/'),
                            1,
                            length(RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/')
                          ) = RTRIM(REPLACE(f.path, '\\', '/'), '/') || '/'
