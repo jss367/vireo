@@ -100,6 +100,23 @@ def _entry(data, species):
     return matches[0]
 
 
+def _add_cardinal_photos(db, ids, count, prefix="card-extra"):
+    k_card = db.add_keyword("Northern Cardinal", is_species=True)
+    photo_ids = []
+    for i in range(count):
+        pid = db.add_photo(
+            folder_id=ids["folder"],
+            filename=f"{prefix}-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=20.0 + i,
+            timestamp=f"2024-05-01T08:{i // 60:02d}:{i % 60:02d}",
+        )
+        db.tag_photo(pid, k_card)
+        photo_ids.append(pid)
+    return photo_ids
+
+
 def test_page_renders(life_app):
     app, _, _ = life_app
     resp = app.test_client().get("/life-list")
@@ -129,6 +146,45 @@ def test_best_photo_is_highest_scored(life_app):
     assert cardinal["best"]["id"] == ids["p2"]
     # Photos are returned best-first for the lightbox set.
     assert [p["id"] for p in cardinal["photos"]] == [ids["p2"], ids["p1"]]
+
+
+def test_life_list_defaults_to_100_and_pages_remaining_species_photos(life_app):
+    app, db, ids = life_app
+    _add_cardinal_photos(db, ids, 101)
+
+    data = _get_life_list(app)
+    cardinal = _entry(data, "Northern Cardinal")
+    first_page_ids = {photo["id"] for photo in cardinal["photos"]}
+    assert data["meta"]["photos_per_species"] == 100
+    assert cardinal["photo_count"] == 103
+    assert cardinal["loaded_count"] == 100
+    assert cardinal["has_more"] is True
+    assert len(first_page_ids) == 100
+
+    resp = app.test_client().get(
+        "/api/life-list/species",
+        query_string={
+            "species": "Northern Cardinal",
+            "offset": 100,
+            "limit": 100,
+        },
+    )
+    assert resp.status_code == 200
+    page = resp.get_json()
+    assert page["photo_count"] == 103
+    assert page["loaded_count"] == 103
+    assert page["has_more"] is False
+    assert len(page["photos"]) == 3
+    assert first_page_ids.isdisjoint(photo["id"] for photo in page["photos"])
+
+
+def test_life_list_species_page_validates_species(life_app):
+    app, _, _ = life_app
+    client = app.test_client()
+    assert client.get("/api/life-list/species").status_code == 400
+    assert client.get(
+        "/api/life-list/species", query_string={"species": "Missing bird"}
+    ).status_code == 404
 
 
 def test_life_list_best_ignores_pick_when_no_preference(life_app):
@@ -734,31 +790,20 @@ def test_life_list_export_photo_csv_all_photos(life_app):
 
 def test_life_list_export_all_photos_is_not_limited_to_page_count(life_app):
     app, db, ids = life_app
-    k_card = db.add_keyword("Northern Cardinal", is_species=True)
-    extra_ids = []
-    for i in range(13):
-        pid = db.add_photo(
-            folder_id=ids["folder"],
-            filename=f"card-extra-{i}.jpg",
-            extension=".jpg",
-            file_size=1000,
-            file_mtime=20.0 + i,
-            timestamp=f"2024-05-{i + 1:02d}T08:00:00",
-        )
-        db.tag_photo(pid, k_card)
-        extra_ids.append(pid)
+    extra_ids = _add_cardinal_photos(db, ids, 101)
 
     page_payload = _get_life_list(app)
     cardinal = _entry(page_payload, "Northern Cardinal")
-    assert cardinal["photo_count"] == 15
-    assert len(cardinal["photos"]) == 12
+    assert cardinal["photo_count"] == 103
+    assert len(cardinal["photos"]) == 100
+    assert cardinal["has_more"] is True
 
     resp = app.test_client().get(
         "/api/life-list/export?format=csv&detail=photos&photos=all"
     )
     rows = list(csv.DictReader(io.StringIO(resp.get_data(as_text=True))))
     cardinal_rows = [r for r in rows if r["species"] == "Northern Cardinal"]
-    assert len(cardinal_rows) == 15
+    assert len(cardinal_rows) == 103
     exported_ids = {int(r["photo_id"]) for r in cardinal_rows}
     assert set(extra_ids).issubset(exported_ids)
 

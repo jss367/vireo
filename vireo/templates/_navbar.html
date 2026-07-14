@@ -6908,7 +6908,19 @@ function lightboxNav(delta) {
   var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === _lightboxCurrentId; });
   if (idx === -1) return;
   var newIdx = idx + delta;
-  if (newIdx < 0 || newIdx >= _lightboxPhotoList.length) return;
+  if (newIdx < 0 || newIdx >= _lightboxPhotoList.length) {
+    try {
+      document.dispatchEvent(new CustomEvent('lightbox:navigationboundary', {
+        detail: {
+          delta: delta,
+          photoId: _lightboxCurrentId,
+          index: idx,
+          photoCount: _lightboxPhotoList.length
+        }
+      }));
+    } catch (_) {}
+    return;
+  }
   var currentViewportState = _lbSaveViewportState(_lightboxCurrentId);
   var next = _lightboxPhotoList[newIdx];
   openLightbox(next.id, next.filename, _lightboxPhotoList, {

@@ -9126,9 +9126,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify(payload)
 
-    def _build_life_list_payload(db, photos_per_species=12):
-        rows = db.get_life_list_candidates()
+    def _build_life_list_payload(
+        db,
+        photos_per_species=12,
+        photo_offset=0,
+        species_filter=None,
+    ):
+        rows = db.get_life_list_candidates(species=species_filter)
         locations_by_species = db.get_life_list_locations()
+        photo_offset = max(0, int(photo_offset))
         if photos_per_species is None:
             photo_limit = None
         else:
@@ -9238,7 +9244,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 photos.insert(0, photos.pop(idx))
                             best_source = "highlight"
                             break
-            top = photos if photo_limit is None else photos[:photo_limit]
+            if photo_limit is None:
+                top = photos[photo_offset:]
+            else:
+                top = photos[photo_offset:photo_offset + photo_limit]
             species_entries.append({
                 "species": species,
                 "scientific_name": entry["scientific_name"],
@@ -9250,8 +9259,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "preferred_photo_id": preferred_id,
                 "has_preferred_photo": preferred_applied,
                 "best_source": best_source,
-                "best": compact(top[0]) if top else None,
+                "best": compact(photos[0]) if photos else None,
                 "photos": [compact(p) for p in top],
+                "loaded_count": min(len(photos), photo_offset + len(top)),
+                "has_more": photo_offset + len(top) < len(photos),
             })
 
         # Life-list numbering: chronological by first photographed date,
@@ -9285,9 +9296,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         payload = _build_life_list_payload(
             db,
-            photos_per_species=request.args.get("photos_per_species", 12, type=int),
+            photos_per_species=request.args.get("photos_per_species", 100, type=int),
         )
         return jsonify(payload)
+
+    @app.route("/api/life-list/species")
+    def api_life_list_species():
+        db = _get_db()
+        species = (request.args.get("species") or "").strip()
+        if not species:
+            return json_error("species required")
+        offset = max(0, request.args.get("offset", 0, type=int))
+        limit = max(1, min(request.args.get("limit", 100, type=int), 500))
+        payload = _build_life_list_payload(
+            db,
+            photos_per_species=limit,
+            photo_offset=offset,
+            species_filter=species,
+        )
+        if not payload["species"]:
+            return json_error("species not found", 404)
+        entry = payload["species"][0]
+        return jsonify({
+            "species": entry["species"],
+            "photos": entry["photos"],
+            "photo_count": entry["photo_count"],
+            "loaded_count": entry["loaded_count"],
+            "has_more": entry["has_more"],
+        })
 
     @app.route("/api/life-list/explorer")
     def api_life_list_explorer():

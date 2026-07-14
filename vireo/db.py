@@ -11401,7 +11401,7 @@ class Database:
         ).fetchall()
         return rows
 
-    def get_life_list_candidates(self):
+    def get_life_list_candidates(self, species=None):
         """Return (photo x accepted-species-keyword) rows for the life list.
 
         Every non-rejected photo in a workspace-visible folder carrying an
@@ -11414,10 +11414,16 @@ class Database:
         never ran through the pipeline still belongs on the life list. The
         API layer ranks each species' photos with the highlights scorer,
         which falls back gracefully when metric columns are NULL.
+
+        When ``species`` is provided, return only that exact keyword bucket.
+        This keeps incremental Life List pages proportional to the species
+        being browsed instead of rescanning every tagged photo in a catalog.
         """
         ws = self._ws_id()
+        species_filter = " AND k.name = ?" if species is not None else ""
+        params = (ws, species) if species is not None else (ws,)
         return self.conn.execute(
-            """SELECT p.id, p.folder_id, p.filename, p.timestamp,
+            f"""SELECT p.id, p.folder_id, p.filename, p.timestamp,
                       p.rating, p.flag, p.quality_score,
                       p.subject_sharpness, p.subject_size, p.sharpness,
                       p.mask_path, p.subject_tenengrad, p.bg_tenengrad,
@@ -11438,8 +11444,9 @@ class Database:
                 AND f.status IN ('ok', 'partial')
                LEFT JOIN taxa t ON t.id = k.taxon_id
                WHERE COALESCE(p.flag, 'none') != 'rejected'
+                 {species_filter}
                ORDER BY k.name, p.timestamp""",
-            (ws,),
+            params,
         ).fetchall()
 
     def get_explorer_root(self, name="Aves", rank="class"):
