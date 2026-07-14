@@ -93,8 +93,8 @@ from services.local_folder import (
 )
 from services.local_folder import (
     local_root_for_folder,
-    workspace_has_local_folders,
     workspace_ids_for_folder_tree,
+    workspace_local_root_ids,
 )
 from services.local_workspace import (
     folder_has_local_workspace,
@@ -10354,12 +10354,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "Cannot delete a workspace with local work. Switch to it and sync or discard the local copy first.",
                     409,
                 )
-            if workspace_has_local_folders(db, ws_id):
-                return json_error(
-                    "Cannot delete a workspace while it references local folders. "
-                    "Sync or discard those folders first.",
-                    409,
-                )
+            # Only block when this workspace is the last remaining link to a
+            # local root. If other workspaces still share the local copy,
+            # deleting this workspace is equivalent to unlinking one non-final
+            # workspace_folders row — which the folder-unlink route already
+            # permits and delete_workspace cascades the same way.
+            for root_id in workspace_local_root_ids(db, ws_id):
+                if local_folder_workspace_ids(db, root_id) == [ws_id]:
+                    return json_error(
+                        "This workspace is the last one linked to a local folder. "
+                        "Sync or discard its local copy before deleting the workspace.",
+                        409,
+                    )
             db.delete_workspace(ws_id)
         # Drop this workspace's cached Missing Originals payload so a
         # later workspace that reuses this SQLite rowid can't be served
