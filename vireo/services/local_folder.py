@@ -215,7 +215,12 @@ def workspace_ids_for_folder_tree(db, root_folder_id: int) -> list[int]:
            JOIN folders f ON f.id = wf.folder_id"""
     ).fetchall()
     for row in rows:
-        if _is_within(row["path"], root["path"]):
+        # Intersection is symmetric: a workspace root that contains the local
+        # root shares the same catalog subtree as a workspace root nested
+        # inside it. Missing the ancestor direction here would let
+        # _busy_job/_pending_local_workspace_transition enqueue overlapping
+        # jobs in an ancestor-linked workspace during the staging window.
+        if _is_within(row["path"], root["path"]) or _is_within(root["path"], row["path"]):
             workspace_ids.add(int(row["workspace_id"]))
     return sorted(workspace_ids)
 
