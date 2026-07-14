@@ -17,6 +17,12 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     argument, so _lightboxPhotoList stayed empty and lightboxNav() silently no-op'd.
     """
     url = live_server["url"]
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
     page.goto(f"{url}/browse")
 
     first_card = page.locator(".grid-card").first
@@ -148,7 +154,7 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
     # 1:1 snap cannot resolve before we observe it.
     hold["active"] = True
     page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
     # Guard that the hold worked: native zoom must still be unknown, so the
     # pending assertion below is genuinely exercising the deferred path.
     assert page.evaluate("window._lbNativeZoom") is None
@@ -287,11 +293,12 @@ def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page)
 def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     live_server, page
 ):
-    """100% navigation must not recenter the outgoing photo while loading.
+    """100% navigation must keep the outgoing photo intact while loading.
 
     The incoming photo's metadata often resolves before its image. Previously
     navigation reset pan immediately, visibly jerking the outgoing bitmap to
     center, then restored the carried viewport when the new bitmap decoded.
+    Its filename and counter also advanced while that old bitmap was visible.
     """
     first_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
@@ -356,8 +363,7 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         }"""
     )
 
-    page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    page.keyboard.press("ArrowRight")
     page.wait_for_function("() => window._lbVisualTransitionPending === true")
     page.wait_for_function("() => window._lightboxCurrentId === window.photos[1].id")
     page.wait_for_timeout(100)
@@ -366,6 +372,13 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     while "route" not in held_original and time.time() < deadline:
         page.wait_for_timeout(10)
     assert "route" in held_original
+
+    # The outgoing bitmap remains visible while the incoming original is
+    # loading, so its filename and position must remain visible too.
+    expect(page.locator("#lightboxFilename")).to_have_text(
+        first_card.get_attribute("data-filename")
+    )
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
 
     while_loading = page.evaluate(
         """() => {
@@ -394,6 +407,10 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
                 && img && img.complete && img.naturalWidth === 3000;
         }"""
     )
+    expect(page.locator("#lightboxFilename")).to_have_text(
+        page.locator(".grid-card").nth(1).get_attribute("data-filename")
+    )
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
     carried = page.evaluate("window._lbViewportStateFromCurrent()")
     assert abs(carried["centerX"] - before["viewport"]["centerX"]) < 0.03
     assert abs(carried["centerY"] - before["viewport"]["centerY"]) < 0.03
@@ -487,7 +504,7 @@ def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
     )
 
     page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
     page.wait_for_function("() => window._lbVisualTransitionPending === true")
     page.wait_for_function("() => window._lightboxCurrentId === window.photos[1].id")
     page.wait_for_timeout(50)
@@ -548,9 +565,8 @@ def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
     failing tier isn't the /original fallback candidate) previously left
     _lbVisualTransitionPending true indefinitely. That kept the metadata
     callback skipping layout updates and made _lbSaveViewportState treat the
-    incoming photo as still mid-transition even though the UI/counter had
-    already advanced to it, freezing the outgoing transform on screen until
-    the lightbox was closed or another navigation succeeded.
+    incoming photo as still mid-transition, freezing the outgoing transform on
+    screen until the lightbox was closed or another navigation succeeded.
     """
     first_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
@@ -589,7 +605,7 @@ def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
     # with _lbVisualTransitionPending=true. The /full request then 404s, so
     # handleInitialImageError takes the non-'original' early-return path.
     page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
     page.wait_for_function(
         "() => window._lightboxCurrentId === window.photos[1].id"
     )
@@ -713,7 +729,7 @@ def test_browse_lightbox_defers_overlays_while_visual_transition_pending(
     )
 
     page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
     page.wait_for_function("() => window._lbVisualTransitionPending === true")
     page.wait_for_function("() => window._lightboxCurrentId === window.photos[1].id")
 

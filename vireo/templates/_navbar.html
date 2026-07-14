@@ -6604,6 +6604,28 @@ function openLightbox(photoId, filename, photoList, options) {
   var similarBtn = document.getElementById('lightboxSimilar');
   var inatBtn = document.getElementById('lightboxInat');
   var wrap = document.getElementById('lightboxWrap');
+
+  // The browser keeps painting the outgoing bitmap while a newly assigned
+  // image source loads. Keep the visible filename and position paired with
+  // that bitmap, then advance all three in the image-load task before the next
+  // paint. Internal navigation state still advances immediately, so rapid
+  // arrow presses continue to target the right photo.
+  function commitVisiblePhotoIdentity() {
+    label.textContent = filename || '';
+    var counter = document.getElementById('lightboxCounter');
+    if (_lightboxPhotoList.length > 1) {
+      var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === photoId; });
+      var counterFilename = filename || (currentFromList && currentFromList.filename) || '';
+      counter.textContent = (idx + 1) + ' / ' + _lightboxPhotoList.length
+        + (counterFilename ? ' \u00b7 ' + counterFilename : '');
+      counter.title = counterFilename;
+      counter.style.display = '';
+    } else {
+      counter.title = '';
+      counter.style.display = 'none';
+    }
+  }
+
   // Reset pan for the new photo, but keep a 1:1 transform during arrow
   // navigation so the outgoing image does not visibly snap back to fit before
   // the replacement finishes loading.
@@ -6756,6 +6778,7 @@ function openLightbox(photoId, filename, photoList, options) {
     img.onload = null;
     img.onerror = null;
     if (_lightboxCurrentId !== photoId || _lbOpenSeq !== openSeq) return;
+    commitVisiblePhotoIdentity();
     // Only record the /full tier size if the currently loaded source is still /full.
     // A quick user zoom can trigger a debounced swap to a higher tier before /full
     // finishes loading, which would otherwise make us record the swapped source's
@@ -6795,9 +6818,9 @@ function openLightbox(photoId, filename, photoList, options) {
       // No further fallback tier is available. Clear the pending visual
       // transition — otherwise the metadata callback would keep skipping
       // layout updates and _lbSaveViewportState would keep treating the
-      // incoming photo as mid-transition even though the UI already points
-      // at it. Apply any deferred viewport state so the layout reflects
-      // the incoming photo instead of the frozen outgoing bitmap.
+      // incoming photo as mid-transition. Apply any deferred viewport state
+      // so the layout reflects the incoming photo instead of the frozen
+      // outgoing bitmap.
       _lbVisualTransitionPending = false;
       _lbRecomputeNativeZoom();
       if (!_lbTryApplyPendingViewportState()) _lbApplyPendingOneToOneZoom();
@@ -6815,7 +6838,7 @@ function openLightbox(photoId, filename, photoList, options) {
   img.onload = handleInitialImageLoad;
   img.onerror = handleInitialImageError;
   img.src = _lbSrcUrl(photoId, _lbCurrentSrcKey);
-  label.textContent = filename || '';
+  if (!alreadyOpen) commitVisiblePhotoIdentity();
   inspectBtn.onclick = function() { closeLightbox(); openPipeline(photoId); };
   similarBtn.onclick = function() { closeLightbox(); findSimilar(photoId); };
   inatBtn.onclick = function() { submitToInat(photoId); };
@@ -6846,19 +6869,6 @@ function openLightbox(photoId, filename, photoList, options) {
   // pages that don't run the pipeline still get the lightbox unchanged.
   _lbLoadMaskVariants(photoId);
 
-  // Show position indicator if navigating a list
-  var counter = document.getElementById('lightboxCounter');
-  if (_lightboxPhotoList.length > 1) {
-    var idx = _lightboxPhotoList.findIndex(function(p) { return p.id === photoId; });
-    var counterFilename = filename || (currentFromList && currentFromList.filename) || '';
-    counter.textContent = (idx + 1) + ' / ' + _lightboxPhotoList.length
-      + (counterFilename ? ' \u00b7 ' + counterFilename : '');
-    counter.title = counterFilename;
-    counter.style.display = '';
-  } else {
-    counter.title = '';
-    counter.style.display = 'none';
-  }
 }
 
 function lightboxNav(delta) {
