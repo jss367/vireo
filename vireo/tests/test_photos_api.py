@@ -5914,6 +5914,65 @@ def test_edit_math_version_migration_survives_unreadable_preview_dir(
         db3.conn.close()
 
 
+def test_edit_math_version_migration_survives_unreadable_thumbnail_dir(
+    tmp_path, monkeypatch,
+):
+    """A transient thumbnail-directory listing failure is retryable and must
+    not prevent app startup during edit-math cache migration."""
+    import os
+    from types import SimpleNamespace
+
+    import app as app_module
+    from db import Database
+    from image_edits import EDIT_MATH_VERSION
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    (vireo_dir / "previews").mkdir()
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder(str(tmp_path), name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="edited.jpg", extension=".jpg",
+        file_size=100, file_mtime=0.0, width=40, height=30,
+    )
+    db.set_photo_edit_recipe(pid, {"adjustments": {"exposure": 0.5}})
+    db.set_meta("edit_math_version", str(EDIT_MATH_VERSION - 1))
+    db.conn.commit()
+    db.conn.close()
+
+    real_listdir = app_module.os.listdir
+
+    def failing_listdir(path):
+        if os.path.abspath(path) == os.path.abspath(str(thumb_dir)):
+            raise PermissionError(path)
+        return real_listdir(path)
+
+    monkeypatch.setattr(app_module.os, "listdir", failing_listdir)
+    fake_app = SimpleNamespace(
+        config={"THUMB_CACHE_DIR": str(thumb_dir), "DB_PATH": db_path},
+    )
+    app_module._migrate_edit_math_render_caches(fake_app)
+
+    db2 = Database(db_path)
+    try:
+        assert db2.get_meta("edit_math_version") == str(EDIT_MATH_VERSION - 1)
+    finally:
+        db2.conn.close()
+
+    monkeypatch.setattr(app_module.os, "listdir", real_listdir)
+    app_module._migrate_edit_math_render_caches(fake_app)
+    db3 = Database(db_path)
+    try:
+        assert db3.get_meta("edit_math_version") == str(EDIT_MATH_VERSION)
+    finally:
+        db3.conn.close()
+
+
 def test_external_edit_handoff_meta_includes_math_version(
     client_with_photo, monkeypatch,
 ):

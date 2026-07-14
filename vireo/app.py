@@ -1740,6 +1740,12 @@ def _migrate_edit_math_render_caches(app):
                         purge_failed = True
             except FileNotFoundError:
                 pass
+            except OSError:
+                log.warning(
+                    "Failed to list thumbnail variants during edit-math "
+                    "migration", exc_info=True,
+                )
+                purge_failed = True
             db.conn.execute(
                 "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
             )
@@ -2298,9 +2304,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         select which physical source supplies the pixels with
         ``?source=jpeg`` or ``?source=raw``. Invalid and non-paired choices
         fall back to the established canonical rendering path so old clients
-        and ordinary photos are unchanged. A known pair with a missing
-        requested file returns the source name with no path so routes can fail
-        explicitly instead of showing RAW pixels under a JPEG label.
+        and ordinary photos are unchanged. Live files are preferred, with the
+        offline-original cache as the fallback; a known pair missing both
+        returns the source name with no path so routes can fail explicitly
+        instead of showing RAW pixels under a JPEG label.
         """
         requested = (request.args.get("source") or "").strip().lower()
         if requested not in {"jpeg", "raw"}:
@@ -2312,15 +2319,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if primary_ext not in RAW_EXTENSIONS or not photo["companion_path"]:
             return None, None
 
+        def _offline_path(column):
+            try:
+                row = _get_db().offline_original_get(photo["id"])
+            except Exception:
+                return None
+            if not row or not row[column]:
+                return None
+            cached = row[column]
+            if not os.path.isabs(cached):
+                vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+                cached = os.path.join(vireo_dir, cached)
+            return cached if os.path.isfile(cached) else None
+
         if requested == "raw":
             primary = os.path.join(folder_path, photo["filename"])
-            return "raw", primary if os.path.isfile(primary) else None
+            if os.path.isfile(primary):
+                return "raw", primary
+            return "raw", _offline_path("original_path")
 
         companion = os.path.join(folder_path, photo["companion_path"])
         companion_ext = os.path.splitext(companion)[1].lower()
-        if companion_ext not in {".jpg", ".jpeg"} or not os.path.isfile(companion):
+        if companion_ext not in {".jpg", ".jpeg"}:
             return "jpeg", None
-        return "jpeg", companion
+        if os.path.isfile(companion):
+            return "jpeg", companion
+        return "jpeg", _offline_path("companion_path")
 
     _invalid_preview_cache_paths = set()
 

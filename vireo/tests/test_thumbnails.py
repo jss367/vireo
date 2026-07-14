@@ -858,6 +858,39 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
     assert client.get(f"/photos/{pid}/preview?size=1920&source=jpeg").status_code == 404
     assert client.get(f"/photos/{pid}/original?source=jpeg").status_code == 404
 
+    vireo_dir = os.path.dirname(thumb_dir)
+    cached_raw = os.path.join(vireo_dir, "offline", "originals", f"{pid}.nef")
+    cached_jpeg = os.path.join(vireo_dir, "offline", "companions", f"{pid}.jpg")
+    os.makedirs(os.path.dirname(cached_raw), exist_ok=True)
+    os.makedirs(os.path.dirname(cached_jpeg), exist_ok=True)
+    Image.new("RGB", (800, 600), (210, 25, 35)).save(
+        cached_raw, "JPEG",
+    )
+    Image.new("RGB", (800, 600), (20, 210, 40)).save(
+        cached_jpeg, "JPEG",
+    )
+    os.remove(os.path.join(folder, "bird.nef"))
+    db.offline_original_upsert(
+        pid,
+        os.path.relpath(cached_raw, vireo_dir),
+        None,
+        os.path.relpath(cached_jpeg, vireo_dir),
+        os.path.getsize(cached_raw) + os.path.getsize(cached_jpeg),
+        100,
+        1.0,
+        "2026-07-14T00:00:00Z",
+        "cached",
+    )
+
+    for endpoint in (
+        f"/thumbnails/{pid}.jpg",
+        f"/photos/{pid}/preview?size=1920",
+        f"/photos/{pid}/original",
+    ):
+        joiner = "&" if "?" in endpoint else "?"
+        assert center_rgb(client.get(endpoint + joiner + "source=jpeg"))[1] > 180
+        assert center_rgb(client.get(endpoint + joiner + "source=raw"))[0] > 180
+
 
 def test_serve_thumbnail_regenerates_on_cache_miss(tmp_path, monkeypatch):
     """When the thumbnail JPEG is missing on disk but the photo exists,
