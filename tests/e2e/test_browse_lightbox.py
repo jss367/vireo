@@ -83,6 +83,12 @@ def test_browse_lightbox_filename_can_be_selected_without_resetting_zoom(
     assert filename_display.evaluate(
         "el => getComputedStyle(el).cursor"
     ) == "text"
+    assert page.evaluate(
+        """() => (
+            Number(getComputedStyle(document.getElementById('lightboxFlagStatus')).zIndex) >
+            Number(getComputedStyle(document.querySelector('.lightbox-bottom-bar')).zIndex)
+        )"""
+    ) is True
 
 
 def test_browse_photo_id_deep_link_loads_target_folder_first_page(live_server, page):
