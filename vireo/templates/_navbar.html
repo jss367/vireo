@@ -4160,10 +4160,17 @@ function _vireoCommitPairSource(photoId, requested, anchor) {
     anchor && anchor.id === 'lightboxImg' &&
     String(_lightboxCurrentId) === key
   ) {
-    _lbFullLongEdge = Math.max(anchor.naturalWidth || 0, anchor.naturalHeight || 0) || null;
+    _lbFullLongEdge = _lbCurrentSrcKey === 'full'
+      ? (Math.max(anchor.naturalWidth || 0, anchor.naturalHeight || 0) || null)
+      : null;
     _lbNativeZoom = null;
     _lbRecomputeNativeZoom();
     _lbApplyTransform();
+    if (requested === 'raw') {
+      _lbLoadDetections(photoId);
+      _lbRenderEyeCrosshair(_lbPhotoDataByPhoto[key]);
+      _lbLoadMaskVariants(photoId);
+    }
     _lbApplyBoxesVisibility();
     _lbApplyEyeVisibility();
     _lbApplyMaskVisibility();

@@ -70,6 +70,8 @@ def test_browse_discloses_raw_jpeg_pairs_and_offers_source_switch(app_and_db):
     assert "_vireoPairSourceByPhoto[key] = 'jpeg'" in html
     assert "_vireoPairPendingSourceByPhoto" in html
     assert "A failed request leaves the old source intact" in html
+    assert "_lbCurrentSrcKey === 'full'" in html
+    assert "_lbLoadDetections(photoId)" in html
 
 
 def test_api_add_keyword_accepts_existing_keyword_id(app_and_db):

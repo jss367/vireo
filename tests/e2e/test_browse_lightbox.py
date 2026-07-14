@@ -127,6 +127,11 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
         "UPDATE photos SET companion_path='developed.jpg' WHERE id=?",
         (photo_id,),
     )
+    db.save_detections(photo_id, [{
+        "box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+        "confidence": 0.95,
+        "category": "animal",
+    }], detector_model="test-detector")
     db.conn.commit()
 
     jpeg = _png_bytes((200, 100), "green")
@@ -172,6 +177,7 @@ def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
     control.click()
     expect(control).to_have_text("Viewing RAW · Show JPEG")
     assert image.evaluate("img => [img.naturalWidth, img.naturalHeight]") == [100, 200]
+    expect(page.locator("#lightboxDetections .lb-detection-box")).to_have_count(1)
     expect(card.locator(".pair-source-badge")).to_have_text("RAW · JPEG pair")
     rebuilt = page.evaluate(
         """photoId => {
