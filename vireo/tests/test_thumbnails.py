@@ -817,9 +817,13 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
     import thumbnails
 
     real_load = image_loader.load_image
+    live_raw = os.path.join(folder, "bird.nef")
 
     def load_selected(path, max_size=None, **kwargs):
         if str(path).lower().endswith(".nef"):
+            if os.path.abspath(path) != os.path.abspath(live_raw):
+                with Image.open(path) as cached:
+                    return cached.convert("RGB")
             return Image.new("RGB", (800, 600), (210, 25, 35))
         return real_load(path, max_size=max_size, **kwargs)
 
@@ -863,10 +867,10 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
     cached_jpeg = os.path.join(vireo_dir, "offline", "companions", f"{pid}.jpg")
     os.makedirs(os.path.dirname(cached_raw), exist_ok=True)
     os.makedirs(os.path.dirname(cached_jpeg), exist_ok=True)
-    Image.new("RGB", (800, 600), (210, 25, 35)).save(
+    Image.new("RGB", (800, 600), (210, 25, 210)).save(
         cached_raw, "JPEG",
     )
-    Image.new("RGB", (800, 600), (20, 210, 40)).save(
+    Image.new("RGB", (800, 600), (20, 210, 210)).save(
         cached_jpeg, "JPEG",
     )
     os.remove(os.path.join(folder, "bird.nef"))
@@ -888,8 +892,10 @@ def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
         f"/photos/{pid}/original",
     ):
         joiner = "&" if "?" in endpoint else "?"
-        assert center_rgb(client.get(endpoint + joiner + "source=jpeg"))[1] > 180
-        assert center_rgb(client.get(endpoint + joiner + "source=raw"))[0] > 180
+        jpeg_rgb = center_rgb(client.get(endpoint + joiner + "source=jpeg"))
+        raw_rgb = center_rgb(client.get(endpoint + joiner + "source=raw"))
+        assert jpeg_rgb[1] > 180 and jpeg_rgb[2] > 180
+        assert raw_rgb[0] > 180 and raw_rgb[2] > 180
 
 
 def test_serve_thumbnail_regenerates_on_cache_miss(tmp_path, monkeypatch):
