@@ -6,7 +6,6 @@
 <link rel="icon" type="image/png" href="/favicon.ico">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <link rel="stylesheet" href="/static/vireo-base.css">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <title>Vireo - Review Photo Locations</title>
 <style>
 html, body { height: 100%; overflow: hidden; }
@@ -364,7 +363,6 @@ body { margin: 0; }
   </section>
 </main>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 (function() {
   'use strict';
@@ -810,6 +808,24 @@ body { margin: 0; }
     });
   }
 
+  function loadLeaflet() {
+    if (window._vireoLeafletPromise) return window._vireoLeafletPromise;
+    window._vireoLeafletPromise = new Promise(function(resolve, reject) {
+      if (window.L) { resolve(window.L); return; }
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(link);
+      var script = document.createElement('script');
+      script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      script.async = true;
+      script.onload = function() { resolve(window.L); };
+      script.onerror = function() { reject(new Error('leaflet_load_failed')); };
+      document.head.appendChild(script);
+    });
+    return window._vireoLeafletPromise;
+  }
+
   async function initMap() {
     var message = document.getElementById('locationReviewMapMessage');
     if (state.config && state.config.google_maps_api_key) {
@@ -846,6 +862,11 @@ body { margin: 0; }
     }
 
     state.mapMode = 'leaflet';
+    try {
+      await loadLeaflet();
+    } catch (e) {
+      console.warn('Leaflet unavailable; disabling map', e);
+    }
     if (!window.L) {
       state.mapMode = 'none';
       state.map = null;
