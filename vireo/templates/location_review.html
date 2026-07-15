@@ -883,9 +883,9 @@ body { margin: 0; }
 
   function bindGoogleSearch() {
     var input = document.getElementById('locationReviewSearch');
+    // No `types` filter: Google rejects combining `geocode` + `establishment`, and omitting it returns parks, addresses, cities, and regions together.
     state.autocomplete = new google.maps.places.Autocomplete(input, {
       fields: ['place_id','name','types','formatted_address','geometry','address_components'],
-      types: ['geocode', 'establishment'],
     });
     state.autocomplete.bindTo('bounds', state.map);
     state.autocomplete.addListener('place_changed', function() {
