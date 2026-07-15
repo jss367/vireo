@@ -312,9 +312,19 @@ function renderClusters(data) {
 
   // Keep the displayed cluster order as the lightbox navigation order.  The
   // shared lightbox can only enable its arrows when the opening page supplies
-  // the surrounding photos.
+  // the surrounding photos.  A photo with multiple detections can appear in
+  // more than one cluster; dedupe by id so lightbox findIndex lookups don't
+  // bounce back to an earlier copy and skip later photos.
+  var seenPhotoIds = {};
   variantPhotos = data.clusters.reduce(function(photos, cluster) {
-    return photos.concat(cluster.photos.map(function(item) { return item.photo; }));
+    cluster.photos.forEach(function(item) {
+      var photo = item.photo;
+      if (photo && !seenPhotoIds[photo.id]) {
+        seenPhotoIds[photo.id] = true;
+        photos.push(photo);
+      }
+    });
+    return photos;
   }, []);
 
   // Header
