@@ -2,7 +2,7 @@
 
 Vireo measures interest in downloads without adding analytics or identifiers to the desktop application. Two independent sources answer different questions:
 
-- Cloudflare Web Analytics reports aggregate visits to `vireo.photo`, referral sources, campaign parameters, approximate location and device information, and page-performance metrics.
+- Cloudflare Web Analytics reports aggregate visits to `vireo.photo`, referral sources, approximate location and device information, and page-performance metrics. Cloudflare Web Analytics does not record query strings, so campaign parameters like `utm_source` are not available.
 - GitHub reports the cumulative download count for each release asset.
 
 A website visit is not proof that someone downloaded Vireo. A GitHub asset download is not a unique person or confirmed installation; retries, automated traffic, and maintainer testing may be included.
@@ -19,15 +19,9 @@ The website includes the tracker only when `PUBLIC_CLOUDFLARE_WEB_ANALYTICS_TOKE
 
 To verify the deployed integration, view the page source and confirm that `https://static.cloudflareinsights.com/beacon.min.js` and `data-cf-beacon` are present. Then load the site from a separate browser session and confirm that traffic appears in Cloudflare Web Analytics. Cloudflare says data can take a few minutes to appear.
 
-## Measure campaigns
+## Attribute announcements
 
-Point announcements at the Vireo download page with descriptive campaign parameters, for example:
-
-```text
-https://vireo.photo/download/?utm_source=reddit&utm_campaign=windows_public_beta
-```
-
-Use only broad source and campaign names. Do not place names, email addresses, usernames, or other person-specific information in campaign parameters.
+Cloudflare Web Analytics reports the referring site for each visit but does not record URL query strings, so `utm_source` and similar campaign parameters are dropped. To distinguish traffic from a specific announcement, either rely on the referrer that Cloudflare records for the source (for example, `reddit.com`) or point the announcement at a distinct URL path or fragment that Cloudflare will log as its own page view.
 
 ## Report GitHub downloads
 

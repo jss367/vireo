@@ -37,7 +37,7 @@ Beyond the bug reports you choose to submit, the Vireo application has no analyt
 
 ## Website measurement
 
-When you visit `vireo.photo`, we use Cloudflare Web Analytics to understand aggregate website traffic and performance. The information available to us includes pages visited, referring sites, campaign parameters included in the URL, browser, operating system, country, and page-performance metrics such as page load time and Core Web Vitals. We use this information only to understand how people discover Vireo and how the website performs.
+When you visit `vireo.photo`, we use Cloudflare Web Analytics to understand aggregate website traffic and performance. The information available to us includes pages visited, referring sites, browser, operating system, country, and page-performance metrics such as page load time and Core Web Vitals. Cloudflare Web Analytics does not record URL query strings. We use this information only to understand how people discover Vireo and how the website performs.
 
 Cloudflare Web Analytics does not use cookies, browser storage, persistent identifiers, or cross-site tracking. Cloudflare says Web Analytics does not collect or use visitors' personal data and does not track individual end users across customers' websites. Vireo does not receive or store your IP address. Learn more in [Cloudflare's Web Analytics documentation](https://developers.cloudflare.com/web-analytics/).
 
