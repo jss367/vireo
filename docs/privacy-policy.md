@@ -1,6 +1,6 @@
 # Privacy Policy
 
-*Effective date: July 12, 2026*
+*Effective date: July 14, 2026*
 
 Vireo is a wildlife photo organizer that runs entirely on your device. This policy explains what data Vireo accesses, what stays on your device, and what leaves it.
 
@@ -37,9 +37,9 @@ Beyond the bug reports you choose to submit, the Vireo application has no analyt
 
 ## Website measurement
 
-When you visit `vireo.photo`, we use Plausible Analytics to understand aggregate website traffic and outbound-link clicks, including download-button clicks. The information measured includes the page visited, referring site, campaign parameters included in the URL, outbound-link destination, browser, operating system, device category, and country, region, and city inferred from your network address. We use this information only to understand how people discover Vireo, which downloads they choose, and which external resources they follow.
+When you visit `vireo.photo`, we use Cloudflare Web Analytics to understand aggregate website traffic and performance. The information available to us includes pages visited, referring sites, campaign parameters included in the URL, browser, operating system, country, and page-performance metrics such as page load time and Core Web Vitals. We use this information only to understand how people discover Vireo and how the website performs.
 
-Plausible does not use cookies, browser storage, or persistent identifiers. Plausible briefly processes your IP address and browser user-agent to calculate aggregate statistics using an identifier that changes daily, but does not store the raw values. Vireo does not receive or store your IP address. Learn more in [Plausible's data policy](https://plausible.io/data-policy).
+Cloudflare Web Analytics does not use cookies, browser storage, persistent identifiers, or cross-site tracking. Cloudflare says Web Analytics does not collect or use visitors' personal data and does not track individual end users across customers' websites. Vireo does not receive or store your IP address. Learn more in [Cloudflare's Web Analytics documentation](https://developers.cloudflare.com/web-analytics/).
 
 Installer files are hosted by GitHub. GitHub provides the Vireo project with an aggregate download count for each release file and handles download requests under [GitHub's privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement). These counts are not connected to identifiable website visitors by Vireo.
 
