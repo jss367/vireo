@@ -2,6 +2,7 @@ import sys
 import types
 
 import numpy as np
+import pytest
 
 
 def test_api_photos_default(app_and_db):
@@ -7376,6 +7377,34 @@ def test_batch_photo_location_text_sets_all_selected_photos(app_and_db):
     assert entry["item_count"] == len(photo_ids)
 
 
+def test_batch_photo_location_text_can_remember_reviewed_map_point(app_and_db):
+    """Custom names created from map review become nearby saved suggestions."""
+    app, db = app_and_db
+    photo_ids = [p["id"] for p in db.get_photos()[:2]]
+
+    response = app.test_client().post(
+        "/api/batch/location/text",
+        json={
+            "photo_ids": photo_ids,
+            "name": "Anza-Borrego Desert State Park",
+            "latitude": 33.255,
+            "longitude": -116.405,
+        },
+    )
+
+    assert response.status_code == 200, response.get_json()
+    row = db.conn.execute(
+        "SELECT name, latitude, longitude FROM keywords "
+        "WHERE id = ?",
+        (response.get_json()["location"]["keyword_id"],),
+    ).fetchone()
+    assert dict(row) == {
+        "name": "Anza-Borrego Desert State Park",
+        "latitude": 33.255,
+        "longitude": -116.405,
+    }
+
+
 def test_delete_photo_location_records_edit(app_and_db):
     """DELETE adds an entry to the audit log even though it doesn't write a sidecar."""
     app, db = app_and_db
@@ -7809,6 +7838,119 @@ def _yosemite_geocode_response():
             {"name": "United States", "short_name": "US", "types": ["country"]},
         ],
     }
+
+
+def test_location_review_preview_groups_coordinates_without_geocoding(
+    app_and_db, monkeypatch,
+):
+    """The review queue is spatial evidence, not Google's chosen place id."""
+    import places
+
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    p1, p2, p3 = [p["id"] for p in photos]
+    db.conn.executemany(
+        "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+        [
+            (33.2550, -116.4050, p1),
+            (33.2554, -116.4053, p2),  # same review area
+            (37.7456, -119.5936, p3),  # a separate area
+        ],
+    )
+    db.conn.commit()
+    monkeypatch.setattr(
+        places,
+        "reverse_geocode",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("location review must not reverse-geocode")
+        ),
+    )
+
+    response = app.test_client().post(
+        "/api/location-review/preview",
+        json={"photo_ids": [p1, p2, p3]},
+    )
+
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert body["total"] == 3
+    assert body["reviewable"] == 3
+    assert body["unresolved"] == []
+    assert body["skipped"] == []
+    assert [group["count"] for group in body["groups"]] == [2, 1]
+    assert body["groups"][0]["photo_ids"] == [p1, p2]
+    assert body["groups"][0]["spread_m"] > 0
+    assert body["groups"][0]["center"]["lat"] == pytest.approx(33.2552)
+
+
+def test_location_review_preview_skips_assigned_and_reports_missing_gps(
+    app_and_db,
+):
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    p1, p2, p3 = [p["id"] for p in photos]
+    db.conn.execute(
+        "UPDATE photos SET latitude = 33.255, longitude = -116.405 WHERE id = ?",
+        (p1,),
+    )
+    db.conn.execute(
+        "UPDATE photos SET latitude = 33.256, longitude = -116.406 WHERE id = ?",
+        (p2,),
+    )
+    location_id = db.get_or_create_text_location("Already reviewed")
+    db.set_photo_location(p2, location_id)
+
+    response = app.test_client().post(
+        "/api/location-review/preview",
+        json={"photo_ids": [p1, p2, p3]},
+    )
+
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert body["reviewable"] == 1
+    assert body["groups"][0]["photo_ids"] == [p1]
+    assert body["skipped"] == [{
+        "filename": "bird2.jpg",
+        "photo_id": p2,
+        "reason": "already_has_location",
+    }]
+    assert body["unresolved"] == [{
+        "filename": "bird3.jpg",
+        "photo_id": p3,
+        "reason": "missing_gps",
+    }]
+
+
+def test_location_review_saved_suggestions_are_nearby_and_workspace_used(
+    app_and_db,
+):
+    app, db = app_and_db
+    p1, p2, _ = [p["id"] for p in db.get_photos(sort="name")]
+    near_id = db._upsert_one_keyword(
+        "Anza-Borrego Desert State Park", None,
+        latitude=33.255, longitude=-116.405,
+    )
+    far_id = db._upsert_one_keyword(
+        "Yosemite Valley", None,
+        latitude=37.7456, longitude=-119.5936,
+    )
+    db.conn.commit()
+    db.set_photo_location(p1, near_id)
+    db.set_photo_location(p2, far_id)
+
+    response = app.test_client().get(
+        "/api/location-review/saved-suggestions"
+        "?lat=33.2551&lng=-116.4051&radius_m=25000"
+    )
+
+    assert response.status_code == 200, response.get_json()
+    suggestions = response.get_json()["suggestions"]
+    assert [item["name"] for item in suggestions] == [
+        "Anza-Borrego Desert State Park"
+    ]
+    assert suggestions[0]["keyword_id"] == near_id
+    assert suggestions[0]["photo_count"] == 1
+    assert suggestions[0]["distance_m"] < 20
 
 
 def test_batch_location_from_exif_preview_groups_without_linking(
