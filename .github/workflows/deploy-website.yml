@@ -35,7 +35,7 @@ jobs:
       - name: Build
         working-directory: website
         env:
-          PUBLIC_PLAUSIBLE_SCRIPT_URL: ${{ vars.PLAUSIBLE_SCRIPT_URL }}
+          PUBLIC_CLOUDFLARE_WEB_ANALYTICS_TOKEN: ${{ vars.CLOUDFLARE_WEB_ANALYTICS_TOKEN }}
         run: npm run build
 
       - uses: actions/upload-pages-artifact@v3
