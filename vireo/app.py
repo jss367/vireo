@@ -1790,6 +1790,126 @@ def _migrate_edit_math_render_caches(app):
             pass
 
 
+def _migrate_unedited_raw_preview_sources(app):
+    """Drop previews that may have used an edit-quality RAW working copy.
+
+    RAW working copies deliberately preserve highlight headroom and therefore
+    look flatter/darker than the camera-rendered rendition used for browsing.
+    Older preview routing treated that working copy as the canonical source
+    even when a RAW had no edit recipe.  Those bytes are keyed only by
+    ``(photo_id, size)``, so fixing source selection alone would keep serving
+    already-cached dark tiers indefinitely.
+
+    Purge only recipe-free RAWs that currently have a working copy, and gate
+    the migration in ``db_meta`` so large libraries pay the directory scan
+    once.  If any cache file cannot be inspected or removed, leave the marker
+    unset so the next launch retries instead of permanently adopting stale
+    pixels.
+    """
+    from image_loader import RAW_EXTENSIONS
+
+    marker = "unedited_raw_camera_preview_source_v1"
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    db = Database(app.config["DB_PATH"])
+    try:
+        if db.get_meta(marker) == "1":
+            return
+
+        rows = db.conn.execute(
+            """SELECT p.id, p.filename
+               FROM photos p
+               LEFT JOIN photo_edit_recipes r ON r.photo_id = p.id
+               WHERE p.working_copy_path IS NOT NULL
+                 AND r.photo_id IS NULL"""
+        ).fetchall()
+        affected = {
+            int(row["id"])
+            for row in rows
+            if os.path.splitext(row["filename"] or "")[1].lower()
+            in RAW_EXTENSIONS
+        }
+
+        purge_failed = False
+        names_by_pid = {}
+        try:
+            preview_names = os.listdir(preview_dir)
+        except FileNotFoundError:
+            preview_names = ()
+        except OSError:
+            log.warning(
+                "Failed to list preview cache dir %s while migrating "
+                "unedited RAW preview sources; retrying next launch",
+                preview_dir,
+                exc_info=True,
+            )
+            preview_names = ()
+            purge_failed = True
+
+        for name in preview_names:
+            if not name.endswith(".jpg"):
+                continue
+            underscore = name.find("_")
+            if underscore <= 0:
+                continue
+            try:
+                photo_id = int(name[:underscore])
+            except ValueError:
+                continue
+            if photo_id in affected:
+                names_by_pid.setdefault(photo_id, set()).add(name)
+
+        invalidated = 0
+        for photo_id in affected:
+            tracked = db.conn.execute(
+                "SELECT size FROM preview_cache WHERE photo_id=?",
+                (photo_id,),
+            ).fetchall()
+            names = names_by_pid.get(photo_id, set())
+            names.update(
+                f"{photo_id}_{row['size']}.jpg" for row in tracked
+            )
+            photo_failed = False
+            for name in names:
+                path = os.path.join(preview_dir, name)
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    log.warning(
+                        "Failed to remove stale unedited RAW preview %s",
+                        path,
+                        exc_info=True,
+                    )
+                    photo_failed = True
+                    purge_failed = True
+            if photo_failed:
+                continue
+            cursor = db.conn.execute(
+                "DELETE FROM preview_cache WHERE photo_id=?", (photo_id,)
+            )
+            invalidated += max(cursor.rowcount, 0)
+
+        if purge_failed:
+            db.conn.commit()
+            return
+
+        db.set_meta(marker, "1", _commit=False)
+        db.conn.commit()
+        if affected:
+            log.info(
+                "Invalidated %d preview-cache entries across %d unedited "
+                "RAW photos so camera-rendered previews can regenerate",
+                invalidated,
+                len(affected),
+            )
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
 def _enforce_preview_cache_quota_at_startup(app):
     """Reconcile and evict at startup so prior runs / external deletes
     can't leave the table out of sync or over quota.
@@ -2010,6 +2130,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     _migrate_legacy_preview_cache(app)
     _migrate_edit_math_render_caches(app)
+    _migrate_unedited_raw_preview_sources(app)
     _enforce_preview_cache_quota_at_startup(app)
 
     # Request timing middleware — logs slow requests and user actions
@@ -17576,10 +17697,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         continue
 
                 if not os.path.exists(cache_path):
-                    canonical, using_working_copy = _recipe_render_source(
-                        detail_photo, recipe, max_size, vireo_dir, folders,
-                    )
                     from image_loader import RAW_EXTENSIONS
+                    folder_path = folders.get(detail_photo["folder_id"])
+                    raw_source_path = None
+                    if (
+                        not recipe
+                        and folder_path
+                        and os.path.splitext(detail_photo["filename"])[1].lower()
+                        in RAW_EXTENSIONS
+                    ):
+                        # Mirror /photos/<id>/preview: an unedited RAW must
+                        # warm from the camera-rendered source, not the
+                        # highlight-preserving working copy. Otherwise the
+                        # precompute job writes flatter/darker bytes into the
+                        # tracked preview cache and _serve_preview returns
+                        # those cache hits before its own RAW-source branch
+                        # ever runs, so the migration's one-time purge is
+                        # undone on the first warmup.
+                        candidate = os.path.join(
+                            folder_path, detail_photo["filename"],
+                        )
+                        if os.path.exists(candidate) and not _has_current_working_copy_failure(
+                            detail_photo,
+                            vireo_dir,
+                            trust_existing_working_copy=False,
+                            live_source_path=candidate,
+                            folder_path=folder_path,
+                        ):
+                            raw_source_path = candidate
+                    if raw_source_path:
+                        canonical = raw_source_path
+                        using_working_copy = False
+                    else:
+                        canonical, using_working_copy = _recipe_render_source(
+                            detail_photo, recipe, max_size, vireo_dir, folders,
+                        )
                     if (
                         not using_working_copy
                         and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
@@ -24803,6 +24955,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if pair_source_path:
             canonical = pair_source_path
             using_working_copy = False
+        elif (
+            not render_recipe
+            and os.path.splitext(photo["filename"])[1].lower()
+            in RAW_EXTENSIONS
+        ):
+            # An unedited RAW must use the camera-rendered decode for every
+            # lightbox tier.  Its working copy is an edit-quality,
+            # highlight-preserving render that intentionally looks
+            # flatter/darker; treating it as canonical makes the photo appear
+            # to gain a dark overlay when the lightbox swaps from /full to a
+            # sharper preview tier.  Keep the working copy as the offline
+            # fallback when the source itself is unavailable, and defer to it
+            # when the current RAW mtime is already marked as a source-side
+            # extraction failure: the RAW failure gate below returns 500
+            # before the companion/working-copy fallbacks further down can
+            # run, so forcing the RAW here would drop the preview for
+            # RAW+JPEG pairs whose companion or working copy could still
+            # satisfy the request.
+            source_path = os.path.join(
+                folder_row["path"], photo["filename"],
+            )
+            if os.path.exists(source_path) and not _has_current_working_copy_failure(
+                photo,
+                vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=source_path,
+                folder_path=folder_row["path"],
+            ):
+                canonical = source_path
+                using_working_copy = False
+            else:
+                canonical, using_working_copy = _recipe_render_source(
+                    photo, render_recipe, size, vireo_dir, folders,
+                )
         else:
             canonical, using_working_copy = _recipe_render_source(
                 photo, render_recipe, size, vireo_dir, folders,
