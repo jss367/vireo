@@ -425,13 +425,22 @@ function processScopeIssues() {
   return issues;
 }
 
-function openProcess(stage) {
+function processScopeBlockedReason() {
+  // The attention cards' Process shortcut is only meaningful when the
+  // scope the card counted is the same scope Process will run over. When
+  // it isn't (child folder, capture-date range), silently over-scoping
+  // Process runs previews/classification over sibling folders or dates
+  // the card never counted, which is the opposite of what the user
+  // clicked on. Return a human-readable reason so the button can be
+  // disabled with an explanation instead of relying on a confirm dialog.
   var issues = processScopeIssues();
-  if (issues.length) {
-    var msg = 'The Process page cannot preserve ' + issues.join(' or ') + '.'
-      + '\n\nContinue anyway with the broader scope?';
-    if (!window.confirm(msg)) return;
-  }
+  if (!issues.length) return '';
+  return 'Process cannot preserve ' + issues.join(' or ') +
+    '. Adjust the Dashboard scope, or open Process from the menu to run it deliberately.';
+}
+
+function openProcess(stage) {
+  if (processScopeBlockedReason()) return;
   var params = new URLSearchParams();
   params.set('dashboard_stage', stage);
   var folderPath = selectedFolderPath();
@@ -541,8 +550,16 @@ async function loadDashboardOptions() {
   var collectionId = query.get('collection_id') || '';
   if (folderId && folderSelect.querySelector('option[value="' + CSS.escape(folderId) + '"]')) {
     folderSelect.value = folderId;
-  } else if (collectionId && collectionSelect.querySelector('option[value="' + CSS.escape(collectionId) + '"]')) {
-    collectionSelect.value = collectionId;
+  } else if (collectionId) {
+    // A bookmarked /dashboard?collection_id=... whose rules have since
+    // broken still matches an <option>, but that option is disabled
+    // (marked degraded by /api/dashboard/options). Programmatically
+    // selecting it would send the id to /api/stats and /api/coverage,
+    // both of which 400 via _build_collection_query and leave the
+    // Dashboard wedged until the scope is reset. Skip disabled options.
+    var opt = collectionSelect.querySelector(
+      'option[value="' + CSS.escape(collectionId) + '"]');
+    if (opt && !opt.disabled) collectionSelect.value = collectionId;
   }
   document.getElementById('scopeDateFrom').value = query.get('date_from') || '';
   document.getElementById('scopeDateTo').value = query.get('date_to') || '';
@@ -1192,8 +1209,15 @@ function attentionCard(label, count, detail, actionLabel, action, options) {
     '<div class="attention-count">' + displayCount + '</div>' +
     '<div class="attention-detail">' + escapeHtml(done ? (options.done || 'Nothing needs attention.') : detail) + '</div>';
   if (!done && actionLabel && action) {
-    html += '<button class="attention-action" type="button" onclick="' + action + '">' +
-      escapeHtml(actionLabel) + ' →</button>';
+    if (options.disabledReason) {
+      html += '<button class="attention-action" type="button" disabled ' +
+        'style="cursor:not-allowed;opacity:0.55;" title="' +
+        escapeAttr(options.disabledReason) + '">' +
+        escapeHtml(actionLabel) + '</button>';
+    } else {
+      html += '<button class="attention-action" type="button" onclick="' + action + '">' +
+        escapeHtml(actionLabel) + ' →</button>';
+    }
   }
   return html + '</div>';
 }
@@ -1204,15 +1228,16 @@ function renderAttention(attention) {
     : 'Accessible photos without a ' + (attention.preview_size || 1920) + 'px preview.';
   var previewDone = attention.preview_enabled === false
     ? 'Preview generation is disabled.' : 'Preview cache covers this scope.';
+  var processBlocked = processScopeBlockedReason();
   var html = '';
   html += attentionCard('Classification', attention.unclassified || 0,
     'Photos without a current classification.', 'Open Process', "openProcess('classify')",
-    {done: 'Every photo has a classification.'});
+    {done: 'Every photo has a classification.', disabledReason: processBlocked});
   html += attentionCard('Map locations', attention.missing_location || 0,
     'Photos without embedded GPS or an assigned location.', 'Review photos',
     "openBrowse({location_status:'none'})", {done: 'Every photo has a map location.'});
   html += attentionCard('Previews', attention.missing_previews || 0,
-    previewDetail, 'Open Process', "openProcess('previews')", {done: previewDone});
+    previewDetail, 'Open Process', "openProcess('previews')", {done: previewDone, disabledReason: processBlocked});
   html += attentionCard('Metadata sync', attention.pending_sync || 0,
     'Pending metadata changes waiting to be written to XMP.', 'Sync workspace',
     'startDashboardSync()', {done: 'XMP metadata is up to date.'});
