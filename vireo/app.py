@@ -8425,16 +8425,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/dashboard/options")
     def api_dashboard_options():
-        """Return lightweight scope choices without running collection counts."""
+        """Return lightweight scope choices without running collection counts.
+
+        Collections whose rules can't be compiled (malformed JSON or
+        unresolvable fields) are marked ``degraded`` so the Dashboard scope
+        picker can disable them. Selecting one would 400 both /api/stats and
+        /api/coverage via ``_build_collection_query`` and leave the Dashboard
+        panels wedged until the scope is reset.
+        """
         db = _get_db()
         folders = [dict(row) for row in db.get_folder_tree()]
-        collections = [
-            dict(row) for row in db.conn.execute(
-                "SELECT id, name FROM collections "
-                "WHERE workspace_id = ? ORDER BY name COLLATE NOCASE, id",
-                (db._ws_id(),),
-            ).fetchall()
-        ]
+        collection_rows = db.conn.execute(
+            "SELECT id, name, rules FROM collections "
+            "WHERE workspace_id = ? ORDER BY name COLLATE NOCASE, id",
+            (db._ws_id(),),
+        ).fetchall()
+        collections = []
+        for row in collection_rows:
+            degraded = False
+            try:
+                parsed_rules = json.loads(row["rules"])
+            except (TypeError, ValueError):
+                degraded = True
+            else:
+                if not db.rules_resolvable(parsed_rules):
+                    degraded = True
+            collections.append({
+                "id": row["id"],
+                "name": row["name"],
+                "degraded": degraded,
+            })
         return jsonify({"folders": folders, "collections": collections})
 
     @app.route("/api/stats")

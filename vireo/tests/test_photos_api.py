@@ -178,6 +178,30 @@ def test_dashboard_and_browse_share_collection_date_scope(app_and_db):
         assert result_ids == [photos[2]["id"]]
 
 
+def test_dashboard_options_flags_degraded_collections(app_and_db):
+    """Collections whose rules can't compile are flagged so the scope
+    picker can disable them instead of 400ing /api/stats and /api/coverage."""
+    app, db = app_and_db
+    healthy = db.add_collection("Healthy", "[]")
+    bad_json = db.add_collection("Broken JSON", "{not json")
+    bad_rules = db.add_collection(
+        "Unresolvable rules",
+        json.dumps([{"field": "no_such_field", "op": "equals", "value": 1}]),
+    )
+
+    client = app.test_client()
+    resp = client.get("/api/dashboard/options")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()["collections"]}
+    assert by_id[healthy]["degraded"] is False
+    assert by_id[bad_json]["degraded"] is True
+    assert by_id[bad_rules]["degraded"] is True
+
+    for cid in (bad_json, bad_rules):
+        assert client.get(f"/api/stats?collection_id={cid}").status_code == 400
+        assert client.get(f"/api/coverage?collection_id={cid}").status_code == 400
+
+
 def test_dashboard_scope_rejects_foreign_collection(app_and_db):
     """Scope ids cannot cross workspace boundaries."""
     app, db = app_and_db

@@ -403,7 +403,35 @@ function selectedFolderPath() {
   return folder ? folder.path : '';
 }
 
+function processScopeIssues() {
+  // Pipeline recognises top-level workspace roots and collections; it maps
+  // child-folder paths to the top-level root that contains them and has no
+  // capture-date filter. Passing a narrower Dashboard scope would silently
+  // run Process across a wider set than the attention card counted.
+  var issues = [];
+  if (dashboardScope.folder_id) {
+    var id = parseInt(dashboardScope.folder_id, 10);
+    var byId = {};
+    (dashboardOptions.folders || []).forEach(function(f) { byId[f.id] = f; });
+    var folder = byId[id];
+    if (folder && folder.parent_id && byId[folder.parent_id]) {
+      issues.push('the child folder scope (Process would expand it to the '
+        + 'containing top-level folder)');
+    }
+  }
+  if (dashboardScope.date_from || dashboardScope.date_to) {
+    issues.push('the capture-date range (Process has no capture-date filter)');
+  }
+  return issues;
+}
+
 function openProcess(stage) {
+  var issues = processScopeIssues();
+  if (issues.length) {
+    var msg = 'The Process page cannot preserve ' + issues.join(' or ') + '.'
+      + '\n\nContinue anyway with the broader scope?';
+    if (!window.confirm(msg)) return;
+  }
   var params = new URLSearchParams();
   params.set('dashboard_stage', stage);
   var folderPath = selectedFolderPath();
@@ -502,7 +530,9 @@ async function loadDashboardOptions() {
   (dashboardOptions.collections || []).forEach(function(collection) {
     var option = document.createElement('option');
     option.value = collection.id;
-    option.textContent = collection.name;
+    option.textContent = collection.name
+      + (collection.degraded ? ' (unavailable — rule error)' : '');
+    if (collection.degraded) option.disabled = true;
     collectionSelect.appendChild(option);
   });
 
