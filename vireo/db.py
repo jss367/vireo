@@ -11624,19 +11624,30 @@ class Database:
         ).fetchall()
         return [r["species"] for r in rows]
 
-    def get_life_list_locations(self):
+    def get_life_list_locations(self, species=None):
         """Return {species name: [location keyword names]} for the life list.
 
         A location is attributed to a species when at least one
         workspace-visible, non-rejected photo carries both the species
         keyword and a ``type = 'location'`` keyword.
+
+        When ``species`` is given, only that species is scanned — used by
+        the single-species paging endpoint so incremental loads don't do
+        catalog-wide work.
         """
         ws = self._ws_id()
+        species_filter = ""
+        params = []
+        if species:
+            species_filter = " AND k.name = ?"
+            params.append(species)
+        params.append(ws)
         rows = self.conn.execute(
-            """SELECT DISTINCT k.name AS species, lk.name AS location
+            f"""SELECT DISTINCT k.name AS species, lk.name AS location
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
+                {species_filter}
                JOIN photos p ON p.id = pk.photo_id
                 AND COALESCE(p.flag, 'none') != 'rejected'
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
@@ -11647,7 +11658,7 @@ class Database:
                JOIN keywords lk ON lk.id = plk.keyword_id
                 AND lk.type = 'location'
                ORDER BY k.name, lk.name""",
-            (ws,),
+            tuple(params),
         ).fetchall()
         result = {}
         for r in rows:
@@ -11665,7 +11676,7 @@ class Database:
         ).fetchall()
         return {r["species"]: r["photo_id"] for r in rows}
 
-    def get_species_representative_lists(self, eligible_only=False):
+    def get_species_representative_lists(self, eligible_only=False, species=None):
         """Return {species: [photo_id, ...]} representative photos.
 
         Representative markings are global, but this read is still scoped to
@@ -11677,6 +11688,10 @@ class Database:
         When ``eligible_only`` is true, omit preferences whose photo is
         rejected, unavailable, or no longer carries the stored species keyword.
         The preference row remains intact for undo.
+
+        When ``species`` is given, only return rows for that species — used
+        by the single-species Life List paging endpoint so incremental
+        loads don't scan every species' representatives.
         """
         ws = self._ws_id()
         eligibility_filter = ""
@@ -11692,6 +11707,11 @@ class Database:
                      WHERE pk.photo_id = sr.photo_id
                        AND k.name = sr.species
                  )"""
+        species_filter = ""
+        params = [ws]
+        if species:
+            species_filter = " AND sr.species = ?"
+            params.append(species)
         rows = self.conn.execute(
             f"""SELECT sr.species, sr.photo_id
                FROM species_representatives sr
@@ -11700,8 +11720,9 @@ class Database:
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                  {eligibility_filter}
+                 {species_filter}
                ORDER BY sr.species, sr.selected_order DESC, sr.id DESC""",
-            (ws,),
+            tuple(params),
         ).fetchall()
         result = {}
         for row in rows:

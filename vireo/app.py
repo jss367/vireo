@@ -9133,7 +9133,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species_filter=None,
     ):
         rows = db.get_life_list_candidates(species=species_filter)
-        locations_by_species = db.get_life_list_locations()
+        locations_by_species = db.get_life_list_locations(species=species_filter)
         photo_offset = max(0, int(photo_offset))
         if photos_per_species is None:
             photo_limit = None
@@ -9202,8 +9202,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         species_entries = []
         distinct_photo_ids = set()
-        representatives = db.get_species_representative_lists()
-        highlights_by_species = db.get_species_highlights()
+        representatives = db.get_species_representative_lists(species=species_filter)
+        highlights_by_species = db.get_species_highlights(species=species_filter)
         for species, entry in buckets.items():
             photos = entry["photos"]
             distinct_photo_ids.update(p["id"] for p in photos)
