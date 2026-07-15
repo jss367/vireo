@@ -9,7 +9,23 @@
 <title>Vireo - Dashboard</title>
 <style>
 body { padding-bottom: 36px; }
-.content { max-width: 1000px; }
+.content { max-width: 1180px; }
+.dashboard-title-row { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
+.dashboard-title-row h2 { margin:0; font-size:20px; }
+.scope-panel {
+  display:flex; align-items:end; gap:10px; flex-wrap:wrap; padding:14px 16px;
+  margin-bottom:18px; background:var(--bg-secondary); border:1px solid var(--border-primary);
+  border-radius:8px;
+}
+.scope-field { display:flex; flex-direction:column; gap:5px; min-width:150px; }
+.scope-field.grow { flex:1 1 220px; }
+.scope-field label { color:var(--text-dim); font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.35px; }
+.scope-field select, .scope-field input {
+  background:var(--bg-tertiary); color:var(--text-primary); border:1px solid var(--border-secondary);
+  border-radius:4px; padding:7px 9px; min-height:32px; box-sizing:border-box;
+}
+.scope-summary { width:100%; color:var(--text-dim); font-size:12px; min-height:16px; }
+.dashboard-busy { opacity:.65; pointer-events:none; }
 .bar-chart { margin-top: 8px; }
 .bar-row {
   display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 12px;
@@ -24,6 +40,10 @@ body { padding-bottom: 36px; }
 .bar-fill {
   height: 100%; border-radius: 3px; transition: width 0.3s;
 }
+.bar-row.dashboard-drill { cursor:pointer; border-radius:4px; padding:2px 4px; margin-left:-4px; margin-right:-4px; }
+.bar-row.dashboard-drill:hover { background:var(--bg-tertiary); }
+.bar-row.dashboard-drill:hover .bar-label { color:var(--accent); }
+.dashboard-drill { cursor:pointer; }
 .bar-value { width: 60px; color: var(--text-dim); font-variant-numeric: tabular-nums; flex-shrink: 0; }
 .species-bar .bar-fill { background: var(--accent); }
 .month-bar .bar-fill { background: var(--info); }
@@ -57,7 +77,29 @@ body { padding-bottom: 36px; }
 }
 
 .grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-@media (max-width: 768px) { .grid-2col { grid-template-columns: 1fr; } }
+.attention-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; }
+.attention-card {
+  display:flex; flex-direction:column; min-height:132px; padding:14px; border:1px solid var(--border-primary);
+  border-radius:7px; background:var(--bg-tertiary);
+}
+.attention-card.warn { border-color:color-mix(in srgb, var(--warning) 45%, var(--border-primary)); }
+.attention-card.ok { opacity:.72; }
+.attention-label { color:var(--text-secondary); font-size:12px; font-weight:600; }
+.attention-count { color:var(--warning); font-size:28px; font-weight:700; margin:6px 0 2px; font-variant-numeric:tabular-nums; }
+.attention-card.ok .attention-count { color:var(--accent); }
+.attention-detail { color:var(--text-dim); font-size:11px; line-height:1.4; flex:1; }
+.attention-action { align-self:flex-start; margin-top:10px; color:var(--accent); background:none; border:0; padding:0; cursor:pointer; font-size:12px; font-weight:600; }
+.attention-action:hover { text-decoration:underline; }
+.trend-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin:10px 0 14px; }
+.trend-stat { background:var(--bg-tertiary); border-radius:5px; padding:9px 10px; }
+.trend-stat strong { display:block; color:var(--text-primary); font-size:16px; font-variant-numeric:tabular-nums; }
+.trend-stat span { color:var(--text-dim); font-size:10px; text-transform:uppercase; letter-spacing:.3px; }
+.workspace-wide-note { color:var(--text-ghost); font-size:11px; font-weight:400; }
+@media (max-width: 768px) {
+  .grid-2col { grid-template-columns: 1fr; }
+  .scope-field, .scope-field.grow { flex:1 1 calc(50% - 8px); min-width:130px; }
+  .trend-summary { grid-template-columns:1fr; }
+}
 
 /* Classification inventory */
 #classInvSection .content-table {
@@ -181,12 +223,37 @@ body { padding-bottom: 36px; }
 {% include '_navbar.html' %}
 
 <div class="content">
-  <h2 style="margin-bottom:20px;font-size:20px;">Dashboard</h2>
+  <div class="dashboard-title-row">
+    <h2>Dashboard</h2>
+    <button id="dashboardRefresh" class="btn-secondary" style="margin-left:auto;" onclick="reloadDashboard()">Refresh</button>
+  </div>
+
+  <div class="scope-panel" id="scopePanel">
+    <div class="scope-field grow">
+      <label for="scopeFolder">Folder</label>
+      <select id="scopeFolder" onchange="onFolderScopeChange()"><option value="">All folders</option></select>
+    </div>
+    <div class="scope-field grow">
+      <label for="scopeCollection">Collection</label>
+      <select id="scopeCollection" onchange="onCollectionScopeChange()"><option value="">All collections</option></select>
+    </div>
+    <div class="scope-field">
+      <label for="scopeDateFrom">From</label>
+      <input type="date" id="scopeDateFrom">
+    </div>
+    <div class="scope-field">
+      <label for="scopeDateTo">To</label>
+      <input type="date" id="scopeDateTo">
+    </div>
+    <button class="btn-secondary" onclick="applyDashboardScope()">Apply</button>
+    <button class="btn-secondary" onclick="resetDashboardScope()">Reset</button>
+    <div class="scope-summary" id="scopeSummary">All photos in this workspace</div>
+  </div>
 
   <!-- Overview Stats -->
   <div class="section">
     <div class="stats-grid">
-      <div class="stat-card">
+      <div class="stat-card" style="cursor:pointer;" onclick="openBrowse()">
         <div class="stat-number" id="photoCount">-</div>
         <div class="stat-label">Photos</div>
         <div id="offlinePhotoNote" style="display:none;font-size:11px;color:var(--warning);margin-top:4px;line-height:1.3;"></div>
@@ -195,7 +262,7 @@ body { padding-bottom: 36px; }
         <div class="stat-number" id="folderCount">-</div>
         <div class="stat-label">Folders &#9662;</div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card" style="cursor:pointer;" onclick="window.location.href='/keywords'">
         <div class="stat-number" id="keywordCount">-</div>
         <div class="stat-label">Keywords</div>
       </div>
@@ -206,6 +273,12 @@ body { padding-bottom: 36px; }
     </div>
     <div id="folderDetail" style="display:none;margin-top:16px;border-top:1px solid var(--border-primary);padding-top:16px;"></div>
     <div id="pendingDetail" style="display:none;margin-top:16px;border-top:1px solid var(--border-primary);padding-top:16px;"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Needs Attention</div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px;">Gaps and unfinished work in the selected scope.</div>
+    <div class="attention-grid" id="attentionGrid"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <!-- Pipeline Outputs -->
@@ -268,6 +341,7 @@ body { padding-bottom: 36px; }
   <div class="section" id="classInvSection">
     <div class="section-title" style="display:flex;align-items:center;gap:10px;">
       <span>Classification Inventory</span>
+      <span class="workspace-wide-note" id="inventoryScopeNote">Workspace-wide</span>
       <span id="classInvSummary" style="font-size:12px;font-weight:400;color:var(--text-dim);"></span>
       <button id="classInvRefresh" onclick="loadClassificationInventory()" class="btn-secondary"
               style="margin-left:auto;font-size:12px;padding:3px 10px;">Refresh</button>
@@ -287,19 +361,197 @@ body { padding-bottom: 36px; }
     <div class="bar-chart" id="hourChart"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
-  <!-- Photos by Month -->
+  <!-- Capture trend -->
   <div class="section">
-    <div class="section-title">Photos by Month</div>
+    <div class="section-title">Capture Trend</div>
+    <div class="trend-summary" id="trendSummary"></div>
     <div class="bar-chart" id="monthChart"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
 </div>
 
 <script>
-loadStats();
-loadDashboard();
-loadCoverage();
-loadClassificationInventory();
+var dashboardScope = {folder_id: null, collection_id: null, date_from: '', date_to: ''};
+var dashboardOptions = {folders: [], collections: []};
+var dashboardStats = null;
+
+function scopedParams(extra) {
+  var params = new URLSearchParams();
+  if (dashboardScope.folder_id) params.set('folder_id', dashboardScope.folder_id);
+  if (dashboardScope.collection_id) params.set('collection_id', dashboardScope.collection_id);
+  if (dashboardScope.date_from) params.set('date_from', dashboardScope.date_from);
+  if (dashboardScope.date_to) params.set('date_to', dashboardScope.date_to);
+  Object.keys(extra || {}).forEach(function(key) {
+    var value = extra[key];
+    if (value !== null && value !== undefined && value !== '') params.set(key, value);
+  });
+  return params;
+}
+
+function scopedUrl(path, extra) {
+  var qs = scopedParams(extra).toString();
+  return path + (qs ? '?' + qs : '');
+}
+
+function openBrowse(extra) {
+  window.location.href = scopedUrl('/browse', extra);
+}
+
+function selectedFolderPath() {
+  var id = parseInt(dashboardScope.folder_id, 10);
+  var folder = dashboardOptions.folders.find(function(f) { return f.id === id; });
+  return folder ? folder.path : '';
+}
+
+function openProcess(stage) {
+  var params = new URLSearchParams();
+  params.set('dashboard_stage', stage);
+  var folderPath = selectedFolderPath();
+  if (folderPath) params.append('folder', folderPath);
+  if (dashboardScope.collection_id) params.set('collection_id', dashboardScope.collection_id);
+  window.location.href = '/pipeline?' + params.toString();
+}
+
+function drillAttrs(params, title) {
+  return ' class="bar-row dashboard-drill" data-dashboard-drill="' +
+    escapeAttr(JSON.stringify(params || {})) + '" title="' +
+    escapeAttr(title || 'Open matching photos in Browse') + '"';
+}
+
+document.addEventListener('click', function(event) {
+  var row = event.target.closest('[data-dashboard-drill]');
+  if (!row) return;
+  try { openBrowse(JSON.parse(row.getAttribute('data-dashboard-drill'))); }
+  catch (_) { openBrowse(); }
+});
+
+function dashboardScopeIsActive() {
+  return !!(dashboardScope.folder_id || dashboardScope.collection_id ||
+    dashboardScope.date_from || dashboardScope.date_to);
+}
+
+function readDashboardScopeControls() {
+  dashboardScope.folder_id = document.getElementById('scopeFolder').value || null;
+  dashboardScope.collection_id = document.getElementById('scopeCollection').value || null;
+  dashboardScope.date_from = document.getElementById('scopeDateFrom').value || '';
+  dashboardScope.date_to = document.getElementById('scopeDateTo').value || '';
+}
+
+function onFolderScopeChange() {
+  if (document.getElementById('scopeFolder').value) {
+    document.getElementById('scopeCollection').value = '';
+  }
+}
+
+function onCollectionScopeChange() {
+  if (document.getElementById('scopeCollection').value) {
+    document.getElementById('scopeFolder').value = '';
+  }
+}
+
+function applyDashboardScope() {
+  readDashboardScopeControls();
+  if (dashboardScope.date_from && dashboardScope.date_to &&
+      dashboardScope.date_from > dashboardScope.date_to) {
+    showToast('The start date must be before the end date.', 'error');
+    return;
+  }
+  var url = scopedUrl('/dashboard');
+  window.history.replaceState({}, '', url);
+  updateScopeSummary();
+  reloadDashboard();
+}
+
+function resetDashboardScope() {
+  document.getElementById('scopeFolder').value = '';
+  document.getElementById('scopeCollection').value = '';
+  document.getElementById('scopeDateFrom').value = '';
+  document.getElementById('scopeDateTo').value = '';
+  applyDashboardScope();
+}
+
+function updateScopeSummary() {
+  var parts = [];
+  if (dashboardScope.folder_id) {
+    var folderPath = selectedFolderPath();
+    parts.push(folderPath ? 'Folder: ' + folderPath : 'Selected folder');
+  }
+  if (dashboardScope.collection_id) {
+    var id = parseInt(dashboardScope.collection_id, 10);
+    var collection = dashboardOptions.collections.find(function(c) { return c.id === id; });
+    parts.push(collection ? 'Collection: ' + collection.name : 'Selected collection');
+  }
+  if (dashboardScope.date_from || dashboardScope.date_to) {
+    parts.push((dashboardScope.date_from || 'Any date') + ' to ' + (dashboardScope.date_to || 'today'));
+  }
+  document.getElementById('scopeSummary').textContent = parts.length
+    ? parts.join(' · ') : 'All photos in this workspace';
+}
+
+async function loadDashboardOptions() {
+  var data = await safeFetch('/api/dashboard/options', {}, {toast:false});
+  dashboardOptions = data || {folders: [], collections: []};
+  var folderSelect = document.getElementById('scopeFolder');
+  var collectionSelect = document.getElementById('scopeCollection');
+  (dashboardOptions.folders || []).forEach(function(folder) {
+    var option = document.createElement('option');
+    option.value = folder.id;
+    option.textContent = folder.path;
+    folderSelect.appendChild(option);
+  });
+  (dashboardOptions.collections || []).forEach(function(collection) {
+    var option = document.createElement('option');
+    option.value = collection.id;
+    option.textContent = collection.name;
+    collectionSelect.appendChild(option);
+  });
+
+  var query = new URLSearchParams(window.location.search);
+  var folderId = query.get('folder_id') || '';
+  var collectionId = query.get('collection_id') || '';
+  if (folderId && folderSelect.querySelector('option[value="' + CSS.escape(folderId) + '"]')) {
+    folderSelect.value = folderId;
+  } else if (collectionId && collectionSelect.querySelector('option[value="' + CSS.escape(collectionId) + '"]')) {
+    collectionSelect.value = collectionId;
+  }
+  document.getElementById('scopeDateFrom').value = query.get('date_from') || '';
+  document.getElementById('scopeDateTo').value = query.get('date_to') || '';
+  readDashboardScopeControls();
+  updateScopeSummary();
+}
+
+async function reloadDashboard() {
+  var panel = document.getElementById('scopePanel');
+  var refresh = document.getElementById('dashboardRefresh');
+  panel.classList.add('dashboard-busy');
+  refresh.disabled = true;
+  folderOpen = false;
+  pendingOpen = false;
+  document.getElementById('folderDetail').style.display = 'none';
+  document.getElementById('pendingDetail').style.display = 'none';
+  _coverageFolders = null;
+  try {
+    await Promise.all([loadStats(), loadCoverage()]);
+    var inventory = document.getElementById('classInvSection');
+    if (dashboardScopeIsActive()) {
+      inventory.style.display = 'none';
+    } else {
+      inventory.style.display = '';
+      await loadClassificationInventory();
+    }
+  } finally {
+    panel.classList.remove('dashboard-busy');
+    refresh.disabled = false;
+  }
+}
+
+async function bootstrapDashboard() {
+  try { await loadDashboardOptions(); }
+  catch (error) { showToast('Could not load Dashboard scope options.', 'error'); }
+  await reloadDashboard();
+}
+
+document.addEventListener('DOMContentLoaded', bootstrapDashboard);
 
 // Counts are split between Vireo outputs and facts that come from the image
 // or the user's library decisions. The second group should not be read as
@@ -338,7 +590,7 @@ async function loadCoverage() {
   var pipelineContainer = document.getElementById('pipelineCoverageChart');
   var attributeContainer = document.getElementById('attributeCoverageChart');
   try {
-    var data = await safeFetch('/api/coverage', {}, { toast: false });
+    var data = await safeFetch(scopedUrl('/api/coverage'), {}, { toast: false });
     _coverageFolders = data.folders || [];
     var overall = data.overall || {total: 0};
     // When ``overall.total`` is 0, we need to know whether the workspace
@@ -346,7 +598,7 @@ async function loadCoverage() {
     // can pick the right empty-state copy. ``/api/scan/status`` carries
     // that signal; only pay for the extra fetch on the empty branch.
     var offlineCtx = null;
-    if ((overall.total || 0) === 0) {
+    if ((overall.total || 0) === 0 && !dashboardScopeIsActive()) {
       try {
         var status = await safeFetch('/api/scan/status', {}, { toast: false });
         if ((status.photo_count || 0) > 0 && (status.missing_folder_count || 0) > 0) {
@@ -379,7 +631,11 @@ function renderCoverageGroup(container, stats, fields, offlineCtx) {
   fields.forEach(function(f) {
     var count = stats[f.key] || 0;
     var pct = Math.round((count / total) * 100);
-    html += '<div class="bar-row cov-bar">' +
+    var attrs = '';
+    if (f.key === 'gps') attrs = drillAttrs({location_status: 'exif'}, 'Browse photos with embedded GPS');
+    else if (f.key === 'rating') attrs = drillAttrs({rating_min: 1}, 'Browse rated photos');
+    if (attrs) attrs = attrs.replace('bar-row dashboard-drill', 'bar-row cov-bar dashboard-drill');
+    html += '<div' + (attrs || ' class="bar-row cov-bar"') + '>' +
       '<span class="bar-label">' + f.label + '</span>' +
       '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
       '<span class="cov-pct">' + pct + '%</span>' +
@@ -414,7 +670,10 @@ function renderFolderCoverage(folder) {
 
 async function loadStats() {
   try {
-    var data = await safeFetch('/api/stats', {}, { toast: false });
+    var data = await safeFetch(scopedUrl('/api/stats'), {}, { toast: false });
+    dashboardStats = data;
+    renderOverview(data);
+    renderAttention(data.attention || {});
     renderSpecies(data.top_keywords || []);
     renderMonths(data.photos_by_month || []);
     renderRatings(data.rating_distribution || []);
@@ -423,6 +682,7 @@ async function loadStats() {
     renderDetection(data.detected_count || 0, data.total_photos || 0);
     renderQuality(data.quality_distribution || []);
     renderHours(data.photos_by_hour || []);
+    renderTrendSummary(data.photos_by_month || []);
   } catch(e) {
     document.getElementById('speciesChart').textContent = 'Failed to load statistics.';
   }
@@ -616,7 +876,9 @@ function renderSpecies(keywords) {
   var html = '';
   species.slice(0, 20).forEach(function(k) {
     var pct = Math.round((k.photo_count / max) * 100);
-    html += '<div class="bar-row species-bar">' +
+    var attrs = drillAttrs({keyword: k.name}, 'Browse photos tagged ' + k.name)
+      .replace('bar-row dashboard-drill', 'bar-row species-bar dashboard-drill');
+    html += '<div' + attrs + '>' +
       '<span class="bar-label">' + escapeHtml(k.name) + '</span>' +
       '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
       '<span class="bar-value">' + k.photo_count.toLocaleString() + '</span>' +
@@ -633,7 +895,7 @@ function renderSpecies(keywords) {
     var otherHtml = '';
     nonSpecies.forEach(function(k) {
       var pct = Math.round((k.photo_count / nonSpeciesMax) * 100);
-      otherHtml += '<div class="bar-row">' +
+      otherHtml += '<div' + drillAttrs({keyword: k.name}, 'Browse photos tagged ' + k.name) + '>' +
         '<span class="bar-label">' + escapeHtml(k.name) + '</span>' +
         '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:var(--text-ghost);"></div></div>' +
         '<span class="bar-value">' + k.photo_count.toLocaleString() + '</span>' +
@@ -656,13 +918,47 @@ function renderMonths(months) {
   var html = '';
   months.forEach(function(m) {
     var pct = Math.round((m.count / max) * 100);
-    html += '<div class="bar-row month-bar">' +
+    var end = monthEnd(m.month);
+    var attrs = drillAttrs({date_from: m.month + '-01', date_to: end},
+      'Browse photos captured in ' + m.month)
+      .replace('bar-row dashboard-drill', 'bar-row month-bar dashboard-drill');
+    html += '<div' + attrs + '>' +
       '<span class="bar-label">' + (m.month || 'Unknown') + '</span>' +
       '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
       '<span class="bar-value">' + m.count.toLocaleString() + '</span>' +
     '</div>';
   });
   container.innerHTML = html;
+}
+
+function monthEnd(month) {
+  if (!/^\d{4}-\d{2}$/.test(month || '')) return month;
+  var parts = month.split('-');
+  var end = new Date(Date.UTC(parseInt(parts[0], 10), parseInt(parts[1], 10), 0));
+  return end.toISOString().slice(0, 10);
+}
+
+function renderTrendSummary(months) {
+  var container = document.getElementById('trendSummary');
+  if (!months.length) { container.innerHTML = ''; return; }
+  var latest = months[months.length - 1];
+  var previous = months.length > 1 ? months[months.length - 2] : null;
+  var busiest = months.reduce(function(best, row) {
+    return !best || row.count > best.count ? row : best;
+  }, null);
+  var change = 'First active month';
+  if (previous && previous.count > 0) {
+    var pct = Math.round(((latest.count - previous.count) / previous.count) * 100);
+    change = (pct > 0 ? '+' : '') + pct + '% vs ' + previous.month;
+  } else if (previous) {
+    change = latest.count > 0 ? 'New activity' : 'No change';
+  }
+  container.innerHTML =
+    '<div class="trend-stat"><strong>' + latest.count.toLocaleString() + '</strong><span>' +
+      escapeHtml(latest.month) + '</span></div>' +
+    '<div class="trend-stat"><strong>' + escapeHtml(change) + '</strong><span>Month-over-month</span></div>' +
+    '<div class="trend-stat"><strong>' + busiest.count.toLocaleString() + '</strong><span>Busiest · ' +
+      escapeHtml(busiest.month) + '</span></div>';
 }
 
 function renderRatings(ratings) {
@@ -677,7 +973,11 @@ function renderRatings(ratings) {
     var pct = max > 0 ? Math.round((count / max) * 100) : 0;
     var stars = i === 0 ? 'Unrated' : '';
     for (var s = 0; s < i; s++) stars += '\u2605';
-    html += '<div class="bar-row rating-bar">' +
+    var attrs = i > 0
+      ? drillAttrs({rating_min: i}, 'Browse photos rated ' + i + ' stars or higher')
+          .replace('bar-row dashboard-drill', 'bar-row rating-bar dashboard-drill')
+      : ' class="bar-row rating-bar"';
+    html += '<div' + attrs + '>' +
       '<span class="bar-label">' + stars + '</span>' +
       '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%"></div></div>' +
       '<span class="bar-value">' + count.toLocaleString() + '</span>' +
@@ -691,7 +991,9 @@ function renderFlags(flags) {
   var html = '';
   flags.forEach(function(f) {
     var color = f.flag === 'flagged' ? 'var(--accent)' : f.flag === 'rejected' ? 'var(--danger)' : 'var(--text-dim)';
-    html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-subtle);">' +
+    var attrs = drillAttrs({flag: f.flag || 'none'}, 'Browse ' + (f.flag || 'unflagged') + ' photos')
+      .replace('bar-row dashboard-drill', 'dashboard-drill');
+    html += '<div' + attrs + ' style="display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid var(--border-subtle);">' +
       '<span style="color:' + color + ';font-size:14px;font-weight:600;text-transform:capitalize;">' + f.flag + '</span>' +
       '<span style="margin-left:auto;font-size:14px;color:var(--text-secondary);font-variant-numeric:tabular-nums;">' + f.count.toLocaleString() + '</span>' +
     '</div>';
@@ -831,30 +1133,74 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-async function loadDashboard() {
-  try {
-    var d = await safeFetch('/api/scan/status', {}, { toast: false });
-    document.getElementById('photoCount').textContent = d.photo_count.toLocaleString();
-    document.getElementById('folderCount').textContent = d.folder_count.toLocaleString();
-    document.getElementById('keywordCount').textContent = d.keyword_count.toLocaleString();
-    document.getElementById('pendingCount').textContent = d.pending_changes.toLocaleString();
+function renderOverview(d) {
+  document.getElementById('photoCount').textContent = (d.total_photos || 0).toLocaleString();
+  document.getElementById('folderCount').textContent = (d.folder_count || 0).toLocaleString();
+  document.getElementById('keywordCount').textContent = (d.keyword_count || 0).toLocaleString();
+  document.getElementById('pendingCount').textContent = (d.pending_changes || 0).toLocaleString();
 
-    // When some photos sit in offline (unmounted) folders, the headline count
-    // now includes them — surface the gap explicitly so the user knows why
-    // coverage bars dipped and what to mount to bring them back online.
-    var note = document.getElementById('offlinePhotoNote');
-    var total = d.photo_count || 0;
-    var accessible = (typeof d.accessible_photo_count === 'number') ? d.accessible_photo_count : total;
-    var missingFolders = d.missing_folder_count || 0;
-    if (accessible < total && missingFolders > 0) {
-      var offline = total - accessible;
-      var fs = missingFolders === 1 ? '' : 's';
-      note.textContent = offline.toLocaleString() + ' in ' + missingFolders + ' offline folder' + fs;
-      note.style.display = 'block';
-    } else {
-      note.style.display = 'none';
-    }
-  } catch(e) {}
+  var note = document.getElementById('offlinePhotoNote');
+  var total = d.total_photos || 0;
+  var accessible = typeof d.accessible_photos === 'number' ? d.accessible_photos : total;
+  var missingFolders = d.missing_folder_count || 0;
+  if (accessible < total && missingFolders > 0) {
+    var offline = total - accessible;
+    note.textContent = offline.toLocaleString() + ' in ' + missingFolders +
+      ' offline folder' + (missingFolders === 1 ? '' : 's');
+    note.style.display = 'block';
+  } else {
+    note.style.display = 'none';
+  }
+}
+
+function attentionCard(label, count, detail, actionLabel, action, options) {
+  options = options || {};
+  var done = count === 0;
+  var displayCount = done ? '✓' : count.toLocaleString();
+  var html = '<div class="attention-card ' + (done ? 'ok' : 'warn') + '">' +
+    '<div class="attention-label">' + escapeHtml(label) + '</div>' +
+    '<div class="attention-count">' + displayCount + '</div>' +
+    '<div class="attention-detail">' + escapeHtml(done ? (options.done || 'Nothing needs attention.') : detail) + '</div>';
+  if (!done && actionLabel && action) {
+    html += '<button class="attention-action" type="button" onclick="' + action + '">' +
+      escapeHtml(actionLabel) + ' →</button>';
+  }
+  return html + '</div>';
+}
+
+function renderAttention(attention) {
+  var previewDetail = attention.preview_enabled === false
+    ? 'Preview generation is disabled in Settings.'
+    : 'Accessible photos without a ' + (attention.preview_size || 1920) + 'px preview.';
+  var previewDone = attention.preview_enabled === false
+    ? 'Preview generation is disabled.' : 'Preview cache covers this scope.';
+  var html = '';
+  html += attentionCard('Classification', attention.unclassified || 0,
+    'Photos without a current classification.', 'Open Process', "openProcess('classify')",
+    {done: 'Every photo has a classification.'});
+  html += attentionCard('Map locations', attention.missing_location || 0,
+    'Photos without embedded GPS or an assigned location.', 'Review photos',
+    "openBrowse({location_status:'none'})", {done: 'Every photo has a map location.'});
+  html += attentionCard('Previews', attention.missing_previews || 0,
+    previewDetail, 'Open Process', "openProcess('previews')", {done: previewDone});
+  html += attentionCard('Metadata sync', attention.pending_sync || 0,
+    'Pending metadata changes waiting to be written to XMP.', 'Sync workspace',
+    'startDashboardSync()', {done: 'XMP metadata is up to date.'});
+  html += attentionCard('Duplicate groups', attention.duplicate_groups || 0,
+    'Possible duplicate groups still needing a decision.', 'Review duplicates',
+    "window.location.href='/duplicates'", {done: 'No unresolved duplicate groups.'});
+  document.getElementById('attentionGrid').innerHTML = html;
+}
+
+async function startDashboardSync() {
+  if (!window.confirm('Write all pending metadata changes in this workspace to XMP?')) return;
+  try {
+    var result = await safeFetch('/api/jobs/sync', {method:'POST'}, {toast:false});
+    showToast('Metadata sync started.', 'success');
+    if (result && result.job_id) window.setTimeout(function() { reloadDashboard(); }, 1200);
+  } catch (error) {
+    showToast('Could not start metadata sync.', 'error');
+  }
 }
 
 var folderOpen = false;
@@ -872,7 +1218,7 @@ async function toggleFolderDetail() {
     // Coverage endpoint already carries per-folder totals + stage counts, so
     // we don't need a separate /api/folders fetch here.
     if (_coverageFolders === null) {
-      var data = await safeFetch('/api/coverage', {}, { toast: false });
+      var data = await safeFetch(scopedUrl('/api/coverage'), {}, { toast: false });
       _coverageFolders = data.folders || [];
     }
     var folders = (_coverageFolders || []).filter(function(f) { return (f.total || 0) > 0; });
@@ -888,6 +1234,8 @@ async function toggleFolderDetail() {
           '<span class="fchevron">\u25B8</span>' +
           '<span class="fpath" title="' + escapeAttr(f.path) + '">' + escapeHtml(f.path) + '</span>' +
           '<span class="fcount">' + (f.total || 0).toLocaleString() + ' photos</span>' +
+          '<button class="attention-action" type="button" style="margin:0 0 0 8px;" ' +
+            'onclick="event.stopPropagation();openBrowse({folder_id:' + f.folder_id + '})">Browse</button>' +
         '</div>' +
         '<div id="' + fid + '" style="display:none;">' + renderFolderCoverage(f) + '</div>' +
       '</div>';

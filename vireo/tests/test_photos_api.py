@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 
@@ -142,6 +143,53 @@ def test_api_photo_ids_matches_browse_filters(app_and_db):
     data = resp.get_json()
     assert data["photo_ids"] == expected
     assert data["total"] == len(expected)
+
+
+def test_dashboard_and_browse_share_collection_date_scope(app_and_db):
+    """Dashboard drill-down parameters preserve collection/date intersections."""
+    app, db = app_and_db
+    photos = db.get_photos(sort="name")
+    collection_id = db.add_collection(
+        "Two dates",
+        json.dumps([{
+            "field": "photo_ids",
+            "value": [photos[0]["id"], photos[2]["id"]],
+        }]),
+    )
+    query = (
+        f"collection_id={collection_id}"
+        "&date_from=2024-06-01&date_to=2024-06-30&sort=name"
+    )
+    client = app.test_client()
+
+    stats = client.get(f"/api/stats?{query}")
+    assert stats.status_code == 200
+    assert stats.get_json()["total_photos"] == 1
+
+    coverage = client.get(f"/api/coverage?{query}")
+    assert coverage.status_code == 200
+    assert coverage.get_json()["overall"]["total"] == 1
+
+    for path in ("/api/browse/init", "/api/photos", "/api/photos/ids"):
+        response = client.get(f"{path}?{query}")
+        assert response.status_code == 200
+        body = response.get_json()
+        result_ids = body.get("photo_ids") or [photo["id"] for photo in body["photos"]]
+        assert result_ids == [photos[2]["id"]]
+
+
+def test_dashboard_scope_rejects_foreign_collection(app_and_db):
+    """Scope ids cannot cross workspace boundaries."""
+    app, db = app_and_db
+    other_workspace = db.create_workspace("Other")
+    db.set_active_workspace(other_workspace)
+    foreign_collection = db.add_collection("Foreign", "[]")
+    db.set_active_workspace(db.get_workspaces()[0]["id"])
+
+    client = app.test_client()
+    for path in ("/api/stats", "/api/coverage", "/api/photos", "/api/photos/ids"):
+        response = client.get(f"{path}?collection_id={foreign_collection}")
+        assert response.status_code == 400
 
 
 def test_api_photos_keyword_whole_word_option(app_and_db):

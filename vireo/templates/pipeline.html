@@ -1077,14 +1077,15 @@ function initPipelinePage() {
 
   // Load collections, models, and labels in parallel
   loadFolderScopeList();
-  loadCollections();
+  var collectionsReady = loadCollections();
   // Models and labels populate the pickers the plan endpoint reads from,
   // so chain the first plan refresh once both are in the DOM. Without
   // this, the initial plan would key off zero models / zero labels and
   // mislabel Classify as "No models selected" until the user clicks
   // something.
-  Promise.all([loadModels(), loadLabels()]).then(function() {
+  Promise.all([loadModels(), loadLabels(), collectionsReady]).then(function() {
     applyClassifyQueryParams();
+    applyDashboardActionQueryParams();
     refreshPipelinePlan();
   });
 
@@ -1131,6 +1132,41 @@ function applyClassifyQueryParams() {
     });
   }
   if (typeof updateLabelsPickerState === 'function') updateLabelsPickerState();
+}
+
+// Dashboard attention cards deep-link to a deliberately narrow Process
+// setup.  The user still reviews the plan and clicks Run; this only selects
+// the intended scope and optional stages.
+function applyDashboardActionQueryParams() {
+  var qs = new URLSearchParams(window.location.search);
+  var stage = qs.get('dashboard_stage');
+  if (stage !== 'classify' && stage !== 'previews') return;
+
+  var classify = document.getElementById('enableClassify');
+  var extract = document.getElementById('enableExtract');
+  var eyes = document.getElementById('enableEyeKeypoints');
+  var group = document.getElementById('enableGroup');
+  var misses = document.getElementById('enableMisses');
+  var speciesReview = document.getElementById('enableSpeciesReview');
+  if (classify) classify.checked = stage === 'classify';
+  if (extract) extract.checked = false;
+  if (eyes) eyes.checked = false;
+  if (group) group.checked = false;
+  if (misses) misses.checked = false;
+  if (speciesReview) speciesReview.checked = false;
+
+  var collectionId = qs.get('collection_id');
+  var picker = document.getElementById('collectionPicker');
+  if (collectionId && picker && picker.querySelector('option[value="' + CSS.escape(collectionId) + '"]')) {
+    picker.value = collectionId;
+    selectSourceMode('collection');
+    onCollectionChange();
+  }
+
+  var card = document.getElementById(stage === 'classify' ? 'card-classify' : 'card-previews');
+  if (card) card.classList.add('expanded');
+  updateCardStates();
+  updateStartButton();
 }
 
 document.addEventListener('DOMContentLoaded', initPipelinePage);

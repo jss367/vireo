@@ -2080,6 +2080,93 @@ def test_get_dashboard_stats_with_data(tmp_path):
     assert hours[8] == 1
 
 
+def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
+    """Dashboard, coverage, and Browse use the same intersected scope."""
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    park = db.add_folder("/photos/park", name="park")
+    yard = db.add_folder("/photos/yard", name="yard")
+    db.add_workspace_folder(ws_id, park)
+    db.add_workspace_folder(ws_id, yard)
+
+    march = db.add_photo(
+        folder_id=park, filename="march.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-03-10T08:00:00",
+    )
+    june_park = db.add_photo(
+        folder_id=park, filename="june-park.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
+    )
+    june_yard = db.add_photo(
+        folder_id=yard, filename="june-yard.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
+    )
+    collection_id = db.add_collection(
+        "June picks",
+        json.dumps([{"field": "photo_ids", "value": [march, june_park, june_yard]}]),
+    )
+
+    scope = {
+        "collection_id": collection_id,
+        "date_from": "2024-06-01",
+        "date_to": "2024-06-30",
+    }
+    stats = db.get_dashboard_stats(**scope)
+    assert stats["total_photos"] == 2
+    assert stats["folder_count"] == 2
+    assert stats["photos_by_month"] == [{"month": "2024-06", "count": 2}]
+    assert db.get_coverage_stats(**scope)["total"] == 2
+    assert {row["path"] for row in db.get_folder_coverage_stats(**scope)} == {
+        "/photos/park", "/photos/yard",
+    }
+
+    browse = db.get_photos(folder_id=yard, **scope)
+    assert [photo["id"] for photo in browse] == [june_yard]
+    assert db.get_photo_ids(folder_id=yard, **scope) == [june_yard]
+    assert db.count_filtered_photos(folder_id=yard, **scope) == 1
+
+
+def test_dashboard_attention_counts_actionable_gaps_in_scope(tmp_path):
+    """Needs Attention cards report preview, sync, location, and duplicate work."""
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {"timestamp": "2024-06-01T08:00:00", "file_hash": "same"},
+        {"timestamp": "2024-06-02T08:00:00", "file_hash": "same"},
+        {"timestamp": "2024-07-01T08:00:00", "file_hash": "other"},
+    ])
+    det_ids = db.save_detections(pids[0], [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+        "confidence": 0.9,
+        "category": "animal",
+    }], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "test")
+    db.preview_cache_insert(pids[0], 1920, 100)
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'rating', '4', 'token', ?)",
+        (pids[1], db._ws_id()),
+    )
+    db.conn.commit()
+
+    attention = db.get_dashboard_stats(
+        date_from="2024-06-01", date_to="2024-06-30",
+    )["attention"]
+    assert attention == {
+        "unclassified": 1,
+        "missing_location": 2,
+        "missing_previews": 1,
+        "preview_size": 1920,
+        "preview_enabled": True,
+        "pending_sync": 1,
+        "duplicate_groups": 1,
+    }
+
+
 # --- Cluster 2b: Coverage Stats ---
 
 def test_get_coverage_stats_empty_workspace(tmp_path):
