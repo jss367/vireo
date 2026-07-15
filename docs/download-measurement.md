@@ -21,7 +21,7 @@ To verify the deployed integration, view the page source and confirm that `https
 
 ## Attribute announcements
 
-Cloudflare Web Analytics reports the referring site for each visit but does not record URL query strings, so `utm_source` and similar campaign parameters are dropped. To distinguish traffic from a specific announcement, either rely on the referrer that Cloudflare records for the source (for example, `reddit.com`) or point the announcement at a distinct URL path or fragment that Cloudflare will log as its own page view.
+Cloudflare Web Analytics reports the referring site for each visit but does not record URL query strings or fragments, so `utm_source`, similar campaign parameters, and `#fragment` suffixes are dropped. To distinguish traffic from a specific announcement, either rely on the referrer that Cloudflare records for the source (for example, `reddit.com`) or point the announcement at a distinct URL path (for example, `/download/reddit/` served by a redirect to `/download/`) that Cloudflare will log as its own page view.
 
 ## Report GitHub downloads
 
