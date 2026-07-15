@@ -233,6 +233,7 @@
 <script>
 var allSpecies = [];
 var activeSpecies = null;
+var variantPhotos = [];
 
 async function loadSpecies() {
   try {
@@ -309,6 +310,13 @@ function renderClusters(data) {
   var area = document.getElementById('clusterArea');
   var html = '';
 
+  // Keep the displayed cluster order as the lightbox navigation order.  The
+  // shared lightbox can only enable its arrows when the opening page supplies
+  // the surrounding photos.
+  variantPhotos = data.clusters.reduce(function(photos, cluster) {
+    return photos.concat(cluster.photos.map(function(item) { return item.photo; }));
+  }, []);
+
   // Header
   html += '<div class="cluster-header">' +
     '<h2>' + escapeHtml(data.species) + '</h2>' +
@@ -367,7 +375,11 @@ function renderClusters(data) {
 document.getElementById('clusterArea').addEventListener('click', function(e) {
   var thumb = e.target.closest('.cluster-thumb[data-photo-id]');
   if (thumb) {
-    openLightbox(parseInt(thumb.dataset.photoId, 10), thumb.dataset.filename || '');
+    openLightbox(
+      parseInt(thumb.dataset.photoId, 10),
+      thumb.dataset.filename || '',
+      variantPhotos
+    );
     return;
   }
   var labelBtn = e.target.closest('.cluster-label-btn[data-cluster-idx]');
