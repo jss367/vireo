@@ -760,12 +760,13 @@ body { margin: 0; }
         var component = (result.address_components || []).find(function(item) {
           return (item.types || []).indexOf(matchedType) !== -1;
         });
-        var choice = googleResultToChoice(result, {
+        if (!component) return;
+        var namedResult = Object.assign({}, result, {name: component.long_name});
+        var choice = googleResultToChoice(namedResult, {
           locality: 'City or town', administrative_area_level_2: 'County or region',
           administrative_area_level_1: 'State or province', country: 'Country'
         }[matchedType]);
-        if (!choice || !component) return;
-        choice.name = component.long_name;
+        if (!choice) return;
         choice.address_components = result.address_components;
         regionChoices.push(choice);
       });
