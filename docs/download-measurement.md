@@ -21,7 +21,7 @@ To verify the deployed integration, view the page source and confirm that `https
 
 ## Attribute announcements
 
-Cloudflare Web Analytics reports the referring site for each visit but does not record URL query strings or fragments, so `utm_source`, similar campaign parameters, and `#fragment` suffixes are dropped. To distinguish traffic from a specific announcement, either rely on the referrer that Cloudflare records for the source (for example, `reddit.com`) or point the announcement at a distinct URL path (for example, `/download/reddit/` served by a redirect to `/download/`) that Cloudflare will log as its own page view.
+Cloudflare Web Analytics reports the referring site for each visit but does not record URL query strings or fragments, so `utm_source`, similar campaign parameters, and `#fragment` suffixes are dropped. To distinguish traffic from a specific announcement, either rely on the referrer that Cloudflare records for the source (for example, `reddit.com`) or point the announcement at a distinct URL path (for example, `/download/reddit/`) that renders its own page using the shared `Base` layout so the Cloudflare beacon executes on that path. A server-side redirect to `/download/` would not work: the beacon only runs on the final page after redirects, so the visit would be logged under `/download/` rather than the announcement path.
 
 ## Report GitHub downloads
 
