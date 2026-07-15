@@ -24899,11 +24899,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # flatter/darker; treating it as canonical makes the photo appear
             # to gain a dark overlay when the lightbox swaps from /full to a
             # sharper preview tier.  Keep the working copy as the offline
-            # fallback when the source itself is unavailable.
+            # fallback when the source itself is unavailable, and defer to it
+            # when the current RAW mtime is already marked as a source-side
+            # extraction failure: the RAW failure gate below returns 500
+            # before the companion/working-copy fallbacks further down can
+            # run, so forcing the RAW here would drop the preview for
+            # RAW+JPEG pairs whose companion or working copy could still
+            # satisfy the request.
             source_path = os.path.join(
                 folder_row["path"], photo["filename"],
             )
-            if os.path.exists(source_path):
+            if os.path.exists(source_path) and not _has_current_working_copy_failure(
+                photo,
+                vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=source_path,
+                folder_path=folder_row["path"],
+            ):
                 canonical = source_path
                 using_working_copy = False
             else:

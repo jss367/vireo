@@ -1302,6 +1302,78 @@ def test_unedited_raw_preview_uses_camera_rendered_source_not_working_copy(
         assert rendered.getpixel((400, 300))[0] > 200
 
 
+def test_unedited_raw_preview_falls_back_when_source_extraction_marked_failed(
+    client_with_photo, monkeypatch,
+):
+    """RAW+JPEG pairs with a source-failure marker keep the working-copy
+    fallback instead of 500ing on the sharper preview tier."""
+    import io
+    import os
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    folder = db.conn.execute(
+        "SELECT f.path FROM photos p JOIN folders f ON f.id=p.folder_id "
+        "WHERE p.id=?",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "source.NEF")
+    with open(raw_path, "wb") as raw_file:
+        raw_file.write(b"raw bytes that libraw cannot decode")
+    companion_path = os.path.join(folder["path"], "source.JPG")
+    Image.new("RGB", (800, 600), (220, 220, 220)).save(
+        companion_path, "JPEG",
+    )
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (25, 25, 25)).save(
+        working_path, "JPEG",
+    )
+    mtime = os.path.getmtime(raw_path)
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path='source.JPG',
+               working_copy_path=?, width=800, height=600,
+               file_mtime=?,
+               working_copy_failed_at=datetime('now'),
+               working_copy_failed_mtime=?,
+               working_copy_failed_source='source'
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", mtime, mtime, photo_id),
+    )
+    db.conn.commit()
+
+    loaded = []
+
+    def tracking_load(path, max_size=1024, **kwargs):
+        loaded.append(os.fspath(path))
+        if os.fspath(path) == raw_path:
+            raise AssertionError(
+                "unedited RAW preview retried a source-failed RAW decode"
+            )
+        # The working copy is the pre-PR fallback for source-failed RAWs.
+        # Return its (dark) pixels so the response is a valid JPEG rather
+        # than 500ing before the fallback path can run.
+        return Image.new("RGB", (800, 600), (25, 25, 25))
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load)
+
+    response = app.test_client().get(
+        f"/photos/{photo_id}/preview?size=2560"
+    )
+
+    assert response.status_code == 200, response.get_data(as_text=True)
+    assert raw_path not in loaded
+    with Image.open(io.BytesIO(response.data)):
+        pass
+
+
 def test_preview_falls_back_to_original(app_and_db, tmp_path):
     """Preview endpoint falls back to original when no working copy exists."""
     app, db = app_and_db
