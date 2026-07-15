@@ -5929,8 +5929,34 @@ function reviewLocationsForCollection(collectionId) {
 function reviewLocationsForSelection() {
   var ids = getActiveSelection();
   if (!ids.length) return;
+  var payload;
+  try {
+    payload = JSON.stringify({photo_ids: ids});
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast('Could not open location review for this selection.', 'error');
+    }
+    return;
+  }
+  try {
+    sessionStorage.setItem('vireoLocationReviewSource', payload);
+  } catch (e) {
+    // sessionStorage has a per-origin quota (typically ~5MB). Very large
+    // selections (e.g. "Select all matching photos" on a big library) can
+    // exceed it, in which case setItem throws synchronously. Guide the
+    // user to the collection-based flow, which passes an id in the URL
+    // and never touches sessionStorage for the id list.
+    if (typeof showToast === 'function') {
+      showToast(
+        'Selection is too large to open location review directly (' +
+          ids.length.toLocaleString() +
+          ' photos). Save the selection as a collection first, then use Review on Map from the collection menu.',
+        'error'
+      );
+    }
+    return;
+  }
   sessionStorage.setItem('vireoLocationReviewReturn', window.location.href);
-  sessionStorage.setItem('vireoLocationReviewSource', JSON.stringify({photo_ids: ids}));
   window.location.href = '/locations/review?source=selection';
 }
 
