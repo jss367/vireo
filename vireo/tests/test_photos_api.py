@@ -5378,6 +5378,81 @@ def test_preview_job_honors_raw_failure_marker_after_source_selection(
     )
 
 
+def test_preview_job_warms_unedited_raw_from_camera_rendered_source(
+    client_with_photo, monkeypatch,
+):
+    """Precompute must warm from the RAW source, not the working copy — otherwise
+    the tracked preview cache locks in the highlight-preserving dark render and
+    /photos/<id>/preview returns those cache hits before its own RAW-source
+    branch ever runs."""
+    import os
+    import time
+
+    import image_loader
+    from PIL import Image
+
+    app, db, photo_id = client_with_photo
+    client = app.test_client()
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = (SELECT folder_id FROM photos WHERE id=?)",
+        (photo_id,),
+    ).fetchone()
+    raw_path = os.path.join(folder["path"], "source.NEF")
+    with open(raw_path, "wb") as raw_file:
+        raw_file.write(b"raw bytes decoded by the test double")
+
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    working_dir = os.path.join(vireo_dir, "working")
+    os.makedirs(working_dir, exist_ok=True)
+    working_path = os.path.join(working_dir, f"{photo_id}.jpg")
+    Image.new("RGB", (800, 600), (25, 25, 25)).save(working_path, "JPEG")
+    db.conn.execute(
+        """UPDATE photos
+           SET filename='source.NEF', extension='.nef',
+               companion_path=NULL,
+               working_copy_path=?, width=800, height=600
+           WHERE id=?""",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+
+    loaded = []
+
+    def tracking_load(path, max_size=1024, **kwargs):
+        loaded.append(os.fspath(path))
+        color = (220, 220, 220) if os.fspath(path) == raw_path else (25, 25, 25)
+        return Image.new("RGB", (800, 600), color)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load)
+
+    resp = client.post("/api/jobs/previews", json={})
+    assert resp.status_code == 200
+    job_id = resp.get_json()["job_id"]
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status_resp = client.get(f"/api/jobs/{job_id}")
+        if status_resp.status_code != 200:
+            time.sleep(0.05)
+            continue
+        data = status_resp.get_json()
+        if data.get("status") in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+
+    assert data["status"] == "completed"
+    # The warmer decoded the RAW source, not the dark working copy.
+    assert raw_path in loaded
+    assert working_path not in loaded
+    preview_path = os.path.join(
+        vireo_dir, "previews", f"{photo_id}_1920.jpg",
+    )
+    assert os.path.exists(preview_path)
+    with Image.open(preview_path) as warmed:
+        # Camera-rendered brightness, not the flat/dark working-copy tone.
+        assert warmed.getpixel((400, 300))[0] > 200
+
+
 def test_preview_job_does_not_adopt_untracked_edited_preview_after_unlink_failure(
     client_with_photo, monkeypatch,
 ):

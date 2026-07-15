@@ -2773,9 +2773,40 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 pass  # photo may have been deleted mid-pipeline
                             continue
                     if not os.path.exists(cache_path):
-                        canonical = _recipe_render_source(
-                            detail_photo, recipe, max_size, base_dir, folders,
-                        )
+                        folder_path = folders.get(detail_photo["folder_id"])
+                        raw_source_path = None
+                        if (
+                            not recipe
+                            and folder_path
+                            and os.path.splitext(detail_photo["filename"])[1].lower()
+                            in _RAW_EXTENSIONS
+                        ):
+                            # Mirror /photos/<id>/preview: an unedited RAW
+                            # must warm from the camera-rendered source,
+                            # not the highlight-preserving working copy.
+                            # Otherwise the pipeline preview stage writes
+                            # flatter/darker bytes into the tracked preview
+                            # cache and _serve_preview returns those cache
+                            # hits before its own RAW-source branch ever
+                            # runs, so the migration's one-time purge is
+                            # undone the first time this stage runs.
+                            candidate = os.path.join(
+                                folder_path, detail_photo["filename"],
+                            )
+                            if os.path.exists(candidate) and not _has_current_working_copy_failure(
+                                detail_photo,
+                                base_dir,
+                                trust_existing_working_copy=False,
+                                live_source_path=candidate,
+                                folder_path=folder_path,
+                            ):
+                                raw_source_path = candidate
+                        if raw_source_path:
+                            canonical = raw_source_path
+                        else:
+                            canonical = _recipe_render_source(
+                                detail_photo, recipe, max_size, base_dir, folders,
+                            )
                         if (
                             os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
                             and _has_current_working_copy_failure(

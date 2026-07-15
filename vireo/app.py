@@ -17661,10 +17661,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         continue
 
                 if not os.path.exists(cache_path):
-                    canonical, using_working_copy = _recipe_render_source(
-                        detail_photo, recipe, max_size, vireo_dir, folders,
-                    )
                     from image_loader import RAW_EXTENSIONS
+                    folder_path = folders.get(detail_photo["folder_id"])
+                    raw_source_path = None
+                    if (
+                        not recipe
+                        and folder_path
+                        and os.path.splitext(detail_photo["filename"])[1].lower()
+                        in RAW_EXTENSIONS
+                    ):
+                        # Mirror /photos/<id>/preview: an unedited RAW must
+                        # warm from the camera-rendered source, not the
+                        # highlight-preserving working copy. Otherwise the
+                        # precompute job writes flatter/darker bytes into the
+                        # tracked preview cache and _serve_preview returns
+                        # those cache hits before its own RAW-source branch
+                        # ever runs, so the migration's one-time purge is
+                        # undone on the first warmup.
+                        candidate = os.path.join(
+                            folder_path, detail_photo["filename"],
+                        )
+                        if os.path.exists(candidate) and not _has_current_working_copy_failure(
+                            detail_photo,
+                            vireo_dir,
+                            trust_existing_working_copy=False,
+                            live_source_path=candidate,
+                            folder_path=folder_path,
+                        ):
+                            raw_source_path = candidate
+                    if raw_source_path:
+                        canonical = raw_source_path
+                        using_working_copy = False
+                    else:
+                        canonical, using_working_copy = _recipe_render_source(
+                            detail_photo, recipe, max_size, vireo_dir, folders,
+                        )
                     if (
                         not using_working_copy
                         and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
