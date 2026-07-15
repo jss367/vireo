@@ -1,0 +1,1019 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<title>Vireo - Review Photo Locations</title>
+<style>
+html, body { height: 100%; overflow: hidden; }
+body { margin: 0; }
+.location-review-page {
+  height: calc(100vh - 76px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-primary);
+}
+.location-review-header {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  box-sizing: border-box;
+}
+.location-review-back,
+.location-review-button {
+  appearance: none;
+  border: 1px solid var(--border-secondary);
+  border-radius: 5px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  padding: 7px 11px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.location-review-back:hover,
+.location-review-button:hover { border-color: var(--accent); color: var(--text-primary); }
+.location-review-title { min-width: 0; }
+.location-review-title h1 { margin: 0; font-size: 17px; font-weight: 650; }
+.location-review-title p { margin: 2px 0 0; color: var(--text-dim); font-size: 11px; }
+.location-review-progress { margin-left: auto; min-width: 180px; }
+.location-review-progress-line {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-dim);
+  font-size: 11px;
+  margin-bottom: 5px;
+}
+.location-review-progress-track {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+.location-review-progress-fill { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.location-review-main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 390px;
+  min-height: 0;
+}
+.location-review-map-column {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 118px;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--border-primary);
+}
+.location-review-map-wrap { position: relative; min-height: 0; background: var(--bg-panel); }
+#locationReviewMap { position: absolute; inset: 0; }
+.location-review-map-message {
+  position: absolute;
+  z-index: 500;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 40px);
+  padding: 7px 11px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  box-shadow: 0 3px 12px rgba(0,0,0,.24);
+}
+.location-review-thumbnails {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 9px 12px;
+  overflow-x: auto;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-primary);
+}
+.location-review-thumb {
+  width: 84px;
+  min-width: 84px;
+  height: 94px;
+  border: 1px solid var(--border-primary);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bg-tertiary);
+}
+.location-review-thumb img { width: 100%; height: 68px; object-fit: cover; display: block; }
+.location-review-thumb span {
+  display: block;
+  padding: 5px 6px;
+  color: var(--text-dim);
+  font-size: 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.location-review-more { color: var(--text-dim); font-size: 11px; white-space: nowrap; padding: 0 8px; }
+.location-review-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+}
+.location-review-panel-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; }
+.location-review-group-nav { display: grid; grid-template-columns: 34px 1fr 34px; gap: 8px; align-items: center; }
+.location-review-nav-button {
+  width: 34px;
+  height: 34px;
+  border-radius: 5px;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 17px;
+}
+.location-review-nav-button:disabled { opacity: .4; cursor: default; }
+.location-review-group-heading { text-align: center; }
+.location-review-group-heading strong { display: block; font-size: 15px; }
+.location-review-group-heading span { color: var(--text-dim); font-size: 11px; }
+.location-review-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 14px 0;
+}
+.location-review-fact {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border-primary);
+  border-radius: 5px;
+  background: var(--bg-primary);
+}
+.location-review-fact-label { color: var(--text-ghost); font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
+.location-review-fact-value { color: var(--text-secondary); font-size: 11px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; }
+.location-review-section { margin-top: 18px; }
+.location-review-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+.location-review-section-title small { color: var(--text-ghost); font-size: 10px; font-weight: 400; }
+.location-review-candidates { display: flex; flex-direction: column; gap: 7px; }
+.location-review-candidate {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  width: 100%;
+  padding: 10px;
+  text-align: left;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.location-review-candidate:hover { border-color: var(--border-secondary); }
+.location-review-candidate.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--bg-primary)); }
+.location-review-radio {
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+  border: 2px solid var(--text-ghost);
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+.location-review-candidate.selected .location-review-radio { border: 4px solid var(--accent); }
+.location-review-candidate-name { font-size: 12px; font-weight: 600; line-height: 1.3; }
+.location-review-candidate-meta { color: var(--text-dim); font-size: 10px; margin-top: 3px; line-height: 1.35; }
+.location-review-search-row { display: flex; gap: 7px; }
+.location-review-search {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border-secondary);
+  border-radius: 5px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  padding: 8px 9px;
+  font-size: 12px;
+  outline: none;
+}
+.location-review-search:focus { border-color: var(--accent); }
+.location-review-details {
+  margin-top: 14px;
+  border-top: 1px solid var(--border-primary);
+  padding-top: 10px;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.location-review-details summary { cursor: pointer; color: var(--text-secondary); }
+.location-review-filenames { margin-top: 6px; max-height: 90px; overflow-y: auto; }
+.location-review-actions {
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+}
+.location-review-assign {
+  border: 0;
+  border-radius: 5px;
+  background: var(--accent);
+  color: var(--accent-text, #05211d);
+  padding: 9px 12px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.location-review-assign:disabled { opacity: .45; cursor: default; }
+.location-review-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 40px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+.location-review-empty h2 { margin: 0; font-size: 20px; color: var(--text-primary); }
+.location-review-loading { color: var(--text-dim); font-size: 12px; }
+.location-review-error { color: var(--danger); }
+.location-review-hidden { display: none !important; }
+.location-review-photo-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid white;
+  box-shadow: 0 1px 4px rgba(0,0,0,.5);
+}
+.leaflet-control-layers {
+  background: var(--bg-secondary) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-secondary) !important;
+}
+@media (max-width: 860px) {
+  html, body { overflow: auto; }
+  .location-review-page { height: auto; min-height: calc(100vh - 76px); }
+  .location-review-main { grid-template-columns: 1fr; grid-template-rows: 58vh auto; }
+  .location-review-map-column { border-right: 0; border-bottom: 1px solid var(--border-primary); }
+  .location-review-panel { min-height: 560px; }
+  .location-review-progress { min-width: 110px; }
+}
+</style>
+</head>
+<body>
+{% include '_navbar.html' %}
+
+<main class="location-review-page">
+  <header class="location-review-header">
+    <button class="location-review-back" id="locationReviewBack" type="button">← Return to Browse</button>
+    <div class="location-review-title">
+      <h1>Review Photo Locations</h1>
+      <p id="locationReviewScope">Preparing coordinate groups…</p>
+    </div>
+    <div class="location-review-progress">
+      <div class="location-review-progress-line">
+        <span id="locationReviewProgressText">Loading…</span>
+        <span id="locationReviewRemaining"></span>
+      </div>
+      <div class="location-review-progress-track"><div class="location-review-progress-fill" id="locationReviewProgressFill"></div></div>
+    </div>
+  </header>
+
+  <div class="location-review-main" id="locationReviewMain">
+    <section class="location-review-map-column">
+      <div class="location-review-map-wrap">
+        <div id="locationReviewMap"></div>
+        <div class="location-review-map-message" id="locationReviewMapMessage">Loading map…</div>
+      </div>
+      <div class="location-review-thumbnails" id="locationReviewThumbnails"></div>
+    </section>
+
+    <aside class="location-review-panel">
+      <div class="location-review-panel-scroll">
+        <div class="location-review-group-nav">
+          <button class="location-review-nav-button" id="locationReviewPrevious" type="button" title="Previous coordinate group">‹</button>
+          <div class="location-review-group-heading">
+            <strong id="locationReviewGroupTitle">Coordinate group</strong>
+            <span id="locationReviewGroupPosition"></span>
+          </div>
+          <button class="location-review-nav-button" id="locationReviewNext" type="button" title="Next coordinate group">›</button>
+        </div>
+
+        <div class="location-review-facts">
+          <div class="location-review-fact">
+            <div class="location-review-fact-label">Captured</div>
+            <div class="location-review-fact-value" id="locationReviewCaptured">—</div>
+          </div>
+          <div class="location-review-fact">
+            <div class="location-review-fact-label">Coordinate spread</div>
+            <div class="location-review-fact-value" id="locationReviewSpread">—</div>
+          </div>
+        </div>
+
+        <section class="location-review-section">
+          <div class="location-review-section-title">
+            <span>Suggested locations</span>
+            <small id="locationReviewSuggestionStatus">Looking nearby…</small>
+          </div>
+          <div class="location-review-candidates" id="locationReviewCandidates">
+            <div class="location-review-loading">Finding saved and nearby locations…</div>
+          </div>
+        </section>
+
+        <section class="location-review-section">
+          <div class="location-review-section-title"><span>Find another place</span></div>
+          <div class="location-review-search-row">
+            <input class="location-review-search" id="locationReviewSearch" type="text" placeholder="Search near these photos or enter a friendly name">
+            <button class="location-review-button" id="locationReviewCustom" type="button">Use custom</button>
+          </div>
+        </section>
+
+        <details class="location-review-details">
+          <summary>Coordinate details</summary>
+          <div id="locationReviewCoordinates"></div>
+          <div class="location-review-filenames" id="locationReviewFilenames"></div>
+        </details>
+      </div>
+
+      <div class="location-review-actions">
+        <button class="location-review-button" id="locationReviewSkip" type="button">Skip for now</button>
+        <button class="location-review-assign" id="locationReviewAssign" type="button" disabled>Select a location</button>
+      </div>
+    </aside>
+  </div>
+
+  <section class="location-review-empty location-review-hidden" id="locationReviewEmpty">
+    <h2 id="locationReviewEmptyTitle">All locations reviewed</h2>
+    <p id="locationReviewEmptyMessage">There are no remaining coordinate groups in this set.</p>
+    <button class="location-review-button" id="locationReviewEmptyBack" type="button">Return to Browse</button>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+(function() {
+  'use strict';
+
+  var state = {
+    source: null,
+    returnUrl: sessionStorage.getItem('vireoLocationReviewReturn') || '/browse',
+    groups: [],
+    currentIndex: 0,
+    initialGroupCount: 0,
+    assignedGroups: 0,
+    skippedGroups: [],
+    selectedChoice: null,
+    savedCandidates: [],
+    googleCandidates: [],
+    regionCandidates: [],
+    searchedCandidate: null,
+    config: null,
+    mapMode: null,
+    map: null,
+    photoMarkers: [],
+    candidateMarkers: [],
+    placesService: null,
+    autocomplete: null,
+    renderToken: 0,
+  };
+
+  var NATURAL_TYPES = {
+    park: 'Park', state_park: 'State park', national_park: 'National park',
+    wildlife_refuge: 'Wildlife refuge', nature_preserve: 'Nature preserve',
+    natural_feature: 'Natural feature', hiking_area: 'Hiking area',
+    scenic_spot: 'Scenic spot', tourist_attraction: 'Place of interest',
+  };
+
+  function returnToBrowse() { window.location.href = state.returnUrl || '/browse'; }
+  document.getElementById('locationReviewBack').addEventListener('click', returnToBrowse);
+  document.getElementById('locationReviewEmptyBack').addEventListener('click', returnToBrowse);
+
+  function parseSource() {
+    var params = new URLSearchParams(window.location.search);
+    var collectionId = parseInt(params.get('collection_id') || '', 10);
+    if (!isNaN(collectionId)) return { collection_id: collectionId };
+    try {
+      var stored = JSON.parse(sessionStorage.getItem('vireoLocationReviewSource') || 'null');
+      if (stored && Array.isArray(stored.photo_ids) && stored.photo_ids.length) {
+        return { photo_ids: stored.photo_ids };
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function formatNumber(value) { return Number(value || 0).toLocaleString(); }
+
+  function formatDateTime(value) {
+    if (!value) return 'Date unavailable';
+    var parsed = new Date(value);
+    if (isNaN(parsed.getTime())) return String(value).replace('T', ' ').slice(0, 16);
+    return parsed.toLocaleString([], {
+      month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'
+    });
+  }
+
+  function formatCaptureRange(group) {
+    if (!group.captured_from) return 'Date unavailable';
+    if (!group.captured_to || group.captured_to === group.captured_from) return formatDateTime(group.captured_from);
+    return formatDateTime(group.captured_from) + ' – ' + formatDateTime(group.captured_to);
+  }
+
+  function formatDistance(meters) {
+    meters = Number(meters || 0);
+    if (meters < 160.934) return Math.max(1, Math.round(meters * 3.28084)) + ' ft';
+    return (meters / 1609.344).toFixed(meters < 16093 ? 1 : 0) + ' mi';
+  }
+
+  function currentGroup() { return state.groups[state.currentIndex] || null; }
+
+  function showEmpty(title, message, error) {
+    document.getElementById('locationReviewMain').classList.add('location-review-hidden');
+    var empty = document.getElementById('locationReviewEmpty');
+    empty.classList.remove('location-review-hidden');
+    document.getElementById('locationReviewEmptyTitle').textContent = title;
+    var messageEl = document.getElementById('locationReviewEmptyMessage');
+    messageEl.textContent = message;
+    messageEl.classList.toggle('location-review-error', !!error);
+  }
+
+  function updateProgress() {
+    var completed = state.assignedGroups;
+    var total = state.initialGroupCount;
+    var pct = total ? Math.round((completed / total) * 100) : 100;
+    document.getElementById('locationReviewProgressText').textContent = completed + ' of ' + total + ' assigned';
+    document.getElementById('locationReviewRemaining').textContent = state.groups.length ? state.groups.length + ' in queue' : '';
+    document.getElementById('locationReviewProgressFill').style.width = pct + '%';
+  }
+
+  function clearMapObjects() {
+    if (state.mapMode === 'google') {
+      state.photoMarkers.forEach(function(marker) { marker.setMap(null); });
+      state.candidateMarkers.forEach(function(marker) { marker.setMap(null); });
+    } else if (state.mapMode === 'leaflet' && state.map) {
+      state.photoMarkers.forEach(function(marker) { state.map.removeLayer(marker); });
+      state.candidateMarkers.forEach(function(marker) { state.map.removeLayer(marker); });
+    }
+    state.photoMarkers = [];
+    state.candidateMarkers = [];
+  }
+
+  function renderPhotoMarkers(group) {
+    clearMapObjects();
+    if (!state.map || !group) return;
+    if (state.mapMode === 'google') {
+      var bounds = new google.maps.LatLngBounds();
+      group.photos.forEach(function(photo) {
+        var position = {lat: photo.latitude, lng: photo.longitude};
+        var marker = new google.maps.Marker({
+          position: position,
+          map: state.map,
+          title: photo.filename,
+          icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            scale: 4,
+            fillColor: '#24E5CA',
+            fillOpacity: .92,
+            strokeColor: '#ffffff',
+            strokeWeight: 1.5,
+          },
+          zIndex: 20,
+        });
+        state.photoMarkers.push(marker);
+        bounds.extend(position);
+      });
+      state.map.fitBounds(bounds, 48);
+      google.maps.event.addListenerOnce(state.map, 'idle', function() {
+        if (state.map.getZoom() > 17) state.map.setZoom(17);
+      });
+    } else {
+      var latLngs = [];
+      group.photos.forEach(function(photo) {
+        var marker = L.marker([photo.latitude, photo.longitude], {
+          icon: L.divIcon({className: '', html: '<div class="location-review-photo-dot"></div>', iconSize: [15,15], iconAnchor: [7,7]}),
+          title: photo.filename,
+        }).addTo(state.map);
+        state.photoMarkers.push(marker);
+        latLngs.push([photo.latitude, photo.longitude]);
+      });
+      if (latLngs.length === 1) state.map.setView(latLngs[0], 16);
+      else state.map.fitBounds(latLngs, {padding: [40, 40], maxZoom: 17});
+      setTimeout(function() { state.map.invalidateSize(); }, 0);
+    }
+  }
+
+  function candidateKey(choice) {
+    if (!choice) return '';
+    if (choice.kind === 'keyword') return 'keyword:' + choice.keyword_id;
+    if (choice.kind === 'google') return 'google:' + choice.place_id;
+    return 'custom:' + choice.name;
+  }
+
+  function candidateMeta(choice) {
+    var parts = [];
+    if (choice.kind === 'keyword') {
+      parts.push('Saved location');
+      parts.push(formatNumber(choice.photo_count) + (choice.photo_count === 1 ? ' photo' : ' photos'));
+    } else if (choice.kind === 'custom') {
+      parts.push('Custom friendly name');
+    } else {
+      var typeLabel = '';
+      (choice.types || []).some(function(type) {
+        if (NATURAL_TYPES[type]) { typeLabel = NATURAL_TYPES[type]; return true; }
+        return false;
+      });
+      parts.push(typeLabel || choice.type_label || 'Google place');
+    }
+    if (choice.distance_m != null) parts.push(formatDistance(choice.distance_m) + ' from photo center');
+    if (choice.context) parts.push(choice.context);
+    return parts.join(' · ');
+  }
+
+  function allCandidates() {
+    var seen = {};
+    var values = [];
+    state.savedCandidates.concat(
+      state.searchedCandidate ? [state.searchedCandidate] : [],
+      state.googleCandidates,
+      state.regionCandidates
+    ).forEach(function(choice) {
+      var key = candidateKey(choice);
+      if (!key || seen[key]) return;
+      seen[key] = true;
+      values.push(choice);
+    });
+    return values;
+  }
+
+  function renderCandidateMarkers() {
+    if (!state.map) return;
+    if (state.mapMode === 'google') {
+      state.candidateMarkers.forEach(function(marker) { marker.setMap(null); });
+    } else {
+      state.candidateMarkers.forEach(function(marker) { state.map.removeLayer(marker); });
+    }
+    state.candidateMarkers = [];
+    allCandidates().forEach(function(choice) {
+      if (choice.latitude == null || choice.longitude == null) return;
+      var selected = candidateKey(choice) === candidateKey(state.selectedChoice);
+      if (state.mapMode === 'google') {
+        var marker = new google.maps.Marker({
+          position: {lat: Number(choice.latitude), lng: Number(choice.longitude)},
+          map: state.map,
+          title: choice.name,
+          label: selected ? {text: '✓', color: '#05211d', fontWeight: '700'} : null,
+          opacity: selected ? 1 : .72,
+          zIndex: selected ? 40 : 10,
+        });
+        marker.addListener('click', function() { selectChoice(choice); });
+        state.candidateMarkers.push(marker);
+      } else if (choice.kind === 'keyword') {
+        var leafletMarker = L.marker([choice.latitude, choice.longitude], {title: choice.name})
+          .addTo(state.map).bindTooltip(choice.name);
+        leafletMarker.on('click', function() { selectChoice(choice); });
+        state.candidateMarkers.push(leafletMarker);
+      }
+    });
+  }
+
+  function selectChoice(choice) {
+    state.selectedChoice = choice;
+    renderCandidates();
+    renderCandidateMarkers();
+    var assign = document.getElementById('locationReviewAssign');
+    assign.disabled = false;
+    assign.textContent = 'Assign “' + choice.name + '”';
+  }
+
+  function renderCandidates() {
+    var container = document.getElementById('locationReviewCandidates');
+    var candidates = allCandidates();
+    if (!candidates.length) {
+      container.innerHTML = '<div class="location-review-loading">No nearby named places found. Search the map or enter a custom friendly name.</div>';
+      return;
+    }
+    container.innerHTML = candidates.map(function(choice, index) {
+      var selected = candidateKey(choice) === candidateKey(state.selectedChoice) ? ' selected' : '';
+      return '<button class="location-review-candidate' + selected + '" type="button" data-candidate-index="' + index + '">' +
+        '<span class="location-review-radio"></span><span>' +
+        '<span class="location-review-candidate-name">' + escapeHtml(choice.name) + '</span>' +
+        '<span class="location-review-candidate-meta">' + escapeHtml(candidateMeta(choice)) + '</span>' +
+        '</span></button>';
+    }).join('');
+    container.querySelectorAll('[data-candidate-index]').forEach(function(button) {
+      button.addEventListener('click', function() {
+        selectChoice(candidates[parseInt(button.dataset.candidateIndex, 10)]);
+      });
+    });
+  }
+
+  function renderThumbnails(group) {
+    var container = document.getElementById('locationReviewThumbnails');
+    var visible = group.photos.slice(0, 24);
+    container.innerHTML = visible.map(function(photo) {
+      return '<div class="location-review-thumb" title="' + escapeAttr(photo.filename) + '">' +
+        '<img src="/thumbnails/' + photo.id + '.jpg" alt="" loading="lazy" onerror="this.style.visibility=\'hidden\'">' +
+        '<span>' + escapeHtml(photo.filename) + '</span></div>';
+    }).join('') + (group.photos.length > visible.length
+      ? '<div class="location-review-more">+' + formatNumber(group.photos.length - visible.length) + ' more</div>' : '');
+  }
+
+  function renderGroupFacts(group) {
+    document.getElementById('locationReviewGroupTitle').textContent = formatNumber(group.count) + (group.count === 1 ? ' photo' : ' photos');
+    document.getElementById('locationReviewGroupPosition').textContent = 'Coordinate group ' + (state.currentIndex + 1) + ' of ' + state.groups.length;
+    document.getElementById('locationReviewCaptured').textContent = formatCaptureRange(group);
+    document.getElementById('locationReviewSpread').textContent = group.spread_m < 10 ? 'Same point' : formatDistance(group.spread_m) + ' from center';
+    document.getElementById('locationReviewCoordinates').textContent =
+      'Center: ' + group.center.lat.toFixed(6) + ', ' + group.center.lng.toFixed(6) + '. These are the original photo coordinates; assigning a name will not change them.';
+    document.getElementById('locationReviewFilenames').innerHTML = group.photos.map(function(photo) {
+      return '<div>' + escapeHtml(photo.filename) + '</div>';
+    }).join('');
+    document.getElementById('locationReviewPrevious').disabled = state.groups.length < 2;
+    document.getElementById('locationReviewNext').disabled = state.groups.length < 2;
+    renderThumbnails(group);
+  }
+
+  function renderCurrentGroup() {
+    var group = currentGroup();
+    if (!group) {
+      if (state.skippedGroups.length) {
+        showEmpty(
+          'Location review paused',
+          formatNumber(state.skippedGroups.length) +
+            (state.skippedGroups.length === 1 ? ' coordinate group was' : ' coordinate groups were') +
+            ' skipped without changes. ' +
+            (state.skippedGroups.length === 1 ? 'It will' : 'They will') +
+            ' appear again the next time you open this review set.'
+        );
+      } else {
+        showEmpty('All locations reviewed', 'There are no remaining coordinate groups in this set.');
+      }
+      updateProgress();
+      return;
+    }
+    state.renderToken += 1;
+    var token = state.renderToken;
+    state.selectedChoice = null;
+    state.savedCandidates = [];
+    state.googleCandidates = [];
+    state.regionCandidates = [];
+    state.searchedCandidate = null;
+    document.getElementById('locationReviewSearch').value = '';
+    var assign = document.getElementById('locationReviewAssign');
+    assign.disabled = true;
+    assign.textContent = 'Select a location';
+    document.getElementById('locationReviewSuggestionStatus').textContent = 'Looking nearby…';
+    document.getElementById('locationReviewCandidates').innerHTML = '<div class="location-review-loading">Finding saved and nearby locations…</div>';
+    renderGroupFacts(group);
+    renderPhotoMarkers(group);
+    updateProgress();
+    loadSuggestions(group, token);
+  }
+
+  async function loadSavedSuggestions(group, token) {
+    var radius = Math.min(100000, Math.max(25000, Number(group.spread_m || 0) + 10000));
+    var params = new URLSearchParams({
+      lat: group.center.lat,
+      lng: group.center.lng,
+      radius_m: radius,
+    });
+    try {
+      var data = await safeFetch('/api/location-review/saved-suggestions?' + params.toString(), {}, {toast: false});
+      if (token !== state.renderToken) return;
+      state.savedCandidates = (data.suggestions || []).map(function(item) {
+        return Object.assign({kind: 'keyword'}, item);
+      });
+    } catch (e) {}
+  }
+
+  function googleResultToChoice(result, typeLabel) {
+    if (!result) return null;
+    var placeId = result.place_id || result.id;
+    var name = result.name || (result.displayName && (result.displayName.text || result.displayName)) || '';
+    var location = result.geometry && result.geometry.location ? result.geometry.location : result.location;
+    var lat = location && (typeof location.lat === 'function' ? location.lat() : location.lat);
+    var lng = location && (typeof location.lng === 'function' ? location.lng() : location.lng);
+    var types = Array.isArray(result.types) ? result.types : [];
+    if (!placeId || !name || types.indexOf('plus_code') !== -1 || /^[A-Z0-9]{4,}\+[A-Z0-9]+\b/i.test(name)) return null;
+    return {
+      kind: 'google', place_id: placeId, name: name, types: types,
+      type_label: typeLabel || '', latitude: Number(lat), longitude: Number(lng),
+      context: result.vicinity || result.formatted_address || result.formattedAddress || '',
+      _googleResult: result,
+    };
+  }
+
+  function nearbySearch(request) {
+    return new Promise(function(resolve) {
+      if (!state.placesService) { resolve([]); return; }
+      state.placesService.nearbySearch(request, function(results, status) {
+        var ok = status === google.maps.places.PlacesServiceStatus.OK;
+        resolve(ok ? (results || []) : []);
+      });
+    });
+  }
+
+  async function loadGoogleSuggestions(group, token) {
+    if (state.mapMode !== 'google' || !state.placesService) return;
+    var location = new google.maps.LatLng(group.center.lat, group.center.lng);
+    var radius = Math.min(50000, Math.max(10000, Number(group.spread_m || 0) + 12000));
+    var resultSets = await Promise.all([
+      nearbySearch({location: location, radius: radius, type: 'park'}),
+      nearbySearch({location: location, radius: radius, keyword: 'state park wildlife refuge nature preserve hiking area'}),
+    ]);
+    if (token !== state.renderToken) return;
+    var center = group.center;
+    var choices = [];
+    resultSets.forEach(function(results) {
+      results.forEach(function(result) {
+        var choice = googleResultToChoice(result);
+        if (!choice) return;
+        choice.distance_m = distanceBetween(center.lat, center.lng, choice.latitude, choice.longitude);
+        choices.push(choice);
+      });
+    });
+    choices.sort(function(a, b) { return a.distance_m - b.distance_m; });
+    state.googleCandidates = choices.slice(0, 8);
+
+    var geocoder = new google.maps.Geocoder();
+    geocoder.geocode({location: location}, function(results, status) {
+      if (token !== state.renderToken || status !== 'OK') return;
+      var allowed = ['locality', 'administrative_area_level_2', 'administrative_area_level_1', 'country'];
+      var regionChoices = [];
+      (results || []).forEach(function(result) {
+        var matchedType = allowed.find(function(type) { return (result.types || []).indexOf(type) !== -1; });
+        if (!matchedType) return;
+        var component = (result.address_components || []).find(function(item) {
+          return (item.types || []).indexOf(matchedType) !== -1;
+        });
+        var choice = googleResultToChoice(result, {
+          locality: 'City or town', administrative_area_level_2: 'County or region',
+          administrative_area_level_1: 'State or province', country: 'Country'
+        }[matchedType]);
+        if (!choice || !component) return;
+        choice.name = component.long_name;
+        choice.address_components = result.address_components;
+        regionChoices.push(choice);
+      });
+      state.regionCandidates = regionChoices.slice(0, 4);
+      finishSuggestionRender(token);
+    });
+  }
+
+  function finishSuggestionRender(token) {
+    if (token !== state.renderToken) return;
+    renderCandidates();
+    renderCandidateMarkers();
+    var count = allCandidates().length;
+    document.getElementById('locationReviewSuggestionStatus').textContent = count ? count + ' options' : 'No matches';
+  }
+
+  async function loadSuggestions(group, token) {
+    await Promise.all([loadSavedSuggestions(group, token), loadGoogleSuggestions(group, token)]);
+    finishSuggestionRender(token);
+  }
+
+  function distanceBetween(lat1, lng1, lat2, lng2) {
+    var toRadians = Math.PI / 180;
+    var first = lat1 * toRadians;
+    var second = lat2 * toRadians;
+    var deltaLat = (lat2 - lat1) * toRadians;
+    var deltaLng = (lng2 - lng1) * toRadians;
+    var value = Math.sin(deltaLat / 2) ** 2 + Math.cos(first) * Math.cos(second) * Math.sin(deltaLng / 2) ** 2;
+    return 12742000 * Math.asin(Math.min(1, Math.sqrt(value)));
+  }
+
+  function loadGoogleMaps(apiKey) {
+    return new Promise(function(resolve, reject) {
+      if (window.google && window.google.maps) { resolve(window.google); return; }
+      window._vireoLocationReviewMapsReady = function() { resolve(window.google); };
+      var script = document.createElement('script');
+      script.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(apiKey) + '&libraries=places&loading=async&callback=_vireoLocationReviewMapsReady';
+      script.async = true;
+      script.onerror = function() { reject(new Error('maps_load_failed')); };
+      document.head.appendChild(script);
+    });
+  }
+
+  async function initMap() {
+    var message = document.getElementById('locationReviewMapMessage');
+    if (state.config && state.config.google_maps_api_key) {
+      try {
+        await loadGoogleMaps(state.config.google_maps_api_key);
+        state.mapMode = 'google';
+        state.map = new google.maps.Map(document.getElementById('locationReviewMap'), {
+          center: {lat: 20, lng: 0}, zoom: 2, mapTypeId: 'roadmap',
+          mapTypeControl: true, mapTypeControlOptions: {
+            mapTypeIds: ['roadmap', 'satellite', 'terrain'],
+            style: google.maps.MapTypeControlStyle.HORIZONTAL_BAR,
+          },
+          streetViewControl: false, fullscreenControl: true, clickableIcons: true,
+        });
+        state.placesService = new google.maps.places.PlacesService(state.map);
+        bindGoogleSearch();
+        state.map.addListener('click', function(event) {
+          if (!event.placeId) return;
+          if (event.stop) event.stop();
+          state.placesService.getDetails({placeId: event.placeId, fields: ['place_id','name','types','formatted_address','geometry','address_components']}, function(place, status) {
+            if (status !== google.maps.places.PlacesServiceStatus.OK) return;
+            var choice = googleResultToChoice(place);
+            if (!choice) return;
+            choice.address_components = place.address_components || [];
+            state.searchedCandidate = choice;
+            selectChoice(choice);
+          });
+        });
+        message.classList.add('location-review-hidden');
+        return;
+      } catch (e) {
+        console.warn('Google Maps unavailable; using basic map', e);
+      }
+    }
+
+    state.mapMode = 'leaflet';
+    if (!window.L) {
+      state.mapMode = 'none';
+      state.map = null;
+      message.textContent = 'The map could not be loaded. You can still review photo details and assign a custom location name.';
+      return;
+    }
+    var street = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {attribution: '&copy; OpenStreetMap contributors', maxZoom: 19});
+    var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {attribution: '&copy; Esri', maxZoom: 19});
+    var terrain = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {attribution: '&copy; OpenTopoMap', maxZoom: 17});
+    state.map = L.map('locationReviewMap', {layers: [street]}).setView([20,0], 2);
+    L.control.layers({'Street': street, 'Satellite': satellite, 'Terrain': terrain}).addTo(state.map);
+    message.textContent = 'Add a Google Maps key in Settings for nearby park and place suggestions. Saved locations and custom names remain available.';
+  }
+
+  function bindGoogleSearch() {
+    var input = document.getElementById('locationReviewSearch');
+    state.autocomplete = new google.maps.places.Autocomplete(input, {
+      fields: ['place_id','name','types','formatted_address','geometry','address_components'],
+      types: ['geocode', 'establishment'],
+    });
+    state.autocomplete.bindTo('bounds', state.map);
+    state.autocomplete.addListener('place_changed', function() {
+      var place = state.autocomplete.getPlace();
+      var choice = googleResultToChoice(place);
+      if (!choice) return;
+      choice.address_components = place.address_components || [];
+      state.searchedCandidate = choice;
+      selectChoice(choice);
+      if (place.geometry && place.geometry.viewport) state.map.fitBounds(place.geometry.viewport);
+      else if (choice.latitude != null) state.map.panTo({lat: choice.latitude, lng: choice.longitude});
+    });
+  }
+
+  function normalizePlaceForSubmit(choice) {
+    var result = choice._googleResult || {};
+    var components = choice.address_components || result.address_components || [];
+    return {
+      place_id: choice.place_id,
+      name: choice.name,
+      types: choice.types || [],
+      lat: choice.latitude,
+      lng: choice.longitude,
+      address_components: components.map(function(component) {
+        return {
+          name: component.name || component.long_name || '',
+          short_name: component.short_name || '',
+          types: component.types || [],
+        };
+      }),
+    };
+  }
+
+  function hydrateGoogleChoice(choice) {
+    if (!state.placesService || (choice.address_components && choice.address_components.length)) return Promise.resolve(choice);
+    return new Promise(function(resolve) {
+      state.placesService.getDetails({
+        placeId: choice.place_id,
+        fields: ['place_id','name','types','formatted_address','geometry','address_components'],
+      }, function(place, status) {
+        if (status === google.maps.places.PlacesServiceStatus.OK && place) {
+          var hydrated = googleResultToChoice(place) || choice;
+          hydrated.address_components = place.address_components || [];
+          resolve(hydrated);
+        } else resolve(choice);
+      });
+    });
+  }
+
+  async function assignCurrentGroup() {
+    var group = currentGroup();
+    var choice = state.selectedChoice;
+    if (!group || !choice) return;
+    var button = document.getElementById('locationReviewAssign');
+    button.disabled = true;
+    button.textContent = 'Assigning…';
+    try {
+      if (choice.kind === 'google') choice = await hydrateGoogleChoice(choice);
+      for (var offset = 0; offset < group.photo_ids.length; offset += 1000) {
+        var chunk = group.photo_ids.slice(offset, offset + 1000);
+        var endpoint = '/api/batch/location';
+        var body = {photo_ids: chunk};
+        if (choice.kind === 'keyword') body.keyword_id = choice.keyword_id;
+        else if (choice.kind === 'custom') {
+          endpoint = '/api/batch/location/text';
+          body.name = choice.name;
+          body.latitude = group.center.lat;
+          body.longitude = group.center.lng;
+        } else {
+          body.place_id = choice.place_id;
+          body.place = normalizePlaceForSubmit(choice);
+        }
+        await safeFetch(endpoint, {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+        });
+      }
+      showToast('Assigned “' + choice.name + '” to ' + formatNumber(group.count) + (group.count === 1 ? ' photo' : ' photos'));
+      state.groups.splice(state.currentIndex, 1);
+      state.assignedGroups += 1;
+      if (state.currentIndex >= state.groups.length) state.currentIndex = Math.max(0, state.groups.length - 1);
+      renderCurrentGroup();
+    } catch (e) {
+      button.disabled = false;
+      button.textContent = 'Assign “' + choice.name + '”';
+    }
+  }
+
+  function moveGroup(direction) {
+    if (state.groups.length < 2) return;
+    state.currentIndex = (state.currentIndex + direction + state.groups.length) % state.groups.length;
+    renderCurrentGroup();
+  }
+
+  document.getElementById('locationReviewPrevious').addEventListener('click', function() { moveGroup(-1); });
+  document.getElementById('locationReviewNext').addEventListener('click', function() { moveGroup(1); });
+  document.getElementById('locationReviewSkip').addEventListener('click', function() {
+    var group = currentGroup();
+    if (!group) return;
+    state.skippedGroups.push(group);
+    state.groups.splice(state.currentIndex, 1);
+    if (state.currentIndex >= state.groups.length) state.currentIndex = Math.max(0, state.groups.length - 1);
+    renderCurrentGroup();
+  });
+  document.getElementById('locationReviewAssign').addEventListener('click', assignCurrentGroup);
+  document.getElementById('locationReviewCustom').addEventListener('click', function() {
+    var name = document.getElementById('locationReviewSearch').value.trim();
+    if (!name) { showToast('Enter a friendly location name first.', 'error'); return; }
+    state.searchedCandidate = {kind: 'custom', name: name};
+    selectChoice(state.searchedCandidate);
+  });
+  document.getElementById('locationReviewSearch').addEventListener('keydown', function(event) {
+    if (event.key === 'Enter' && state.mapMode !== 'google') {
+      event.preventDefault();
+      document.getElementById('locationReviewCustom').click();
+    }
+  });
+
+  async function initialize() {
+    state.source = parseSource();
+    if (!state.source) {
+      showEmpty('No photos selected', 'Return to Browse and choose a collection or photo selection to review.', true);
+      return;
+    }
+    try {
+      state.config = await safeFetch('/api/config', {}, {toast: false});
+    } catch (e) { state.config = {}; }
+    await initMap();
+    try {
+      var preview = await safeFetch('/api/location-review/preview', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(state.source)
+      });
+      state.groups = preview.groups || [];
+      state.initialGroupCount = state.groups.length;
+      var scopeParts = [formatNumber(preview.reviewable) + ' photos ready for review'];
+      if ((preview.skipped || []).length) scopeParts.push(formatNumber(preview.skipped.length) + ' already assigned');
+      if ((preview.unresolved || []).length) scopeParts.push(formatNumber(preview.unresolved.length) + ' without usable coordinates');
+      document.getElementById('locationReviewScope').textContent = scopeParts.join(' · ');
+      if (!state.groups.length) {
+        showEmpty('No locations to review', preview.total ? 'Every photo in this set is already assigned or lacks usable coordinates.' : 'This set contains no photos.');
+        updateProgress();
+        return;
+      }
+      renderCurrentGroup();
+    } catch (e) {
+      showEmpty('Could not load locations', e.message || 'The location review set could not be opened.', true);
+    }
+  }
+
+  initialize();
+})();
+</script>
+</body>
+</html>
