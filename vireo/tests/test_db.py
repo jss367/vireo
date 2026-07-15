@@ -2131,6 +2131,64 @@ def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
     assert db.count_filtered_photos(folder_id=yard, **scope) == 1
 
 
+def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
+    """Dashboard totals for a collection scope keep photos in offline folders.
+
+    The unscoped Dashboard intentionally counts photos in missing folders
+    (metadata-only aggregates like total_photos, photos_by_month, etc.).
+    Scoping by a collection whose rules match those photos must not
+    silently drop them via the collection subquery's folder-status filter.
+    """
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    ok_folder = db.add_folder("/photos/ok", name="ok")
+    gone_folder = db.add_folder("/photos/gone", name="gone")
+    db.add_workspace_folder(ws_id, ok_folder)
+    db.add_workspace_folder(ws_id, gone_folder)
+
+    visible = db.add_photo(
+        folder_id=ok_folder, filename="here.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
+    )
+    offline = db.add_photo(
+        folder_id=gone_folder, filename="offline.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
+    )
+    collection_id = db.add_collection(
+        "All photos",
+        json.dumps([{"field": "photo_ids", "value": [visible, offline]}]),
+    )
+
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (gone_folder,),
+    )
+    db.conn.commit()
+
+    stats = db.get_dashboard_stats(collection_id=collection_id)
+    assert stats["total_photos"] == 2, (
+        "Dashboard totals must count the offline photo when scoped by "
+        f"a collection that matches it; got {stats['total_photos']}"
+    )
+    assert stats["accessible_photos"] == 1
+    assert stats["missing_folder_count"] == 1
+    months = {row["month"]: row["count"] for row in stats["photos_by_month"]}
+    assert months.get("2024-06") == 2
+
+    # Coverage still restricts to accessible folders in its outer join, so
+    # the collection scope must not further shrink that count either.
+    assert db.get_coverage_stats(collection_id=collection_id)["total"] == 1
+
+    # Regression guard: Browse and pipeline callers must still filter out
+    # photos in offline folders even when the collection rules match them.
+    assert db.count_collection_photos(collection_id) == 1
+    assert [p["id"] for p in db.get_collection_photos(collection_id)] == [visible]
+
+
 def test_dashboard_attention_counts_actionable_gaps_in_scope(tmp_path):
     """Needs Attention cards report preview, sync, location, and duplicate work."""
     db, pids = _make_workspace_with_photos(tmp_path, [

@@ -5448,7 +5448,14 @@ class Database:
             params.extend(subtree)
 
         if collection_id is not None:
-            parts = self._build_collection_query(collection_id)
+            # Dashboard scope keeps offline photos in totals, so the collection
+            # subquery must not filter them out via the Browse-oriented
+            # ``f.status IN ('ok', 'partial')`` join. Callers that need the
+            # accessible-only view apply that filter in their outer query
+            # (e.g. get_coverage_stats), so it's fine to be permissive here.
+            parts = self._build_collection_query(
+                collection_id, include_offline_folders=True,
+            )
             if parts is None:
                 raise ValueError("collection not found in active workspace")
             folder_join, join_clause, where, collection_params = parts
@@ -15647,10 +15654,12 @@ class Database:
             "file_paths": paths,
         }
 
-    def _build_collection_query(self, collection_id):
+    def _build_collection_query(self, collection_id, include_offline_folders=False):
         """Build SQL clauses from collection rules.
 
-        Returns (folder_join, join_clause, where, params) or None if collection not found.
+        Returns (folder_join, join_clause, where, params) or None if collection
+        not found. Pass ``include_offline_folders=True`` for metadata-only
+        callers (Dashboard scope) that keep offline photos in their totals.
         """
         row = self.conn.execute(
             "SELECT rules FROM collections WHERE id = ? AND workspace_id = ?",
@@ -15660,14 +15669,22 @@ class Database:
             return None
 
         rules = json.loads(row["rules"])
-        return self._build_query_from_rules(rules)
+        return self._build_query_from_rules(
+            rules, include_offline_folders=include_offline_folders,
+        )
 
-    def _build_query_from_rules(self, rules):
+    def _build_query_from_rules(self, rules, include_offline_folders=False):
         """Build SQL clauses from a smart-collection rule tree.
 
         Returns (folder_join, join_clause, where, params). Raises ValueError on
         malformed input — callers that accept rules from untrusted sources
         (e.g. the live-preview API) should catch and surface a 400.
+
+        By default the folder join filters to accessible folders
+        (``status IN ('ok', 'partial')``), matching what Browse and pipeline
+        callers need. Pass ``include_offline_folders=True`` for metadata-only
+        callers (e.g. Dashboard totals) that count photos even when their
+        storage is currently missing.
 
         Backward compatibility: the original collection format was a flat list
         of rule objects, implicitly combined with AND. Newer collections may use
@@ -16032,8 +16049,15 @@ class Database:
         _validate_node(root)
         condition, params = _build_node(root)
 
-        # Always join folders for folder-under rules, scoped to workspace
-        folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
+        # Always join folders for folder-under rules, scoped to workspace.
+        # For metadata-only callers (Dashboard scope) drop the accessible-
+        # folder filter so photos in an offline folder still count toward
+        # the collection's membership; every other caller keeps the Browse-
+        # oriented ``status IN ('ok', 'partial')`` filter that excludes them.
+        if include_offline_folders:
+            folder_join = " JOIN folders f ON f.id = p.folder_id"
+        else:
+            folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
         folder_join += " JOIN workspace_folders wf ON wf.folder_id = f.id AND wf.workspace_id = ?"
 
         # folder_join comes before join_clause in the query, so its param goes first
