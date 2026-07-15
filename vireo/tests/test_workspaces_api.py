@@ -165,6 +165,62 @@ def test_delete_active_workspace_fails(app_and_db):
     assert "active" in error_msg.lower()
 
 
+def test_delete_workspace_shared_local_folder(tmp_path, monkeypatch):
+    """A workspace sharing a local folder with another workspace can be deleted;
+    the last workspace still linked to the local folder cannot.
+
+    Regression: the delete guard used to reject *any* workspace that touched a
+    local folder, forcing users to sync or discard before deleting an inactive
+    workspace whose local folder was still owned by others. Deletion is now
+    equivalent to unlinking one non-final ``workspace_folders`` link (which the
+    folder-unlink route already permits), so only the last link is blocked.
+    """
+    from db import Database
+    from services.local_folder import stage_folder
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"x")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    # Keep Default active so First/Second are safe to delete under the guard.
+    default_id = db.ensure_default_workspace()
+    db.set_active_workspace(default_id)
+    first = db.create_workspace("First")
+    second = db.create_workspace("Second")
+    folder_id = db.add_folder(str(source), name="photos", link_to_workspace=False)
+    db.add_workspace_folder(first, folder_id)
+    db.add_workspace_folder(second, folder_id)
+    stage_folder(db, folder_id, str(vireo_dir))
+    db.close()
+
+    app = create_app(db_path=db_path, thumb_cache_dir=str(thumbs))
+    client = app.test_client()
+
+    # First shares the local folder with Second, so deleting First is safe.
+    resp = client.delete(f"/api/workspaces/{first}")
+    assert resp.status_code == 200, resp.get_json()
+
+    # Second is now the last workspace linked; delete must be refused.
+    resp = client.delete(f"/api/workspaces/{second}")
+    assert resp.status_code == 409
+    err = resp.get_json()["error"].lower()
+    assert "last" in err and "local folder" in err
+
+
 def test_activate_workspace(app_and_db):
     """POST /api/workspaces/<id>/activate switches the active workspace."""
     app, db = app_and_db

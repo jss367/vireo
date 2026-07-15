@@ -911,6 +911,34 @@ def test_count_photos_for_rules_unsaved(tmp_path):
     assert len(db.get_collections()) == 0
 
 
+def test_smart_collection_can_select_photos_with_jpeg_companions(tmp_path):
+    """Paired JPEG availability is a first-class smart-collection rule even
+    though the pair remains one RAW-primary catalog record."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    paired = db.add_photo(
+        folder_id=fid, filename="paired.nef", extension=".nef",
+        file_size=100, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=fid, filename="raw-only.nef", extension=".nef",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='paired.jpg' WHERE id=?", (paired,),
+    )
+    db.conn.commit()
+
+    yes = [{"field": "has_jpeg_companion", "op": "equals", "value": 1}]
+    no = [{"field": "has_jpeg_companion", "op": "equals", "value": 0}]
+    assert db.count_photos_for_rules(yes) == 1
+    assert db.count_photos_for_rules(no) == 1
+
+
 def test_count_photos_for_rules_rejects_malformed_input(tmp_path):
     """The preview helper raises on input that isn't a list of rule dicts —
     the API route relies on this to return a 400 instead of 500.

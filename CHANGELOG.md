@@ -19,6 +19,11 @@ All notable changes to Vireo are documented in this file.
   any user-customized thresholds are left untouched.
 
 ### Changed
+- **Work Locally follows folders across workspaces.** Local copies are now
+  managed per top-level folder. A folder shared by several workspaces uses one
+  local copy in all of them, while workspace controls can stage or finish
+  several folders together. Individual folders can also be staged, synced, or
+  discarded from the Workspace page.
 - **Global detection/classifier cache.** MegaDetector and classifier results
   are now cached per-photo instead of per-workspace. Switching to a new
   workspace or changing your detector confidence threshold no longer

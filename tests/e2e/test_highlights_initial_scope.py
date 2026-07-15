@@ -1189,9 +1189,11 @@ def test_highlights_lightbox_next_preserves_pending_one_to_one_zoom(live_server,
                 oneToOne: false,
                 pending1To1: false,
             };
-            lightboxNav(1);
-            return {
-                counter: document.getElementById('lightboxCounter').textContent,
+                lightboxNav(1);
+                return {
+                    currentId: window._lightboxCurrentId,
+                    nextId: next.id,
+                    counter: document.getElementById('lightboxCounter').textContent,
                 pending1To1: window._lbPending1To1,
                 zoom: window._lbZoom,
                 srcKey: window._lbCurrentSrcKey,
@@ -1199,7 +1201,8 @@ def test_highlights_lightbox_next_preserves_pending_one_to_one_zoom(live_server,
         }"""
     )
 
-    assert "2 /" in handoff["counter"]
+    assert handoff["currentId"] == handoff["nextId"]
+    assert "1 /" in handoff["counter"]
     assert handoff["pending1To1"] is True
     assert handoff["zoom"] > 1.001
     assert handoff["srcKey"] == "original"

@@ -1473,6 +1473,41 @@ def test_discard_http_flow_guards_stale_page_state(tmp_path, monkeypatch):
     final_db.close()
 
 
+def test_legacy_stage_refuses_when_folder_session_is_active(tmp_path, monkeypatch):
+    """Legacy /local-workspace/stage must refuse while a folder-scoped session
+    covers one of this workspace's folders. Without the reciprocal check,
+    ``status()`` still reports ``remote`` (it only reads
+    ``local_workspace_folders``), so a stale client would restage the
+    already-rebased ``local-folders/`` tree into ``.vireo/local/W/`` and
+    orphan the folder manifest from the catalog.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+    from services.local_folder import stage_folder
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    folder_id = db.add_folder(str(source), name="photos")
+    stage_folder(db, folder_id, str(vireo_dir))
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        blocked = client.post(
+            "/api/workspaces/active/local-workspace/stage", json={}
+        )
+        assert blocked.status_code == 409
+        assert "folder-scoped" in blocked.get_json()["error"]
+
+
 def test_local_workspace_folders_folder_id_fk_cascades_on_folder_delete(local_workspace_env):
     """Deleting the underlying folder cascades to local_workspace_folders.
 
@@ -1698,6 +1733,11 @@ def test_status_endpoint_does_not_surface_unrelated_workspace_jobs(tmp_path, mon
             assert "job" not in payload
         finally:
             hold.set()
+
+        # Let the scan job finish before posting to /stage. Without this
+        # wait, `_busy_job` may still see the scan as running on slow CI
+        # runners (mac-latest) and reject the stage attempt with 409.
+        wait_for_job_via_client(client, job_id)
 
         # Sanity-check the whitelist: a real transfer job still surfaces.
         stage_response = client.post("/api/workspaces/active/local-workspace/stage", json={})

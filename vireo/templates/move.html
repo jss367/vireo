@@ -338,6 +338,28 @@ body { padding-bottom: 36px; }
   margin-bottom: 8px;
   word-break: break-all;
 }
+.browser-source {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+.browser-source-path {
+  color: var(--text-primary);
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+}
+.move-summary {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+}
 .browser-folder-item {
   padding: 6px 10px;
   cursor: pointer;
@@ -409,6 +431,7 @@ body { padding-bottom: 36px; }
         <input type="text" id="quickSubpathInput" placeholder="Optional subfolder under the target (e.g. USA/2026)" oninput="updateQuickMoveBtn()">
       </div>
       <div class="dest-preview" id="quickDestPreview"></div>
+      <div class="move-summary" id="quickMoveSummary" style="display:none;"></div>
 
       <div style="margin-top:16px;">
         <button class="btn btn-primary" id="quickMoveBtn" onclick="startQuickMove()" disabled>Move Folder</button>
@@ -473,6 +496,10 @@ body { padding-bottom: 36px; }
 <div class="modal-overlay" id="moveBrowserModal" style="z-index:1001;">
   <div class="modal" style="max-width:600px;width:85%;">
     <h3>Select Folder</h3>
+    <div class="browser-source" id="moveBrowserSource" style="display:none;">
+      Source folder: <span class="browser-source-path" id="moveBrowserSourcePath"></span>
+      <span id="moveBrowserSourceCount"></span>
+    </div>
     <div class="browser-shortcuts">
       <button onclick="browseTo(null)">Home</button>
       <button onclick="browseTo('__pictures__')">Pictures</button>
@@ -621,9 +648,26 @@ function onQuickFolderChange() {
   }
   var folder = allFolders.find(function(f) { return f.id === fid; });
   if (folder) {
-    info.textContent = (folder.photo_count || 0) + ' photos in this folder';
+    var count = folder.photo_count || 0;
+    info.textContent = 'Source: ' + folder.path + ' · ' +
+      count.toLocaleString() + ' photo' + (count !== 1 ? 's' : '');
   }
   updateQuickMoveBtn();
+}
+
+function setQuickMoveSummary(folder, finalPath) {
+  var summary = document.getElementById('quickMoveSummary');
+  if (!folder || !finalPath) {
+    summary.textContent = '';
+    summary.style.display = 'none';
+    return '';
+  }
+  var count = folder.photo_count || 0;
+  var text = 'Confirm moving ' + count.toLocaleString() + ' photo' +
+    (count !== 1 ? 's' : '') + ' from ' + folder.path + ' to ' + finalPath + '?';
+  summary.textContent = text;
+  summary.style.display = 'block';
+  return text;
 }
 
 function updateQuickMoveBtn() {
@@ -670,12 +714,20 @@ function updateQuickMovePreview() {
   var preview = document.getElementById('quickDestPreview');
   var fid = parseInt(document.getElementById('quickFolderSelect').value);
   var remoteId = quickRemoteTargetId();
-  if (!fid) { preview.textContent = ''; return; }
+  if (!fid) {
+    preview.textContent = '';
+    setQuickMoveSummary(null, '');
+    return;
+  }
   var folder = allFolders.find(function(f) { return f.id === fid; });
 
   if (remoteId) {
     var t = quickRemoteTargets.find(function(x) { return x.id === remoteId; });
-    if (!t) { preview.textContent = ''; return; }
+    if (!t) {
+      preview.textContent = '';
+      setQuickMoveSummary(null, '');
+      return;
+    }
     // Use the same normalization the backend does, so the preview path
     // matches what move.py / sanitize_subpath will actually write. Without
     // this the UI can show e.g. "/volume1/Photo/USA" while the move
@@ -685,6 +737,7 @@ function updateQuickMovePreview() {
       document.getElementById('quickSubpathInput').value);
     if (subResult.error) {
       preview.textContent = '';
+      setQuickMoveSummary(null, '');
       preview.appendChild(_destWarn('⚠ ' + subResult.error));
       return;
     }
@@ -693,13 +746,14 @@ function updateQuickMovePreview() {
       ((folder && folder.path) || '').replace(/\/+$/, '').split('/').pop();
     var base = t.remote_path.replace(/\/+$/, '') + (sub ? '/' + sub : '');
     var finalPath = base + '/' + folderName;
+    var finalDestSpec = rsyncDestSpec(t.user, t.host, finalPath);
 
     preview.textContent = '';
     var line = document.createElement('div');
     line.textContent = 'Transferring over SSH to: ';
     var span = document.createElement('span');
     span.className = 'dest-preview-path';
-    span.textContent = rsyncDestSpec(t.user, t.host, finalPath);
+    span.textContent = finalDestSpec;
     line.appendChild(span);
     preview.appendChild(line);
 
@@ -722,12 +776,17 @@ function updateQuickMovePreview() {
     rstatus.id = 'quickDestStatus';
     rstatus.className = 'dest-status';
     preview.appendChild(rstatus);
+    setQuickMoveSummary(folder, finalDestSpec);
     scheduleQuickPreflight(fid, null, remoteId, sub);
     return;
   }
 
   var dest = document.getElementById('quickDestInput').value.trim();
-  if (!dest) { preview.textContent = ''; return; }
+  if (!dest) {
+    preview.textContent = '';
+    setQuickMoveSummary(null, '');
+    return;
+  }
   var finalPath = resolvedMoveDest(folder, dest);
 
   // The resolved path is computable client-side, so show it instantly.
@@ -747,6 +806,7 @@ function updateQuickMovePreview() {
   status.id = 'quickDestStatus';
   status.className = 'dest-status';
   preview.appendChild(status);
+  setQuickMoveSummary(folder, finalPath);
   scheduleQuickPreflight(fid, dest, '', '');
 }
 
@@ -949,7 +1009,7 @@ async function startQuickMove() {
   }
 
   var folder = allFolders.find(function(f) { return f.id === fid; });
-  var folderName = folder ? folder.path : 'folder #' + fid;
+  var sourcePath = folder ? folder.path : 'folder #' + fid;
   var photoCount = folder ? (folder.photo_count || 0) : '?';
 
   // Ask the backend for the resolved destination and whether it already
@@ -980,6 +1040,9 @@ async function startQuickMove() {
   }
 
   var finalPath = pf.resolved_dest;
+  var moveSummary = folder
+    ? setQuickMoveSummary(folder, finalPath)
+    : 'Confirm moving photos from ' + sourcePath + ' to ' + finalPath + '?';
   var verifyText = remoteId
     ? ' Transferred over SSH and verified by checksum before originals are removed.'
     : ' Files will be copied and verified before originals are removed.';
@@ -1007,13 +1070,13 @@ async function startQuickMove() {
         ' a destination entry that is a symlink or non-file — the merge will be canceled at the verify step before any originals are removed.' : '';
       if (copyN === 0 && blockN === 0) {
         msg = 'All ' + skipN.toLocaleString() + ' file' + (skipN !== 1 ? 's' : '') +
-          ' from "' + folderName + '" are already present at "' + finalPath +
+          ' from "' + sourcePath + '" are already present at "' + finalPath +
           '". Merging copies nothing new.' + conflictNote +
           ' Originals are removed only after every source file is verified at the destination. Continue?';
       } else {
         var skipPart = skipN ? ', ' + skipN.toLocaleString() + ' already present will be left untouched' : '';
         var blockPart = blockN ? ', ' + blockN.toLocaleString() + ' blocked by a non-file at the destination' : '';
-        msg = 'Merge "' + folderName + '" into "' + finalPath + '"? ' +
+        msg = 'Merge "' + sourcePath + '" into "' + finalPath + '"? ' +
           copyN.toLocaleString() + ' file' + (copyN !== 1 ? 's' : '') + ' will be copied' +
           skipPart + blockPart + '.' + conflictNote + blockNote +
           ' Originals are removed only after every source file is verified at the destination.';
@@ -1024,11 +1087,11 @@ async function startQuickMove() {
       var n = pf.file_count || 0;
       var countText = pf.file_count_truncated ? ('at least ' + n.toLocaleString()) : n.toLocaleString();
       msg = '"' + finalPath + '" already exists and contains ' + countText + ' file' + (n !== 1 || pf.file_count_truncated ? 's' : '') +
-        '. Merge "' + folderName + '" (' + photoCount + ' photos) into it? Files already there are left untouched; only missing files are copied. If a same-name file differs, the merge is canceled and nothing is changed. Originals are removed only after every source file is verified at the destination.';
+        '. Merge "' + sourcePath + '" (' + photoCount + ' photos) into it? Files already there are left untouched; only missing files are copied. If a same-name file differs, the merge is canceled and nothing is changed. Originals are removed only after every source file is verified at the destination.';
     }
     showConfirm(
       'Destination Exists — Merge & Resume',
-      msg,
+      moveSummary + ' ' + msg,
       function() {
         executeQuickMove(Object.assign({folder_id: fid, merge: true}, destBody));
       }
@@ -1036,7 +1099,7 @@ async function startQuickMove() {
   } else {
     showConfirm(
       'Move Folder',
-      'Move "' + folderName + '" (' + photoCount + ' photos) to "' + finalPath + '"?' + verifyText,
+      moveSummary + verifyText,
       function() {
         executeQuickMove(Object.assign({folder_id: fid, merge: false}, destBody));
       }
@@ -1481,7 +1544,28 @@ function openBrowser(targetInputId) {
   browserPath = currentVal || '';
   document.getElementById('moveBrowserModal').classList.add('open');
   document.getElementById('newFolderName').value = '';
+  updateBrowserSource();
   browseTo(browserPath || null);
+}
+
+function updateBrowserSource() {
+  var source = document.getElementById('moveBrowserSource');
+  var folder = null;
+  if (browserTargetInput === 'quickDestInput') {
+    var fid = parseInt(document.getElementById('quickFolderSelect').value);
+    folder = allFolders.find(function(f) { return f.id === fid; });
+  }
+  if (!folder) {
+    source.style.display = 'none';
+    document.getElementById('moveBrowserSourcePath').textContent = '';
+    document.getElementById('moveBrowserSourceCount').textContent = '';
+    return;
+  }
+  var count = folder.photo_count || 0;
+  document.getElementById('moveBrowserSourcePath').textContent = folder.path;
+  document.getElementById('moveBrowserSourceCount').textContent = ' (' +
+    count.toLocaleString() + ' photo' + (count !== 1 ? 's' : '') + ')';
+  source.style.display = 'block';
 }
 
 function closeBrowser() {

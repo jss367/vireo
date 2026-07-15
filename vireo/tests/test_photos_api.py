@@ -3173,7 +3173,6 @@ def test_edited_original_cache_write_is_atomic(client_with_photo, monkeypatch):
     app, db, photo_id = client_with_photo
     db.set_photo_edit_recipe(photo_id, {"rotation": 90})
     vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-    final_path = os.path.join(vireo_dir, "originals", f"{photo_id}.jpg")
     calls = []
     original_replace = app_module.os.replace
 
@@ -3189,9 +3188,11 @@ def test_edited_original_cache_write_is_atomic(client_with_photo, monkeypatch):
     assert calls
     tmp_path, dst_path, tmp_existed = calls[0]
     assert tmp_existed is True
-    assert dst_path == final_path
+    assert os.path.dirname(dst_path) == os.path.join(vireo_dir, "originals")
+    assert os.path.basename(dst_path).startswith(f"{photo_id}_")
+    assert dst_path.endswith(".jpg")
     assert not os.path.exists(tmp_path)
-    assert os.path.exists(final_path)
+    assert os.path.exists(dst_path)
 
 
 def test_cropped_preview_uses_original_when_working_copy_is_too_small(
@@ -4744,7 +4745,7 @@ def test_edited_original_uses_companion_when_raw_returns_undersized(
     ``preserve_highlights`` mode still falls back to the embedded
     thumb. The endpoint must compare the loaded dimensions against
     the photo's stored full-resolution dimensions and try the
-    companion JPEG before caching an undersized originals/<id>.jpg.
+    companion JPEG before caching an undersized full-resolution render.
     """
     import io
     import os
@@ -5724,10 +5725,16 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     plain_preview = preview_dir / f"{pid_plain}_1920.jpg"
     edited_thumb = thumb_dir / f"{pid_edited}.jpg"
     plain_thumb = thumb_dir / f"{pid_plain}.jpg"
+    edited_raw_thumb = thumb_dir / f"{pid_edited}_raw.jpg"
+    edited_jpeg_thumb = thumb_dir / f"{pid_edited}_jpeg.jpg"
+    plain_raw_thumb = thumb_dir / f"{pid_plain}_raw.jpg"
     edited_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"o" * 1024)
     plain_preview.write_bytes(b"\xff\xd8\xff\xe0" + b"p" * 1024)
     edited_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"t" * 1024)
     plain_thumb.write_bytes(b"\xff\xd8\xff\xe0" + b"u" * 1024)
+    edited_raw_thumb.write_bytes(b"stale raw")
+    edited_jpeg_thumb.write_bytes(b"stale jpeg")
+    plain_raw_thumb.write_bytes(b"plain raw")
     db.preview_cache_insert(pid_edited, 1920, edited_preview.stat().st_size)
     db.preview_cache_insert(pid_plain, 1920, plain_preview.stat().st_size)
     db.conn.execute(
@@ -5746,6 +5753,8 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     # Edited photo: preview and thumb gone, thumb_path cleared, no row.
     assert not edited_preview.exists()
     assert not edited_thumb.exists()
+    assert not edited_raw_thumb.exists()
+    assert not edited_jpeg_thumb.exists()
     assert db.preview_cache_get(pid_edited, 1920) is None
     edited_row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (pid_edited,),
@@ -5755,6 +5764,7 @@ def test_edit_math_version_bump_invalidates_edited_photo_caches(tmp_path, monkey
     # Plain photo: cache survives because no recipe → output bytes unchanged.
     assert plain_preview.exists()
     assert plain_thumb.exists()
+    assert plain_raw_thumb.exists()
     assert db.preview_cache_get(pid_plain, 1920) is not None
     plain_row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id = ?", (pid_plain,),

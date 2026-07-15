@@ -49,9 +49,10 @@ def cleanup_cached_files_for_deleted_photos(
     total = len(files)
     for idx, f in enumerate(files, start=1):
         pid = f["photo_id"]
-        # {id}.jpg lives in all three dirs (legacy full preview, thumb,
-        # working copy). {id}_{size}.jpg is sized preview variants.
-        for d in [thumb_cache_dir, preview_dir, working_dir]:
+        # {id}.jpg lives in these dirs as a legacy full preview, thumbnail,
+        # working copy, or prepared full-resolution render. {id}_{size}.jpg
+        # is used for sized preview variants.
+        for d in [thumb_cache_dir, preview_dir, working_dir, originals_dir]:
             cached = os.path.join(d, f"{pid}.jpg")
             if os.path.isfile(cached):
                 try:
@@ -62,7 +63,30 @@ def cleanup_cached_files_for_deleted_photos(
                         "delete — will be reclaimed by Clear Cache: %s",
                         cached, e,
                     )
-        for name in (f"{pid}.jpg", f"{pid}.display.jpg"):
+        # Paired RAW+JPEG views keep source-specific thumbnail variants next
+        # to the legacy/default thumbnail. They are disposable derivatives
+        # and must follow the photo out of the cache on delete as well.
+        for variant in _glob.glob(os.path.join(thumb_cache_dir, f"{pid}_*.jpg")):
+            try:
+                os.remove(variant)
+            except OSError as e:
+                log.warning(
+                    "Failed to remove thumbnail variant %s after photo "
+                    "delete — will be reclaimed by Clear Cache: %s",
+                    variant, e,
+                )
+        for prepared_render in _glob.glob(
+            os.path.join(originals_dir, f"{pid}_*.jpg")
+        ):
+            try:
+                os.remove(prepared_render)
+            except OSError as e:
+                log.warning(
+                    "Failed to remove cached file %s after photo delete — "
+                    "will be reclaimed by Clear Cache: %s",
+                    prepared_render, e,
+                )
+        for name in (f"{pid}.display.jpg",):
             cached = os.path.join(originals_dir, name)
             if os.path.isfile(cached):
                 try:

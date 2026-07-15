@@ -370,6 +370,19 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
             # camera JPEG was paired. File mtimes cannot tell which source
             # produced that cache, so discard it when the companion changes.
             _invalidate_raw_display_cache(vireo_dir, primary["id"])
+            thumb_dir = thumb_cache_dir or os.path.join(vireo_dir, "thumbnails")
+            jpeg_variant = os.path.join(
+                thumb_dir, f"{primary['id']}_jpeg.jpg",
+            )
+            try:
+                if os.path.exists(jpeg_variant):
+                    os.remove(jpeg_variant)
+            except OSError:
+                log.debug(
+                    "Could not delete stale companion thumbnail %s",
+                    jpeg_variant,
+                    exc_info=True,
+                )
 
         # Transfer detections (and their cascaded predictions) from companion to primary.
         # Detection IDs are content-addressed on (photo_id, detector_model, box,
@@ -617,6 +630,21 @@ def _invalidate_derived_caches(db, vireo_dir, photo_id, thumb_cache_dir=None):
         # external cache wipe). Keep the column in sync so the pipeline
         # planner's "thumb_path IS NULL" gate matches disk reality.
         thumb_removed = True
+    # Explicit RAW/JPEG pair views use source-specific thumbnail names. They
+    # derive from the same source bytes and must be invalidated alongside the
+    # legacy thumbnail, especially when a hash change preserves file mtime.
+    for source in ("raw", "jpeg"):
+        variant_path = os.path.join(thumb_dir, f"{photo_id}_{source}.jpg")
+        if not os.path.exists(variant_path):
+            continue
+        try:
+            os.remove(variant_path)
+        except OSError:
+            log.debug(
+                "Could not delete stale paired thumbnail %s",
+                variant_path,
+                exc_info=True,
+            )
     if thumb_removed:
         # Mirror the working_copy_path / preview_cache cleanup below: any
         # path that drops the cached thumbnail file must also clear
