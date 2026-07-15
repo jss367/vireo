@@ -44,6 +44,9 @@
   .species-meta { font-size:12px; color:var(--text-secondary); margin-top:6px; }
   .species-locations { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
   .loc-chip { padding:1px 7px; border-radius:999px; background:var(--bg-tertiary); color:var(--text-secondary); font-size:11px; white-space:nowrap; }
+  .lifelist-load-more { margin-top:9px; border:1px solid var(--border-secondary); background:var(--bg-tertiary); color:var(--text-primary); border-radius:4px; padding:5px 9px; font-size:12px; cursor:pointer; }
+  .lifelist-load-more:hover { border-color:var(--accent); }
+  .lifelist-load-more:disabled { opacity:.65; cursor:default; }
 
   .lifelist-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
   .lifelist-empty a { color:var(--accent); }
@@ -259,6 +262,9 @@ var debounceTimer = null;
 var LIFE_LIST_SORT_STORAGE_KEY = 'vireo.lifeList.sort';
 var LIFE_LIST_RENUMBER_STORAGE_KEY = 'vireo.lifeList.renumber';
 var LIFE_LIST_SORTS = ['newest', 'life-order', 'alpha', 'most-photos'];
+var LIFE_LIST_PAGE_SIZE = 100;
+var lifeListLightboxSpecies = null;
+var lifeListLoadPromises = {};
 
 function restoreLifeListViewPreferences() {
   try {
@@ -345,6 +351,16 @@ function renderCard(entry, displayNumber) {
   }).join('');
   var extraLocs = (entry.locations || []).length - 3;
   if (extraLocs > 0) locations += '<span class="loc-chip">+' + extraLocs + ' more</span>';
+  var remaining = Math.max(0, entry.photo_count - (entry.photos || []).length);
+  var loadMore = entry.has_more
+    ? '<button type="button" class="lifelist-load-more" data-load-more-species="'
+      + escapeAttr(entry.species) + '"' + (entry.loading_more ? ' disabled' : '') + '>'
+      + (entry.loading_more
+        ? 'Loading photos…'
+        : 'Load ' + Math.min(LIFE_LIST_PAGE_SIZE, remaining) + ' more photo'
+          + (Math.min(LIFE_LIST_PAGE_SIZE, remaining) === 1 ? '' : 's'))
+      + '</button>'
+    : '';
   return '<div class="species-card" data-species="' + escapeAttr(entry.species) + '" title="'
     + escapeAttr((entry.locations || []).join(', ')) + '">'
     + '<div class="lifer-number">#' + displayNumber + '</div>'
@@ -355,7 +371,51 @@ function renderCard(entry, displayNumber) {
     + sci
     + '<div class="species-meta">' + metaParts.join(' &middot; ') + '</div>'
     + (locations ? '<div class="species-locations">' + locations + '</div>' : '')
+    + loadMore
     + '</div></div>';
+}
+
+function lifeListEntry(species) {
+  return (currentData && currentData.species || []).find(function(entry) {
+    return entry.species === species;
+  });
+}
+
+function loadMoreLifeListPhotos(entry) {
+  if (!entry || !entry.has_more) return Promise.resolve(entry ? entry.photos : []);
+  if (lifeListLoadPromises[entry.species]) {
+    return lifeListLoadPromises[entry.species];
+  }
+  entry.loading_more = true;
+  render();
+  var params = new URLSearchParams({
+    species: entry.species,
+    offset: String((entry.photos || []).length),
+    limit: String(LIFE_LIST_PAGE_SIZE),
+  });
+  var promise = safeFetch('/api/life-list/species?' + params.toString())
+    .then(function(data) {
+      var seen = new Set((entry.photos || []).map(function(photo) { return photo.id; }));
+      (data.photos || []).forEach(function(photo) {
+        if (!seen.has(photo.id)) {
+          entry.photos.push(photo);
+          seen.add(photo.id);
+        }
+      });
+      entry.loaded_count = data.loaded_count;
+      entry.has_more = data.has_more;
+      return entry.photos;
+    })
+    .catch(function() {
+      return entry.photos;
+    })
+    .finally(function() {
+      entry.loading_more = false;
+      delete lifeListLoadPromises[entry.species];
+      render();
+    });
+  lifeListLoadPromises[entry.species] = promise;
+  return promise;
 }
 
 function render() {
@@ -397,19 +457,57 @@ function render() {
   }).join('')
     || '<div class="lifelist-empty" style="grid-column:1/-1;"><p>No species match this search.</p></div>';
 
+  content.querySelectorAll('[data-load-more-species]').forEach(function(button) {
+    button.addEventListener('click', function(event) {
+      event.stopPropagation();
+      loadMoreLifeListPhotos(lifeListEntry(button.getAttribute('data-load-more-species')));
+    });
+  });
+
   content.querySelectorAll('.species-card').forEach(function(card) {
     card.addEventListener('click', function() {
       var sp = card.getAttribute('data-species');
       var entry = (currentData.species || []).find(function(e) { return e.species === sp; });
       if (entry && entry.best && window.openLightbox) {
-        // The lightbox set is this species' top photos so the user can
-        // flip through their best shots of the lifer. The shared lightbox
-        // panel (see _navbar.html) renders its own representative control.
+        // Keep the same array object as pages are appended so the shared
+        // lightbox immediately sees newly loaded photos.
+        lifeListLightboxSpecies = entry.species;
         openLightbox(entry.best.id, entry.best.filename, entry.photos || [entry.best]);
       }
     });
   });
 }
+
+// Prefetch the next page before the viewer reaches the end of the current
+// lightbox list. If navigation reaches the boundary first, the boundary
+// listener waits for that same request and advances as soon as it arrives.
+document.addEventListener('lightbox:photochanged', function(event) {
+  var entry = lifeListEntry(lifeListLightboxSpecies);
+  if (!entry || !entry.has_more) return;
+  var photoId = event && event.detail && event.detail.photoId;
+  var index = (entry.photos || []).findIndex(function(photo) { return photo.id === photoId; });
+  if (index >= entry.photos.length - 3) loadMoreLifeListPhotos(entry);
+});
+
+document.addEventListener('lightbox:navigationboundary', function(event) {
+  var detail = event && event.detail || {};
+  if (detail.delta !== 1) return;
+  var entry = lifeListEntry(lifeListLightboxSpecies);
+  if (!entry || !entry.has_more) return;
+  var currentId = detail.photoId;
+  loadMoreLifeListPhotos(entry).then(function() {
+    if (window._lightboxCurrentId !== currentId) return;
+    var index = entry.photos.findIndex(function(photo) { return photo.id === currentId; });
+    var next = entry.photos[index + 1];
+    if (next && window.openLightbox) {
+      openLightbox(next.id, next.filename, entry.photos);
+    }
+  });
+});
+
+document.addEventListener('lightbox:closed', function() {
+  lifeListLightboxSpecies = null;
+});
 
 function debounceRender() {
   clearTimeout(debounceTimer);
