@@ -10425,6 +10425,82 @@ def test_species_highlight_eligibility_accepted_species_exact_match(app_and_db):
     assert pid in (same_spelling.get("Robin") or {})
 
 
+def test_resolve_species_display_name_prefers_taxonomy_over_general_homonym(
+    app_and_db,
+):
+    """When a taxonomy species row and a non-species general row share a
+    NOCASE key (e.g. taxonomy ``Common waxbill`` alongside a hand-tagged
+    ``Common Waxbill`` general), ``add_keyword(is_species=True)`` picks
+    the taxonomy row. ``resolve_species_display_name`` must mirror that
+    pick — otherwise the bucket collection keys prediction-only photos
+    under ``Common Waxbill``, curation setters store rows under the
+    non-taxonomy spelling, and once the prediction is accepted the
+    stored highlight no longer matches the accepted keyword spelling
+    (``Common waxbill``) and silently disappears from the bucket."""
+    _, db = app_and_db
+    # Taxonomy species row (the one add_keyword prefers).
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    )
+    # Separate non-species general row with classifier casing —
+    # someone hand-tagged the same spelling as a plain keyword.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common Waxbill', 'general', 0)"
+    )
+    db.conn.commit()
+
+    # Every caller spelling must land on the taxonomy row's stored
+    # spelling: that's what add_keyword(is_species=True) will pick, and
+    # bucket / parse / setter paths all agree on the same string.
+    assert db.resolve_species_display_name("Common Waxbill") == "Common waxbill"
+    assert db.resolve_species_display_name("common waxbill") == "Common waxbill"
+    assert db.resolve_species_display_name("COMMON WAXBILL") == "Common waxbill"
+
+    # Cross-check the invariant: add_keyword(is_species=True) actually
+    # returns the taxonomy row — otherwise the resolve fix would be
+    # tracking a different behavior than reality.
+    picked_id = db.add_keyword("Common Waxbill", is_species=True)
+    picked_name = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (picked_id,)
+    ).fetchone()["name"]
+    assert picked_name == "Common waxbill"
+
+
+def test_resolve_species_display_name_promotes_non_species_general_alone(
+    app_and_db,
+):
+    """When only a non-species general row shares the NOCASE key,
+    ``add_keyword(is_species=True)`` finds and promotes it in place —
+    is_species/type flip but the stored name is untouched. Resolve must
+    return that stored name so curation keys on the string the promoted
+    row will carry, not on a case-convention-derived spelling that
+    doesn't exist."""
+    _, db = app_and_db
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common Waxbill', 'general', 0)"
+    )
+    db.conn.commit()
+
+    # No taxonomy candidate for this NOCASE key, so add_keyword will
+    # promote the general row rather than insert a fresh taxonomy row.
+    # Resolve returns the general's stored spelling — the string
+    # curation setters must key on.
+    assert db.resolve_species_display_name("common waxbill") == "Common Waxbill"
+
+    # add_keyword promotes in place; the row's name doesn't change.
+    picked_id = db.add_keyword("common waxbill", is_species=True)
+    row = db.conn.execute(
+        "SELECT name, type, is_species FROM keywords WHERE id = ?",
+        (picked_id,),
+    ).fetchone()
+    assert row["name"] == "Common Waxbill"
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+
+
 def test_highlights_save(app_and_db):
     """POST /api/highlights/save creates a static collection."""
     app, db = app_and_db

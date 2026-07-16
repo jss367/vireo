@@ -9265,22 +9265,35 @@ class Database:
 
         Species relabel endpoints snapshot curation dst_existed before
         add_keyword actually runs, so they need to know the final stored
-        spelling in advance. Three cases:
+        spelling in advance. Cases:
 
-        1. A single root taxonomy/general keyword row matches (SQLite
+        1. A single species-bearing root keyword row matches (SQLite
            ASCII NOCASE) → preserve that stored spelling; existing
-           curation rows key on it.
-        2. Multiple distinct stored spellings match the same NOCASE key
-           (intentional homonyms — e.g. legacy general ``Robin`` alongside
-           taxonomy ``robin``) → preserve the caller's spelling. Silently
-           picking one would route bucket/curation writes across
-           genuinely different keyword rows, so the eligibility check
-           (which compares ``bucket["species"]`` to this result exactly)
-           would then reject requests coming from the other homonym's
-           bucket. Bucket collection, API parse, and DB setters all
-           funnel through this call, so preserving keeps them agreeing
-           on the same string.
-        3. No matching root keyword row → apply the same species-casing
+           curation rows key on it. A non-species general homonym with
+           the same NOCASE key (e.g. a hand-tagged ``Common Waxbill``
+           general alongside a taxonomy ``Common waxbill``) is ignored
+           here — add_keyword's typed lookup prefers the taxonomy row,
+           so returning the general's spelling would key curation onto a
+           string add_keyword never stores.
+        2. Multiple species-bearing stored spellings match the same
+           NOCASE key (intentional homonyms — e.g. legacy general
+           ``Robin`` (is_species=1) alongside taxonomy ``robin``) →
+           preserve the caller's spelling. Silently picking one would
+           route bucket/curation writes across genuinely different
+           species rows, so the eligibility check (which compares
+           ``bucket["species"]`` to this result exactly) would then
+           reject requests coming from the other homonym's bucket.
+           Bucket collection, API parse, and DB setters all funnel
+           through this call, so preserving keeps them agreeing on the
+           same string. (Callers that need the exact spelling
+           add_keyword will land on after promotion — e.g. relabel
+           snapshots — apply add_keyword's ORDER BY themselves.)
+        3. No species-bearing row but a non-species general row shares
+           the NOCASE key → return that general's spelling.
+           add_keyword(is_species=True) would find and promote that row
+           in place, keeping its name, so curation must key on the same
+           string.
+        4. No matching root keyword row → apply the same species-casing
            convention that add_keyword applies for new species keywords,
            so pre-existing curation from predictions (which inserted
            `Black Phoebe`) is matched even when the request submits
@@ -9290,20 +9303,25 @@ class Database:
         if not name:
             return name
         rows = self.conn.execute(
-            "SELECT DISTINCT name FROM keywords "
+            "SELECT name, type, is_species FROM keywords "
             "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
             "AND type IN ('taxonomy', 'general') "
             "ORDER BY (type = 'taxonomy') DESC, id ASC",
             (name,),
         ).fetchall()
-        stored_names = [r["name"] for r in rows if r["name"]]
-        if len(stored_names) == 1:
-            return stored_names[0]
-        if len(stored_names) > 1:
-            for stored in stored_names:
-                if stored == name:
-                    return stored
-            return name
+        if rows:
+            species_rows = [
+                r for r in rows
+                if r["is_species"] or r["type"] == "taxonomy"
+            ]
+            if len(species_rows) == 1:
+                return species_rows[0]["name"]
+            if len(species_rows) > 1:
+                for r in species_rows:
+                    if r["name"] == name:
+                        return r["name"]
+                return name
+            return rows[0]["name"]
         import config as cfg
         override = cfg.get("keyword_case")
         if override and override != "auto":
