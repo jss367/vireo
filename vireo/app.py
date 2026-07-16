@@ -3615,6 +3615,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         return value
 
+    def _collection_rules_state(db, rules_json):
+        """Return parsed collection rules and whether they are degraded."""
+        try:
+            parsed_rules = json.loads(rules_json)
+        except (TypeError, ValueError):
+            return None, True
+        return parsed_rules, not db.rules_resolvable(parsed_rules)
+
     @app.route("/api/browse/init")
     def api_browse_init():
         """Combined endpoint for browse page initial load — one request instead of five."""
@@ -3700,24 +3708,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # on every smart-collection query. Malformed JSON is treated
             # as degraded too — those rules would 400 downstream just
             # like an unresolvable rule.
-            try:
-                parsed_rules = json.loads(c["rules"])
-            except (TypeError, ValueError):
+            parsed_rules, degraded = _collection_rules_state(db, c["rules"])
+            if degraded:
                 d["can_add_photos"] = False
                 d["count_error"] = True
                 collection_dicts.append(d)
-                continue
-            if not db.rules_resolvable(parsed_rules):
                 app.logger.warning(
                     "Collection %s (%s) has unresolvable rules; marking degraded",
                     c["id"],
                     c["name"],
                 )
-                d["count_error"] = True
-                # Same reasoning as /api/collections: an unresolvable rule
-                # cannot be safely merged into via add-photos, so keep it
-                # out of the add-to-collection modal.
-                d["can_add_photos"] = False
+                continue
             else:
                 d["can_add_photos"] = _collection_accepts_manual_photos(parsed_rules)
             collection_dicts.append(d)
@@ -8758,14 +8759,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchall()
         collections = []
         for row in collection_rows:
-            degraded = False
-            try:
-                parsed_rules = json.loads(row["rules"])
-            except (TypeError, ValueError):
-                degraded = True
-            else:
-                if not db.rules_resolvable(parsed_rules):
-                    degraded = True
+            _, degraded = _collection_rules_state(db, row["rules"])
             collections.append({
                 "id": row["id"],
                 "name": row["name"],

@@ -1021,6 +1021,7 @@ body { padding-bottom: 36px; }
 // with the checkbox while this is still true risks having that
 // assignment silently overwrite the interaction.
 window._pageInitPending = true;
+var _dashboardActionScopeError = '';
 function initPipelinePage() {
   fetch('/api/pipeline/page-init')
     .then(function(r) { return r.json(); })
@@ -1157,10 +1158,17 @@ function applyDashboardActionQueryParams() {
 
   var collectionId = qs.get('collection_id');
   var picker = document.getElementById('collectionPicker');
-  if (collectionId && picker && picker.querySelector('option[value="' + CSS.escape(collectionId) + '"]')) {
-    picker.value = collectionId;
-    selectSourceMode('collection');
-    onCollectionChange();
+  if (collectionId) {
+    var option = picker && picker.querySelector(
+      'option[value="' + CSS.escape(collectionId) + '"]');
+    if (!option || option.disabled) {
+      _dashboardActionScopeError =
+        'The Dashboard collection is unavailable. Return to Dashboard and choose another scope.';
+    } else {
+      picker.value = collectionId;
+      selectSourceMode('collection');
+      onCollectionChange();
+    }
   }
 
   var card = document.getElementById(stage === 'classify' ? 'card-classify' : 'card-previews');
@@ -2149,6 +2157,15 @@ function updateStartButton() {
     actionStatus.className = 'status-msg';
   }
 
+  if (_dashboardActionScopeError) {
+    btn.disabled = true;
+    if (actionStatus) {
+      actionStatus.textContent = _dashboardActionScopeError;
+      actionStatus.className = 'status-msg error';
+    }
+    return;
+  }
+
   if (_sourceMode === 'folders') {
     btn.disabled = selectedFolderIds().length === 0;
   } else if (_sourceMode === 'new_images') {
@@ -2332,6 +2349,10 @@ var _currentPipelineJobId = null;
 
 async function startPipeline() {
   if (_pipelineRunning) return;
+  if (_dashboardActionScopeError) {
+    updateStartButton();
+    return;
+  }
 
   // Belt-and-suspenders: updateStartButton() should already have disabled
   // this button when Classify is enabled and the plan is mid-refresh, but

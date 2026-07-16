@@ -2889,7 +2889,7 @@ async function bootstrapBrowse() {
     var initialCollectionId = parseInt(pageParams.get('collection_id'), 10);
     if (!isNaN(initialCollectionId)) {
       activeCollectionId = initialCollectionId;
-      dashboardCollectionScope = true;
+      dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
     }
     document.getElementById('dateFrom').value = pageParams.get('date_from') || '';
     document.getElementById('dateTo').value = pageParams.get('date_to') || '';
@@ -2918,6 +2918,11 @@ async function bootstrapBrowse() {
       document.getElementById('locationStatusFilter').value = initialLocationStatus;
     }
     var initParams = buildCurrentBrowseParams();
+    // Collection-only deep links keep their historical endpoint behavior,
+    // while Dashboard links opt into composable filters via dashboard_scope.
+    // The combined init endpoint still needs the collection id for first paint
+    // in either case.
+    if (activeCollectionId) initParams.set('collection_id', activeCollectionId);
     initParams.set('per_page', perPage);
     var data = await safeFetch('/api/browse/init?' + initParams.toString());
 

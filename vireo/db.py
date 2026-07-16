@@ -5554,6 +5554,27 @@ class Database:
         scope_sql, scope_params = self._dashboard_scope_clause(
             folder_id, collection_id, date_from, date_to,
         )
+        # Date and collection constraints belong on the LEFT JOIN so folders
+        # with zero matching photos remain visible as 0 / 0. Folder scope is
+        # different: it controls which folder rows are enumerated, so keep it
+        # as an outer WHERE condition on ``f.id``.
+        photo_scope_sql, photo_scope_params = self._dashboard_scope_clause(
+            None, collection_id, date_from, date_to,
+        )
+        folder_filter_sql = ""
+        folder_filter_params = []
+        if folder_id is not None:
+            linked = self.conn.execute(
+                "SELECT 1 FROM workspace_folders "
+                "WHERE workspace_id = ? AND folder_id = ?",
+                (ws, folder_id),
+            ).fetchone()
+            if not linked:
+                raise ValueError("folder not found in active workspace")
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            folder_filter_sql = f" AND f.id IN ({placeholders})"
+            folder_filter_params = subtree
         photo_rows = self.conn.execute(
             f"""SELECT
                 f.id AS folder_id,
@@ -5563,11 +5584,11 @@ class Database:
                 {self._coverage_select_fragment()}
             FROM folders f
             JOIN workspace_folders wf ON wf.folder_id = f.id
-            LEFT JOIN photos p ON p.folder_id = f.id
-            WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial'){scope_sql}
+            LEFT JOIN photos p ON p.folder_id = f.id{photo_scope_sql}
+            WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial'){folder_filter_sql}
             GROUP BY f.id
             ORDER BY f.path""",
-            (ws, *scope_params),
+            (*photo_scope_params, ws, *folder_filter_params),
         ).fetchall()
         det_rows = self.conn.execute(
             f"""SELECT p.folder_id AS folder_id,

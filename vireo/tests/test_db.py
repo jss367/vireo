@@ -2338,6 +2338,40 @@ def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
     assert by_path['/B']['phash'] == 0
 
 
+def test_folder_coverage_keeps_zero_match_folders_with_scopes(tmp_path):
+    """Photo filters keep in-scope folders visible while folder scope narrows rows."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    folder_a = db.add_folder("/A", name="A")
+    folder_b = db.add_folder("/B", name="B")
+    db.add_workspace_folder(ws_id, folder_a)
+    db.add_workspace_folder(ws_id, folder_b)
+    db.add_photo(
+        folder_id=folder_a, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-01-01T00:00:00",
+    )
+    db.add_photo(
+        folder_id=folder_b, filename="b.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-01-02T00:00:00",
+    )
+
+    no_matches = db.get_folder_coverage_stats(date_from="2024-02-01")
+    assert {row["path"]: row["total"] for row in no_matches} == {
+        "/A": 0,
+        "/B": 0,
+    }
+
+    folder_scoped = db.get_folder_coverage_stats(
+        folder_id=folder_a, date_from="2024-02-01",
+    )
+    assert [(row["path"], row["total"]) for row in folder_scoped] == [
+        ("/A", 0),
+    ]
+
+
 # --- Cluster 3: Prediction Management ---
 
 def test_get_group_predictions(tmp_path):

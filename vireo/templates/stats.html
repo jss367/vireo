@@ -44,6 +44,9 @@ body { padding-bottom: 36px; }
 .bar-row.dashboard-drill:hover { background:var(--bg-tertiary); }
 .bar-row.dashboard-drill:hover .bar-label { color:var(--accent); }
 .dashboard-drill { cursor:pointer; }
+.dashboard-drill:focus-visible, .dashboard-stat-action:focus-visible {
+  outline:2px solid var(--accent); outline-offset:2px;
+}
 .bar-value { width: 60px; color: var(--text-dim); font-variant-numeric: tabular-nums; flex-shrink: 0; }
 .species-bar .bar-fill { background: var(--accent); }
 .month-bar .bar-fill { background: var(--info); }
@@ -165,6 +168,10 @@ body { padding-bottom: 36px; }
 .stat-card {
   background: var(--bg-tertiary); border-radius: 6px; padding: 14px 16px; text-align: center;
 }
+.dashboard-stat-action {
+  display:block; width:100%; border:0; color:inherit; font:inherit;
+  text-decoration:none; cursor:pointer;
+}
 .stat-number {
   font-size: 24px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums;
 }
@@ -253,23 +260,23 @@ body { padding-bottom: 36px; }
   <!-- Overview Stats -->
   <div class="section">
     <div class="stats-grid">
-      <div class="stat-card" style="cursor:pointer;" onclick="openBrowse()">
+      <button class="stat-card dashboard-stat-action" type="button" onclick="openBrowse()">
         <div class="stat-number" id="photoCount">-</div>
         <div class="stat-label">Photos</div>
         <div id="offlinePhotoNote" style="display:none;font-size:11px;color:var(--warning);margin-top:4px;line-height:1.3;"></div>
-      </div>
-      <div class="stat-card" id="folderCard" style="cursor:pointer;" onclick="toggleFolderDetail()">
+      </button>
+      <button class="stat-card dashboard-stat-action" id="folderCard" type="button" aria-expanded="false" onclick="toggleFolderDetail()">
         <div class="stat-number" id="folderCount">-</div>
         <div class="stat-label">Folders &#9662;</div>
-      </div>
-      <div class="stat-card" style="cursor:pointer;" onclick="window.location.href='/keywords'">
+      </button>
+      <a class="stat-card dashboard-stat-action" href="/keywords">
         <div class="stat-number" id="keywordCount">-</div>
         <div class="stat-label">Keywords</div>
-      </div>
-      <div class="stat-card" id="pendingCard" style="cursor:pointer;" onclick="togglePendingDetail()">
+      </a>
+      <button class="stat-card dashboard-stat-action" id="pendingCard" type="button" aria-expanded="false" onclick="togglePendingDetail()">
         <div class="stat-number" id="pendingCount">-</div>
         <div class="stat-label">Pending Sync &#9662;</div>
-      </div>
+      </button>
     </div>
     <div id="folderDetail" style="display:none;margin-top:16px;border-top:1px solid var(--border-primary);padding-top:16px;"></div>
     <div id="pendingDetail" style="display:none;margin-top:16px;border-top:1px solid var(--border-primary);padding-top:16px;"></div>
@@ -394,7 +401,8 @@ function scopedUrl(path, extra) {
 }
 
 function openBrowse(extra) {
-  window.location.href = scopedUrl('/browse', extra);
+  var browseParams = Object.assign({dashboard_scope: '1'}, extra || {});
+  window.location.href = scopedUrl('/browse', browseParams);
 }
 
 function selectedFolderPath() {
@@ -450,16 +458,25 @@ function openProcess(stage) {
 }
 
 function drillAttrs(params, title) {
-  return ' class="bar-row dashboard-drill" data-dashboard-drill="' +
+  return ' class="bar-row dashboard-drill" role="link" tabindex="0" data-dashboard-drill="' +
     escapeAttr(JSON.stringify(params || {})) + '" title="' +
     escapeAttr(title || 'Open matching photos in Browse') + '"';
 }
 
-document.addEventListener('click', function(event) {
+function activateDashboardDrill(event) {
   var row = event.target.closest('[data-dashboard-drill]');
   if (!row) return;
   try { openBrowse(JSON.parse(row.getAttribute('data-dashboard-drill'))); }
   catch (_) { openBrowse(); }
+}
+
+document.addEventListener('click', activateDashboardDrill);
+document.addEventListener('keydown', function(event) {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  var row = event.target.closest('[data-dashboard-drill]');
+  if (!row) return;
+  event.preventDefault();
+  activateDashboardDrill(event);
 });
 
 function dashboardScopeIsActive() {
@@ -488,8 +505,7 @@ function onCollectionScopeChange() {
 
 function applyDashboardScope() {
   readDashboardScopeControls();
-  if (dashboardScope.date_from && dashboardScope.date_to &&
-      dashboardScope.date_from > dashboardScope.date_to) {
+  if (!dashboardDateRangeIsValid()) {
     showToast('The start date must be before the end date.', 'error');
     return;
   }
@@ -497,6 +513,11 @@ function applyDashboardScope() {
   window.history.replaceState({}, '', url);
   updateScopeSummary();
   reloadDashboard();
+}
+
+function dashboardDateRangeIsValid() {
+  return !(dashboardScope.date_from && dashboardScope.date_to &&
+    dashboardScope.date_from > dashboardScope.date_to);
 }
 
 function resetDashboardScope() {
@@ -518,8 +539,12 @@ function updateScopeSummary() {
     var collection = dashboardOptions.collections.find(function(c) { return c.id === id; });
     parts.push(collection ? 'Collection: ' + collection.name : 'Selected collection');
   }
-  if (dashboardScope.date_from || dashboardScope.date_to) {
-    parts.push((dashboardScope.date_from || 'Any date') + ' to ' + (dashboardScope.date_to || 'today'));
+  if (dashboardScope.date_from && dashboardScope.date_to) {
+    parts.push(dashboardScope.date_from + ' to ' + dashboardScope.date_to);
+  } else if (dashboardScope.date_from) {
+    parts.push('From ' + dashboardScope.date_from + ' onward');
+  } else if (dashboardScope.date_to) {
+    parts.push('Through ' + dashboardScope.date_to);
   }
   document.getElementById('scopeSummary').textContent = parts.length
     ? parts.join(' · ') : 'All photos in this workspace';
@@ -564,6 +589,16 @@ async function loadDashboardOptions() {
   document.getElementById('scopeDateFrom').value = query.get('date_from') || '';
   document.getElementById('scopeDateTo').value = query.get('date_to') || '';
   readDashboardScopeControls();
+  if (!dashboardDateRangeIsValid()) {
+    showToast('The start date must be before the end date.', 'error');
+    document.getElementById('scopeDateFrom').value = '';
+    document.getElementById('scopeDateTo').value = '';
+    readDashboardScopeControls();
+    query.delete('date_from');
+    query.delete('date_to');
+    var cleanQuery = query.toString();
+    window.history.replaceState({}, '', '/dashboard' + (cleanQuery ? '?' + cleanQuery : ''));
+  }
   updateScopeSummary();
 }
 
@@ -576,6 +611,8 @@ async function reloadDashboard() {
   pendingOpen = false;
   document.getElementById('folderDetail').style.display = 'none';
   document.getElementById('pendingDetail').style.display = 'none';
+  document.getElementById('folderCard').setAttribute('aria-expanded', 'false');
+  document.getElementById('pendingCard').setAttribute('aria-expanded', 'false');
   _coverageFolders = null;
   try {
     await Promise.all([loadStats(), loadCoverage()]);
@@ -1229,6 +1266,9 @@ function renderAttention(attention) {
   var previewDone = attention.preview_enabled === false
     ? 'Preview generation is disabled.' : 'Preview cache covers this scope.';
   var processBlocked = processScopeBlockedReason();
+  var syncBlocked = dashboardScopeIsActive()
+    ? 'Metadata sync runs workspace-wide. Reset the Dashboard scope to sync safely from this card.'
+    : '';
   var html = '';
   html += attentionCard('Classification', attention.unclassified || 0,
     'Photos without a current classification.', 'Open Process', "openProcess('classify')",
@@ -1240,7 +1280,7 @@ function renderAttention(attention) {
     previewDetail, 'Open Process', "openProcess('previews')", {done: previewDone, disabledReason: processBlocked});
   html += attentionCard('Metadata sync', attention.pending_sync || 0,
     'Pending metadata changes waiting to be written to XMP.', 'Sync workspace',
-    'startDashboardSync()', {done: 'XMP metadata is up to date.'});
+    'startDashboardSync()', {done: 'XMP metadata is up to date.', disabledReason: syncBlocked});
   html += attentionCard('Duplicate groups', attention.duplicate_groups || 0,
     'Possible duplicate groups still needing a decision.', 'Review duplicates',
     "window.location.href='/duplicates'", {done: 'No unresolved duplicate groups.'});
@@ -1261,12 +1301,15 @@ async function startDashboardSync() {
 var folderOpen = false;
 async function toggleFolderDetail() {
   var panel = document.getElementById('folderDetail');
+  var card = document.getElementById('folderCard');
   if (folderOpen) {
     panel.style.display = 'none';
     folderOpen = false;
+    card.setAttribute('aria-expanded', 'false');
     return;
   }
   panel.style.display = 'block';
+  card.setAttribute('aria-expanded', 'true');
   panel.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">Loading...</span>';
   folderOpen = true;
   try {
@@ -1313,12 +1356,15 @@ function toggleFolderCov(id, head) {
 var pendingOpen = false;
 async function togglePendingDetail() {
   var panel = document.getElementById('pendingDetail');
+  var card = document.getElementById('pendingCard');
   if (pendingOpen) {
     panel.style.display = 'none';
     pendingOpen = false;
+    card.setAttribute('aria-expanded', 'false');
     return;
   }
   panel.style.display = 'block';
+  card.setAttribute('aria-expanded', 'true');
   panel.innerHTML = '<span style="color:var(--text-ghost);font-size:13px;">Loading...</span>';
   pendingOpen = true;
   try {
