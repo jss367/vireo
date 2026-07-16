@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 
 from PIL import Image
 
@@ -47,6 +48,28 @@ SHARPEN_RADIUS_DEFAULT = 1.0
 # per-pixel tone pipeline. A recipe containing only these must not run the
 # tone pass at all (so a detail-only edit stays byte-exact outside detail).
 _DETAIL_KEYS = frozenset({"sharpen", "sharpen_radius", "noise_reduction"})
+
+# Local (mask-weighted) adjustments — see
+# docs/plans/2026-07-03-local-adjustments-design.md. Region values are deltas
+# on top of the global adjustments and share the global ranges; the v1 set
+# deliberately excludes whites/blacks/vibrance/white-balance.
+_LOCAL_REGION_NAMES = ("subject", "background")
+_LOCAL_ADJUSTMENT_KEYS = frozenset({
+    "exposure", "highlights", "shadows", "contrast", "saturation",
+    "sharpen", "noise_reduction",
+})
+# Region values are deltas layered on top of the global adjustments, so
+# sharpen and noise_reduction — whose globals are [0, 100] — need to accept
+# negative deltas here (e.g. background sharpen -70 against global sharpen 70
+# zeroes sharpen in the background). ``_combine_detail`` clamps the sum back
+# into the global range before rendering.
+_LOCAL_ADJUSTMENT_RANGES = {
+    **_ADJUSTMENT_RANGES,
+    "sharpen": (-100.0, 100.0),
+    "noise_reduction": (-100.0, 100.0),
+}
+LOCAL_FEATHER_RANGE = (0.0, 200.0)
+_LOCAL_MASK_REF_RE = re.compile(r"^[0-9a-f]{12}$")
 
 _WHITE_BALANCE_RANGES = {
     "temperature": (-100.0, 100.0),
@@ -223,7 +246,120 @@ def normalize_recipe(recipe):
     if normalized_adjustments:
         out["adjustments"] = normalized_adjustments
 
+    local = recipe.get("local")
+    if local not in (None, "", {}):
+        normalized_local = _normalize_local(local)
+        if normalized_local is not None:
+            out["local"] = normalized_local
+
     return out if len(out) > 1 else None
+
+
+def _normalize_local(local):
+    """Validate and canonicalize the local (mask-weighted) section.
+
+    Returns None when every region normalizes away — the shared mask never
+    persists without at least one active region referencing it.
+    """
+    if not isinstance(local, dict):
+        raise RecipeError("local must be an object")
+
+    regions_in = local.get("regions")
+    if regions_in in (None, ""):
+        regions_in = []
+    if not isinstance(regions_in, list):
+        raise RecipeError("local.regions must be an array")
+
+    normalized_regions = []
+    seen = set()
+    for entry in regions_in:
+        if not isinstance(entry, dict):
+            raise RecipeError("local.regions entries must be objects")
+        region = entry.get("region")
+        if region not in _LOCAL_REGION_NAMES:
+            raise RecipeError("local region must be 'subject' or 'background'")
+        if region in seen:
+            raise RecipeError(f"duplicate local region '{region}'")
+        seen.add(region)
+
+        adjustments_in = entry.get("adjustments")
+        if adjustments_in is None:
+            adjustments_in = {}
+        if not isinstance(adjustments_in, dict):
+            raise RecipeError("local adjustments must be an object")
+        normalized_adj = {}
+        for name, raw in adjustments_in.items():
+            if raw in (None, ""):
+                continue
+            if name == "sharpen_radius":
+                # A region radius is an absolute override of the effective
+                # branch radius (which may come from global sharpen), so it
+                # is kept even without a region sharpen delta and its 1.0
+                # value is meaningful — no default-drop like the global key.
+                if isinstance(raw, bool) or not isinstance(raw, int | float):
+                    raise RecipeError(
+                        "sharpen_radius adjustment must be numeric"
+                    )
+                radius = float(raw)
+                lo, hi = SHARPEN_RADIUS_RANGE
+                if not math.isfinite(radius) or radius < lo or radius > hi:
+                    raise RecipeError(
+                        f"sharpen_radius adjustment must be between "
+                        f"{lo:g} and {hi:g}"
+                    )
+                normalized_adj[name] = round(radius, 6)
+                continue
+            if name not in _LOCAL_ADJUSTMENT_KEYS:
+                raise RecipeError(
+                    f"{name} adjustment is not supported in local regions"
+                )
+            if isinstance(raw, bool) or not isinstance(raw, int | float):
+                raise RecipeError(f"{name} adjustment must be numeric")
+            val = float(raw)
+            lo, hi = _LOCAL_ADJUSTMENT_RANGES[name]
+            if not math.isfinite(val) or val < lo or val > hi:
+                raise RecipeError(
+                    f"{name} adjustment must be between {lo:g} and {hi:g}"
+                )
+            if abs(val) > 1e-9:
+                normalized_adj[name] = round(val, 6)
+        if normalized_adj:
+            normalized_regions.append(
+                {"region": region, "adjustments": normalized_adj}
+            )
+
+    if not normalized_regions:
+        return None
+
+    mask_in = local.get("mask")
+    if not isinstance(mask_in, dict):
+        raise RecipeError("local.mask is required when regions are present")
+    ref = mask_in.get("ref")
+    if not isinstance(ref, str) or not _LOCAL_MASK_REF_RE.match(ref):
+        raise RecipeError(
+            "local.mask.ref must be a 12-character lowercase hex id"
+        )
+    digest = mask_in.get("source_digest")
+    if not isinstance(digest, str) or not digest.strip() or len(digest) > 128:
+        raise RecipeError("local.mask.source_digest is required")
+    normalized_mask = {"ref": ref, "source_digest": digest}
+
+    feather = mask_in.get("feather", 0)
+    if feather in (None, ""):
+        feather = 0
+    if isinstance(feather, bool) or not isinstance(feather, int | float):
+        raise RecipeError("local.mask.feather must be numeric")
+    feather = float(feather)
+    lo, hi = LOCAL_FEATHER_RANGE
+    if not math.isfinite(feather) or feather < lo or feather > hi:
+        raise RecipeError(
+            f"local.mask.feather must be between {lo:g} and {hi:g}"
+        )
+    if abs(feather) > 1e-9:
+        normalized_mask["feather"] = round(feather, 4)
+
+    normalized_regions.sort(key=lambda entry: entry["region"])
+    return {"mask": normalized_mask, "regions": normalized_regions}
 
 
 def recipe_to_json(recipe):
@@ -239,13 +375,20 @@ def recipe_to_json(recipe):
 _ADJUST_TILE_PIXELS = 4_000_000
 
 
-def _apply_adjustments(img, adjustments):
+def _apply_adjustments(
+    img, adjustments, local_weight=None, local_subject=None,
+    local_background=None,
+):
     """Apply tonal adjustments to a PIL image via the linear tone pipeline.
 
     Bridges PIL <-> numpy: promotes the image to RGB(A), runs the shared
     per-pixel pipeline in :mod:`tone` (linear-light exposure/white balance with
     a highlight shoulder, then display-space tonal/color controls), and merges
-    any alpha channel back unchanged.
+    any alpha channel back unchanged. ``local_weight`` (a full-frame float
+    subject-weight array) plus per-region delta dicts route through the
+    weighted tone branch; the weight is sliced along the same row tiles as
+    the image, which keeps tiling numerically identical to a whole-frame
+    pass (the pipeline stays strictly per-pixel).
     """
     import numpy as np
 
@@ -294,6 +437,11 @@ def _apply_adjustments(img, adjustments):
             contrast=contrast,
             vibrance=vibrance,
             saturation=saturation,
+            local_weight=(
+                local_weight[top:bottom] if local_weight is not None else None
+            ),
+            local_subject=local_subject,
+            local_background=local_background,
         )
         out8[top:bottom, :, :3] = np.clip(adj * 255.0 + 0.5, 0, 255).astype(
             np.uint8
@@ -308,13 +456,13 @@ def _apply_adjustments(img, adjustments):
     return Image.fromarray(out8, "RGB")
 
 
-def apply_recipe(img, recipe):
-    """Apply a normalized edit recipe to a PIL image and return a new image."""
-    normalized = normalize_recipe(recipe)
-    if normalized is None:
-        return img
+def _apply_geometry(image, normalized):
+    """Apply the recipe's geometry ops (rotate/flip/straighten/crop).
 
-    result = img.copy()
+    Used for both the photo and the local-adjustment mask so their pixels
+    stay aligned through every transform.
+    """
+    result = image
 
     rotation = normalized.get("rotation", 0)
     if rotation:
@@ -347,13 +495,138 @@ def apply_recipe(img, recipe):
         bottom = max(top + 1, min(ih, bottom))
         result = result.crop((left, top, right, bottom))
 
+    return result
+
+
+_LOCAL_TONE_KEYS = frozenset(
+    {"exposure", "highlights", "shadows", "contrast", "saturation"}
+)
+
+
+def _local_region_deltas(local, keys):
+    """Split a normalized local section into (subject, background) dicts
+    restricted to ``keys``."""
+    subject = {}
+    background = {}
+    for entry in (local or {}).get("regions") or []:
+        target = subject if entry["region"] == "subject" else background
+        for name, value in entry["adjustments"].items():
+            if name in keys:
+                target[name] = value
+    return subject, background
+
+
+def _fit_mask_to_source(mask, size):
+    """Uniform-scale a snapshot mask onto the loaded source, or None.
+
+    None means the mask cannot be trusted to line up (aspect disagreement
+    beyond tolerance — e.g. an embedded-preview-crop RAW) and the local pass
+    must be disabled rather than misaligned.
+    """
+    try:
+        from .local_masks import ASPECT_TOLERANCE
+    except ImportError:
+        from local_masks import ASPECT_TOLERANCE
+
+    mask_w, mask_h = mask.size
+    target_w, target_h = size
+    if min(mask_w, mask_h, target_w, target_h) <= 0:
+        return None
+    target_ar = target_w / target_h
+    if abs(mask_w / mask_h - target_ar) / target_ar > ASPECT_TOLERANCE:
+        return None
+    if mask.size != size:
+        mask = mask.resize(size, Image.Resampling.BILINEAR)
+    return mask
+
+
+def _feathered_weight(mask_img, sigma):
+    """Mask image -> [0,1] float weight map, Gaussian-feathered by sigma."""
+    import numpy as np
+
+    arr = np.asarray(mask_img, dtype=np.float32) / 255.0
+    if sigma > 0.3:
+        try:
+            from .detail import _gaussian_blur
+        except ImportError:
+            from detail import _gaussian_blur
+        arr = _gaussian_blur(arr, sigma)
+    return np.clip(arr, 0.0, 1.0)
+
+
+def _apply_recipe_impl(
+    img, normalized, local_mask, native_size, detail_scale=None,
+):
+    """Geometry + weighted tone. Returns (image, geometry-transformed mask).
+
+    The returned mask is None whenever the local pass is disabled (no local
+    section, no usable mask) — callers must then skip local detail too, so a
+    degraded render fails toward "no local edits", never toward applying a
+    region edit to the whole frame.
+
+    ``detail_scale`` overrides the scale used to convert ``local.mask.feather``
+    (native pixels) into a blur sigma for the tone pass. Callers that also
+    override the scale for the detail pass (e.g. the edit-preview endpoint,
+    which strips crop from the recipe but wants the saved-render scale) must
+    pass the same override here — otherwise the tone falloff uses the scale
+    computed from the crop-stripped recipe while detail uses the saved-render
+    scale, and preview mask geometry disagrees with the saved output.
+    """
+    local = normalized.get("local")
+    fitted = None
+    if local and local_mask is not None:
+        fitted = _fit_mask_to_source(local_mask, img.size)
+        if fitted is None:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Local-adjustment mask does not fit the render source "
+                "(size %s vs mask %s); local pass disabled for this render",
+                img.size, local_mask.size,
+            )
+
+    result = _apply_geometry(img.copy(), normalized)
+    mask_geo = _apply_geometry(fitted, normalized) if fitted is not None else None
+
     adjustments = normalized.get("adjustments") or {}
     tone_adjustments = {
         k: v for k, v in adjustments.items() if k not in _DETAIL_KEYS
     }
-    if tone_adjustments:
+    subject_tone, background_tone = (
+        _local_region_deltas(local, _LOCAL_TONE_KEYS)
+        if mask_geo is not None else ({}, {})
+    )
+    if subject_tone or background_tone:
+        scale = (
+            detail_scale
+            if detail_scale is not None
+            else detail_render_scale(result.size, native_size, normalized)
+        )
+        feather = (local["mask"].get("feather") or 0.0) * scale
+        weight = _feathered_weight(mask_geo, feather)
+        result = _apply_adjustments(
+            result, tone_adjustments,
+            local_weight=weight,
+            local_subject=subject_tone,
+            local_background=background_tone,
+        )
+    elif tone_adjustments:
         result = _apply_adjustments(result, tone_adjustments)
 
+    return result, mask_geo
+
+
+def apply_recipe(img, recipe, local_mask=None, native_size=None):
+    """Apply a normalized edit recipe to a PIL image and return a new image.
+
+    ``local_mask`` is the recipe's edit-mask snapshot (PIL 'L', source
+    working space — see local_masks.load_snapshot); without it any local
+    regions in the recipe are skipped. Note the detail pass (global and
+    local) runs in :func:`apply_recipe_to_loaded_image`, not here.
+    """
+    normalized = normalize_recipe(recipe)
+    if normalized is None:
+        return img
+    result, _ = _apply_recipe_impl(img, normalized, local_mask, native_size)
     return result
 
 
@@ -389,8 +662,32 @@ def detail_render_scale(rendered_size, native_size, recipe):
     return max(rendered_size) / native_long
 
 
+def _combine_detail(adjustments, region):
+    """Effective detail params for one region: global + delta, clamped.
+
+    ``sharpen_radius`` is an absolute override (a kernel size, not a
+    strength), falling back to the global radius.
+    """
+    def clamped(name):
+        lo, hi = _ADJUSTMENT_RANGES[name]
+        total = float(adjustments.get(name, 0.0)) + float(region.get(name, 0.0))
+        return min(hi, max(lo, total))
+
+    return {
+        "sharpen": clamped("sharpen"),
+        "sharpen_radius": float(
+            region.get(
+                "sharpen_radius",
+                adjustments.get("sharpen_radius", SHARPEN_RADIUS_DEFAULT),
+            )
+        ),
+        "noise_reduction": clamped("noise_reduction"),
+    }
+
+
 def apply_recipe_to_loaded_image(
     img, recipe, max_size=None, native_size=None, detail_scale=None,
+    local_mask=None,
 ):
     """Apply edits, constrain the long edge, then run the detail pass.
 
@@ -398,7 +695,10 @@ def apply_recipe_to_loaded_image(
     pixels, so they run last — at output resolution, with kernels scaled by
     ``detail_render_scale`` — approximating the full-resolution render
     downscaled. Callers that know the photo's native dimensions pass them via
-    ``native_size`` (see render_source.recipe_source_dimensions).
+    ``native_size`` (see render_source.recipe_source_dimensions); callers
+    rendering a recipe with local regions pass the loaded snapshot via
+    ``local_mask`` (see local_masks.load_snapshot) — without it any local
+    regions are skipped entirely.
 
     ``detail_scale`` overrides the scale computed from this call's recipe.
     Use it when rendering a modified recipe (e.g. the edit-preview endpoint
@@ -406,13 +706,71 @@ def apply_recipe_to_loaded_image(
     what the unmodified recipe's saved render would produce — otherwise a
     tighter crop scales sharpen/NR up in the saved output but not in the
     preview, and the two disagree for cropped detail edits.
+
+    Local detail runs as a two-branch blend: the detail pass executes once
+    per distinct (global + region delta) parameter set on the tone output,
+    and the outputs blend by the feathered weight map. A single pass can't
+    represent two regions (NR mutates the image before sharpening reads
+    it), and composing each branch with the global baseline guarantees
+    whole-photo sharpen/NR is never dropped when a local delta is added.
     """
     normalized = normalize_recipe(recipe)
-    result = apply_recipe(img, normalized)
+    if normalized is None:
+        result, mask_geo = img, None
+    else:
+        result, mask_geo = _apply_recipe_impl(
+            img, normalized, local_mask, native_size,
+            detail_scale=detail_scale,
+        )
     if max_size and max_size > 0 and max(result.size) > max_size:
         result.thumbnail((max_size, max_size), resample=Image.Resampling.LANCZOS)
 
     adjustments = (normalized or {}).get("adjustments") or {}
+    local = (normalized or {}).get("local")
+    scale = (
+        detail_scale
+        if detail_scale is not None
+        else detail_render_scale(result.size, native_size, normalized)
+    )
+
+    subject_detail, background_detail = (
+        _local_region_deltas(local, _DETAIL_KEYS)
+        if (local and mask_geo is not None) else ({}, {})
+    )
+    if subject_detail or background_detail:
+        import numpy as np
+
+        try:
+            from .detail import apply_detail
+        except ImportError:
+            from detail import apply_detail
+
+        subject_params = _combine_detail(adjustments, subject_detail)
+        background_params = _combine_detail(adjustments, background_detail)
+        if subject_params == background_params:
+            if subject_params["sharpen"] or subject_params["noise_reduction"]:
+                result = apply_detail(result, scale=scale, **subject_params)
+            return result
+        subject_out = apply_detail(result, scale=scale, **subject_params)
+        background_out = apply_detail(result, scale=scale, **background_params)
+        feather = (local["mask"].get("feather") or 0.0) * scale
+        weight = _feathered_weight(
+            mask_geo.resize(subject_out.size, Image.Resampling.BILINEAR),
+            feather,
+        )[..., None]
+        subject_arr = np.asarray(subject_out).astype(np.float32)
+        background_arr = np.asarray(background_out).astype(np.float32)
+        blended = subject_arr.copy()
+        blended[..., :3] = (
+            subject_arr[..., :3] * weight
+            + background_arr[..., :3] * (1.0 - weight)
+        )
+        out8 = np.clip(blended + 0.5, 0, 255).astype(np.uint8)
+        if out8.shape[-1] == 4:
+            # Alpha passes through unchanged (identical in both branches).
+            out8[..., 3] = np.asarray(subject_out)[..., 3]
+        return Image.fromarray(out8, subject_out.mode)
+
     sharpen = adjustments.get("sharpen", 0.0)
     noise_reduction = adjustments.get("noise_reduction", 0.0)
     if sharpen or noise_reduction:
@@ -421,11 +779,6 @@ def apply_recipe_to_loaded_image(
         except ImportError:
             from detail import apply_detail
 
-        scale = (
-            detail_scale
-            if detail_scale is not None
-            else detail_render_scale(result.size, native_size, normalized)
-        )
         result = apply_detail(
             result,
             sharpen=sharpen,
@@ -436,6 +789,42 @@ def apply_recipe_to_loaded_image(
             scale=scale,
         )
     return result
+
+
+def local_weight_map(
+    local_mask, source_size, recipe, native_size=None, detail_scale=None,
+):
+    """The local-adjustment weight map exactly as the renderer computes it.
+
+    For overlay/preview consumers: fit the snapshot to the render source,
+    ride the recipe's geometry, feather at this resolution. Returns a float
+    [0,1] array, or None when the recipe has no local section or the mask
+    cannot be trusted to line up (same disable conditions as rendering).
+
+    ``detail_scale`` overrides the scale used to convert the recipe's
+    feather amount into pixels. Use it when the caller has already
+    stripped crop from ``recipe`` to align with an uncropped preview
+    (the edit-mask-preview endpoint does this) so the feather still
+    matches the halo the saved cropped render will actually produce —
+    otherwise the overlay recomputes the scale from the crop-stripped
+    recipe and disagrees with what /edit-preview passes to
+    :func:`apply_recipe_to_loaded_image`.
+    """
+    normalized = normalize_recipe(recipe)
+    local = (normalized or {}).get("local")
+    if not local or local_mask is None:
+        return None
+    fitted = _fit_mask_to_source(local_mask, source_size)
+    if fitted is None:
+        return None
+    mask_geo = _apply_geometry(fitted, normalized)
+    scale = (
+        detail_scale
+        if detail_scale is not None
+        else detail_render_scale(mask_geo.size, native_size, normalized)
+    )
+    feather = (local["mask"].get("feather") or 0.0) * scale
+    return _feathered_weight(mask_geo, feather)
 
 
 def copy_recipe(recipe):

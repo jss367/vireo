@@ -125,15 +125,27 @@ def scaled_recipe_source_dimensions(photo, max_size=None, exif_data=_UNSET):
     return width, height
 
 
-def rendered_recipe_long_edge(width, height, recipe):
-    """Return the rendered long edge after right-angle rotation and crop."""
+def rendered_recipe_dimensions(width, height, recipe):
+    """Return the rendered ``(width, height)`` after right-angle rotation and crop.
+
+    Kept in floats to match the multiplicative crop shape callers use, and to
+    let :func:`working_copy_satisfies_recipe_render` compare each axis
+    separately — a long-edge-only compare accepts a truncated short edge
+    (e.g. 6000x3376 for a 6000x4000 source) which drops content.
+    """
     rotation = (recipe or {}).get("rotation", 0)
     if rotation in (90, 270):
         width, height = height, width
     crop = (recipe or {}).get("crop") if recipe else None
     if crop:
-        return max(float(crop["w"]) * width, float(crop["h"]) * height)
-    return max(width, height)
+        return float(crop["w"]) * width, float(crop["h"]) * height
+    return float(width), float(height)
+
+
+def rendered_recipe_long_edge(width, height, recipe):
+    """Return the rendered long edge after right-angle rotation and crop."""
+    w, h = rendered_recipe_dimensions(width, height, recipe)
+    return max(w, h)
 
 
 def image_size_after_exif_orientation(img):
@@ -180,6 +192,43 @@ def image_is_smaller_than_expected(img, expected_w, expected_h, *, abs_slack=1, 
     )
 
 
+def thumbnail_source_dimensions_are_acceptable(
+    width, height, expected_w, expected_h, *,
+    max_shortfall_px=32, max_shortfall_ratio=0.01,
+    max_aspect_ratio_delta=0.005,
+):
+    """Return whether a near-full image is safe for a thumbnail render.
+
+    Some RAW formats report the nominal sensor bounds while their embedded
+    JPEG contains the slightly smaller active image area. That difference is
+    harmless at thumbnail scale, but a relative tolerance alone would also
+    accept large missing borders on high-resolution files. Require all three:
+    a small relative shortfall, a small absolute shortfall, and a stable
+    aspect ratio. Full-resolution preview/export paths intentionally keep
+    using :func:`is_undersized` instead of this thumbnail-only policy.
+
+    When the expected dimensions are unknown (<= 0), returns True so callers
+    match :func:`is_undersized`'s pass-through semantic — a photo row missing
+    ``width``/``height`` should not cause an otherwise-decoded thumbnail to
+    be rejected. A broken image (width/height <= 0) is still unacceptable.
+    """
+    if width <= 0 or height <= 0:
+        return False
+    if expected_w <= 0 or expected_h <= 0:
+        return True
+    if width >= expected_w and height >= expected_h:
+        return True
+
+    allowed_w = min(max_shortfall_px, expected_w * max_shortfall_ratio)
+    allowed_h = min(max_shortfall_px, expected_h * max_shortfall_ratio)
+    if width < expected_w - allowed_w or height < expected_h - allowed_h:
+        return False
+
+    expected_aspect = expected_w / expected_h
+    actual_aspect = width / height
+    return abs(actual_aspect / expected_aspect - 1.0) <= max_aspect_ratio_delta
+
+
 def companion_image_can_replace_raw_result(
     companion_img, current_img, expected_w, expected_h,
 ):
@@ -202,14 +251,23 @@ def companion_image_can_replace_raw_result(
     )
 
 
-def working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
+def working_copy_satisfies_recipe_render(
+    photo, recipe, max_size, vireo_dir, *, rel_slack=0.0,
+    thumbnail_tolerance=False,
+):
     """Return True when the working copy is large enough for this recipe render.
 
-    Uncropped renders are always satisfiable by the working copy; cropped ones
-    must keep enough rendered long edge after the crop.
+    The working copy qualifies when its rendered dimensions (after the recipe's
+    rotation/crop) cover the rendered original scaled to ``max_size`` on both
+    axes — for a typical capped request that's just ``max_size`` on the long
+    edge with the short edge scaled proportionally, but a native-resolution
+    request (the editor's 100% zoom) needs the full original.
+
+    Both axes are compared. A long-edge-only check accepts a working copy whose
+    short edge is truncated (e.g. a failed RAW decode's 6000x3376 embedded
+    preview for a 6000x4000 source) and silently drops that lost short-edge
+    content into the cached edit render.
     """
-    if not recipe or not recipe.get("crop"):
-        return True
     wc_rel = photo_value(photo, "working_copy_path")
     if not wc_rel:
         return False
@@ -225,12 +283,58 @@ def working_copy_satisfies_recipe_render(photo, recipe, max_size, vireo_dir):
     original_w, original_h = recipe_source_dimensions(photo)
     if original_w <= 0 or original_h <= 0:
         return False
-    original_render_long = rendered_recipe_long_edge(original_w, original_h, recipe)
-    required_long = (
-        min(max_size, original_render_long) if max_size else original_render_long
+    orig_render_w, orig_render_h = rendered_recipe_dimensions(
+        original_w, original_h, recipe,
     )
-    wc_render_long = rendered_recipe_long_edge(wc_w, wc_h, recipe)
-    return wc_render_long >= required_long
+    orig_render_long = max(orig_render_w, orig_render_h)
+    if max_size and orig_render_long > max_size:
+        scale = max_size / orig_render_long
+        required_w = orig_render_w * scale
+        required_h = orig_render_h * scale
+    else:
+        required_w = orig_render_w
+        required_h = orig_render_h
+    wc_render_w, wc_render_h = rendered_recipe_dimensions(wc_w, wc_h, recipe)
+    # ``load_image(..., max_size=max_size)`` caps the long edge at ``max_size``
+    # and scales the short edge proportionally. Compare what it would actually
+    # produce from this working copy, not the raw WC render dims: a 6000x3376
+    # embedded preview for a 6000x4000 source clears an unscaled compare
+    # against 1024x683 (both axes exceed it), but a max_size=1024 render of
+    # that WC is 1024x576 — its short edge falls short and the truncated
+    # preview would otherwise get cached through the failed-RAW fallback.
+    if max_size:
+        wc_render_long = max(wc_render_w, wc_render_h)
+        if wc_render_long > max_size:
+            wc_scale = max_size / wc_render_long
+            wc_render_w = wc_render_w * wc_scale
+            wc_render_h = wc_render_h * wc_scale
+    if thumbnail_tolerance:
+        return thumbnail_source_dimensions_are_acceptable(
+            wc_render_w, wc_render_h, required_w, required_h,
+        )
+    return not is_undersized(
+        wc_render_w, wc_render_h, required_w, required_h,
+        abs_slack=0, rel_slack=rel_slack,
+    )
+
+
+def working_copy_path_if_satisfies(
+    photo, recipe, max_size, vireo_dir, *, rel_slack=0.0,
+    thumbnail_tolerance=False,
+):
+    """Return the working-copy path when it can satisfy this recipe render."""
+    wc_rel = photo_value(photo, "working_copy_path")
+    if not wc_rel or not vireo_dir:
+        return None
+    wc_path = wc_rel if os.path.isabs(wc_rel) else os.path.join(vireo_dir, wc_rel)
+    if not os.path.exists(wc_path):
+        return None
+    if not working_copy_satisfies_recipe_render(
+        photo, recipe, max_size, vireo_dir, rel_slack=rel_slack,
+        thumbnail_tolerance=thumbnail_tolerance,
+    ):
+        return None
+    return wc_path
 
 
 def path_satisfies_recipe_render(path, photo, recipe, max_size):
@@ -292,13 +396,10 @@ def recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
         os.path.splitext(photo_value(photo, "filename"))[1].lower() in RAW_EXTENSIONS
     )
 
-    if not primary_is_raw:
-        if not recipe.get("crop") and _is_working_copy_path(canonical):
-            return canonical, True
-        if recipe.get("crop") and working_copy_satisfies_recipe_render(
-            photo, recipe, max_size, vireo_dir,
-        ):
-            return canonical, _is_working_copy_path(canonical)
+    if not primary_is_raw and working_copy_satisfies_recipe_render(
+        photo, recipe, max_size, vireo_dir,
+    ):
+        return canonical, _is_working_copy_path(canonical)
 
     folder_path = folders.get(photo_value(photo, "folder_id"))
     wc_rel = photo_value(photo, "working_copy_path")
@@ -309,18 +410,19 @@ def recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
                 return wc_path, True
         return "", False
 
-    companion_path = photo_value(photo, "companion_path")
     original_abs = os.path.join(folder_path, photo_value(photo, "filename"))
+    source_failure_current = primary_is_raw and has_current_working_copy_failure(
+        photo,
+        vireo_dir,
+        trust_existing_working_copy=False,
+        live_source_path=original_abs,
+        folder_path=folder_path,
+    )
+    companion_path = photo_value(photo, "companion_path")
     allow_companion = (
         not primary_is_raw
         or not os.path.exists(original_abs)
-        or has_current_working_copy_failure(
-            photo,
-            vireo_dir,
-            trust_existing_working_copy=False,
-            live_source_path=original_abs,
-            folder_path=folder_path,
-        )
+        or source_failure_current
     )
     if companion_path and allow_companion:
         companion = os.path.join(folder_path, companion_path)
@@ -328,6 +430,14 @@ def recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
             companion, photo, recipe, max_size,
         ):
             return companion, True
+    if source_failure_current and working_copy_satisfies_recipe_render(
+        photo, recipe, max_size, vireo_dir, rel_slack=0.01,
+    ):
+        wc_path = working_copy_path_if_satisfies(
+            photo, recipe, max_size, vireo_dir, rel_slack=0.01,
+        )
+        if wc_path:
+            return wc_path, True
     if not os.path.exists(original_abs) and wc_rel:
         wc_path = os.path.join(vireo_dir, wc_rel)
         if os.path.exists(wc_path):

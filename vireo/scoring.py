@@ -310,6 +310,31 @@ def hard_reject_reasons(photo, q_score, config=None):
     return reasons
 
 
+def _normalize_scoring_config(config):
+    """Merge nested pipeline settings up so callers can pass either shape.
+
+    Two shapes reach scoring today:
+
+    * A flat pipeline config, e.g. ``effective_cfg["pipeline"]`` — the
+      shape ``pipeline_job``'s regroup stage and the test suite pass.
+    * A full effective config with pipeline keys nested under
+      ``config["pipeline"]`` — the shape ``_build_best_batch_response`` and
+      the browse-selection batch review path pass.
+
+    Without this normalization, the second shape silently reads pipeline
+    keys as absent and falls back to DEFAULTS/False. The most visible
+    breakage after defaulting ``eye_detect_enabled`` to False is that
+    scoring ignores ``eye_tenengrad`` on those paths even in workspaces
+    where the user has enabled eye detection in Settings.
+    """
+    if not config:
+        return {}
+    nested = config.get("pipeline")
+    if isinstance(nested, dict):
+        return {**config, **nested}
+    return config
+
+
 def score_encounter(encounter, config=None):
     """Score all photos in an encounter and apply hard reject rules.
 
@@ -326,7 +351,7 @@ def score_encounter(encounter, config=None):
     Returns:
         encounter dict (modified in place)
     """
-    cfg = {**DEFAULTS, **(config or {})}
+    cfg = {**DEFAULTS, **_normalize_scoring_config(config)}
     photos = encounter["photos"]
 
     # Compute per-encounter normalization data
@@ -341,7 +366,7 @@ def score_encounter(encounter, config=None):
     # peers' eye_tenengrad. Skipped entirely when eye detection is
     # disabled so stale eye_tenengrad values from prior runs don't
     # influence scoring after the user turns the feature off.
-    eye_enabled = cfg.get("eye_detect_enabled", True)
+    eye_enabled = cfg.get("eye_detect_enabled", False)
     enc_eye_tenegrads = [
         p["eye_tenengrad"] for p in photos
         if p.get("eye_tenengrad") is not None

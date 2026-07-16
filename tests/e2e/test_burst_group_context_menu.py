@@ -280,6 +280,52 @@ def test_burst_multi_selected_cards_drag_together(live_server, page):
     assert abs(offsets["a"]["ty"]) > 0
 
 
+def test_burst_multi_selected_reject_shortcut_applies_to_selection(live_server, page):
+    """X in the review burst modal rejects every selected card."""
+    n = _seed_burst_group(live_server["db"])
+    if n < 2:
+        pytest.skip("need at least 2 burst cards")
+
+    url = live_server["url"]
+    page.goto(f"{url}/review")
+    page.wait_for_load_state("networkidle")
+    _open_burst_modal(page)
+
+    cards = page.locator("#grmOverlay .grm-card[data-photo-id]")
+    first_pid = cards.nth(0).get_attribute("data-photo-id")
+    second_pid = cards.nth(1).get_attribute("data-photo-id")
+    assert first_pid and second_pid
+
+    page.evaluate(
+        """() => {
+          grmState.picks.clear();
+          grmState.rejects.clear();
+          grmState.selected = null;
+          grmState.selectedIds.clear();
+          grmState.selectionAnchor = null;
+          renderGroupModal();
+        }"""
+    )
+
+    page.locator(f'#grmOverlay .grm-card[data-photo-id="{first_pid}"]').click()
+    page.locator(f'#grmOverlay .grm-card[data-photo-id="{second_pid}"]').click(modifiers=["Meta"])
+    selected = page.evaluate("Array.from(grmState.selectedIds).map(String).sort()")
+    assert selected == sorted([first_pid, second_pid])
+
+    page.keyboard.press("x")
+
+    state = page.evaluate(
+        """() => ({
+          rejects: Array.from(grmState.rejects).map(String).sort(),
+          picks: Array.from(grmState.picks).map(String).sort(),
+          selected: Array.from(grmState.selectedIds).map(String).sort(),
+        })"""
+    )
+    assert state["rejects"] == sorted([first_pid, second_pid])
+    assert not set(state["picks"]).intersection({first_pid, second_pid})
+    assert state["selected"] == sorted([first_pid, second_pid])
+
+
 def test_burst_loupe_drag_offsets_selected_cards_only(live_server, page):
     """Dragging the right preview should nudge only the selected burst cards."""
     n = _seed_burst_group(live_server["db"])

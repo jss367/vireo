@@ -6,6 +6,7 @@ for the SQLite writer lock), a single scan job now iterates roots
 serially so there is no contention in the first place.
 """
 import os
+import threading
 import time
 
 import pytest
@@ -128,6 +129,60 @@ def test_scan_continues_after_one_root_fails(app_and_db, tmp_path, monkeypatch):
     )
     # And errors carry the failure context.
     assert any("bad" in e or "simulated failure" in e for e in data["errors"]), data
+
+
+def test_scan_job_cancel_is_forwarded_to_scanner(app_and_db, tmp_path, monkeypatch):
+    """Cancelling a standalone scan job must interrupt scanner.scan itself."""
+    app, _ = app_and_db
+    client = app.test_client()
+
+    root_a = str(tmp_path / "a")
+    root_b = str(tmp_path / "b")
+    _make_photo(root_a, "a.jpg")
+    _make_photo(root_b, "b.jpg")
+
+    scan_started = threading.Event()
+    scanned_roots = []
+    from scanner import ScanCancelled
+
+    def cancellable_scan(root, db, *args, cancel_check=None, **kwargs):
+        scanned_roots.append(root)
+        assert callable(cancel_check), "scan job did not pass cancel_check"
+        scan_started.set()
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if cancel_check():
+                raise ScanCancelled("scan cancelled")
+            time.sleep(0.02)
+        raise AssertionError("scanner.scan never observed cancellation")
+
+    monkeypatch.setattr("scanner.scan", cancellable_scan)
+
+    generate_calls = {"n": 0}
+
+    def tracking_generate_all(*args, **kwargs):
+        generate_calls["n"] += 1
+        return {"generated": 0, "skipped": 0, "errors": []}
+
+    monkeypatch.setattr("thumbnails.generate_all", tracking_generate_all)
+
+    resp = client.post("/api/jobs/scan", json={"roots": [root_a, root_b]})
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    assert scan_started.wait(timeout=2.0), "scan job did not start"
+
+    cancel_resp = client.post(f"/api/jobs/{job_id}/cancel")
+    assert cancel_resp.status_code == 200, cancel_resp.get_json()
+
+    data = _wait_for_terminal(client, job_id)
+    assert data["status"] == "cancelled", data
+    assert scanned_roots == [root_a]
+    assert generate_calls["n"] == 0
+
+    scan_step = next(s for s in data["steps"] if s["id"] == "scan")
+    thumb_step = next(s for s in data["steps"] if s["id"] == "thumbnails")
+    assert scan_step["status"] == "cancelled", scan_step
+    assert thumb_step["status"] == "skipped", thumb_step
 
 
 def test_single_root_string_still_works(app_and_db, tmp_path):

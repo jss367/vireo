@@ -1349,7 +1349,7 @@ def test_store_grouped_predictions_persists_match_for_cache(tmp_path, monkeypatc
 
 
 def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monkeypatch):
-    """Already-labeled burst groups cache consensus species per detection."""
+    """Already-labeled burst groups cache each detection's own species."""
     from datetime import datetime
 
     import classify_job
@@ -1424,14 +1424,14 @@ def test_store_grouped_predictions_persists_group_match_for_cache(tmp_path, monk
     ).fetchall()
     assert {(r["detection_id"], r["species"], r["category"]) for r in rows} == {
         (det_ids[0], "Robin", "match"),
-        (det_ids[1], "Robin", "match"),
+        (det_ids[1], "Sparrow", "match"),
     }
 
 
 def test_group_match_drops_per_frame_alternatives(tmp_path, monkeypatch):
-    """Burst match caches only the consensus species — per-frame alternatives
+    """Burst match caches only each member's primary species; alternatives
     are dropped so a high-confidence dissenting runner-up can't outrank the
-    consensus primary via get_predictions_for_detection's confidence ordering.
+    accepted primary via get_predictions_for_detection's confidence ordering.
     """
     from datetime import datetime
 
@@ -1599,6 +1599,406 @@ def test_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatch):
     assert rows["Sparrow"]["status"] == "alternative"   # still nested
 
 
+def test_match_becoming_multispecies_clears_stale_auto_accept(tmp_path, monkeypatch):
+    """A previously auto-accepted single-species match must re-enter the
+    pending queue when the sidecar later gains a second recognized taxon.
+
+    Run 1: XMP has one recognized taxon -> single-species match ->
+    ``_can_auto_accept_detection_prediction`` returns True ->
+    ``_store_match_prediction`` writes the ``AUTO_MATCH_REVIEW_MARKER``
+    review row so the detection stays out of the queue.
+
+    Run 2 (non-reclassify, cache reused via ``_existing=True``): the sidecar
+    now has two recognized taxa. The prediction still matches, so
+    ``category`` remains ``"match"``, but auto-accept flips off. The pending
+    path must drop the stale marker so ``status='accepted'`` no longer hides
+    the detection from review.
+    """
+    import classify_job
+    from db import Database
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+
+    class Tax:
+        def is_taxon(self, name):
+            return name in {"Robin", "Sparrow"}
+
+        def get_hierarchy(self, _species):
+            return {}
+
+    monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "match")
+
+    def run(extra):
+        return classify_job._store_grouped_predictions(
+            raw_results=[{
+                "photo": {
+                    "id": photo_id, "filename": "a.jpg",
+                    "folder_id": folder_id, "timestamp": None, "burst_id": None,
+                },
+                "folder_path": str(tmp_path),
+                "detection_id": det_id,
+                "prediction": "Robin",
+                "confidence": 0.88,
+                "alternatives": [],
+                "taxonomy": {},
+                "timestamp": None,
+                **extra,
+            }],
+            job_id="job-abc",
+            model_name="bioclip-2",
+            grouping_window=0,
+            similarity_threshold=0.99,
+            tax=Tax(),
+            db=db,
+            labels_fingerprint="fp-active",
+        )
+
+    # Run 1: sole recognized taxon matches -> auto-accepted, out of queue.
+    write_sidecar(tmp_path / "a.xmp", {"Robin"}, set())
+    run({})
+    accepted = db.get_predictions(photo_ids=[photo_id], status="accepted")
+    assert [r["species"] for r in accepted] == ["Robin"]
+
+    # Run 2: sidecar now has a second recognized taxon. Category stays
+    # "match" but the match is no longer unambiguous -> pending path.
+    write_sidecar(tmp_path / "a.xmp", {"Robin", "Sparrow"}, set())
+    run({"_existing": True})
+
+    row = db.get_predictions(photo_ids=[photo_id])[0]
+    assert row["species"] == "Robin"
+    assert row["category"] == "match"
+    assert row["status"] == "pending"        # stale auto-accept cleared
+    assert not db.get_predictions(photo_ids=[photo_id], status="accepted")
+
+
+def test_multi_species_xmp_does_not_auto_accept_detection_match(tmp_path):
+    """Photo-level multi-species matches stay pending for detection review."""
+    import classify_job
+    from db import Database
+    from xmp import write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    write_sidecar(
+        tmp_path / "a.xmp",
+        {"Robin", "Sparrow", "Wildlife"},
+        set(),
+    )
+
+    class Tax:
+        def is_taxon(self, name):
+            return name in {"Robin", "Sparrow"}
+
+        def relationship(self, existing, prediction):
+            if existing == prediction:
+                return "same"
+            return "unrelated"
+
+        def get_hierarchy(self, _species):
+            return {}
+
+    result = classify_job._store_grouped_predictions(
+        raw_results=[{
+            "photo": {
+                "id": photo_id, "filename": "a.jpg",
+                "folder_id": folder_id, "timestamp": None, "burst_id": None,
+            },
+            "folder_path": str(tmp_path),
+            "detection_id": det_id,
+            "prediction": "Robin",
+            "confidence": 0.88,
+            "alternatives": [],
+            "taxonomy": {},
+            "timestamp": None,
+        }],
+        job_id="job-abc",
+        model_name="bioclip-2",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        tax=Tax(),
+        db=db,
+        labels_fingerprint="fp-active",
+    )
+
+    assert result["predictions_stored"] == 1
+    assert result["already_labeled"] == 0
+    rows = db.get_predictions(photo_ids=[photo_id])
+    assert len(rows) == 1
+    assert rows[0]["species"] == "Robin"
+    assert rows[0]["category"] == "match"
+    assert rows[0]["status"] == "pending"
+    assert not db.get_predictions(photo_ids=[photo_id], status="accepted")
+
+
+def test_hierarchy_keyword_still_auto_accepts_single_species_match(
+    tmp_path, monkeypatch
+):
+    """An ancestor taxon keyword (e.g. ``Aves``) alongside the matched species
+    must not force the detection back into pending review — it's the same
+    species, just labeled at multiple ranks.
+    """
+    import classify_job
+    from db import Database
+    from xmp import write_sidecar
+
+    monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "match")
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    write_sidecar(tmp_path / "a.xmp", {"Robin", "Aves"}, set())
+
+    class Tax:
+        def is_taxon(self, name):
+            return name in {"Robin", "Aves"}
+
+        def relationship(self, existing, prediction):
+            if existing == prediction:
+                return "same"
+            if existing == "Aves" and prediction == "Robin":
+                return "ancestor"
+            return "unrelated"
+
+        def get_hierarchy(self, _species):
+            return {}
+
+    result = classify_job._store_grouped_predictions(
+        raw_results=[{
+            "photo": {
+                "id": photo_id, "filename": "a.jpg",
+                "folder_id": folder_id, "timestamp": None, "burst_id": None,
+            },
+            "folder_path": str(tmp_path),
+            "detection_id": det_id,
+            "prediction": "Robin",
+            "confidence": 0.88,
+            "alternatives": [],
+            "taxonomy": {},
+            "timestamp": None,
+        }],
+        job_id="job-abc",
+        model_name="bioclip-2",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        tax=Tax(),
+        db=db,
+        labels_fingerprint="fp-active",
+    )
+
+    assert result["already_labeled"] == 1
+    assert result["predictions_stored"] == 0
+    accepted = db.get_predictions(photo_ids=[photo_id], status="accepted")
+    assert [r["species"] for r in accepted] == ["Robin"]
+
+
+def test_multiple_distinct_descendants_stay_pending(tmp_path, monkeypatch):
+    """A photo-level ``match`` on a broad prediction that has two unrelated
+    descendant keywords in the sidecar describes multiple species and must
+    NOT be auto-accepted.
+
+    Concretely: prediction ``Sparrow`` with sidecar ``White-crowned Sparrow``
+    + ``Golden-crowned Sparrow``. ``categorize()`` returns ``match`` because
+    each keyword is a descendant of the prediction, but folding both under
+    "same species" would hide a genuinely multi-species photo from review.
+    Descendants only fold in when they resolve to one another (species +
+    subspecies); sibling descendants must force pending review.
+    """
+    import classify_job
+    from db import Database
+    from xmp import write_sidecar
+
+    monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "match")
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    write_sidecar(
+        tmp_path / "a.xmp",
+        {"White-crowned Sparrow", "Golden-crowned Sparrow"},
+        set(),
+    )
+
+    class Tax:
+        _species = {
+            "Sparrow",
+            "White-crowned Sparrow",
+            "Golden-crowned Sparrow",
+        }
+
+        def is_taxon(self, name):
+            return name in self._species
+
+        def relationship(self, existing, prediction):
+            if existing == prediction:
+                return "same"
+            descendants_of_sparrow = {
+                "White-crowned Sparrow", "Golden-crowned Sparrow",
+            }
+            if (
+                existing in descendants_of_sparrow
+                and prediction == "Sparrow"
+            ):
+                return "descendant"
+            if (
+                existing == "Sparrow"
+                and prediction in descendants_of_sparrow
+            ):
+                return "ancestor"
+            if existing in descendants_of_sparrow and prediction in descendants_of_sparrow:
+                return "sibling"
+            return "unrelated"
+
+        def get_hierarchy(self, _species):
+            return {}
+
+    result = classify_job._store_grouped_predictions(
+        raw_results=[{
+            "photo": {
+                "id": photo_id, "filename": "a.jpg",
+                "folder_id": folder_id, "timestamp": None, "burst_id": None,
+            },
+            "folder_path": str(tmp_path),
+            "detection_id": det_id,
+            "prediction": "Sparrow",
+            "confidence": 0.88,
+            "alternatives": [],
+            "taxonomy": {},
+            "timestamp": None,
+        }],
+        job_id="job-abc",
+        model_name="bioclip-2",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        tax=Tax(),
+        db=db,
+        labels_fingerprint="fp-active",
+    )
+
+    assert result["predictions_stored"] == 1
+    assert result["already_labeled"] == 0
+    rows = db.get_predictions(photo_ids=[photo_id])
+    assert len(rows) == 1
+    assert rows[0]["species"] == "Sparrow"
+    assert rows[0]["category"] == "match"
+    assert rows[0]["status"] == "pending"
+    assert not db.get_predictions(photo_ids=[photo_id], status="accepted")
+
+
+def test_single_descendant_still_auto_accepts_match(tmp_path, monkeypatch):
+    """A photo-level match on a broad prediction with a single descendant
+    keyword (e.g. prediction ``Sparrow`` + sidecar ``White-crowned Sparrow``)
+    still auto-accepts — only one species is asserted.
+    """
+    import classify_job
+    from db import Database
+    from xmp import write_sidecar
+
+    monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "match")
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "a.jpg", extension=".jpg", file_size=100, file_mtime=1.0
+    )
+    det_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    write_sidecar(tmp_path / "a.xmp", {"White-crowned Sparrow"}, set())
+
+    class Tax:
+        def is_taxon(self, name):
+            return name in {"Sparrow", "White-crowned Sparrow"}
+
+        def relationship(self, existing, prediction):
+            if existing == prediction:
+                return "same"
+            if existing == "White-crowned Sparrow" and prediction == "Sparrow":
+                return "descendant"
+            if existing == "Sparrow" and prediction == "White-crowned Sparrow":
+                return "ancestor"
+            return "unrelated"
+
+        def get_hierarchy(self, _species):
+            return {}
+
+    result = classify_job._store_grouped_predictions(
+        raw_results=[{
+            "photo": {
+                "id": photo_id, "filename": "a.jpg",
+                "folder_id": folder_id, "timestamp": None, "burst_id": None,
+            },
+            "folder_path": str(tmp_path),
+            "detection_id": det_id,
+            "prediction": "Sparrow",
+            "confidence": 0.88,
+            "alternatives": [],
+            "taxonomy": {},
+            "timestamp": None,
+        }],
+        job_id="job-abc",
+        model_name="bioclip-2",
+        grouping_window=0,
+        similarity_threshold=0.99,
+        tax=Tax(),
+        db=db,
+        labels_fingerprint="fp-active",
+    )
+
+    assert result["already_labeled"] == 1
+    assert result["predictions_stored"] == 0
+    accepted = db.get_predictions(photo_ids=[photo_id], status="accepted")
+    assert [r["species"] for r in accepted] == ["Sparrow"]
+
+
 @pytest.mark.parametrize("manual_status", ["accepted", "rejected"])
 def test_match_flip_preserves_manual_review_on_reuse(
     tmp_path, monkeypatch, manual_status
@@ -1750,11 +2150,9 @@ def test_group_match_then_unmatch_reenters_pending_on_reuse(tmp_path, monkeypatc
 def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
     tmp_path, monkeypatch
 ):
-    """A mixed burst is cached as 'match' under the consensus species for
-    every detection. When it later stops matching and the cached rows are
-    reused, the downgrade must reconcile by the consensus species so the
-    dissenting frame's detection also re-enters the pending queue rather
-    than staying durably hidden as an auto-accepted match.
+    """A mixed burst caches each detection's own matched species. When it
+    later stops matching and the cached rows are reused, every detection
+    must re-enter the pending queue without grouped consensus review.
     """
     from datetime import datetime
 
@@ -1824,7 +2222,7 @@ def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
     run("match", {})
     accepted = db.get_predictions(photo_ids=photo_ids, status="accepted")
     assert {r["detection_id"] for r in accepted} == set(det_ids)
-    assert {r["species"] for r in accepted} == {"Robin"}
+    assert {r["species"] for r in accepted} == {"Robin", "Sparrow"}
 
     run("disagreement", {"_existing": True})
 
@@ -1833,10 +2231,116 @@ def test_mixed_group_match_then_unmatch_reenters_pending_for_dissenters(
     # Both detections, including the dissenting Sparrow frame, re-enter
     # review; none stay hidden as a stale auto-accepted match.
     assert set(by_det) == set(det_ids)
+    assert by_det[det_ids[0]]["species"] == "Robin"
+    assert by_det[det_ids[1]]["species"] == "Sparrow"
     for r in by_det.values():
         assert r["status"] == "pending"
         assert r["category"] == "disagreement"
+        assert not r["group_id"]
     assert not db.get_predictions(photo_ids=photo_ids, status="accepted")
+
+
+def test_ungrouped_burst_clears_stale_group_id_on_reuse(
+    tmp_path, monkeypatch
+):
+    """Cached predictions from a previously reviewable burst must lose their
+    ``group_id`` when the same detections are later reused outside that
+    group — e.g. the grouping window shrinks so the burst dissolves into
+    singletons. Otherwise group actions on any of the freshly-ungrouped
+    detections would retag the whole stale burst together.
+    """
+    from datetime import datetime
+
+    import classify_job
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path))
+    ws = db.create_workspace("A")
+    db._active_workspace_id = ws
+    db.add_workspace_folder(ws, folder_id)
+    photo_ids = [
+        db.add_photo(
+            folder_id, f"{i}.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        for i in range(2)
+    ]
+    det_ids = [
+        db.save_detections(
+            pid,
+            [{
+                "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                "confidence": 0.9,
+                "category": "animal",
+            }],
+            detector_model="MDV6",
+        )[0]
+        for pid in photo_ids
+    ]
+
+    class Tax:
+        def get_hierarchy(self, _species):
+            return {}
+
+    # category="new" keeps both runs on the pending path so we can watch
+    # group_id transition without the auto-accept marker interfering.
+    monkeypatch.setattr("compare.categorize", lambda *_a, **_k: "new")
+
+    def run(grouping_window, extra):
+        raw = [
+            {
+                "photo": {
+                    "id": pid, "filename": f"{i}.jpg",
+                    "folder_id": folder_id, "timestamp": None,
+                    "burst_id": None,
+                },
+                "folder_path": str(tmp_path),
+                "detection_id": did,
+                "prediction": "Robin",
+                "confidence": 0.9 - (i * 0.01),
+                "alternatives": [],
+                "taxonomy": {},
+                # Frames 5 seconds apart: grouped under a 10s window,
+                # ungrouped under a 1s window.
+                "timestamp": datetime(2024, 1, 1, 12, 0, i * 5),
+                **extra,
+            }
+            for i, (pid, did) in enumerate(
+                zip(photo_ids, det_ids, strict=True)
+            )
+        ]
+        return classify_job._store_grouped_predictions(
+            raw_results=raw, job_id="job-abc", model_name="bioclip-2",
+            grouping_window=grouping_window, similarity_threshold=0.99,
+            tax=Tax(), db=db, labels_fingerprint="fp-active",
+        )
+
+    # Run 1: 10s window groups both frames -> group_reviewable (same
+    # species) -> both detections share a burst group_id.
+    run(10, {})
+    initial = {r["detection_id"]: r
+               for r in db.get_predictions(photo_ids=photo_ids)}
+    gid_before = initial[det_ids[0]]["group_id"]
+    assert gid_before, "Run 1 should assign a burst group_id"
+    assert initial[det_ids[1]]["group_id"] == gid_before
+
+    # Run 2: cache is reused (_existing=True) with a 1s window that
+    # dissolves the burst into singletons. Each detection goes through
+    # _store_pending_detection_prediction with group_id=None; the cached
+    # rows must lose the stale group_id from Run 1.
+    run(1, {"_existing": True})
+
+    after = {r["detection_id"]: r
+             for r in db.get_predictions(photo_ids=photo_ids)}
+    for det_id in det_ids:
+        assert not after[det_id]["group_id"], (
+            f"Stale group_id survived cache reuse for detection {det_id}: "
+            f"{after[det_id]['group_id']!r}"
+        )
+        assert not after[det_id]["vote_count"]
+        assert not after[det_id]["total_votes"]
+        assert not after[det_id]["individual"]
 
 
 def test_classifier_skipped_when_run_already_recorded(tmp_path, monkeypatch):

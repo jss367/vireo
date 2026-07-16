@@ -135,12 +135,19 @@ def _mock_pipeline_rapid_review(
     )
 
 
+def _goto_rapid_review(page, live_server, query=""):
+    # Startup begins loading preview/thumbnail images; the page behavior under
+    # test is ready at DOMContentLoaded and the assertions wait for app state.
+    page.goto(f"{live_server['url']}/pipeline/rapid-review{query}", wait_until="domcontentloaded")
+
+
 def test_rapid_review_decision_keys_advance_through_queue(live_server, page):
     _mock_pipeline_rapid_review(page)
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
 
     expect(page.locator("#filename")).to_have_text("a.jpg")
+    expect(page.locator("#applyBtn")).to_be_enabled()
 
     page.keyboard.press("x")
     expect(page.locator("#filename")).to_have_text("b.jpg")
@@ -158,7 +165,7 @@ def test_rapid_review_decision_keys_advance_through_queue(live_server, page):
 def test_rapid_review_pick_key_ignores_legacy_pipeline_nav_shortcut(live_server, page):
     _mock_pipeline_rapid_review(page)
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
     page.wait_for_function(
         """() => window.Keymap
           && window.Keymap.getScope() === 'pipeline_rapid_review'
@@ -192,7 +199,7 @@ def test_rapid_review_honors_remapped_decision_shortcuts(live_server, page):
         },
     )
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
     page.wait_for_function(
         """() => window._vireoShortcuts
           && window._vireoShortcuts.pipeline_rapid_review
@@ -219,7 +226,7 @@ def test_rapid_review_honors_remapped_decision_shortcuts(live_server, page):
 def test_rapid_review_keeps_apply_disabled_when_state_load_fails(live_server, page):
     _mock_pipeline_rapid_review(page, state_ok=False)
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
 
     expect(page.locator("#filename")).to_have_text("a.jpg")
     expect(page.locator("#applyBtn")).to_be_disabled()
@@ -233,7 +240,7 @@ def test_rapid_review_keeps_apply_disabled_when_state_load_fails(live_server, pa
 def test_rapid_review_apply_button_summarizes_pending_writes(live_server, page):
     _mock_pipeline_rapid_review(page)
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
 
     # Species tagging now covers EVERY frame in the burst (not just picks), so
     # with a pre-filled species and no frames yet carrying the keyword, Apply
@@ -273,7 +280,7 @@ def test_rapid_review_species_edit_refreshes_existing_keyword_state(live_server,
         state_photos={"1": {"flag": "flagged", "has_species_keyword": True}},
     )
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
     expect(page.locator("#applyBtn")).to_have_text("Apply: no DB changes")
 
     page.locator("#speciesInput").fill("New bird")
@@ -315,7 +322,7 @@ def test_rapid_review_rewrites_all_burst_labels_before_saving_cache(live_server,
         save_payloads=save_payloads,
     )
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
     expect(page.locator("#applyBtn")).to_be_enabled()
 
     with page.expect_response("**/api/pipeline/save-cache"):
@@ -359,7 +366,7 @@ def test_rapid_review_preserves_burst_override_species_on_apply_next(live_server
         },
     )
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
     expect(page.locator("#speciesInput")).to_have_value("Encounter bird")
     page.locator("#speciesInput").fill("New encounter bird")
 
@@ -389,7 +396,7 @@ def test_rapid_review_default_queue_excludes_fully_confirmed_bursts(live_server,
     }
     _mock_pipeline_rapid_review(page, results=results)
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
 
     expect(page.locator("#queueFilter")).to_have_value("needs-species")
     expect(page.locator("#queueCount")).to_contain_text("Needs species: 1 of 2 bursts")
@@ -420,7 +427,7 @@ def test_rapid_review_deep_link_opens_filtered_out_burst_via_all(live_server, pa
     }
     _mock_pipeline_rapid_review(page, results=results)
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review?enc=0&burst=0")
+    _goto_rapid_review(page, live_server, "?enc=0&burst=0")
 
     expect(page.locator("#queueFilter")).to_have_value("all")
     expect(page.locator("#burstTitle")).to_have_text("Encounter 1, Burst 1")
@@ -446,7 +453,7 @@ def test_rapid_review_needs_species_includes_mixed_burst(live_server, page):
     }
     _mock_pipeline_rapid_review(page, results=results)
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
 
     expect(page.locator("#queueCount")).to_contain_text("Needs species: 1 of 1 bursts")
     expect(page.locator(".reason-chip", has_text="No species")).to_be_visible()
@@ -472,7 +479,7 @@ def test_rapid_review_needs_species_ignores_rejected_untagged_photos(live_server
     }
     _mock_pipeline_rapid_review(page, results=results)
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
 
     expect(page.locator("#queueCount")).to_contain_text("Needs species: 0 of 1 bursts")
     expect(page.locator("#burstSubtitle")).to_have_text("0 matching bursts")
@@ -502,7 +509,7 @@ def test_rapid_review_apply_next_skips_bursts_outside_active_queue(live_server, 
     }
     _mock_pipeline_rapid_review(page, results=results)
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
     expect(page.locator("#filename")).to_have_text("first.jpg")
     page.locator("#speciesInput").fill("Test bird")
     page.keyboard.press("p")
@@ -538,7 +545,7 @@ def test_rapid_review_rebases_active_session_after_apply_rebuild(live_server, pa
         apply_photos={"1": {"flag": "flagged", "has_species_keyword": True}},
     )
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
     expect(page.locator("#applyBtn")).to_be_enabled()
     expect(page.locator("#filename")).to_have_text("first.jpg")
     page.locator("#speciesInput").fill("Test bird")
@@ -577,7 +584,7 @@ def test_rapid_review_filter_change_prompts_with_staged_decisions(live_server, p
     }
     _mock_pipeline_rapid_review(page, results=results, save_payloads=save_payloads)
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
     expect(page.locator("#applyBtn")).to_be_enabled()
     page.keyboard.press("x")
     page.locator("#queueFilter").select_option("all")
@@ -614,9 +621,13 @@ def test_rapid_review_click_main_image_opens_original_at_one_to_one(live_server,
         original_content_type="image/svg+xml",
     )
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
     img = page.locator("#currentPhoto")
     stage = page.locator("#photoStage")
+
+    # currentPhoto() returns null until mocked results and state hydrate the
+    # session, so an immediate click can fall through without toggling zoom.
+    expect(img).to_have_attribute("src", re.compile(r"/photos/1/preview\?size=2560$"))
 
     stage.click(position={"x": 12, "y": 12})
 
@@ -885,6 +896,96 @@ def test_classic_pipeline_review_group_shortcuts_do_not_flag_prior_single_photo(
     assert stale_flag_payloads == []
 
 
+def test_classic_pipeline_review_group_reject_shortcut_applies_to_multiselection(live_server, page):
+    image_body = base64.b64decode(_PNG_1X1)
+    results = {
+        "photos": [
+            {"id": 1, "filename": "burst-a.jpg", "label": "REVIEW", "quality_composite": 0.3, "subject_tenengrad": 10},
+            {"id": 2, "filename": "burst-b.jpg", "label": "REVIEW", "quality_composite": 0.6, "subject_tenengrad": 20},
+            {"id": 3, "filename": "burst-c.jpg", "label": "REVIEW", "quality_composite": 0.9, "subject_tenengrad": 30},
+        ],
+        "encounters": [
+            {
+                "photo_ids": [1, 2, 3],
+                "photo_count": 3,
+                "burst_count": 1,
+                "species": ["Test bird"],
+                "bursts": [{"photo_ids": [1, 2, 3]}],
+            }
+        ],
+        "summary": {
+            "total_photos": 3,
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": 0,
+            "review_count": 3,
+            "reject_count": 0,
+        },
+    }
+
+    page.route(
+        "**/api/pipeline/page-init",
+        lambda route: route.fulfill(
+            json={
+                "results": results,
+                "workspace_overrides": {},
+                "review_readiness": {"state": "ready", "total_photos": 3},
+            }
+        ),
+    )
+    page.route(
+        "**/api/pipeline/group/state",
+        lambda route: route.fulfill(
+            json={
+                "photos": {
+                    "1": {"flag": "none", "has_species_keyword": False},
+                    "2": {"flag": "none", "has_species_keyword": False},
+                    "3": {"flag": "none", "has_species_keyword": False},
+                },
+                "species_kid": None,
+            }
+        ),
+    )
+    page.route("**/thumbnails/*.jpg", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+    page.route("**/photos/*/preview?*", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+    page.route("**/photos/*/original", lambda route: route.fulfill(body=image_body, content_type="image/png"))
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    page.locator(".photo-card[data-photo-id='1'] img").click()
+    expect(page.locator("#grmOverlay")).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#grmTitle")).to_have_text("Review Burst Group")
+    expect(page.locator("#grmApplyBtn")).to_be_enabled()
+
+    page.evaluate(
+        """() => {
+          grmState.picks.clear();
+          grmState.rejects.clear();
+          grmState.selected = null;
+          grmState.selectedIds.clear();
+          grmState.selectionAnchor = null;
+          renderGroupModal();
+        }"""
+    )
+
+    page.locator('#grmOverlay .grm-card[data-photo-id="1"]').click()
+    page.locator('#grmOverlay .grm-card[data-photo-id="2"]').click(modifiers=["Meta"])
+    page.keyboard.press("x")
+
+    expect(page.locator("#grmCount")).to_have_text("0 picks, 2 rejects, 1 unsorted")
+    state = page.evaluate(
+        """() => ({
+          rejects: Array.from(grmState.rejects).sort(),
+          picks: Array.from(grmState.picks).sort(),
+          selected: Array.from(grmState.selectedIds).sort(),
+          touched: Array.from(grmState.touched || []).sort(),
+        })"""
+    )
+    assert state["rejects"] == [1, 2]
+    assert not set(state["picks"]).intersection({1, 2})
+    assert state["selected"] == [1, 2]
+    assert state["touched"] == [1, 2]
+
+
 def test_rapid_review_apply_tags_all_burst_frames_via_encounters_species(live_server, page):
     # A multi-frame burst where only ONE frame is a pick. Species tagging must
     # cover EVERY frame (matching the pipeline decision / the grid), so the
@@ -919,7 +1020,7 @@ def test_rapid_review_apply_tags_all_burst_frames_via_encounters_species(live_se
         species_payloads=species_payloads,
     )
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
     expect(page.locator("#applyBtn")).to_be_enabled()
     # Pick only the first frame; the other two stay unsorted.
     page.keyboard.press("p")
@@ -986,7 +1087,7 @@ def test_rapid_review_cull_only_on_confirmed_burst_skips_species_post(live_serve
     )
 
     # Deep-link forces the "all" queue so a fully-confirmed burst is reviewable.
-    page.goto(f"{live_server['url']}/pipeline/rapid-review?enc=0&burst=0")
+    _goto_rapid_review(page, live_server, "?enc=0&burst=0")
     expect(page.locator("#applyBtn")).to_be_enabled()
     expect(page.locator("#filename")).to_have_text("a.jpg")
     # Species field already reflects the confirmed species; do NOT change it.
@@ -1064,7 +1165,7 @@ def test_rapid_review_confirmed_burst_with_untagged_frame_posts_species(live_ser
     )
 
     # Deep-link the "all" queue so a confirmed burst is reviewable.
-    page.goto(f"{live_server['url']}/pipeline/rapid-review?enc=0&burst=0")
+    _goto_rapid_review(page, live_server, "?enc=0&burst=0")
     expect(page.locator("#applyBtn")).to_be_enabled()
     # Species field already reflects the confirmed species; leave it unchanged.
     expect(page.locator("#speciesInput")).to_have_value("Test bird")
@@ -1107,7 +1208,7 @@ def test_rapid_review_first_confirmation_and_replacement_post_species(live_serve
     }
     _mock_pipeline_rapid_review(page, results=results, species_payloads=species_payloads)
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review")
+    _goto_rapid_review(page, live_server)
     expect(page.locator("#applyBtn")).to_be_enabled()
     # "Test bird" is an unconfirmed prediction (no species_confirmed), so the
     # field pre-fills with it and applying is a first-time confirmation → posts.
@@ -1154,7 +1255,7 @@ def test_rapid_review_species_replacement_on_confirmed_burst_posts(live_server, 
         species_payloads=species_payloads,
     )
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review?enc=0&burst=0")
+    _goto_rapid_review(page, live_server, "?enc=0&burst=0")
     expect(page.locator("#applyBtn")).to_be_enabled()
     expect(page.locator("#speciesInput")).to_have_value("Test bird")
     page.locator("#speciesInput").fill("Different bird")
@@ -1221,7 +1322,7 @@ def test_rapid_review_adopts_detach_restructure_without_clobbering_cache(live_se
         species_response=restructured,
     )
 
-    page.goto(f"{live_server['url']}/pipeline/rapid-review?enc=0&burst=0")
+    _goto_rapid_review(page, live_server, "?enc=0&burst=0")
     expect(page.locator("#applyBtn")).to_be_enabled()
     expect(page.locator("#filename")).to_have_text("a.jpg")
     # Confirm a species that diverges from the encounter's, triggering detach.

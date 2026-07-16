@@ -31,14 +31,49 @@ body {
   min-height: 52px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-primary);
   background: var(--bg-secondary);
 }
+.editor-search {
+  min-width: 220px;
+  flex: 0 1 300px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+.editor-search input {
+  min-width: 0;
+  width: 100%;
+  height: 32px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  padding: 0 9px;
+  font-size: 12px;
+}
+.editor-search input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.editor-search-status {
+  grid-column: 1 / -1;
+  min-height: 13px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.editor-search-status.error { color: var(--danger); }
 .editor-title {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 180px;
 }
 .editor-title strong,
 .editor-title span {
@@ -218,6 +253,53 @@ body {
   font-size: 12px;
 }
 .control-row input[type="range"] { width: 100%; }
+.preset-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  margin: 10px 0;
+}
+#maskOverlayImg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+.local-stale-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--warning, #f0b84f);
+  border-radius: 4px;
+  color: var(--warning, #f0b84f);
+  font-size: 12px;
+}
+.local-region-title {
+  margin: 12px 0 2px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.local-unavailable-note {
+  margin: 8px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.preset-row select,
+.preset-row input[type="text"] {
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  font-size: 12px;
+}
 .control-value {
   color: var(--text-muted);
   font-size: 12px;
@@ -269,13 +351,28 @@ body {
   margin-top: 12px;
 }
 .crop-meta div {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   color: var(--text-muted);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   border: 1px solid var(--border-primary);
   border-radius: 4px;
-  padding: 7px;
+  padding: 4px 5px 4px 7px;
 }
+.crop-meta input {
+  width: 100%;
+  min-width: 0;
+  padding: 2px 3px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 3px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.crop-meta input:disabled { opacity: 0.55; }
 .history-header {
   position: sticky;
   top: 0;
@@ -340,6 +437,14 @@ body {
     border-right: 0;
     border-bottom: 1px solid var(--border-primary);
   }
+  .editor-search {
+    flex-basis: 100%;
+    order: 2;
+  }
+  .editor-title {
+    flex-basis: 100%;
+    order: 3;
+  }
   #editorImg {
     max-width: calc(100vw - 32px);
     max-height: 70vh;
@@ -357,6 +462,11 @@ body {
       <button class="editor-btn" id="prevBtn" type="button" onclick="editorNav(-1)" title="Previous photo (←)" hidden>‹ Prev</button>
       <button class="editor-btn" id="nextBtn" type="button" onclick="editorNav(1)" title="Next photo (→)" hidden>Next ›</button>
       <span class="editor-navpos" id="editorNavPos"></span>
+      <div class="editor-search" role="search">
+        <input id="editorSearchInput" type="search" placeholder="Find bird or filename..." autocomplete="off" aria-label="Find bird or filename" oninput="scheduleEditorSearch()" onkeydown="if(event.key==='Enter'){event.preventDefault(); runEditorSearch({immediate:true});}">
+        <button class="editor-btn" type="button" onclick="runEditorSearch({immediate:true})">Search</button>
+        <span class="editor-search-status" id="editorSearchStatus" role="status" aria-live="polite"></span>
+      </div>
       <div class="editor-title">
         <strong id="editorFilename">Loading photo...</strong>
         <span id="editorSubhead">Non-destructive editor</span>
@@ -373,6 +483,7 @@ body {
     <div class="editor-canvas-wrap" id="editorCanvasWrap">
       <div class="editor-canvas" id="editorCanvas">
         <img id="editorImg" alt="">
+        <img id="maskOverlayImg" alt="" aria-hidden="true" style="display:none">
         <div class="crop-box" id="editorCropBox">
           <span class="crop-handle nw" data-handle="nw"></span>
           <span class="crop-handle ne" data-handle="ne"></span>
@@ -408,15 +519,16 @@ body {
       <div class="panel-title">Crop</div>
       <div class="button-row">
         <button class="editor-btn" type="button" onclick="resetCrop()">Full Frame</button>
-        <button class="editor-btn" type="button" onclick="setAspect(1.5)">3:2</button>
-        <button class="editor-btn" type="button" onclick="setAspect(1.3333333333)">4:3</button>
-        <button class="editor-btn" type="button" onclick="setAspect(1)">1:1</button>
+        <button class="editor-btn" type="button" id="aspectLockBtn" onclick="toggleAspectLock()" title="Keep the current crop aspect ratio while resizing">Lock Ratio</button>
+        <button class="editor-btn" type="button" id="aspect32Btn" onclick="setAspect(1.5)" title="Set a 3:2 crop and lock the ratio; click again to unlock">3:2</button>
+        <button class="editor-btn" type="button" id="aspect43Btn" onclick="setAspect(1.3333333333)" title="Set a 4:3 crop and lock the ratio; click again to unlock">4:3</button>
+        <button class="editor-btn" type="button" id="aspect11Btn" onclick="setAspect(1)" title="Set a 1:1 crop and lock the ratio; click again to unlock">1:1</button>
       </div>
       <div class="crop-meta">
-        <div>x <span id="cropX">0</span></div>
-        <div>y <span id="cropY">0</span></div>
-        <div>w <span id="cropW">100</span></div>
-        <div>h <span id="cropH">100</span></div>
+        <div><label for="cropX">x</label><input id="cropX" type="number" min="0" max="100" step="0.1" value="0" onchange="setCropField('x', this.value)" aria-label="Crop x (percent)"></div>
+        <div><label for="cropY">y</label><input id="cropY" type="number" min="0" max="100" step="0.1" value="0" onchange="setCropField('y', this.value)" aria-label="Crop y (percent)"></div>
+        <div><label for="cropW">w</label><input id="cropW" type="number" min="2" max="100" step="0.1" value="100" onchange="setCropField('w', this.value)" aria-label="Crop width (percent)"></div>
+        <div><label for="cropH">h</label><input id="cropH" type="number" min="2" max="100" step="0.1" value="100" onchange="setCropField('h', this.value)" aria-label="Crop height (percent)"></div>
       </div>
     </div>
 
@@ -434,6 +546,21 @@ body {
         </div>
       </div>
       <div class="feedback-note" id="feedbackNote">Current preview</div>
+    </div>
+
+    <div class="panel-band">
+      <div class="panel-title">Presets</div>
+      <div class="preset-row">
+        <select id="presetSelect" onchange="onPresetSelected()">
+          <option value="">Select a preset...</option>
+        </select>
+        <input id="presetNameInput" type="text" maxlength="80" placeholder="Preset name" aria-label="Preset name">
+      </div>
+      <div class="button-row">
+        <button class="editor-btn" type="button" id="applyPresetBtn" onclick="applySelectedPreset()" disabled>Apply</button>
+        <button class="editor-btn" type="button" id="savePresetBtn" onclick="saveCurrentAsPreset()">Save</button>
+        <button class="editor-btn" type="button" id="deletePresetBtn" onclick="deleteSelectedPreset()" disabled>Delete</button>
+      </div>
     </div>
 
     <div class="panel-band">
@@ -517,6 +644,32 @@ body {
         <button class="editor-btn" type="button" onclick="resetDetail()">Reset Detail</button>
       </div>
     </div>
+
+    <div class="panel-band" id="localBand" style="display:none">
+      <div class="panel-title">Local (Subject / Background)</div>
+      <div class="local-stale-banner" id="localStaleBanner" style="display:none">
+        <span>Newer subject mask available</span>
+        <button class="editor-btn" type="button" onclick="updateLocalMask()">Update</button>
+      </div>
+      <div class="button-row">
+        <button class="editor-btn" id="maskOverlayBtn" type="button" onclick="toggleMaskOverlay()">Show Mask</button>
+        <button class="editor-btn" type="button" onclick="resetLocal()">Reset Local</button>
+      </div>
+      <div class="control-row">
+        <label for="featherRange">Feather</label>
+        <input id="featherRange" type="range" min="0" max="200" step="1" value="0" oninput="setLocalFeather(this.value)">
+        <span class="control-value" id="featherValue">0</span>
+      </div>
+      <div class="local-region-title">Subject</div>
+      <div id="subjectLocalControls"></div>
+      <div class="local-region-title">Background</div>
+      <div id="backgroundLocalControls"></div>
+    </div>
+
+    <div class="panel-band" id="localUnavailableBand" style="display:none">
+      <div class="panel-title">Local (Subject / Background)</div>
+      <p class="local-unavailable-note">No subject mask for this photo &mdash; run the pipeline's mask stage to enable local adjustments.</p>
+    </div>
   </aside>
 
   <aside class="history-panel">
@@ -536,14 +689,35 @@ var editorState = {
   photo: null,
   savedRecipe: {},
   recipe: {},
+  presets: [],
+  localDraft: {subject: {}, background: {}, feather: 0},
+  localMask: null,
+  localMaskPromise: null,
+  localAvailable: false,
+  localStale: false,
+  maskOverlay: false,
+  maskOverlaySeq: 0,
+  maskOverlayTimer: null,
   previewSeq: 0,
   previewTimer: null,
   drag: null,
   showBefore: false,
   zoomMode: 'fit',
+  cropAspect: null,
   navIds: [],
+  baseNavIds: [],
   loadSeq: 0,
   loading: false,
+  histogramTimer: null,
+  searchTimer: null,
+  searchSeq: 0,
+  searchQuery: '',
+  // Seq under which the current `searchQuery` was dispatched. When the input
+  // is retyped back to `searchQuery` after an intermediate keystroke bumped
+  // `searchSeq`, this mismatch tells us the in-flight response was already
+  // invalidated so a replacement fetch is required.
+  searchQuerySeq: 0,
+  suppressUnloadPrompt: false,
 };
 
 function setEditorLoading(loading) {
@@ -558,6 +732,7 @@ function setEditorLoading(loading) {
   if (resetAll) resetAll.disabled = !!loading;
   var copyBtn = document.getElementById('copySettingsBtn');
   if (copyBtn) copyBtn.disabled = !!loading;
+  updateAspectButtons();
 }
 
 function isEditorDirty() {
@@ -582,6 +757,11 @@ function setButtonActive(id, active) {
   if (btn) btn.classList.toggle('active', !!active);
 }
 
+function setButtonDisabled(id, disabled) {
+  var btn = document.getElementById(id);
+  if (btn) btn.disabled = !!disabled;
+}
+
 function updateFeedbackControls() {
   setButtonActive('beforeBtn', editorState.showBefore);
   setButtonActive('fitBtn', editorState.zoomMode === 'fit');
@@ -594,6 +774,7 @@ function updateFeedbackControls() {
   if (note) {
     note.textContent = editorState.showBefore ? 'Approximate saved preview' : 'Approximate current preview';
   }
+  updateAspectButtons();
 }
 
 function setZoomMode(mode) {
@@ -830,6 +1011,11 @@ function updateRecipeSummary() {
       else parts.push(key);
     });
   }
+  if (r.local && r.local.regions) {
+    r.local.regions.forEach(function(entry) {
+      parts.push('local ' + entry.region);
+    });
+  }
   document.getElementById('recipeSummary').textContent = parts.length ? parts.join(' | ') : 'No edits';
 }
 
@@ -856,9 +1042,18 @@ function syncControls() {
   set('sharpen_radius', vals.sharpen_radius, true);
   set('noise_reduction', vals.noise_reduction, false);
   var straight = Number(r.straighten || 0);
-  document.getElementById('straightenRange').value = String(straight);
+  var straightInput = document.getElementById('straightenRange');
+  // The recipe schema allows ±45° (pasted/API recipes), wider than the ±10°
+  // slider. Widen the slider to fit an out-of-range value instead of letting
+  // the browser silently clamp the thumb while the label shows the real number.
+  var straightLimit = Math.max(10, Math.ceil(Math.abs(straight)));
+  straightInput.min = String(-straightLimit);
+  straightInput.max = String(straightLimit);
+  straightInput.value = String(straight);
   document.getElementById('straightenValue').textContent = straight.toFixed(1);
+  syncLocalControls();
   renderCropBox();
+  updateAspectButtons();
   updateDirtyState();
 }
 
@@ -898,15 +1093,30 @@ function updateHistogramFeedback() {
   var ctx = canvas.getContext('2d');
   if (!ctx) return;
 
+  // Sample only the active crop so the histogram and clip readouts describe
+  // the frame the user is keeping — the preview render is uncropped, and a
+  // blown sky the user already cropped away must not keep warning about
+  // highlight clipping. Mirrors Auto Tone's _lumaStats sampling.
+  var crop = editorState.showBefore
+    ? clampCrop(Object.assign({x: 0, y: 0, w: 1, h: 1}, editorState.savedRecipe.crop || {}))
+    : ensureCrop(editorState.recipe);
+  var sx = 0, sy = 0;
+  var sW = img.naturalWidth, sH = img.naturalHeight;
+  if (!isFullCrop(crop)) {
+    sx = Math.max(0, Math.round((Number(crop.x) || 0) * img.naturalWidth));
+    sy = Math.max(0, Math.round((Number(crop.y) || 0) * img.naturalHeight));
+    sW = Math.max(1, Math.round((Number(crop.w) || 1) * img.naturalWidth));
+    sH = Math.max(1, Math.round((Number(crop.h) || 1) * img.naturalHeight));
+  }
   var sample = document.createElement('canvas');
   var maxSample = 180;
-  var scale = Math.min(1, maxSample / Math.max(img.naturalWidth, img.naturalHeight));
-  sample.width = Math.max(1, Math.round(img.naturalWidth * scale));
-  sample.height = Math.max(1, Math.round(img.naturalHeight * scale));
+  var scale = Math.min(1, maxSample / Math.max(sW, sH));
+  sample.width = Math.max(1, Math.round(sW * scale));
+  sample.height = Math.max(1, Math.round(sH * scale));
   var sampleCtx = sample.getContext('2d', { willReadFrequently: true });
   if (!sampleCtx) return;
   try {
-    sampleCtx.drawImage(img, 0, 0, sample.width, sample.height);
+    sampleCtx.drawImage(img, sx, sy, sW, sH, 0, 0, sample.width, sample.height);
     var data = sampleCtx.getImageData(0, 0, sample.width, sample.height).data;
   } catch (_) {
     clearHistogramFeedback();
@@ -968,32 +1178,60 @@ function updateHistogramFeedback() {
   setClip('highlight', clippedHigh);
 }
 
+function previewRenderSize() {
+  // 100% zoom asks for a native-resolution render so 1:1 shows the photo's
+  // real pixels; fit zoom keeps the cheaper 1920 render. Falls back to the
+  // old 3840 request when the native dimensions are unknown.
+  if (editorState.zoomMode !== 'actual') return 1920;
+  var p = editorState.photo || {};
+  var native = Math.max(Number(p.width) || 0, Number(p.height) || 0);
+  return native > 0 ? Math.min(16384, Math.max(256, native)) : 3840;
+}
+
+function previewStatusText(img) {
+  // At 100% the render size is the whole point of the view — state the
+  // actual delivered dimensions rather than implying "100%" on its own.
+  var suffix = editorState.zoomMode === 'actual' && img && img.naturalWidth
+    ? ' (' + img.naturalWidth + '×' + img.naturalHeight + ' render)'
+    : '';
+  return (editorState.showBefore
+    ? 'Preview is showing the saved recipe'
+    : 'Preview uses the current unsaved recipe') + suffix;
+}
+
 function updatePreview() {
   if (!editorState.photoId) return;
   var img = document.getElementById('editorImg');
-  var seq = ++editorState.previewSeq;
-  document.getElementById('previewStatus').textContent = 'Rendering preview...';
   updateFeedbackControls();
-  // 100% zoom asks for the endpoint's max render so detail (sharpen/NR) is
-  // judgeable near native pixels; fit zoom keeps the cheaper 1920 render.
-  var size = editorState.zoomMode === 'actual' ? 3840 : 1920;
-  img.onload = function() {
-    if (seq !== editorState.previewSeq) return;
-    var suffix = size === 3840 ? ' (3840px render)' : '';
-    document.getElementById('previewStatus').textContent = (editorState.showBefore
-      ? 'Preview is showing the saved recipe'
-      : 'Preview uses the current unsaved recipe') + suffix;
+  var recipe = editorState.showBefore ? previewRecipeFor(editorState.savedRecipe) : previewRecipe();
+  var url = '/photos/' + editorState.photoId + '/edit-preview?size=' + previewRenderSize() +
+    '&recipe=' + encodeURIComponent(JSON.stringify(recipe));
+  if (img.getAttribute('src') === url && img.complete && img.naturalWidth) {
+    // Identical render already on screen (e.g. Before toggled twice, or a
+    // slider moved and returned) — skip the server round-trip and just
+    // refresh the dependent UI.
+    editorState.previewSeq++;
+    document.getElementById('previewStatus').textContent = previewStatusText(img);
     renderCropBox();
     updateHistogramFeedback();
+    refreshMaskOverlay();
+    return;
+  }
+  var seq = ++editorState.previewSeq;
+  document.getElementById('previewStatus').textContent = 'Rendering preview...';
+  img.onload = function() {
+    if (seq !== editorState.previewSeq) return;
+    document.getElementById('previewStatus').textContent = previewStatusText(img);
+    renderCropBox();
+    updateHistogramFeedback();
+    refreshMaskOverlay();
   };
   img.onerror = function() {
     if (seq !== editorState.previewSeq) return;
     document.getElementById('previewStatus').textContent = 'Could not render preview';
     clearHistogramFeedback();
   };
-  var recipe = editorState.showBefore ? previewRecipeFor(editorState.savedRecipe) : previewRecipe();
-  img.src = '/photos/' + editorState.photoId + '/edit-preview?size=' + size + '&recipe=' +
-    encodeURIComponent(JSON.stringify(recipe)) + '&v=' + seq;
+  img.src = url;
 }
 
 function schedulePreview() {
@@ -1004,7 +1242,33 @@ function schedulePreview() {
   }, 140);
 }
 
-function renderCropBox() {
+function scheduleHistogramRefresh() {
+  // Debounced histogram/clip-readout resample for crop-only edits, which
+  // don't re-render the preview: the readouts sample inside the crop, so a
+  // crop drag changes what they should report even though the pixels on
+  // screen are unchanged.
+  if (editorState.histogramTimer) clearTimeout(editorState.histogramTimer);
+  editorState.histogramTimer = setTimeout(function() {
+    editorState.histogramTimer = null;
+    updateHistogramFeedback();
+  }, 140);
+}
+
+function scheduleMaskOverlayRefresh() {
+  // Debounced counterpart to schedulePreview() for crop-only edits that
+  // don't schedule a preview: /edit-mask-preview reads the current crop
+  // to compute the saved-render feather scale, so dragging/resetting/
+  // changing crop aspect changes the halo the overlay is meant to show.
+  // Without this the visible mask lags until an unrelated slider or zoom
+  // forces a reload.
+  if (editorState.maskOverlayTimer) clearTimeout(editorState.maskOverlayTimer);
+  editorState.maskOverlayTimer = setTimeout(function() {
+    editorState.maskOverlayTimer = null;
+    refreshMaskOverlay();
+  }, 140);
+}
+
+function renderCropBox(forceInputs) {
   var img = document.getElementById('editorImg');
   var box = document.getElementById('editorCropBox');
   if (!img || !box || !img.complete || !img.clientWidth || !img.clientHeight) return;
@@ -1015,10 +1279,53 @@ function renderCropBox() {
   box.style.top = (crop.y * img.clientHeight) + 'px';
   box.style.width = (crop.w * img.clientWidth) + 'px';
   box.style.height = (crop.h * img.clientHeight) + 'px';
-  document.getElementById('cropX').textContent = Math.round(crop.x * 100);
-  document.getElementById('cropY').textContent = Math.round(crop.y * 100);
-  document.getElementById('cropW').textContent = Math.round(crop.w * 100);
-  document.getElementById('cropH').textContent = Math.round(crop.h * 100);
+  ['x', 'y', 'w', 'h'].forEach(function(key) {
+    var input = document.getElementById('crop' + key.toUpperCase());
+    if (!input) return;
+    // While the user is typing in a field, don't overwrite it from a stray
+    // redraw — but a forced pass (after commit) snaps it to the clamped value.
+    if (forceInputs || document.activeElement !== input) {
+      input.value = String(Math.round(crop[key] * 1000) / 10);
+    }
+    input.disabled = !!editorState.showBefore;
+  });
+}
+
+function setCropField(key, raw) {
+  if (editorState.loading || editorState.showBefore) return;
+  var v = Number(raw);
+  if (!Number.isFinite(v)) { renderCropBox(true); return; }
+  v = Math.max(0, Math.min(100, v)) / 100;
+  var crop = cloneRecipe({crop: ensureCrop(editorState.recipe)}).crop;
+  crop[key] = v;
+  if (editorState.cropAspect && (key === 'w' || key === 'h')) {
+    var img = document.getElementById('editorImg');
+    if (img && img.clientWidth && img.clientHeight) {
+      var k = editorState.cropAspect * img.clientHeight / img.clientWidth;
+      // Cap the edited dimension so the paired one still fits in the frame.
+      // Otherwise clampCrop would clamp only the overflowing side (w=100 on
+      // a 1:1 lock over a 2:1 landscape → h clipped to 1, w stays 1) and
+      // silently break the lock while the ratio button remains active.
+      if (key === 'w') {
+        crop.w = Math.min(crop.w, k);
+        crop.h = crop.w / k;
+      } else {
+        crop.h = Math.min(crop.h, 1 / k);
+        crop.w = crop.h * k;
+      }
+    }
+  }
+  editorState.recipe.crop = clampCrop(crop);
+  markChanged(false);
+  renderCropBox(true);
+}
+
+function currentCropAspect() {
+  var img = document.getElementById('editorImg');
+  if (!img || !img.clientWidth || !img.clientHeight) return null;
+  var crop = ensureCrop(editorState.recipe);
+  var aspect = (crop.w * img.clientWidth) / (crop.h * img.clientHeight);
+  return Number.isFinite(aspect) && aspect > 0 ? aspect : null;
 }
 
 function markChanged(render) {
@@ -1029,6 +1336,14 @@ function markChanged(render) {
   updateDirtyState();
   renderCropBox();
   if (render || wasShowingBefore) schedulePreview();
+  else {
+    // Crop-only edits (resetCrop, setAspect, drag pointermove) pass
+    // render=false, so the preview isn't rescheduled — but the histogram
+    // samples inside the crop, and the mask overlay depends on the current
+    // crop for its feather scale, so both must refresh anyway.
+    scheduleHistogramRefresh();
+    if (editorState.maskOverlay) scheduleMaskOverlayRefresh();
+  }
 }
 
 function rotateRecipe(delta) {
@@ -1038,6 +1353,12 @@ function rotateRecipe(delta) {
   if (next < 0) next += 360;
   editorState.recipe.rotation = next;
   editorState.recipe.crop = transformCropForRotation(crop, delta, editorState.recipe.flip || {});
+  if (editorState.cropAspect && ((Math.abs(delta) % 180) !== 0)) {
+    // A 90° rotation turns a 3:2 box into 2:3 — the lock no longer matches
+    // any button, so release it rather than silently hold an invisible ratio.
+    editorState.cropAspect = null;
+    updateAspectButtons();
+  }
   markChanged(true);
 }
 
@@ -1059,14 +1380,35 @@ function setStraighten(value) {
   markChanged(true);
 }
 
+function updateAspectButtons() {
+  var map = { aspect32Btn: 1.5, aspect43Btn: 1.3333333333, aspect11Btn: 1 };
+  setButtonActive('aspectLockBtn', !!editorState.cropAspect);
+  setButtonDisabled('aspectLockBtn', !!editorState.showBefore || !!editorState.loading);
+  Object.keys(map).forEach(function(id) {
+    setButtonActive(id, Math.abs(Number(editorState.cropAspect || 0) - map[id]) < 0.0001);
+    setButtonDisabled(id, !!editorState.showBefore || !!editorState.loading);
+  });
+}
+
 function resetCrop() {
+  editorState.cropAspect = null;
+  updateAspectButtons();
   editorState.recipe.crop = { x: 0, y: 0, w: 1, h: 1 };
   markChanged(false);
 }
 
 function setAspect(aspect) {
+  if (editorState.loading || editorState.showBefore) return;
   var img = document.getElementById('editorImg');
   if (!img || !img.clientWidth || !img.clientHeight) return;
+  if (Math.abs(Number(editorState.cropAspect || 0) - aspect) < 0.0001) {
+    // Second click on the active ratio unlocks it and leaves the crop alone.
+    editorState.cropAspect = null;
+    updateAspectButtons();
+    return;
+  }
+  editorState.cropAspect = aspect;
+  updateAspectButtons();
   var imageAspect = img.clientWidth / img.clientHeight;
   var normalizedRatio = aspect / imageAspect;
   var w = 0.9;
@@ -1077,6 +1419,18 @@ function setAspect(aspect) {
   }
   editorState.recipe.crop = { x: (1 - w) / 2, y: (1 - h) / 2, w: w, h: h };
   markChanged(false);
+}
+
+function toggleAspectLock() {
+  if (editorState.loading || editorState.showBefore) return;
+  if (editorState.cropAspect) {
+    editorState.cropAspect = null;
+  } else {
+    var aspect = currentCropAspect();
+    if (!aspect) return;
+    editorState.cropAspect = aspect;
+  }
+  updateAspectButtons();
 }
 
 function setAdjustment(key, value) {
@@ -1112,6 +1466,418 @@ function resetAdjustments() {
   else delete editorState.recipe.adjustments;
   syncControls();
   markChanged(true);
+}
+
+// --- Presets ---------------------------------------------------------------
+// Reusable adjustments-only looks (tone + white balance + detail). Applying a
+// preset replaces the working recipe's adjustments and leaves geometry alone;
+// nothing persists until the user saves the photo. See
+// docs/plans/2026-07-03-edit-presets-design.md.
+
+async function loadPresets(selectId) {
+  try {
+    var data = await safeFetch('/api/edit-presets', {}, {toast: false});
+    editorState.presets = data.presets || [];
+  } catch (e) {
+    editorState.presets = [];
+  }
+  renderPresetOptions(selectId);
+}
+
+function renderPresetOptions(selectId) {
+  var sel = document.getElementById('presetSelect');
+  if (!sel) return;
+  var current = selectId != null ? String(selectId) : sel.value;
+  sel.innerHTML = '';
+  var placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = editorState.presets.length
+    ? 'Select a preset...'
+    : 'No presets saved yet';
+  sel.appendChild(placeholder);
+  editorState.presets.forEach(function(p) {
+    var opt = document.createElement('option');
+    opt.value = String(p.id);
+    opt.textContent = p.name;
+    sel.appendChild(opt);
+  });
+  sel.value = current;
+  if (sel.value !== current) sel.value = '';
+  onPresetSelected();
+}
+
+function selectedPreset() {
+  var sel = document.getElementById('presetSelect');
+  var id = sel ? Number(sel.value) : NaN;
+  return editorState.presets.find(function(p) { return p.id === id; }) || null;
+}
+
+function onPresetSelected() {
+  var preset = selectedPreset();
+  document.getElementById('applyPresetBtn').disabled = !preset;
+  document.getElementById('deletePresetBtn').disabled = !preset;
+  if (preset) document.getElementById('presetNameInput').value = preset.name;
+}
+
+function applySelectedPreset() {
+  var preset = selectedPreset();
+  if (!preset || editorState.loading) return;
+  var adj = cloneRecipe((preset.recipe || {}).adjustments || {});
+  if (Object.keys(adj).length) editorState.recipe.adjustments = adj;
+  else delete editorState.recipe.adjustments;
+  syncControls();
+  markChanged(true);
+  if (typeof showToast === 'function') {
+    showToast('Applied preset "' + preset.name + '" (not saved yet)', 'success');
+  }
+}
+
+async function saveCurrentAsPreset() {
+  var current = recipeForSave(editorState.recipe);
+  if (!current.adjustments) {
+    if (typeof showToast === 'function') {
+      showToast('No adjustments to save as a preset', 'error');
+    }
+    return;
+  }
+  var name = document.getElementById('presetNameInput').value.trim();
+  if (!name) {
+    if (typeof showToast === 'function') {
+      showToast('Enter a preset name first', 'error');
+    }
+    return;
+  }
+  // The server upserts by name, and selecting a preset auto-fills the name
+  // field — without this, tweak-then-Save silently replaces that preset when
+  // the user may have meant to create a new one.
+  var existing = editorState.presets.find(function(p) { return p.name === name; });
+  if (existing && !window.confirm('Overwrite preset "' + name + '" with the current adjustments?')) {
+    return;
+  }
+  try {
+    var data = await safeFetch('/api/edit-presets', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        name: name,
+        recipe: {adjustments: current.adjustments},
+      }),
+    }, {toast: false});
+    await loadPresets(data.preset && data.preset.id);
+    if (typeof showToast === 'function') {
+      showToast('Saved preset "' + data.preset.name + '"', 'success');
+    }
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast(e.message || 'Could not save preset', 'error');
+    }
+  }
+}
+
+async function deleteSelectedPreset() {
+  var preset = selectedPreset();
+  if (!preset) return;
+  if (!window.confirm('Delete preset "' + preset.name + '"?')) return;
+  try {
+    await safeFetch('/api/edit-presets/' + preset.id, {method: 'DELETE'}, {toast: false});
+    document.getElementById('presetNameInput').value = '';
+    await loadPresets('');
+    if (typeof showToast === 'function') {
+      showToast('Deleted preset "' + preset.name + '"', 'success');
+    }
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast(e.message || 'Could not delete preset', 'error');
+    }
+  }
+}
+
+// --- Local (mask-weighted) adjustments --------------------------------------
+// Subject/Background deltas driven by the photo's SAM mask, frozen into an
+// edit-mask snapshot on first touch so saved renders never shift under a
+// regenerated mask. See docs/plans/2026-07-03-local-adjustments-design.md.
+
+var LOCAL_REGIONS = ['subject', 'background'];
+var LOCAL_CONTROL_DEFS = [
+  ['exposure', 'Exposure', -5, 5, 0.1, true],
+  ['shadows', 'Shadows', -100, 100, 1, false],
+  ['highlights', 'Highlights', -100, 100, 1, false],
+  ['saturation', 'Saturation', -100, 100, 1, false],
+  ['sharpen', 'Sharpen', -100, 100, 1, false],
+  ['noise_reduction', 'Denoise', -100, 100, 1, false],
+];
+
+function buildLocalControls() {
+  LOCAL_REGIONS.forEach(function(region) {
+    var host = document.getElementById(region + 'LocalControls');
+    if (!host || host.childElementCount) return;
+    LOCAL_CONTROL_DEFS.forEach(function(def) {
+      var key = def[0];
+      var id = 'local_' + region + '_' + key;
+      var row = document.createElement('div');
+      row.className = 'control-row';
+      row.innerHTML =
+        '<label for="' + id + 'Range">' + def[1] + '</label>' +
+        '<input id="' + id + 'Range" type="range" min="' + def[2] +
+        '" max="' + def[3] + '" step="' + def[4] + '" value="0">' +
+        '<span class="control-value" id="' + id + 'Value">' +
+        (def[5] ? '0.0' : '0') + '</span>';
+      host.appendChild(row);
+      row.querySelector('input').addEventListener('input', function() {
+        setLocalAdjustment(region, key, this.value, def[5]);
+      });
+    });
+  });
+}
+
+function localRegionValues(recipe) {
+  var out = {subject: {}, background: {}, feather: 0};
+  var local = recipe && recipe.local || {};
+  (local.regions || []).forEach(function(entry) {
+    if (out[entry.region]) {
+      out[entry.region] = Object.assign({}, entry.adjustments || {});
+    }
+  });
+  out.feather = Number((local.mask || {}).feather || 0);
+  return out;
+}
+
+function rebuildLocalSection() {
+  var draft = editorState.localDraft;
+  var regions = [];
+  LOCAL_REGIONS.forEach(function(region) {
+    var adj = {};
+    LOCAL_CONTROL_DEFS.forEach(function(def) {
+      var v = Number(draft[region][def[0]] || 0);
+      if (Math.abs(v) > 0.000001) adj[def[0]] = v;
+    });
+    if (Object.keys(adj).length) regions.push({region: region, adjustments: adj});
+  });
+  // Mirror normalize_recipe's canonical region order so the dirty-state
+  // comparison stays stable against the server's saved form.
+  regions.sort(function(a, b) { return a.region < b.region ? -1 : 1; });
+  if (!regions.length || !editorState.localMask) {
+    delete editorState.recipe.local;
+    return;
+  }
+  var mask = {
+    ref: editorState.localMask.ref,
+    source_digest: editorState.localMask.source_digest,
+  };
+  if (Math.abs(Number(draft.feather || 0)) > 0.000001) {
+    mask.feather = Number(draft.feather);
+  }
+  editorState.recipe.local = {mask: mask, regions: regions};
+}
+
+function syncLocalControls() {
+  var vals = localRegionValues(editorState.recipe);
+  editorState.localDraft = {
+    subject: vals.subject,
+    background: vals.background,
+    feather: vals.feather,
+  };
+  var savedMask = (editorState.recipe.local || {}).mask;
+  if (savedMask && savedMask.ref) {
+    editorState.localMask = {
+      ref: savedMask.ref,
+      source_digest: savedMask.source_digest,
+    };
+  } else {
+    // No saved local recipe: clear the cached snapshot so the next local
+    // slider touch re-freezes the CURRENT active mask instead of taking the
+    // stale-ref fast path in ensureLocalMask().
+    editorState.localMask = null;
+    editorState.localMaskPromise = null;
+  }
+  LOCAL_REGIONS.forEach(function(region) {
+    LOCAL_CONTROL_DEFS.forEach(function(def) {
+      var id = 'local_' + region + '_' + def[0];
+      var input = document.getElementById(id + 'Range');
+      var label = document.getElementById(id + 'Value');
+      var v = Number(vals[region][def[0]] || 0);
+      if (input) input.value = String(v);
+      if (label) label.textContent = def[5] ? v.toFixed(1) : String(Math.round(v));
+    });
+  });
+  var feather = document.getElementById('featherRange');
+  if (feather) feather.value = String(vals.feather || 0);
+  var featherLabel = document.getElementById('featherValue');
+  if (featherLabel) featherLabel.textContent = String(Math.round(vals.feather || 0));
+  updateLocalBandVisibility();
+}
+
+function updateLocalBandVisibility() {
+  var available = editorState.localAvailable || !!editorState.recipe.local;
+  var band = document.getElementById('localBand');
+  var unavailable = document.getElementById('localUnavailableBand');
+  if (band) band.style.display = available ? '' : 'none';
+  if (unavailable) unavailable.style.display = available ? 'none' : '';
+  var banner = document.getElementById('localStaleBanner');
+  if (banner) banner.style.display = editorState.localStale ? '' : 'none';
+}
+
+function ensureLocalMask() {
+  if (editorState.localMask) return Promise.resolve(editorState.localMask);
+  if (!editorState.localMaskPromise) {
+    var photoId = editorState.photoId;
+    // A concurrent resetLocal() / photo change clears localMaskPromise while
+    // the snapshot POST is in flight; without the identity guard below, the
+    // late resolver would re-cache a pre-reset snapshot and the next slider
+    // touch would save that stale ref instead of freezing the current mask.
+    var pending = safeFetch(
+      '/api/photos/' + photoId + '/local-mask/snapshot',
+      {method: 'POST'}, {toast: false}
+    ).then(function(data) {
+      if (editorState.photoId === photoId && editorState.localMaskPromise === pending) {
+        editorState.localMask = data.mask;
+      }
+      return data.mask;
+    }).catch(function(e) {
+      if (editorState.photoId === photoId && editorState.localMaskPromise === pending) {
+        editorState.localMaskPromise = null;
+        editorState.localAvailable = false;
+        updateLocalBandVisibility();
+        if (typeof showToast === 'function') {
+          showToast(e.message || 'Could not snapshot the subject mask', 'error');
+        }
+      }
+      throw e;
+    });
+    editorState.localMaskPromise = pending;
+  }
+  return editorState.localMaskPromise;
+}
+
+function setLocalAdjustment(region, key, raw, fixed) {
+  if (editorState.loading) return;
+  var v = Number(raw) || 0;
+  editorState.localDraft[region][key] = v;
+  var label = document.getElementById('local_' + region + '_' + key + 'Value');
+  if (label) label.textContent = fixed ? v.toFixed(1) : String(Math.round(v));
+  if (editorState.localMask) {
+    rebuildLocalSection();
+    markChanged(true);
+  } else {
+    // First touch: freeze the active mask into a snapshot, then attach the
+    // pending slider state. The snapshot is content-addressed, so repeat
+    // calls are idempotent.
+    ensureLocalMask().then(function() {
+      rebuildLocalSection();
+      markChanged(true);
+    }).catch(function() {});
+  }
+}
+
+function setLocalFeather(raw) {
+  if (editorState.loading) return;
+  var v = Number(raw) || 0;
+  editorState.localDraft.feather = v;
+  var label = document.getElementById('featherValue');
+  if (label) label.textContent = String(Math.round(v));
+  if (editorState.localMask) {
+    rebuildLocalSection();
+    markChanged(true);
+  } else {
+    ensureLocalMask().then(function() {
+      rebuildLocalSection();
+      markChanged(true);
+    }).catch(function() {});
+  }
+}
+
+function resetLocal() {
+  editorState.localDraft = {subject: {}, background: {}, feather: 0};
+  delete editorState.recipe.local;
+  syncLocalControls();
+  markChanged(true);
+}
+
+async function updateLocalMask() {
+  var photoId = editorState.photoId;
+  try {
+    var data = await safeFetch(
+      '/api/photos/' + photoId + '/local-mask/snapshot',
+      {method: 'POST'}, {toast: false}
+    );
+    if (editorState.photoId !== photoId) return;
+    editorState.localMask = data.mask;
+    editorState.localStale = false;
+    rebuildLocalSection();
+    updateLocalBandVisibility();
+    markChanged(true);
+    if (typeof showToast === 'function') {
+      showToast('Subject mask updated — save to keep it', 'success');
+    }
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast(e.message || 'Could not update the subject mask', 'error');
+    }
+  }
+}
+
+function toggleMaskOverlay() {
+  editorState.maskOverlay = !editorState.maskOverlay;
+  setButtonActive('maskOverlayBtn', editorState.maskOverlay);
+  refreshMaskOverlay();
+}
+
+function refreshMaskOverlay() {
+  var overlay = document.getElementById('maskOverlayImg');
+  if (!overlay) return;
+  // Keep crop in the overlay recipe. /edit-mask-preview strips crop only
+  // for geometry alignment with the uncropped editor preview, but still
+  // uses the ORIGINAL cropped recipe to compute the saved-render feather
+  // scale (mirroring what /edit-preview passes to
+  // apply_recipe_to_loaded_image). Sending a crop-stripped recipe here
+  // would let the endpoint recompute the scale from the uncropped
+  // dimensions and the overlay halo would drift from the pixels the
+  // saved cropped render actually weights.
+  var source = editorState.showBefore ? editorState.savedRecipe : editorState.recipe;
+  var recipe = recipeForSave(source || {});
+  if (!editorState.maskOverlay || !recipe.local) {
+    // Bump the sequence and clear handlers so any in-flight preview load
+    // can't win the race and re-show an overlay the user just hid (or one
+    // from a previous photo during navigation).
+    editorState.maskOverlaySeq++;
+    overlay.onload = null;
+    overlay.onerror = null;
+    overlay.style.display = 'none';
+    overlay.removeAttribute('src');
+    return;
+  }
+  // The overlay is stretched to the displayed image, so its render never
+  // needs to exceed 3840 even when the preview is a native-resolution 1:1
+  // render — a full-res RGBA weight map would just burn memory and encode time.
+  var size = Math.min(previewRenderSize(), 3840);
+  var url = '/photos/' + editorState.photoId + '/edit-mask-preview?size=' +
+    size + '&recipe=' + encodeURIComponent(JSON.stringify(recipe));
+  if (overlay.getAttribute('src') === url && overlay.complete && overlay.naturalWidth) {
+    // Identical overlay already loaded — just make sure it's placed and shown.
+    editorState.maskOverlaySeq++;
+    positionMaskOverlay();
+    overlay.style.display = '';
+    return;
+  }
+  var seq = ++editorState.maskOverlaySeq;
+  overlay.onload = function() {
+    if (seq !== editorState.maskOverlaySeq) return;
+    positionMaskOverlay();
+    overlay.style.display = '';
+  };
+  overlay.onerror = function() {
+    if (seq !== editorState.maskOverlaySeq) return;
+    overlay.style.display = 'none';
+  };
+  overlay.src = url;
+}
+
+function positionMaskOverlay() {
+  var img = document.getElementById('editorImg');
+  var overlay = document.getElementById('maskOverlayImg');
+  if (!img || !overlay) return;
+  overlay.style.width = img.clientWidth + 'px';
+  overlay.style.height = img.clientHeight + 'px';
 }
 
 function resetDetail() {
@@ -1294,6 +2060,10 @@ async function autoTone() {
     var sampleCrop = cloneRecipe({crop: ensureCrop(editorState.recipe)}).crop;
     var base = previewRecipeFor(editorState.recipe);
     delete base.adjustments;
+    // Strip local (Subject/Background) edits too — otherwise the analysis
+    // render samples pixels the user has already locally edited, and Auto
+    // Tone compensates for those, computing wrong global exposure/highlights.
+    delete base.local;
     var src = '/photos/' + editorState.photoId + '/edit-preview?size=1024&analysis=1&recipe=' +
       encodeURIComponent(JSON.stringify(base));
     var img = await _loadImage(src);
@@ -1341,6 +2111,8 @@ async function autoTone() {
 function resetAllEdits() {
   editorState.recipe = {};
   ensureCrop(editorState.recipe);
+  editorState.cropAspect = null;
+  updateAspectButtons();
   syncControls();
   markChanged(true);
 }
@@ -1399,6 +2171,9 @@ async function restoreRecipe(recipe) {
   if (editorState.loading) return;
   editorState.recipe = cloneRecipe(recipe || {});
   ensureCrop(editorState.recipe);
+  // The restored checkpoint's crop needn't match the locked ratio.
+  editorState.cropAspect = null;
+  updateAspectButtons();
   syncControls();
   updatePreview();
   await saveRecipe('Restored photo edit checkpoint');
@@ -1482,8 +2257,25 @@ async function loadHistory(photoId) {
 }
 
 function goBackToBrowse() {
+  if (isEditorDirty() && !window.confirm('Discard unsaved edits to this photo?')) return;
+  // The explicit confirm above already covered this navigation; don't let the
+  // beforeunload guard prompt a second time. Re-arm shortly after in case the
+  // navigation is cancelled or the page comes back from the bfcache.
+  editorState.suppressUnloadPrompt = true;
+  setTimeout(function() { editorState.suppressUnloadPrompt = false; }, 1000);
   if (window.history.length > 1) window.history.back();
   else window.location.href = '/browse';
+}
+
+function initUnloadGuard() {
+  // Prev/Next confirm discards via editorNav, and Back via goBackToBrowse —
+  // this catches every other way off the page with unsaved edits: navbar
+  // links, refresh, tab close.
+  window.addEventListener('beforeunload', function(e) {
+    if (editorState.suppressUnloadPrompt || !isEditorDirty()) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
 }
 
 function initCropDrag() {
@@ -1515,18 +2307,34 @@ function initCropDrag() {
       c.x += dx;
       c.y += dy;
     } else {
-      if (drag.handle.indexOf('w') !== -1) { c.x += dx; c.w -= dx; }
-      if (drag.handle.indexOf('e') !== -1) c.w += dx;
-      if (drag.handle.indexOf('n') !== -1) { c.y += dy; c.h -= dy; }
-      if (drag.handle.indexOf('s') !== -1) c.h += dy;
-      if (c.w < min) {
-        if (drag.handle.indexOf('w') !== -1) c.x = drag.crop.x + drag.crop.w - min;
-        c.w = min;
+      var west = drag.handle.indexOf('w') !== -1;
+      var north = drag.handle.indexOf('n') !== -1;
+      // The corner opposite the dragged handle stays fixed.
+      var anchorX = west ? drag.crop.x + drag.crop.w : drag.crop.x;
+      var anchorY = north ? drag.crop.y + drag.crop.h : drag.crop.y;
+      c.w += west ? -dx : dx;
+      c.h += north ? -dy : dy;
+      // Locked ratio (3:2 / 4:3 / 1:1 buttons) converted from displayed
+      // pixels into the normalized 0..1 crop space.
+      var k = editorState.cropAspect
+        ? editorState.cropAspect * drag.imgH / drag.imgW
+        : 0;
+      if (k > 0) {
+        // The axis the pointer moved most drives the other.
+        if (Math.abs(dx) >= Math.abs(dy)) c.h = c.w / k;
+        else c.w = c.h * k;
+        // Cap against the image edges on the anchor's side so clampCrop
+        // below can't knock the box back off-ratio.
+        c.w = Math.min(c.w, west ? anchorX : 1 - anchorX,
+                       (north ? anchorY : 1 - anchorY) * k);
+        c.w = Math.max(c.w, min, min * k);
+        c.h = c.w / k;
+      } else {
+        if (c.w < min) c.w = min;
+        if (c.h < min) c.h = min;
       }
-      if (c.h < min) {
-        if (drag.handle.indexOf('n') !== -1) c.y = drag.crop.y + drag.crop.h - min;
-        c.h = min;
-      }
+      c.x = west ? anchorX - c.w : anchorX;
+      c.y = north ? anchorY - c.h : anchorY;
     }
     editorState.recipe.crop = clampCrop(c);
     markChanged(false);
@@ -1535,9 +2343,16 @@ function initCropDrag() {
   document.addEventListener('pointerup', function() {
     editorState.drag = null;
   });
+  // pointercancel (touch interrupted, pointer grabbed by the browser) ends
+  // the gesture without a pointerup; without this the drag stays armed and
+  // the next stray pointermove keeps resizing the crop.
+  document.addEventListener('pointercancel', function() {
+    editorState.drag = null;
+  });
   window.addEventListener('resize', function() {
     renderCropBox();
     updateHistogramFeedback();
+    positionMaskOverlay();
   });
 }
 
@@ -1551,6 +2366,125 @@ function updateNavControls() {
   if (prev) { prev.hidden = !hasNav; prev.disabled = !hasNav || idx <= 0; }
   if (next) { next.hidden = !hasNav; next.disabled = !hasNav || idx >= ids.length - 1; }
   if (pos) pos.textContent = hasNav ? (idx + 1) + ' / ' + ids.length : '';
+}
+
+function setSearchStatus(text, isError) {
+  var el = document.getElementById('editorSearchStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.toggle('error', !!isError);
+}
+
+function scheduleEditorSearch() {
+  if (editorState.searchTimer) clearTimeout(editorState.searchTimer);
+  editorState.searchTimer = null;
+  var input = document.getElementById('editorSearchInput');
+  var q = input ? input.value.trim() : '';
+  if (!q) {
+    clearEditorSearchResults();
+    return;
+  }
+  if (q === editorState.searchQuery &&
+      editorState.searchQuerySeq === editorState.searchSeq) {
+    // Trimmed query unchanged since our last dispatch AND that dispatch is
+    // still current (e.g. typing a trailing space after "American Robin"),
+    // so its in-flight response will still pass the seq guard. Bumping the
+    // seq here would invalidate it while the debounced replacement would
+    // early-return on the same-query check, leaving the UI stuck at
+    // "Searching...".
+    return;
+  }
+  // Either the trimmed query actually changed, or the previously-dispatched
+  // fetch has been invalidated by an intermediate keystroke (user typed a
+  // different query then reverted before the debounce fired). In both cases
+  // bump the seq so any in-flight response fails the seq guard, then debounce
+  // a replacement fetch.
+  editorState.searchSeq++;
+  editorState.searchTimer = setTimeout(function() {
+    editorState.searchTimer = null;
+    runEditorSearch();
+  }, 300);
+}
+
+function clearEditorSearchResults() {
+  editorState.searchSeq++;
+  editorState.searchQuery = '';
+  editorState.searchQuerySeq = 0;
+  editorState.navIds = (editorState.baseNavIds || []).slice();
+  if (window.vireoEditNav) window.vireoEditNav.setList(editorState.navIds, editorState.photoId);
+  setSearchStatus('');
+  updateNavControls();
+}
+
+async function runEditorSearch(opts) {
+  opts = opts || {};
+  if (editorState.searchTimer) {
+    clearTimeout(editorState.searchTimer);
+    editorState.searchTimer = null;
+  }
+  var input = document.getElementById('editorSearchInput');
+  var q = input ? input.value.trim() : '';
+  if (!q) {
+    clearEditorSearchResults();
+    return;
+  }
+  if (q === editorState.searchQuery && !opts.immediate &&
+      editorState.searchQuerySeq === editorState.searchSeq) {
+    // Same trimmed query as our last dispatch and that dispatch is still
+    // current (nothing invalidated it) — no need to refire. If the seqs no
+    // longer match, `scheduleEditorSearch` bumped the seq because an
+    // intermediate keystroke invalidated the in-flight response, so we must
+    // fall through to dispatch a replacement.
+    return;
+  }
+  if (isEditorDirty()) {
+    setSearchStatus('Save or discard this photo before searching.', true);
+    return;
+  }
+
+  var seq = ++editorState.searchSeq;
+  editorState.searchQuery = q;
+  editorState.searchQuerySeq = seq;
+  setSearchStatus('Searching...');
+  try {
+    var params = new URLSearchParams();
+    params.set('keyword', q);
+    params.set('sort', 'name');
+    var data = await safeFetch('/api/photos/ids?' + params.toString(), {}, {toast: false});
+    if (seq !== editorState.searchSeq) return;
+    var ids = (data.photo_ids || [])
+      .map(function(id) { return Number(id); })
+      .filter(function(id) { return Number.isFinite(id) && id > 0; });
+    if (!ids.length) {
+      editorState.navIds = [];
+      if (window.vireoEditNav) window.vireoEditNav.setList([], null);
+      setSearchStatus('No matches for "' + q + '".', true);
+      updateNavControls();
+      return;
+    }
+
+    var current = Number(editorState.photoId);
+    var target = ids.indexOf(current) === -1 ? ids[0] : current;
+    // Dirty state can change during the fetch above. Run the confirm before
+    // any nav/status mutation so a dismissed prompt leaves the editor
+    // untouched — otherwise the navIds/nav position/status would already
+    // describe the search target while the still-loaded dirty photo isn't in
+    // ids, leaving the editor visibly inconsistent.
+    if (target !== current && isEditorDirty() &&
+        !window.confirm('Discard unsaved edits to this photo?')) {
+      return;
+    }
+    editorState.navIds = ids;
+    if (window.vireoEditNav) window.vireoEditNav.setList(ids, target);
+    setSearchStatus(ids.length.toLocaleString() + ' match' + (ids.length === 1 ? '' : 'es'));
+    updateNavControls();
+    if (target !== current) {
+      await loadPhoto(target);
+    }
+  } catch (e) {
+    if (seq !== editorState.searchSeq) return;
+    setSearchStatus(e.message || 'Search failed', true);
+  }
 }
 
 function editorNav(delta) {
@@ -1609,7 +2543,13 @@ async function loadPhoto(photoId, opts) {
   editorState.recipe = {};
   var saveBtn = document.getElementById('saveBtn');
   if (saveBtn) saveBtn.disabled = true;
+  ['copySettingsBtn', 'beforeBtn', 'fitBtn', 'actualBtn'].forEach(function(id) {
+    var b = document.getElementById(id);
+    if (b) b.disabled = false;
+  });
   editorState.showBefore = false;
+  editorState.cropAspect = null;
+  updateAspectButtons();
   if (window.vireoEditNav) window.vireoEditNav.setLastPhoto(photoId);
   // Keep the URL in sync so refresh / bookmark / Back behave sensibly.
   if (!opts.skipUrl) {
@@ -1626,6 +2566,27 @@ async function loadPhoto(photoId, opts) {
     editorState.savedRecipe = cloneRecipe(photo.edit_recipe || {});
     editorState.recipe = cloneRecipe(photo.edit_recipe || {});
     ensureCrop(editorState.recipe);
+    editorState.localMask = null;
+    editorState.localMaskPromise = null;
+    editorState.localAvailable = false;
+    editorState.localStale = false;
+    editorState.maskOverlay = false;
+    setButtonActive('maskOverlayBtn', false);
+    refreshMaskOverlay();
+    safeFetch('/api/photos/' + photoId + '/masks', {}, {toast: false})
+      .then(function(d) {
+        if (editorState.photoId !== photoId) return;
+        editorState.localAvailable = !!d.active;
+        updateLocalBandVisibility();
+      }).catch(function() {});
+    if (photo.edit_recipe && photo.edit_recipe.local) {
+      safeFetch('/api/photos/' + photoId + '/edit-recipe', {}, {toast: false})
+        .then(function(d) {
+          if (editorState.photoId !== photoId) return;
+          editorState.localStale = !!d.local_mask_stale;
+          updateLocalBandVisibility();
+        }).catch(function() {});
+    }
     document.getElementById('editorFilename').textContent = photo.filename || ('Photo ' + photoId);
     var dim = photo.width && photo.height ? photo.width + ' x ' + photo.height : 'Photo ' + photoId;
     document.getElementById('editorSubhead').textContent = dim;
@@ -1636,7 +2597,12 @@ async function loadPhoto(photoId, opts) {
     loadHistory(photoId);
   } catch (e) {
     if (seq !== editorState.loadSeq) return;
-    setEditorLoading(false);
+    // Keep the editing surface frozen (editor-loading) on failure: the stage
+    // still shows the previous photo's pixels, the history panel still lists
+    // its checkpoints, and the recipe state was reset above — re-enabling the
+    // panels would let a slider tweak build a recipe from scratch and save it
+    // over this photo's real saved recipe. Prev/Next/Back in the topbar stay
+    // usable to retry or leave.
     document.getElementById('editorFilename').textContent = 'Photo unavailable';
     setStatus(e.message || 'Could not load photo', true);
   }
@@ -1650,15 +2616,32 @@ function initEditorKeyboard() {
     if (tag === 'input' || tag === 'textarea' || tag === 'select' || (t && t.isContentEditable)) return;
     if (e.key === 'ArrowLeft') { e.preventDefault(); editorNav(-1); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); editorNav(1); }
+    else if (e.key === 'Enter') {
+      // Enter locks in the current edit (crop, straighten, adjustments) by
+      // committing the working recipe — same as clicking Save Changes. Skip
+      // when focus is on a control with native Enter activation (button, link,
+      // summary, role="button") so tabbing to Reset All / Back / a transform
+      // button and pressing Enter still triggers that control. No-op when
+      // there's nothing to save so it doesn't fire on an unchanged photo.
+      var role = t && t.getAttribute ? t.getAttribute('role') : null;
+      if (tag === 'button' || tag === 'a' || tag === 'summary' || tag === 'label' ||
+          role === 'button' || role === 'link' || role === 'menuitem' || role === 'tab') return;
+      var saveBtn = document.getElementById('saveBtn');
+      if (saveBtn && !saveBtn.disabled) { e.preventDefault(); saveRecipe(); }
+    }
   });
 }
 
 async function initEditor() {
   initCropDrag();
   initEditorKeyboard();
+  initUnloadGuard();
+  buildLocalControls();
   clearHistogramFeedback();
   setZoomMode('fit');
+  loadPresets();
   if (window.vireoEditNav) editorState.navIds = window.vireoEditNav.getList() || [];
+  editorState.baseNavIds = (editorState.navIds || []).slice();
   var match = window.location.pathname.match(/\/edit\/(\d+)/);
   var photoId = match
     ? Number(match[1])

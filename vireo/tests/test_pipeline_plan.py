@@ -9,6 +9,8 @@ work — independent of whether *any* prior output exists in the workspace.
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
@@ -203,6 +205,33 @@ def test_count_real_detections_scopes_to_photo_ids(tmp_path):
     # the whole-workspace count.
     counts = db.count_real_detections_in_scope(photo_ids=set())
     assert counts == {"total_dets": 0, "photos_with_dets": 0}
+
+
+def test_full_image_fallback_classify_counts_track_run_keys(tmp_path):
+    db, folder_id = _make_db(tmp_path)
+    pid_empty = db.add_photo(
+        folder_id=folder_id, filename="empty.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.record_detector_run(pid_empty, "megadetector-v6", box_count=0)
+
+    pid_weak, _ = _add_photo_with_detection(db, folder_id, "weak.jpg", conf=0.05)
+    db.record_detector_run(pid_weak, "megadetector-v6", box_count=1)
+
+    assert db.count_full_image_fallback_photos() == 1
+    assert db.count_full_image_classify_pending_pairs("BioCLIP-2", "fp1") == 1
+
+    full_det_id = db.save_detections(
+        pid_empty,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+          "confidence": 0, "category": "animal"}],
+        detector_model="full-image",
+    )[0]
+    assert db.count_full_image_classify_pending_pairs("BioCLIP-2", "fp1") == 1
+
+    db.record_classifier_run(full_det_id, "BioCLIP-2", "fp1", prediction_count=1)
+    assert db.count_full_image_classify_pending_pairs("BioCLIP-2", "fp1") == 0
+    assert db.count_classifier_runs([pid_empty, pid_weak], "BioCLIP-2", "fp1") == 1
 
 
 def test_count_classify_pending_excludes_recorded_runs(tmp_path):
@@ -1005,6 +1034,74 @@ def test_classify_plan_exposes_pending_and_eligible_no_detections(tmp_path, monk
     assert detail["pending"] == 0
 
 
+def test_classify_plan_counts_full_image_fallback_pending(tmp_path, monkeypatch):
+    from pipeline_plan import compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    pid = db.add_photo(
+        folder_id=folder_id, filename="empty.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.record_detector_run(pid, "megadetector-v6", box_count=0)
+
+    import labels as labels_mod
+    import models as models_mod
+
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "will-run"
+    assert classify["detail"]["full_image_fallbacks"] == 1
+    assert classify["detail"]["eligible"] == 1
+    assert classify["detail"]["pending"] == 1
+
+
+def test_classify_plan_done_prior_for_full_image_fallback(tmp_path, monkeypatch):
+    from labels_fingerprint import TOL_SENTINEL
+    from pipeline_plan import compute_plan
+
+    db, folder_id = _make_db(tmp_path)
+    pid = db.add_photo(
+        folder_id=folder_id, filename="empty.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.record_detector_run(pid, "megadetector-v6", box_count=0)
+    full_det_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0, "y": 0, "w": 1, "h": 1},
+          "confidence": 0, "category": "animal"}],
+        detector_model="full-image",
+    )[0]
+    db.record_classifier_run(full_det_id, "BioCLIP-2", TOL_SENTINEL, 1)
+
+    import labels as labels_mod
+    import models as models_mod
+
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True,
+         "weights_path": _tol_weights(tmp_path)},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    plan = compute_plan(db, _params(model_ids=["m1"]), str(tmp_path / "test.db"))
+    classify = plan["stages"]["Classify"]
+    assert classify["state"] == "done-prior"
+    assert classify["detail"]["full_image_fallbacks"] == 1
+    assert classify["detail"]["eligible"] == 1
+    assert classify["detail"]["pending"] == 0
+
+
 def test_classify_plan_exposes_pending_and_eligible_blocked_only(tmp_path, monkeypatch):
     """Blocked-only path (model needs labels): eligible=0 since no model can run.
     pending=0. UI hides the bar; the summary explains the block."""
@@ -1794,6 +1891,50 @@ def test_eye_keypoints_plan_will_skip_when_preflight_fails(tmp_path, monkeypatch
     assert "disabled in config" in eye["summary"]
 
 
+def test_eye_keypoints_plan_honors_per_run_override_against_config_disabled(
+    tmp_path, monkeypatch,
+):
+    """When Settings has ``eye_detect_enabled=False`` but the caller opted
+    in via ``eye_detect_override=True`` (Process-page checkbox on), the
+    plan must show the stage as ``will-run``, not ``will-skip — Disabled
+    in config``. The pill has to match what the job would actually do —
+    which is toggle the config on for the run and execute the stage.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    # Give the stage some eligible work so it lands on will-run (not
+    # done-prior). eye_keypoint_stage_preflight is exercised with the
+    # REAL implementation — no monkeypatch — so the override must reach
+    # its config lookup.
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    db.conn.execute(
+        "UPDATE photos SET mask_path='/m/a.png' WHERE id=?", (pid,),
+    )
+    db.conn.execute(
+        """INSERT INTO predictions
+            (detection_id, classifier_model, labels_fingerprint,
+             species, confidence)
+           VALUES (?, ?, ?, ?, ?)""",
+        (did, "BioCLIP-2", "fp1", "robin", 0.9),
+    )
+    db.conn.commit()
+
+    plan_no_override = compute_plan(
+        db, _params(), str(tmp_path / "test.db"),
+    )
+    assert plan_no_override["stages"]["EyeKeypoints"]["state"] == "will-skip"
+
+    plan_with_override = compute_plan(
+        db, _params(eye_detect_override=True), str(tmp_path / "test.db"),
+    )
+    eye = plan_with_override["stages"]["EyeKeypoints"]
+    assert eye["state"] != "will-skip", (
+        f"eye_detect_override=True must let the plan pill show what the "
+        f"job would actually do (run the stage), not the stale Settings "
+        f"disabled reason: got {eye!r}"
+    )
+
+
 def test_eye_keypoints_plan_done_prior_when_all_processed(tmp_path, monkeypatch):
     """The headline bug case: every eligible photo has eye_tenengrad set
     (with the current fingerprint, so it isn't stale), so the next run is
@@ -1970,6 +2111,108 @@ def test_regroup_plan_will_skip_when_disabled(tmp_path):
     assert plan["stages"]["Group"]["state"] == "will-skip"
 
 
+def test_regroup_plan_will_run_species_review_for_identify_preset(
+    tmp_path, monkeypatch,
+):
+    """The identify preset sets ``skip_regroup=True`` but flags
+    ``review_mode="species"``, and ``regroup_stage`` (pipeline_job.py) then
+    runs the species-review pipeline and overwrites the workspace cache. The
+    plan must NOT report "Disabled" here — that lies about the work the
+    next press performs (and hides that identify wipes the existing full
+    Group cache/fingerprint on save).
+
+    Requires a downloaded/active model: ``/api/jobs/pipeline`` auto-flips
+    ``skip_classify`` on installs without one, and the species-review
+    branch can't run then. The plan mirrors that no-model degradation —
+    see ``test_regroup_plan_species_review_skipped_when_no_active_model``.
+    """
+    import models as models_mod
+    from pipeline_plan import compute_plan
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: {
+        "id": "m1", "name": "BioCLIP-2", "downloaded": True,
+    })
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(skip_regroup=True, review_mode="species"),
+        str(tmp_path / "test.db"),
+    )
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-run", group
+    assert "species review" in group["summary"].lower(), group
+
+
+def test_regroup_plan_species_review_ignored_when_classify_also_disabled(tmp_path):
+    """species review only runs when classify runs (regroup_stage's
+    species branch requires ``not skip_classify``). If a caller sends
+    ``review_mode="species"`` alongside ``skip_classify=True``, the actual
+    job skips grouping — the plan must too.
+    """
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(
+            skip_regroup=True, skip_classify=True, review_mode="species",
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["stages"]["Group"]["state"] == "will-skip"
+
+
+def test_regroup_plan_species_review_skipped_when_no_active_model(
+    tmp_path, monkeypatch,
+):
+    """No downloaded/active model → ``/api/jobs/pipeline`` calls
+    ``_apply_no_model_auto_skip`` and flips ``skip_classify`` +
+    ``skip_regroup`` to True, so ``regroup_stage`` skips and no
+    species-review cache is prepared. The plan must mirror that
+    degradation instead of promising "Will prepare species review" for
+    a run that will only show the no-model warning.
+    """
+    import models as models_mod
+    from pipeline_plan import compute_plan
+    # No downloaded model, no active model — the plan-side auto-skip
+    # gate should trip. The `_make_db` fixture already ships no models,
+    # but the dev's real ~/.vireo/models.json could bleed in without
+    # this monkeypatch.
+    monkeypatch.setattr(models_mod, "get_models", lambda: [])
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: None)
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(skip_regroup=True, review_mode="species"),
+        str(tmp_path / "test.db"),
+    )
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-skip", group
+    assert "disabled" in group["summary"].lower(), group
+
+
+def test_regroup_plan_species_review_skipped_when_selected_model_not_downloaded(
+    tmp_path, monkeypatch,
+):
+    """The auto-skip in ``/api/jobs/pipeline`` also trips when every
+    requested ``model_ids`` entry is missing its download. The plan
+    must not advertise species review in that case either.
+    """
+    import models as models_mod
+    from pipeline_plan import compute_plan
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2", "downloaded": False},
+    ])
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: None)
+    db, _ = _make_db(tmp_path)
+    plan = compute_plan(
+        db,
+        _params(
+            skip_regroup=True, review_mode="species", model_ids=["m1"],
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["stages"]["Group"]["state"] == "will-skip"
+
+
 def test_regroup_plan_done_prior_when_cache_exists_and_no_upstream_work(tmp_path, monkeypatch):
     """The other headline bug: Group & Score had no signal at all and
     always said "Will run." When the cache exists and no upstream stage
@@ -2086,6 +2329,80 @@ def test_regroup_plan_will_run_when_workspace_fingerprint_outdated(tmp_path, mon
 
 
 
+def test_regroup_plan_will_run_when_eye_detect_override_differs_from_workspace(
+    tmp_path, monkeypatch,
+):
+    """Cache is fresh against workspace settings, but the run carries a
+    ``eye_detect_override`` that flips ``eye_detect_enabled`` for THIS
+    press. Because ``compute_group_fingerprint`` doesn't hash
+    ``eye_detect_enabled``, the fingerprint match alone would let the
+    plan report ``done-prior`` — hiding the fact that ``regroup_stage``
+    will actually rescore with different eye behavior. The plan must
+    call this out as will-run instead.
+    """
+    from pipeline_plan import compute_plan
+    db, folder_id = _make_db(tmp_path)
+    pid, did = _add_photo_with_detection(db, folder_id, "a.jpg")
+    _mark_sam_done(db, pid, "/m/a.png")
+    from labels_fingerprint import TOL_SENTINEL
+    db.record_classifier_run(did, "BioCLIP-2", TOL_SENTINEL, prediction_count=1)
+
+    cache_path = os.path.join(
+        str(tmp_path), f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(cache_path, "w") as f:
+        f.write('{"photos": []}')
+
+    # Workspace's own effective config: eye off (the new default). Stamp
+    # fingerprint so the fingerprint check would pass without the override.
+    import config as cfg
+    from pipeline import compute_group_fingerprint
+    effective = db.get_effective_config(cfg.load())
+    db.set_workspace_group_state(
+        db._active_workspace_id,
+        fingerprint=compute_group_fingerprint(effective),
+        when_ts=1714579200,
+    )
+
+    import labels as labels_mod
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_models", lambda: [
+        {"id": "m1", "name": "BioCLIP-2",
+         "model_str": "hf-hub:imageomics/bioclip-2",
+         "model_type": "bioclip", "downloaded": True},
+    ])
+    monkeypatch.setattr(labels_mod, "get_active_labels", lambda: [])
+    monkeypatch.setattr(labels_mod, "get_saved_labels", lambda: [])
+
+    # Sanity check: no override → plan is done-prior.
+    plan_no_override = compute_plan(
+        db,
+        _params(model_ids=["m1"], skip_eye_keypoints=True),
+        str(tmp_path / "test.db"),
+    )
+    assert plan_no_override["stages"]["Group"]["state"] == "done-prior"
+
+    # Same state + eye_detect_override=True (Process-page checkbox) → the
+    # eye override differs from the workspace's eye-off setting, so
+    # regroup will rescore with different eye behavior; must be will-run.
+    plan_with_override = compute_plan(
+        db,
+        _params(
+            model_ids=["m1"], skip_eye_keypoints=True,
+            eye_detect_override=True,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    group = plan_with_override["stages"]["Group"]
+    assert group["state"] == "will-run", (
+        "eye_detect_override differs from workspace eye_detect_enabled — "
+        "regroup will rescore with different eye behavior, so the plan "
+        "must report will-run instead of the cache-fresh done-prior: "
+        f"got {group!r}"
+    )
+    assert group.get("detail", {}).get("eye_override_differs") is True
+
+
 def test_regroup_plan_will_run_when_cache_exists_but_fingerprint_invalidated(
     tmp_path, monkeypatch,
 ):
@@ -2175,6 +2492,191 @@ def test_api_pipeline_plan_returns_per_stage_state(app_and_db):
     assert data["stages"]["Extract"]["state"] == "will-skip"
     assert data["stages"]["EyeKeypoints"]["state"] == "will-skip"
     assert data["stages"]["Group"]["state"] == "will-skip"
+
+
+def _plan_process_id(db, name):
+    return next(p["id"] for p in db.get_saved_processes() if p["name"] == name)
+
+
+def test_api_pipeline_plan_identify_flags_show_species_review(
+    app_and_db, monkeypatch,
+):
+    """The process page sends explicit skip flags + review_mode='species' for
+    the Identify-birds shape. The plan must show Group as species review, not
+    "Disabled — stage will be skipped" (a lie about the default workflow).
+
+    An active model must resolve for the plan to promise species review —
+    on no-model installs the job auto-skips; see the paired plan-side
+    ``test_regroup_plan_species_review_skipped_when_no_active_model``.
+    """
+    app, _ = app_and_db
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: {
+        "id": "m1", "name": "BioCLIP-2", "downloaded": True,
+    })
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={
+            # classify on, extract/eyes/group off, species-review path.
+            "skip_classify": False,
+            "skip_extract_masks": True,
+            "skip_eye_keypoints": True,
+            "skip_regroup": True,
+            "review_mode": "species",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    group = data["stages"]["Group"]
+    assert group["state"] == "will-run", group
+    assert "species review" in group["summary"].lower(), group
+
+
+def test_api_pipeline_plan_process_id_only_body_merges_skip_flags(app_and_db):
+    """A body of just ``{"process_id": <Quick look>}`` (no explicit skip
+    flags) must plan the same run ``/api/jobs/pipeline`` would run — every
+    stage Quick look disables must report skipped, not the ``skip_* = false``
+    defaults the raw ``PipelinePlanParams`` would use.
+
+    Before the plan route merged the full process expansion, it copied only
+    ``review_mode`` and left every ``skip_*`` field at its default False, so
+    a caller sending process-id-only got a plan that promised
+    Classify/Extract/Group work the actual job would skip.
+    """
+    app, db = app_and_db
+    pid = _plan_process_id(db, "Quick look")
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"process_id": pid},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Quick look: skip_classify + skip_extract + skip_eyes + skip_regroup
+    for stage in ("Classify", "Extract", "EyeKeypoints", "Group"):
+        assert data["stages"][stage]["state"] == "will-skip", (stage, data)
+
+
+def test_api_pipeline_plan_process_id_only_identify_runs_species_review(
+    app_and_db, monkeypatch,
+):
+    """Process-id-only Identify birds must still surface the species-review
+    branch: it sets skip_regroup=True *and* review_mode="species", and the
+    plan must reflect that Group prepares species review even though
+    skip_regroup came from the expansion (not an explicit body key).
+    """
+    app, db = app_and_db
+    pid = _plan_process_id(db, "Identify birds")
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: {
+        "id": "m1", "name": "BioCLIP-2", "downloaded": True,
+    })
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"process_id": pid},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    group = data["stages"]["Group"]
+    assert group["state"] == "will-run", group
+    assert "species review" in group["summary"].lower(), group
+    # Extract/EyeKeypoints must still report skipped — the process's skip
+    # flags applied even though the body sent only ``process_id``.
+    assert data["stages"]["Extract"]["state"] == "will-skip", data
+    assert data["stages"]["EyeKeypoints"]["state"] == "will-skip", data
+
+
+def test_api_pipeline_plan_identify_no_model_mirrors_job_auto_skip(app_and_db):
+    """On installs with no active model, ``/api/jobs/pipeline`` calls
+    ``_apply_no_model_auto_skip`` and flips ``skip_classify`` +
+    ``skip_regroup`` to True, so the Identify-birds run only shows the
+    no-model warning and skips regroup. The plan endpoint must mirror
+    that degradation instead of promising "Will prepare species review"
+    for the default workflow on a fresh install.
+    """
+    app, db = app_and_db
+    pid = _plan_process_id(db, "Identify birds")
+    # `app_and_db` already redirects models.DEFAULT_MODELS_DIR/CONFIG_PATH
+    # to tmp_path, so `get_active_model()` returns None here without any
+    # extra monkeypatching — a clean fresh install.
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"process_id": pid},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["stages"]["Group"]["state"] == "will-skip", data
+
+
+def test_api_pipeline_plan_explicit_body_key_wins_over_process(app_and_db):
+    """Process expansion supplies *defaults*: an explicit body key must still
+    override, mirroring ``/api/jobs/pipeline``. Without this a Custom caller
+    can't pin one flag on top of a process.
+
+    Quick look sets ``skip_regroup=True`` — a body that pins
+    ``skip_regroup=False`` alongside the process must produce a Group plan for
+    a real run, not the "Disabled" summary skip_regroup=True would emit.
+    """
+    app, db = app_and_db
+    pid = _plan_process_id(db, "Quick look")
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"process_id": pid, "skip_regroup": False},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    group = data["stages"]["Group"]
+    # skip_regroup=True would produce "Disabled — stage will be skipped"
+    # (pipeline_plan._regroup_plan). Explicit False must route around
+    # that branch entirely.
+    assert "disabled" not in group["summary"].lower(), group
+
+
+def test_api_pipeline_plan_rejects_unknown_process_id(app_and_db):
+    """A nonexistent process id must 404 — otherwise the plan silently falls
+    back to the raw skip flags and disagrees with what /api/jobs/pipeline
+    would do (which 404s the same input)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"process_id": 999999},
+    )
+    assert resp.status_code == 404
+
+
+def test_api_pipeline_plan_rejects_null_process_id(app_and_db):
+    """A present-but-null process_id must 400, matching /api/jobs/pipeline —
+    key presence, not truthiness. Otherwise previewing and starting the same
+    body disagree: the plan treats null as omitted and returns a Custom plan
+    while the job route rejects the identical body."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"process_id": None},
+    )
+    assert resp.status_code == 400
+    assert "process_id" in resp.get_json()["error"]
+
+
+def test_api_pipeline_plan_rejects_legacy_strategy(app_and_db):
+    """The plan route must reject the previous strategy-name shape too, so
+    an old caller sending `{"strategy": "quick_look"}` fails here rather
+    than silently producing a full-pipeline plan the job route would then
+    reject."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"strategy": "quick_look"},
+    )
+    assert resp.status_code == 400
+    assert "strategy" in resp.get_json()["error"]
 
 
 def test_api_pipeline_plan_collection_scope(app_and_db):
@@ -2444,6 +2946,135 @@ def test_import_plan_deduplicates_source_paths(tmp_path, monkeypatch):
     assert plan_mixed["stages"]["Scan"]["detail"]["already_known"] == 1
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import planner mode")
+def test_import_plan_all_duplicates_reports_zero_new_photos(
+    tmp_path, monkeypatch
+):
+    """The re-inserted SD card (local-processing mode): every selected
+    file is already in the library via the hash/metadata duplicate gate,
+    so the run will import 0 new photos and every per-photo stage executes
+    over an empty set — the post-ingest scan walks the local staging root,
+    which stays empty when everything deduplicated.
+    The summaries must say that outright — "no photos in scope yet" and
+    "MegaDetector will run first" read as "work is coming" when none is.
+    Group must report "Will skip": with 0 collected photos the job never
+    creates a collection, and regroup_stage skips on `not collection_id` —
+    so any "Will run" claim (upstream work, no cached grouping, stale
+    cache) would promise a Group run the job cannot perform."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    paths = ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"]
+    plan = compute_plan(
+        db,
+        _import_params(
+            paths,
+            model_ids=["m1"],
+            hash_duplicate_paths=list(paths),
+            local_processing=True,
+            skip_eye_keypoints=False,
+            skip_regroup=False,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 0
+    assert plan["scope"]["known_count"] == 2
+    for suffix in ("Previews", "Classify", "Extract", "EyeKeypoints"):
+        stage = plan["stages"][suffix]
+        assert stage["state"] == "will-run", (suffix, stage)
+        assert "0 new photos to import" in stage["summary"], (suffix, stage)
+        assert stage["detail"]["import_no_new"] is True, (suffix, stage)
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-skip", group
+    assert "nothing to group" in group["summary"], group
+    assert "0 new photos to import" in group["summary"], group
+    assert group["detail"]["import_no_new"] is True, group
+    assert group["detail"]["upstream_will_run"] is False, group
+    assert "cache_exists" in group["detail"], group
+
+
+def test_import_plan_all_duplicates_copy_mode_keeps_forward_summaries(
+    tmp_path, monkeypatch
+):
+    """Contrast case for the above: same all-duplicates selection but in
+    plain copy mode (local_processing off). Here "nothing to …" would
+    overclaim: with no copied paths the post-ingest scan runs with
+    restrict=None over the REAL destination, and scanner.scan fires the
+    photo callback for existing cataloged rows there — so downstream
+    workspace-scoped stages can still find real work among
+    previously-unprocessed destination photos. The plan must keep the
+    pre-existing forward-looking summaries and let Group see upstream
+    as will-run."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    paths = ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"]
+    plan = compute_plan(
+        db,
+        _import_params(
+            paths,
+            model_ids=["m1"],
+            hash_duplicate_paths=list(paths),
+            skip_eye_keypoints=False,
+            skip_regroup=False,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 0
+    assert plan["scope"]["known_count"] == 2
+    for suffix in ("Previews", "Classify", "Extract", "EyeKeypoints"):
+        stage = plan["stages"][suffix]
+        assert stage["state"] == "will-run", (suffix, stage)
+        assert "0 new photos to import" not in stage["summary"], (suffix, stage)
+        assert not stage["detail"].get("import_no_new"), (suffix, stage)
+    assert "no photos in scope yet" in plan["stages"]["Previews"]["summary"]
+    group = plan["stages"]["Group"]
+    assert group["state"] == "will-run"
+    assert "upstream stages have new work" in group["summary"], group
+
+
+@pytest.mark.skip(reason="retired pipeline local-processing import planner mode")
+def test_import_plan_with_new_files_keeps_forward_looking_summaries(
+    tmp_path, monkeypatch
+):
+    """Contrast case: an import that DOES bring new files must keep the
+    counting summaries and never claim "0 new photos to import" — even in
+    local-processing mode, where the all-duplicates wording is allowed."""
+    import pipeline as pipeline_mod
+    from pipeline_plan import compute_plan
+    db, _ = _make_db(tmp_path)
+    _stub_models(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline_mod, "eye_keypoint_stage_preflight", lambda config: None,
+    )
+    plan = compute_plan(
+        db,
+        _import_params(
+            ["/cards/SD/IMG_001.NEF", "/cards/SD/IMG_002.NEF"],
+            model_ids=["m1"],
+            local_processing=True,
+            skip_eye_keypoints=False,
+            skip_regroup=False,
+        ),
+        str(tmp_path / "test.db"),
+    )
+    assert plan["scope"]["new_count"] == 2
+    for suffix in ("Previews", "Classify", "Extract", "EyeKeypoints"):
+        stage = plan["stages"][suffix]
+        assert stage["state"] == "will-run", (suffix, stage)
+        assert "0 new photos to import" not in stage["summary"], (suffix, stage)
+        assert not stage["detail"].get("import_no_new"), (suffix, stage)
+    assert plan["stages"]["Group"]["state"] == "will-run"
+
+
 def test_import_plan_all_known_scan_is_done_prior(tmp_path):
     """If every preview file is already in the DB, Scan reports done-prior
     (the run will be a no-op for the scan step). Other stages reflect
@@ -2606,6 +3237,17 @@ def test_api_pipeline_plan_rejects_non_string_source_paths_elements(app_and_db):
         },
     )
     assert resp.status_code == 400
+
+
+def test_api_pipeline_plan_rejects_retired_import_fields(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post(
+        "/api/pipeline/plan",
+        json={"source_paths": [], "local_processing": True},
+    )
+    assert resp.status_code == 400
+    assert "import/archive fields" in resp.get_json()["error"]
 
 
 def test_import_plan_empty_source_paths_is_no_op(tmp_path, monkeypatch):

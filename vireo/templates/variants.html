@@ -33,12 +33,11 @@
   padding: 12px;
   border-bottom: 1px solid var(--border-primary);
 }
+.species-search .search-control { width: 100%; }
 .species-search input {
-  width: 100%;
   background: var(--bg-input);
   color: var(--text-primary);
   border: 1px solid var(--border-secondary);
-  border-radius: 4px;
   padding: 8px 10px;
   font-size: 13px;
   outline: none;
@@ -208,7 +207,11 @@
   <!-- Species sidebar -->
   <div class="species-sidebar">
     <div class="species-search">
-      <input type="text" id="speciesSearch" placeholder="Search species..." oninput="filterSpecies()">
+      <div class="search-control">
+        <input type="text" id="speciesSearch" placeholder="Search species..." oninput="filterSpecies()">
+        <button id="variantSpeciesMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('variantSpecies', 'match_case', filterSpecies)" title="Match case">Aa</button>
+        <button id="variantSpeciesWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('variantSpecies', 'whole_word', filterSpecies)" title="Match whole word">ab</button>
+      </div>
     </div>
     <div class="species-list" id="speciesList">
       <div style="padding:20px;color:var(--text-dim);font-size:13px;">Loading species...</div>
@@ -230,6 +233,7 @@
 <script>
 var allSpecies = [];
 var activeSpecies = null;
+var variantPhotos = [];
 
 async function loadSpecies() {
   try {
@@ -269,15 +273,18 @@ document.getElementById('speciesList').addEventListener('click', function(e) {
 });
 
 function filterSpecies() {
-  var q = document.getElementById('speciesSearch').value.toLowerCase();
+  var q = document.getElementById('speciesSearch').value.trim();
   if (!q) {
     renderSpeciesList(allSpecies);
     return;
   }
+  var searchOptions = VireoTextSearch.readOptions('variantSpecies');
   var filtered = allSpecies.filter(function(s) {
-    return s.species.toLowerCase().indexOf(q) !== -1 ||
-           (s.taxonomy_family || '').toLowerCase().indexOf(q) !== -1 ||
-           (s.taxonomy_order || '').toLowerCase().indexOf(q) !== -1;
+    return VireoTextSearch.matchesFields(
+      [s.species, s.taxonomy_family || '', s.taxonomy_order || ''],
+      q,
+      searchOptions
+    );
   });
   renderSpeciesList(filtered);
 }
@@ -302,6 +309,23 @@ async function selectSpecies(name) {
 function renderClusters(data) {
   var area = document.getElementById('clusterArea');
   var html = '';
+
+  // Keep the displayed cluster order as the lightbox navigation order.  The
+  // shared lightbox can only enable its arrows when the opening page supplies
+  // the surrounding photos.  A photo with multiple detections can appear in
+  // more than one cluster; dedupe by id so lightbox findIndex lookups don't
+  // bounce back to an earlier copy and skip later photos.
+  var seenPhotoIds = {};
+  variantPhotos = data.clusters.reduce(function(photos, cluster) {
+    cluster.photos.forEach(function(item) {
+      var photo = item.photo;
+      if (photo && !seenPhotoIds[photo.id]) {
+        seenPhotoIds[photo.id] = true;
+        photos.push(photo);
+      }
+    });
+    return photos;
+  }, []);
 
   // Header
   html += '<div class="cluster-header">' +
@@ -361,7 +385,11 @@ function renderClusters(data) {
 document.getElementById('clusterArea').addEventListener('click', function(e) {
   var thumb = e.target.closest('.cluster-thumb[data-photo-id]');
   if (thumb) {
-    openLightbox(parseInt(thumb.dataset.photoId, 10), thumb.dataset.filename || '');
+    openLightbox(
+      parseInt(thumb.dataset.photoId, 10),
+      thumb.dataset.filename || '',
+      variantPhotos
+    );
     return;
   }
   var labelBtn = e.target.closest('.cluster-label-btn[data-cluster-idx]');

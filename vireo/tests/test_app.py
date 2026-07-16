@@ -1,7 +1,26 @@
+import contextlib
 import json
 import os
 
 from wait import wait_for_job_via_client
+
+
+def _run_missing_originals_check(client, folder_id=None):
+    body = {}
+    if folder_id is not None:
+        body["folder_id"] = folder_id
+    resp = client.post("/api/photos/missing/check", json=body)
+    assert resp.status_code in (200, 202)
+    data = resp.get_json()
+    if data.get("pending"):
+        wait_for_job_via_client(client, data["job_id"])
+    url = "/api/photos/missing"
+    if folder_id is not None:
+        url += f"?folder_id={folder_id}"
+    payload = client.get(url).get_json()
+    assert payload["status"] == "ready"
+    assert "photos" in payload
+    return payload
 
 
 def test_index_redirects_to_browse(app_and_db, monkeypatch, tmp_path):
@@ -38,18 +57,22 @@ def test_browse_page(app_and_db):
     assert 'function refreshPendingSyncBanner()' in html
 
 
-def test_zoom_test_page(app_and_db):
-    """GET /zoom-test returns the experimental zoom comparison page."""
+def test_browse_discloses_raw_jpeg_pairs_and_offers_source_switch(app_and_db):
+    """The paired-file behavior must be discoverable in Browse rather than
+    existing only as an internal ``companion_path`` or delete-dialog detail."""
     app, _ = app_and_db
-    client = app.test_client()
-    resp = client.get('/zoom-test')
+    html = app.test_client().get("/browse").get_data(as_text=True)
 
-    assert resp.status_code == 200
-    html = resp.get_data(as_text=True)
-    assert 'Current Lightbox: CSS 1:1' in html
-    assert 'Current Lightbox: Device 1:1' in html
-    assert 'Natural Layout: Device 1:1' in html
-    assert 'Direct Image: Device 1:1' in html
+    assert "JPEG · RAW pair" in html
+    assert 'id="lightboxSourceControl"' in html
+    assert "Viewing JPEG · Show RAW" in html
+    assert "Has JPEG Companion" in html
+    assert "_vireoPairSourceByPhoto[key] = 'jpeg'" in html
+    assert "_vireoPairPendingSourceByPhoto" in html
+    assert "A failed request leaves the old source intact" in html
+    assert "_lbCurrentSrcKey === 'full'" in html
+    assert "_lbLoadDetections(photoId)" in html
+    assert "_vireoPairSourceImageLoaded(photoId, 'jpeg', pairImg)" in html
 
 
 def test_api_add_keyword_accepts_existing_keyword_id(app_and_db):
@@ -519,15 +542,165 @@ def test_logs_page(app_and_db):
     assert resp.status_code == 200
 
 
-def test_settings_page_has_preview_cache_field(app_and_db):
-    """Settings page renders the preview_cache_max_mb input and cache controls."""
+def test_storage_page_has_preview_cache_field(app_and_db):
+    """Storage page renders the preview_cache_max_mb input and cache controls."""
     app, _ = app_and_db
     client = app.test_client()
-    resp = client.get('/settings')
+    resp = client.get('/storage')
     assert resp.status_code == 200
-    assert b'preview_cache_max_mb' in resp.data
     assert b'cfgPreviewCacheMaxMb' in resp.data
     assert b'clearPreviewCache' in resp.data
+
+
+def test_storage_page_bounds_large_cache_file_listings(app_and_db):
+    """Thumbnail and preview modals request a bounded first page."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/storage')
+    assert resp.status_code == 200
+    assert b'STORAGE_MODAL_FILE_LIMIT = 500' in resp.data
+    assert b'&limit=' in resp.data
+    assert b'Select all shown' in resp.data
+    assert b'Delete Entire Cache' in resp.data
+
+
+def test_storage_page_has_health_cleanup_and_location_controls(app_and_db):
+    """Storage surfaces capacity, safety guidance, refresh, and folder actions."""
+    app, _ = app_and_db
+    page = app.test_client().get('/storage')
+    assert page.status_code == 200
+    for marker in (
+        b'storageFreeSize', b'storageReclaimableSize', b'clearSafeCaches',
+        b'openStorageFolder', b'refreshStoragePage', b'Safe to clear',
+        b'Download again', b'cannot currently be reclaimed separately',
+        b'loadMasksCard(s && s.masks)',
+    ):
+        assert marker in page.data
+    assert page.data.count(b"{name: 'Database'") == 1
+
+
+def test_api_storage_includes_offline_originals(app_and_db):
+    """Storage totals include Vireo-managed offline originals."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/storage')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["offline_originals"]["count"] == 0
+    assert data["offline_originals"]["size"] == 0
+    assert data["offline_originals"]["path"].endswith("offline")
+
+
+def test_api_storage_reports_volume_reclaimable_and_masks(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    _seed_masks(db, tmp_path)
+
+    data = app.test_client().get('/api/storage').get_json()
+    assert data["masks"]["size"] == 450
+    assert data["masks"]["total_bytes"] == 450
+    assert len(data["masks"]["variants"]) == 2
+    assert data["reclaimable"] == sum(
+        data[name]["size"] for name in ("thumbnails", "previews", "embeddings")
+    )
+    assert data["total"] == sum([
+        data["database"]["size"], data["thumbnails"]["size"],
+        data["previews"]["size"], data["embeddings"]["size"],
+        data["models"]["size"], data["hf_cache"]["size"],
+        data["offline_originals"]["size"], data["masks"]["size"],
+    ])
+    assert data["storage_root"] == str(tmp_path)
+    assert data["locations"]
+    assert data["volumes"]
+    assert all(volume["name"] for volume in data["volumes"])
+    assert all(volume["free"] >= 0 for volume in data["volumes"])
+    assert all(volume["capacity"] > 0 for volume in data["volumes"])
+
+
+def test_api_storage_reports_each_backing_volume(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    import app as app_module
+    import classifier
+
+    embedding_dir = tmp_path / "separate-embedding-volume"
+    embedding_dir.mkdir()
+    (embedding_dir / "labels.npy").write_bytes(b"embedding")
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(embedding_dir))
+
+    real_ismount = app_module.os.path.ismount
+    simulated_mounts = {str(tmp_path), str(embedding_dir)}
+    monkeypatch.setattr(
+        app_module.os.path, "ismount",
+        lambda path: path in simulated_mounts or real_ismount(path),
+    )
+    disk_usage = app_module.shutil._ntuple_diskusage
+    monkeypatch.setattr(
+        app_module.shutil, "disk_usage",
+        lambda path: disk_usage(
+            1000, 900 if path == str(embedding_dir) else 600,
+            100 if path == str(embedding_dir) else 400,
+        ),
+    )
+
+    data = app.test_client().get('/api/storage').get_json()
+    by_mount = {volume["mount_path"]: volume for volume in data["volumes"]}
+    assert by_mount[str(tmp_path)]["free"] == 400
+    assert by_mount[str(embedding_dir)]["free"] == 100
+    embedding_location = next(
+        location for location in data["locations"]
+        if location["id"] == "embeddings"
+    )
+    assert embedding_location["volume"]["mount_path"] == str(embedding_dir)
+
+
+def test_clear_safe_storage_caches(app_and_db, tmp_path, monkeypatch):
+    app, db = app_and_db
+    import classifier
+
+    preview_dir = tmp_path / "previews"
+    preview_dir.mkdir()
+    (preview_dir / "1_1200.jpg").write_bytes(b"preview")
+    embedding_dir = tmp_path / "embedding-cache"
+    embedding_dir.mkdir()
+    (embedding_dir / "labels.npy").write_bytes(b"embedding")
+    monkeypatch.setattr(classifier, "CACHE_DIR", str(embedding_dir))
+
+    response = app.test_client().post('/api/storage/clear-safe')
+    assert response.status_code == 200
+    assert response.get_json()["cleared"] == [
+        "thumbnails", "previews", "embeddings",
+    ]
+    assert not (tmp_path / "thumbs").exists()
+    assert not preview_dir.exists()
+    assert not embedding_dir.exists()
+    assert db.conn.execute("SELECT COUNT(*) FROM preview_cache").fetchone()[0] == 0
+
+
+def test_open_storage_folder_uses_server_selected_path(
+    app_and_db, monkeypatch,
+):
+    app, _ = app_and_db
+    import app as app_module
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    monkeypatch.setattr(
+        app_module.subprocess, "run",
+        lambda command, **kwargs: calls.append(command) or Result(),
+    )
+    response = app.test_client().post('/api/storage/open-folder')
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True}
+    assert calls
+    assert calls[0][-1] == app.config["THUMB_CACHE_DIR"].rsplit(os.sep, 1)[0]
 
 
 def test_detection_cache_stats_endpoint(app_and_db):
@@ -545,8 +718,8 @@ def test_detection_cache_stats_endpoint(app_and_db):
     data = resp.get_json()
     assert data == {"photo_count": 0, "model_count": 0}
 
-    # Settings page advertises the stat with the right DOM hooks.
-    page = client.get('/settings')
+    # Storage page advertises the stat with the right DOM hooks.
+    page = client.get('/storage')
     assert page.status_code == 200
     assert b'detectionCacheStats' in page.data
     assert b'photos' in page.data
@@ -1313,6 +1486,141 @@ def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
         assert root_sparrow_id not in kw_ids
 
 
+def test_encounter_species_replacement_finds_taxonomy_only_previous(app_and_db):
+    """Replacement path resolves ``previous_species`` via the taxonomy-only rule.
+
+    When ``previous_species`` (drawn from the pipeline cache's
+    ``confirmed_species``) resolves to a stored row that carries
+    ``type='taxonomy'`` but ``is_species=0`` (update_keyword with an explicit
+    type doesn't set the legacy column), the ``old_kid`` lookup must find it.
+    Without ``OR type='taxonomy'`` it misses, ``is_replacement`` stays true
+    but no ``old_kid`` is resolved, so the previously-tagged photo keeps the
+    old tag while ``add_keyword`` adds the new species alongside it —
+    leaving two taxonomy tags on the same photo.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    prev_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('apapane', 'taxonomy', 0)"
+    ).lastrowid
+    db.conn.commit()
+
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    db.tag_photo(photo_id, prev_kid)
+
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="apapane")
+
+    resp = client.post(
+        '/api/encounters/species',
+        json={"species": "iiwi", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json().get("previous_species") == "apapane"
+
+    remaining = db.conn.execute(
+        """SELECT k.name FROM keywords k
+           JOIN photo_keywords pk ON pk.keyword_id = k.id
+           WHERE pk.photo_id = ?
+             AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+        (photo_id,),
+    ).fetchall()
+    names = sorted(row["name"] for row in remaining)
+    assert names == ["iiwi"], (
+        f"expected only the new species after replacement, got {names!r}"
+    )
+
+
+def test_encounter_species_replacement_queues_stored_previous_name(app_and_db):
+    """When the pipeline cache still holds a legacy quoted species like
+    `‘apapane` but the DB row is stored under the normalized `apapane`, the
+    replacement path must queue keyword_remove with the STORED normalized
+    name so it cancels an outstanding keyword_add for the same normalized
+    key. Queuing the raw quoted value would leave both the stale add and a
+    quoted remove in the pending set, and the next XMP sync would then
+    write the stray-quote spelling back to the sidecar. The v5 migration
+    normalizes DB rows but not pipeline cache files, so this state remains
+    reachable.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    # Pretend an earlier confirm queued a keyword_add for the normalized
+    # spelling. This is the state we need cancellation to fire against.
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Apapane", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_add", "Apapane") in values
+
+    # Seed the pipeline cache's confirmed_species with the LEGACY quoted
+    # spelling — an upgraded pipeline cache written before keyword
+    # normalization landed. The DB row is stored as clean `Apapane`.
+    _seed_encounter_cache(app, db, photo_ids, confirmed_species="‘Apapane")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    # The stale keyword_add for the normalized spelling must be cancelled by
+    # a remove that targets the same normalized value — not the raw quoted
+    # cache value. If the queue used the cache spelling, both would linger.
+    assert ("keyword_add", "Apapane") not in values
+    assert ("keyword_remove", "‘Apapane") not in values
+    assert ("keyword_add", "Blue Jay") in values
+
+
+def test_encounter_species_replacement_queues_stored_case_previous_name(app_and_db):
+    """Cache/stored spelling can differ by case only (SQLite NOCASE keeps
+    them together, but pending_changes.value is exact-match). When
+    replacing a species whose cache reads `saffron finch` but the stored
+    keyword row and outstanding pending add are `Saffron Finch`, the
+    remove queued for the old species must use the stored spelling so it
+    cancels the pending add. Queuing the cache spelling would leave both
+    add(`Saffron Finch`) and remove(`saffron finch`) in the pending set;
+    sync_to_xmp then treats them as a paired rename and writes the old
+    species back to the sidecar.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    photo_ids = [p["id"] for p in db.conn.execute("SELECT id FROM photos").fetchall()]
+
+    # Earlier confirm queues keyword_add('Saffron Finch') under the DB's
+    # canonical case.
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Saffron Finch", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    assert ("keyword_add", "Saffron Finch") in values
+
+    # Cache confirmed_species drifts to a case-variant spelling (upgraded
+    # cache written by a client that normalized case differently).
+    _seed_encounter_cache(app, db, photo_ids, confirmed_species="saffron finch")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+
+    values = {(c["change_type"], c["value"]) for c in db.get_pending_changes()}
+    # The stale add must be cancelled by a remove that targets the same
+    # stored spelling — not the lowercase cache value.
+    assert ("keyword_add", "Saffron Finch") not in values
+    assert ("keyword_remove", "saffron finch") not in values
+    assert ("keyword_add", "Blue Jay") in values
+
+
 def test_species_search(app_and_db):
     """GET /api/species/search returns matching species from keywords."""
     app, db = app_and_db
@@ -1328,6 +1636,27 @@ def test_species_search(app_and_db):
     assert len(data) >= 2
     names_lower = [n.lower() for n in data]
     assert any("robin" in n for n in names_lower)
+
+    db.add_keyword("Western Tanager", is_species=True)
+    db.add_keyword("Common Tern", is_species=True)
+
+    resp = client.get('/api/species/search?q=tern')
+    assert resp.status_code == 200
+    names = resp.get_json()
+    assert "Western Tanager" in names
+    assert "Common Tern" in names
+
+    resp = client.get('/api/species/search?q=tern&whole_word=1')
+    assert resp.status_code == 200
+    names = resp.get_json()
+    assert "Western Tanager" not in names
+    assert "Common Tern" in names
+
+    resp = client.get('/api/species/search?q=Tern&match_case=1')
+    assert resp.status_code == 200
+    names = resp.get_json()
+    assert "Western Tanager" not in names
+    assert "Common Tern" in names
 
     # Too short query returns empty
     resp = client.get('/api/species/search?q=r')
@@ -1391,8 +1720,8 @@ def test_pages_link_base_css(app_and_db):
     """Every page includes a <link> to vireo-base.css."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/lightroom', '/audit', '/logs',
-             '/settings', '/workspace', '/pipeline', '/dashboard',
+    pages = ['/browse', '/audit', '/logs',
+             '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/pipeline/review', '/map', '/shortcuts']
     for page in pages:
         resp = client.get(page)
@@ -1467,8 +1796,37 @@ def test_compare_predictions_api(app_and_db):
         assert "confidence" in model_preds[0]
 
 
+def test_compare_predictions_api_exposes_miss_flags(app_and_db):
+    """Miss flags on a photo must reach the compare payload so the
+    'Hide marked misses' exclusion and 'marked miss' badge can work."""
+    app, db = app_and_db
+
+    photos = db.conn.execute("SELECT id FROM photos ORDER BY id").fetchall()
+    p_miss = photos[0]["id"]
+    p_clean = photos[1]["id"]
+    db.conn.execute(
+        "UPDATE photos SET miss_no_subject=1, miss_clipped=1, miss_oof=1 WHERE id=?",
+        (p_miss,),
+    )
+    db.conn.commit()
+
+    rules = json.dumps([{"field": "photo_ids", "value": [p_miss, p_clean]}])
+    cid = db.add_collection("Miss Flag Collection", rules)
+
+    resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
+    assert resp.status_code == 200
+    by_id = {row["photo_id"]: row for row in resp.get_json()["photos"]}
+
+    assert by_id[p_miss]["miss_no_subject"] is True
+    assert by_id[p_miss]["miss_clipped"] is True
+    assert by_id[p_miss]["miss_oof"] is True
+    assert by_id[p_clean]["miss_no_subject"] is False
+    assert by_id[p_clean]["miss_clipped"] is False
+    assert by_id[p_clean]["miss_oof"] is False
+
+
 def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
-    """A resolved conflict plus a pending match should not stay in review."""
+    """When every prediction on a photo is already reviewed, no needs_review."""
     app, db = app_and_db
     photo_id = db.conn.execute(
         "SELECT id FROM photos ORDER BY id LIMIT 1"
@@ -1485,15 +1843,84 @@ def test_compare_ignores_resolved_predictions_for_needs_review(app_and_db):
     db.add_prediction(
         det_ids[0], "Blue Jay", 0.95, "model-a", status="accepted",
     )
-    db.add_prediction(det_ids[1], "Cardinal", 0.92, "model-b")
+    db.add_prediction(
+        det_ids[1], "Cardinal", 0.92, "model-b", status="accepted",
+    )
 
     resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
 
     assert resp.status_code == 200
     row = resp.get_json()["photos"][0]
-    assert row["row_category"] == "match"
+    # Both predictions are already reviewed (accepted). The row falls back
+    # to the highest-priority category among all predictions, but nothing is
+    # pending so it must not appear in the Needs review count/filter.
+    assert row["row_category"] == "conflict"
     assert row["needs_review"] is False
     assert resp.get_json()["summary"]["needs_review"] == 0
+
+
+def test_compare_flags_pending_match_as_needs_review(app_and_db):
+    """A pending match prediction must still surface in the needs-review
+    count/filter.
+
+    classify_job stores a pending prediction with ``category="match"`` when a
+    photo-level match is ambiguous (e.g. multiple recognized species keywords
+    in the sidecar), and expects Compare to route the user to it. Before this
+    fix, ``/api/predictions/compare`` excluded ``match`` from ``needs_review``,
+    so those deliberately-pending detections disappeared from the queue.
+    """
+
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    species_id = db.add_keyword("Cardinal", is_species=True)
+    db.tag_photo(photo_id, species_id)
+    rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
+    cid = db.add_collection("Pending Match", rules)
+
+    det_ids = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Cardinal", 0.92, "model-a")
+
+    resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    row = payload["photos"][0]
+    assert row["row_category"] == "match"
+    assert row["needs_review"] is True
+    assert payload["summary"]["needs_review"] == 1
+
+
+def test_compare_accepted_matches_are_not_marked_missing(app_and_db):
+    """Accepted match predictions still make the photo a match row."""
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    species_id = db.add_keyword("Cardinal", is_species=True)
+    db.tag_photo(photo_id, species_id)
+    rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
+    cid = db.add_collection("Accepted Matches", rules)
+
+    det_ids = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3}, "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Cardinal", 0.95, "model-a", status="accepted")
+    db.add_prediction(det_ids[0], "Cardinal", 0.93, "model-b", status="accepted")
+
+    resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    row = data["photos"][0]
+    assert row["row_category"] == "match"
+    assert row["row_label"] == "Match"
+    assert row["needs_review"] is False
+    assert data["summary"]["missing_predictions"] == 0
 
 
 def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
@@ -1554,6 +1981,54 @@ def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
             and c["value"] == "New Species"
             for c in changes
         )
+
+
+def test_replace_prediction_keywords_migrates_species_curation(app_and_db):
+    """Replacing species via prediction moves ordered highlights and
+    representative preferences from the old species to the new one.
+    Without this migration, a curated photo silently loses its
+    Highlights/Life-List position when its species is swapped."""
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    old_kid = db.add_keyword("Old Species", is_species=True)
+    db.tag_photo(photo_id, old_kid)
+    db.add_species_highlight("Old Species", photo_id)
+    db.set_species_representative("Old Species", photo_id)
+
+    det_id = db.save_detections(photo_id, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.add_prediction(det_id, "New Species", 0.95, "model-a")
+    pred = db.conn.execute(
+        """SELECT id FROM predictions
+           WHERE detection_id = ? AND classifier_model = ?""",
+        (det_id, "model-a"),
+    ).fetchone()
+
+    resp = app.test_client().post(
+        f"/api/predictions/{pred['id']}/replace-keywords"
+    )
+    assert resp.status_code == 200
+
+    ws_id = db._ws_id()
+    highlights = db.conn.execute(
+        """SELECT species FROM species_highlights
+           WHERE workspace_id = ? AND photo_id = ?""",
+        (ws_id, photo_id),
+    ).fetchall()
+    assert [r["species"] for r in highlights] == ["New Species"]
+
+    prefs = db.conn.execute(
+        """SELECT purpose, species FROM photo_preferences
+           WHERE workspace_id = ? AND photo_id = ?""",
+        (ws_id, photo_id),
+    ).fetchall()
+    assert {(p["purpose"], p["species"]) for p in prefs} == {
+        ("species_representative", "New Species"),
+    }
 
 
 def test_api_predictions_include_bounding_box(app_and_db):
@@ -1954,8 +2429,8 @@ def test_pages_include_vireo_utils(app_and_db):
     """Every page includes vireo-utils.js via _navbar.html."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/lightroom', '/audit', '/logs',
-             '/settings', '/workspace', '/pipeline', '/dashboard',
+    pages = ['/browse', '/audit', '/logs',
+             '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:
         resp = client.get(page)
@@ -1976,8 +2451,8 @@ def test_pages_no_inline_escapeHtml(app_and_db):
     """No page template should still define escapeHtml inline."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/lightroom', '/audit', '/logs',
-             '/settings', '/workspace', '/pipeline', '/dashboard',
+    pages = ['/browse', '/audit', '/logs',
+             '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:
         resp = client.get(page)
@@ -2063,11 +2538,12 @@ def test_pipeline_page_init_api(app_and_db):
     assert data['total_photos'] == 3
 
 
-def test_pipeline_page_init_includes_recent_destinations(app_and_db):
-    """page-init response includes recent_destinations from ingest config."""
+def test_pipeline_page_init_omits_recent_destinations(app_and_db):
+    """recent_destinations left page-init with the Destination card: the
+    process page no longer copies files anywhere, so leaking the import
+    history here would just invite the UI to grow a destination again."""
     import config as cfg
     app, _ = app_and_db
-    # Write config with recent_destinations
     config = cfg.load()
     config.setdefault("ingest", {})["recent_destinations"] = ["/photos/out1", "/photos/out2"]
     cfg.save(config)
@@ -2075,8 +2551,7 @@ def test_pipeline_page_init_includes_recent_destinations(app_and_db):
         resp = c.get("/api/pipeline/page-init")
         assert resp.status_code == 200
         data = resp.get_json()
-        assert "recent_destinations" in data
-        assert data["recent_destinations"] == ["/photos/out1", "/photos/out2"]
+        assert "recent_destinations" not in data
 
 
 def test_templates_jinja_free_except_includes():
@@ -2472,6 +2947,10 @@ def test_pipeline_detach_burst(app_and_db):
     assert len(data["encounters"]) == 2
     assert len(data["encounters"][0]["bursts"]) == 1
     assert data["encounters"][1]["photo_ids"] == [3]
+    assert data["encounters"][0]["species"] == ["Robin", 0.875]
+    assert data["encounters"][1]["species"] == ["Eagle", 0.8]
+    assert data["encounters"][1]["confirmed_species"] is None
+    assert data["encounters"][1]["species_confirmed"] is False
     # Remaining encounter predictions should only reflect photos 1,2
     remaining_species = [sp["species"] for sp in data["encounters"][0]["species_predictions"]]
     assert "Robin" in remaining_species
@@ -2586,6 +3065,216 @@ def test_pipeline_detach_photo(app_and_db):
     # New burst predictions should reflect photo 3
     new_species = [sp["species"] for sp in enc["bursts"][1]["species_predictions"]]
     assert "Eagle" in new_species
+    assert enc["bursts"][1]["species_override"] == {
+        "species": "Eagle",
+        "confirmed": False,
+    }
+
+
+def test_pipeline_detach_photo_confidence_weighted_override(app_and_db):
+    """The derived species_override on a detached single-photo burst uses the
+    same confidence-weighted vote as encounter_species_label — not the
+    prediction count. For a photo whose top-5 is [A .90, B .44, B .44] the
+    override must be A (weight 0.90 > 0.88), even though B appears twice.
+    This is the invariant the client-side detach mirror
+    (candidateSpeciesOverrideFromPhotos in pipeline_review.html) has to
+    match; a divergence would let the local save-cache path persist a
+    different unconfirmed override than the server detach-photo endpoint."""
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Robin", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 2,
+                "burst_count": 1,
+                "time_range": [None, None],
+                "photo_ids": [1, 2],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg",
+             "species_top5": [["Robin", 0.9, "m1"]]},
+            {"id": 2, "label": "REVIEW", "filename": "b.jpg",
+             "species_top5": [
+                 ["Alpha", 0.90, "m1"],
+                 ["Beta", 0.44, "m1"],
+                 ["Beta", 0.44, "m2"],
+             ]},
+        ],
+        "summary": {"total_photos": 2, "encounter_count": 1, "burst_count": 1,
+                     "keep_count": 1, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-photo",
+                       json={"encounter_index": 0, "burst_index": 0, "photo_id": 2})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    enc = data["encounters"][0]
+    detached = enc["bursts"][1]
+    assert detached["photo_ids"] == [2]
+    assert detached["species_override"] == {"species": "Alpha", "confirmed": False}
+
+
+def test_pipeline_detach_photo_partial_confirm_leaves_override_null(app_and_db):
+    """When the source encounter is in the mixed/partially-confirmed state
+    (species_confirmed=False but confirmed_species set — e.g. some photos
+    confirmed as species A, others still unconfirmed), detaching a photo
+    must NOT stamp the new burst with an unconfirmed classifier-guess
+    override. The confirm endpoint reads species_override.species without
+    checking the confirmed flag, so a guess override there would be picked
+    up as previous_species on the next burst confirm — the code would then
+    try to untag the guess instead of the actual prior species, leaving
+    the photo with both the old and new species keywords. Leaving the
+    override empty makes the confirm endpoint fall back to
+    enc.confirmed_species as previous_species instead.
+    """
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                "species": ["Robin", 0.9],
+                # Partial-confirm state: dominant prior species is known
+                # but not all photos agree, so species_confirmed is False.
+                "confirmed_species": "Robin",
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 1,
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2, 3], "species_predictions": [],
+                     "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg",
+             "species_top5": [["Robin", 0.9, "m1"]]},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg",
+             "species_top5": [["Robin", 0.85, "m1"]]},
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg",
+             "species_top5": [["Eagle", 0.8, "m1"]]},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 1,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0,
+                     "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-photo",
+                       json={"encounter_index": 0, "burst_index": 0,
+                             "photo_id": 3})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    enc = data["encounters"][0]
+    detached = enc["bursts"][1]
+    assert detached["photo_ids"] == [3]
+    # Critically: no unconfirmed "Eagle" guess should be stamped here.
+    # Otherwise the confirm endpoint would treat "Eagle" as previous_species
+    # instead of the real prior confirmed_species "Robin".
+    assert detached["species_override"] is None
+
+
+def test_pipeline_detach_burst_predictionless_does_not_inherit_parent_species(app_and_db):
+    """When the detached burst's photos have no species predictions,
+    ``encounter_species_label`` returns ``(None, 0.0)``. The new encounter
+    must remain unlabeled rather than inheriting the source encounter's
+    label — the parent species almost certainly came from the sibling
+    burst we just left behind, so advertising it as a one-click candidate
+    on the unrelated detached photos would reintroduce the stale-inherited-
+    label bug this change removes. Mirror check for the shrunken source
+    encounter when the only predicted burst is detached away from
+    unclassified siblings.
+    """
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    results = {
+        "encounters": [
+            {
+                # Encounter-level label was inherited from burst [1,2] alone;
+                # burst [3] has no predictions of its own.
+                "species": ["Robin", 0.9],
+                "confirmed_species": None,
+                "species_predictions": [],
+                "species_confirmed": False,
+                "photo_count": 3,
+                "burst_count": 2,
+                "time_range": [None, None],
+                "photo_ids": [1, 2, 3],
+                "bursts": [
+                    {"photo_ids": [1, 2], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [3], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg",
+             "species_top5": [["Robin", 0.9, "m1"]]},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg",
+             "species_top5": [["Robin", 0.85, "m1"]]},
+            # Photo 3 has no predictions — the burst we detach is unclassified.
+            {"id": 3, "label": "REVIEW", "filename": "c.jpg",
+             "species_top5": []},
+        ],
+        "summary": {"total_photos": 3, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 1, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/pipeline/detach-burst",
+                       json={"encounter_index": 0, "burst_index": 1})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Sanity: two encounters, detached photo is on the new one.
+    assert len(data["encounters"]) == 2
+    assert data["encounters"][1]["photo_ids"] == [3]
+    # The detached encounter's photos have no predictions of their own,
+    # so its species must be [None, 0.0] — not the parent's Robin label.
+    assert data["encounters"][1]["species"] == [None, 0.0]
+
+    # Now the reverse: detach the only predicted burst and leave an
+    # encounter of unclassified photos behind. The remaining encounter
+    # must not keep the pre-detach Robin label.
+    with open(path, "w") as f:
+        _json.dump(results, f)
+    resp = client.post("/api/pipeline/detach-burst",
+                       json={"encounter_index": 0, "burst_index": 0})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Source encounter now holds only photo 3 (no predictions).
+    assert data["encounters"][0]["photo_ids"] == [3]
+    assert data["encounters"][0]["species"] == [None, 0.0]
+    # And the detached burst (photos 1, 2) keeps its own Robin label.
+    assert data["encounters"][1]["photo_ids"] == [1, 2]
+    assert data["encounters"][1]["species"][0] == "Robin"
 
 
 def test_pipeline_detach_burst_clears_stale_trace(app_and_db):
@@ -2864,6 +3553,62 @@ def test_encounter_species_confirm_single_burst_does_not_detach(app_and_db):
     assert enc["bursts"][0]["species_override"] == {"species": "Golden Eagle", "confirmed": True}
 
 
+def test_encounter_species_burst_confirm_does_not_detach_on_variant_spelling(app_and_db):
+    """Burst confirm must compare `enc_species` against the submitted species
+    by keyword_match_key: a cached pre-normalization spelling of the same
+    species (e.g. legacy `‘Apapane` from before the migration ran vs the
+    stored/submitted `Apapane`) is the same species and must not trigger
+    _auto_detach_burst_for_species. A raw `!=` compare would treat them as
+    different and split the burst out even though nothing actually changed.
+    """
+    import json as _json
+    app, db = app_and_db
+    client = app.test_client()
+
+    cache_dir = os.path.dirname(app.config["DB_PATH"])
+    ws_id = db._active_workspace_id
+    # Encounter has 2 bursts; confirmed_species carries the legacy quoted
+    # spelling. The clean form is what the user is submitting.
+    results = {
+        "encounters": [
+            {
+                "species": ["Apapane", 0.9],
+                "confirmed_species": "‘Apapane",
+                "species_predictions": [],
+                "species_confirmed": True,
+                "photo_count": 2,
+                "burst_count": 2,
+                "time_range": ["2024-06-10T09:00:00", "2024-06-10T09:00:02"],
+                "photo_ids": [1, 2],
+                "bursts": [
+                    {"photo_ids": [1], "species_predictions": [], "species_override": None},
+                    {"photo_ids": [2], "species_predictions": [], "species_override": None},
+                ],
+            }
+        ],
+        "photos": [
+            {"id": 1, "label": "KEEP", "filename": "a.jpg", "timestamp": "2024-06-10T09:00:00"},
+            {"id": 2, "label": "KEEP", "filename": "b.jpg", "timestamp": "2024-06-10T09:00:02"},
+        ],
+        "summary": {"total_photos": 2, "encounter_count": 1, "burst_count": 2,
+                     "keep_count": 2, "review_count": 0, "reject_count": 0, "rarity_protected": 0},
+    }
+    path = os.path.join(cache_dir, f"pipeline_results_ws{ws_id}.json")
+    with open(path, "w") as f:
+        _json.dump(results, f)
+
+    resp = client.post("/api/encounters/species",
+                       json={"species": "Apapane", "photo_ids": [1], "burst_index": 0})
+    assert resp.status_code == 200
+
+    with open(path) as f:
+        updated = _json.load(f)
+    # Same species (variant-only difference in confirmed_species) — burst
+    # must NOT be split off. Still exactly one encounter with both bursts.
+    assert len(updated["encounters"]) == 1
+    assert len(updated["encounters"][0]["bursts"]) == 2
+
+
 def test_encounter_species_detach_merges_into_adjacent_encounter(app_and_db):
     """Detaching a second burst merges it into an adjacent encounter with matching confirmed species."""
     import json as _json
@@ -2979,6 +3724,67 @@ def test_keyword_duplicates_scoped_by_workspace(app_and_db):
         assert "Cardinal" in dupe_names or "cardinal" in dupe_names
         # sparrow dupe is only in ws_b, should not appear
         assert "sparrow" not in dupe_names
+
+
+def test_keyword_duplicates_scoped_by_slot(app_and_db):
+    """Same-name keywords in different slots (parent_id, type) are not reported.
+
+    The cleanup endpoint merges only within
+    (keyword_match_key, parent_id, type, species-bearing).
+    If the duplicates listing groups solely by lowered name, users would see
+    persistent false positives — a taxonomy `Robin` and an individual `Robin`,
+    or `Springfield` under Illinois vs Missouri — that never disappear after
+    clicking Clean.
+    """
+    app, db = app_and_db
+    photos = db.get_photos()
+    p1 = photos[0]["id"]
+    p2 = photos[1]["id"]
+
+    # Same name under two different parents — legitimately distinct places
+    illinois = db.add_keyword("Illinois")
+    missouri = db.add_keyword("Missouri")
+    sfd_il = db.add_keyword("Springfield", parent_id=illinois)
+    sfd_mo = db.add_keyword("Springfield", parent_id=missouri)
+    db.tag_photo(p1, sfd_il)
+    db.tag_photo(p2, sfd_mo)
+
+    # Same name at root but different type — species vs general
+    # Insert directly to bypass add_keyword's dedup, and match how the migration
+    # allows type-distinct roots to coexist (UNIQUE(name, parent_id) permits it
+    # because parent_id is NULL — NULLs don't compare equal in SQLite).
+    cur1 = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("Robin",),
+    )
+    cur2 = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'general', 0)",
+        ("Robin",),
+    )
+    db.conn.commit()
+    db.tag_photo(p1, cur1.lastrowid)
+    db.tag_photo(p2, cur2.lastrowid)
+
+    # Same name/parent/type but different effective species identity. Legacy
+    # databases may contain type=general,is_species=1 species alongside an
+    # ordinary general homonym; cleanup must not offer or merge this pair.
+    species_general = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES (?, 'general', 1)",
+        ("robin",),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(p1, species_general)
+
+    with app.test_client() as c:
+        resp = c.get("/api/keywords/duplicates")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        dupe_names = {v["name"] for d in data for v in d["variants"]}
+        # Neither slot-distinct name should be reported as a duplicate
+        assert "Springfield" not in dupe_names
+        assert "Robin" not in dupe_names
+        assert "robin" not in dupe_names
 
 
 def test_all_keywords_scoped_by_workspace(app_and_db):
@@ -3227,6 +4033,194 @@ def test_rename_keyword_queues_sidecar_changes(app_and_db):
     assert ("keyword_add", "NewBird") in actions
 
 
+def test_rename_keyword_normalizes_edge_quotes_and_queues_clean_name(app_and_db):
+    """A rename request with stray edge quotes must store the normalized
+    value AND queue that normalized value to sidecars. Otherwise the DB
+    holds the clean spelling while pending changes and history reference
+    the raw quoted variant, and XMP sync would then write the wrong name.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird")
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "OldBird") in actions
+    assert ("keyword_add", "apapane") in actions
+    assert ("keyword_add", "‘apapane") not in actions
+
+
+def test_rename_keyword_rejects_empty_after_normalization(app_and_db):
+    """PUT /api/keywords/<id> with a quote-only name must be rejected at
+    the boundary — same contract as add_keyword — instead of storing an
+    invisible empty-string keyword row."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("Real")
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "'"})
+    assert resp.status_code == 400
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "Real"
+
+
+def test_rename_keyword_merges_into_normalized_peer_toplevel(app_and_db):
+    """Renaming a top-level keyword to a name that normalizes to an existing
+    top-level peer must merge into that peer instead of writing a second row.
+    SQLite treats NULL parent_ids as distinct under UNIQUE(name, parent_id),
+    so without the peer check the rename would silently produce two peer
+    `apapane` rows for later duplicate cleanup to mop up."""
+    app, db = app_and_db
+    client = app.test_client()
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    apapane_id = db.add_keyword("apapane")
+    other_id = db.add_keyword("Other")
+    db.tag_photo(p1, other_id)
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT id FROM keywords WHERE parent_id IS NULL "
+        "AND name = 'apapane'"
+    ).fetchall()
+    assert [row["id"] for row in rows] == [apapane_id]
+    other_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert other_row is None
+    tag_ids = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (p1,)
+        ).fetchall()
+    }
+    assert apapane_id in tag_ids
+    assert other_id not in tag_ids
+
+    changes = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ? "
+        "ORDER BY id",
+        (p1,),
+    ).fetchall()
+    actions = [(c["change_type"], c["value"]) for c in changes]
+    assert ("keyword_remove", "Other") in actions
+    assert ("keyword_add", "apapane") in actions
+    assert ("keyword_add", "‘apapane") not in actions
+
+
+def test_rename_keyword_merges_into_normalized_peer_child(app_and_db):
+    """Same guard for child keywords: without the peer check, two rows under
+    the same parent with normalized-equal names would violate
+    UNIQUE(name, parent_id) at UPDATE time and surface as a 500. The merge
+    turns that into an in-place consolidation instead."""
+    app, db = app_and_db
+    client = app.test_client()
+    parent_id = db.add_keyword("Birds")
+    apapane_id = db.add_keyword("apapane", parent_id=parent_id)
+    other_id = db.add_keyword("Other", parent_id=parent_id)
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT id FROM keywords WHERE parent_id = ? AND name = 'apapane'",
+        (parent_id,),
+    ).fetchall()
+    assert [row["id"] for row in rows] == [apapane_id]
+    other_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert other_row is None
+
+
+def test_rename_keyword_does_not_merge_across_types_toplevel(app_and_db):
+    """Cross-type collisions at the top level must not be merged into a
+    peer. Silently moving photos from an 'individual' keyword onto a
+    same-named 'taxonomy' peer would rewrite the tag's semantics; the
+    dedup boundary elsewhere is (name, parent_id, type). SQLite treats
+    NULL parent_ids as distinct under UNIQUE(name, parent_id), so a
+    cross-type rename at the top level is allowed to produce a
+    coexisting row rather than a silent merge."""
+    app, db = app_and_db
+    client = app.test_client()
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    taxonomy_id = db.add_keyword("apapane", kw_type="taxonomy")
+    other_id = db.add_keyword("Other", kw_type="individual")
+    db.tag_photo(p1, other_id)
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    assert resp.status_code == 200
+
+    # The individual row survives with its normalized name; the taxonomy
+    # peer is untouched.
+    survivor = db.conn.execute(
+        "SELECT id, name, type FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert survivor is not None
+    assert survivor["name"] == "apapane"
+    assert survivor["type"] == "individual"
+    taxonomy_row = db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (taxonomy_id,)
+    ).fetchone()
+    assert taxonomy_row["type"] == "taxonomy"
+    # The individual tag must NOT have silently retargeted onto the
+    # taxonomy peer.
+    tag_ids = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (p1,)
+        ).fetchall()
+    }
+    assert other_id in tag_ids
+    assert taxonomy_id not in tag_ids
+
+
+def test_rename_keyword_does_not_merge_across_types_child(app_and_db):
+    """Cross-type collisions under the same parent surface as an error
+    rather than silently retagging photos across types. UNIQUE(name,
+    parent_id) fires when the plain UPDATE lands on a cross-type peer."""
+    app, db = app_and_db
+    client = app.test_client()
+    parent_id = db.add_keyword("Birds")
+    db.add_keyword("apapane", parent_id=parent_id, kw_type="taxonomy")
+    other_id = db.add_keyword("Other", parent_id=parent_id, kw_type="individual")
+
+    resp = client.put(f"/api/keywords/{other_id}", json={"name": "‘apapane"})
+    # A cross-type same-name collision under a shared parent hits the
+    # table-level UNIQUE(name, parent_id) at UPDATE time and surfaces to
+    # the caller, rather than being silently absorbed into the wrong-typed
+    # peer.
+    assert resp.status_code >= 400
+    # The original individual keyword is preserved with its old name.
+    survivor = db.conn.execute(
+        "SELECT name, type FROM keywords WHERE id = ?", (other_id,)
+    ).fetchone()
+    assert survivor is not None
+    assert survivor["name"] == "Other"
+    assert survivor["type"] == "individual"
+
+
 def test_rename_keyword_updates_photo_preferences(app_and_db):
     """Representative-photo preferences follow species keyword renames."""
     app, db = app_and_db
@@ -3242,6 +4236,21 @@ def test_rename_keyword_updates_photo_preferences(app_and_db):
 
     assert db.get_photo_preferences("life_list") == {"NewBird": p1}
     assert db.get_photo_preferences("highlights") == {"NewBird": p1}
+
+
+def test_rename_keyword_updates_species_representative(app_and_db):
+    """species_representative preferences follow species keyword renames."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird", is_species=True)
+    p1 = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.tag_photo(p1, kid)
+    db.set_photo_preference("species_representative", "OldBird", p1)
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_photo_preferences("species_representative") == {"NewBird": p1}
 
 
 def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
@@ -3260,6 +4269,448 @@ def test_rename_keyword_photo_preferences_keep_existing_target(app_and_db):
     assert resp.status_code == 200
 
     assert db.get_photo_preferences("life_list") == {"NewBird": p_new}
+
+
+def test_rename_keyword_updates_species_highlights(app_and_db):
+    """Ordered species highlights follow species-keyword renames."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid = db.add_keyword("OldBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p1, p2 = rows[0]["id"], rows[1]["id"]
+    db.tag_photo(p1, kid)
+    db.tag_photo(p2, kid)
+    db.add_species_highlight("OldBird", p1)
+    db.add_species_highlight("OldBird", p2)
+
+    resp = client.put(f"/api/keywords/{kid}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("OldBird") == {}
+    highlights = db.get_species_highlights("NewBird")
+    assert highlights == {"NewBird": {p1: 1, p2: 2}}
+
+
+def test_rename_keyword_species_highlights_merge_into_existing_target(app_and_db):
+    """Renaming into an existing highlights bucket appends after the target's rows."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    kid_new = db.add_keyword("NewBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 3").fetchall()
+    p_target = rows[0]["id"]
+    p_moving_a = rows[1]["id"]
+    p_moving_b = rows[2]["id"]
+    db.tag_photo(p_target, kid_new)
+    db.tag_photo(p_moving_a, kid_old)
+    db.tag_photo(p_moving_b, kid_old)
+    db.add_species_highlight("NewBird", p_target)
+    db.add_species_highlight("OldBird", p_moving_a)
+    db.add_species_highlight("OldBird", p_moving_b)
+
+    resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("OldBird") == {}
+    assert db.get_species_highlights("NewBird") == {
+        "NewBird": {p_target: 1, p_moving_a: 2, p_moving_b: 3}
+    }
+
+
+def test_rename_keyword_species_highlights_dedupe_existing_photo(app_and_db):
+    """A photo already highlighted under the target species keeps its target rank."""
+    app, db = app_and_db
+    client = app.test_client()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    kid_new = db.add_keyword("NewBird", is_species=True)
+    rows = db.conn.execute("SELECT id FROM photos ORDER BY id LIMIT 2").fetchall()
+    p_target = rows[0]["id"]
+    p_shared = rows[1]["id"]
+    db.tag_photo(p_target, kid_new)
+    db.tag_photo(p_shared, kid_old)
+    db.tag_photo(p_shared, kid_new)
+    db.add_species_highlight("NewBird", p_target)
+    db.add_species_highlight("NewBird", p_shared)
+    db.add_species_highlight("OldBird", p_shared)
+
+    resp = client.put(f"/api/keywords/{kid_old}", json={"name": "NewBird"})
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("OldBird") == {}
+    assert db.get_species_highlights("NewBird") == {
+        "NewBird": {p_target: 1, p_shared: 2}
+    }
+
+
+def test_rename_species_highlights_species_chunks_scoped_photo_ids(
+    app_and_db, monkeypatch,
+):
+    """rename_species_highlights_species must chunk the IN(...) clause when
+    called with more photos than SQLite's bound-parameter cap. Without the
+    chunk, an unbounded IN clause on legacy SQLite builds
+    (SQLITE_MAX_VARIABLE_NUMBER=999) raises OperationalError and strands the
+    highlight rows under the renamed species."""
+    from vireo import db as db_module
+
+    _app, db = app_and_db
+    ws = db._ws_id()
+    kid_old = db.add_keyword("OldBird", is_species=True)
+    fid = db.add_folder("/renamed", name="renamed")
+    db.add_workspace_folder(ws, fid)
+
+    # Seed enough photos+highlight rows to exceed the shrunk parameter cap
+    # in a single un-chunked query.
+    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 3)
+    photo_ids = []
+    for i in range(7):
+        pid = db.add_photo(
+            folder_id=fid, filename=f"p{i}.jpg", extension=".jpg",
+            file_size=1, file_mtime=float(i),
+        )
+        db.tag_photo(pid, kid_old)
+        db.add_species_highlight("OldBird", pid)
+        photo_ids.append(pid)
+
+    pairs = [(pid, ws) for pid in photo_ids]
+    moved = db.rename_species_highlights_species("OldBird", "NewBird", pairs)
+
+    assert moved == len(photo_ids)
+    assert db.get_species_highlights("OldBird") == {}
+    highlights = db.get_species_highlights("NewBird")
+    # Ranks preserve the original bucket order (1..N).
+    assert highlights == {
+        "NewBird": {pid: rank for rank, pid in enumerate(photo_ids, start=1)}
+    }
+
+
+def test_apply_ordered_highlights_preserves_order_when_no_visible_match():
+    """When a species has highlights elsewhere in the workspace but none are
+    present in the current bucket, _apply_ordered_highlights must not re-sort
+    the bucket. Re-sorting would drop the picked-first order that
+    _highlight_score_bucket already applied on the visible photos."""
+    from app import _apply_ordered_highlights
+
+    class FakeDb:
+        def get_species_highlights(self, eligible_only=False):
+            assert eligible_only is True
+            return {"Robin": {999: 1}}
+
+    original = [
+        {"id": 1, "highlight_score": 0.4, "flag": "flagged"},
+        {"id": 2, "highlight_score": 0.9, "flag": "none"},
+    ]
+    buckets = [{"species": "Robin", "photos": list(original)}]
+    _apply_ordered_highlights(FakeDb(), buckets)
+    assert [p["id"] for p in buckets[0]["photos"]] == [1, 2]
+    assert all(p["is_highlighted"] is False for p in buckets[0]["photos"])
+    assert all(p["highlight_rank"] is None for p in buckets[0]["photos"])
+
+
+def test_apply_ordered_highlights_resorts_when_visible_match():
+    """When at least one visible photo is a stored highlight, the bucket must
+    be re-sorted so the highlighted photo leads and follows the stored rank."""
+    from app import _apply_ordered_highlights
+
+    class FakeDb:
+        def get_species_highlights(self, eligible_only=False):
+            assert eligible_only is True
+            return {"Robin": {2: 1}}
+
+    buckets = [{
+        "species": "Robin",
+        "photos": [
+            {"id": 1, "highlight_score": 0.9, "flag": "flagged"},
+            {"id": 2, "highlight_score": 0.4, "flag": "none"},
+        ],
+    }]
+    _apply_ordered_highlights(FakeDb(), buckets)
+    order = [p["id"] for p in buckets[0]["photos"]]
+    assert order == [2, 1]
+    marks = {p["id"]: p["is_highlighted"] for p in buckets[0]["photos"]}
+    assert marks == {1: False, 2: True}
+
+
+def test_highlight_score_bucket_orders_picks_then_scored_then_unscored():
+    """Highlights ordering (picked_first) forms three contiguous regions:
+    picks (scored first, then unscored in capture order), scored non-picks by
+    score, then unscored non-picks in capture order. No rich metrics are set,
+    so highlight_score collapses to quality_score (+0.08 pick bonus)."""
+    from app import _highlight_score_bucket
+
+    photos = [
+        # scored non-picks (out of order to prove score sorts them)
+        {"id": 4, "quality_score": 0.3, "flag": "none", "timestamp": "2024-01-07"},
+        {"id": 5, "quality_score": 0.9, "flag": "none", "timestamp": "2024-01-06"},
+        # unscored non-picks (later capture times, shuffled)
+        {"id": 6, "quality_score": None, "flag": "none", "timestamp": "2024-03-02"},
+        {"id": 7, "quality_score": None, "flag": "none", "timestamp": "2024-03-01"},
+        # picks: one scored, two unscored (shuffled capture times)
+        {"id": 1, "quality_score": 0.5, "flag": "flagged", "timestamp": "2024-01-05"},
+        {"id": 2, "quality_score": None, "flag": "flagged", "timestamp": "2024-01-09"},
+        {"id": 3, "quality_score": None, "flag": "flagged", "timestamp": "2024-01-02"},
+    ]
+    _highlight_score_bucket(photos, picked_first=True)
+    # picks first (scored pick 1, then unscored picks 3<2 by capture time),
+    # then scored non-picks by score (5 before 4),
+    # then unscored non-picks by capture time (7 before 6).
+    assert [p["id"] for p in photos] == [1, 3, 2, 5, 4, 7, 6]
+
+
+def test_highlight_score_bucket_picked_first_false_unchanged():
+    """Regression: the non-picks-first path (life list / best-photo) still
+    ranks purely by score descending, ignoring flag and capture time."""
+    from app import _highlight_score_bucket
+
+    photos = [
+        {"id": 1, "quality_score": 0.4, "flag": "flagged", "timestamp": "2024-01-01"},
+        {"id": 2, "quality_score": 0.9, "flag": "none", "timestamp": "2024-01-09"},
+        {"id": 3, "quality_score": 0.6, "flag": "none", "timestamp": "2024-01-02"},
+    ]
+    _highlight_score_bucket(photos, picked_first=False)
+    assert [p["id"] for p in photos] == [2, 3, 1]
+
+
+def test_bucket_unanalyzed_count_counts_unscored_non_picks_only():
+    from app import _bucket_unanalyzed_count
+
+    photos = [
+        {"id": 1, "quality_score": 0.5, "flag": "flagged"},   # scored pick
+        {"id": 2, "quality_score": None, "flag": "flagged"},  # unscored pick (excluded)
+        {"id": 3, "quality_score": 0.4, "flag": "none"},      # scored non-pick
+        {"id": 4, "quality_score": None, "flag": "none"},     # unscored non-pick
+        {"id": 5, "quality_score": None, "flag": "none"},     # unscored non-pick
+    ]
+    assert _bucket_unanalyzed_count(photos) == 2
+    assert _bucket_unanalyzed_count([]) == 0
+    assert _bucket_unanalyzed_count(None) == 0
+
+
+def _set_photo_quality_flag(db, photo_id, quality=None, flag=None):
+    db.conn.execute(
+        "UPDATE photos SET quality_score = ?, flag = ? WHERE id = ?",
+        (quality, flag, photo_id),
+    )
+    db.conn.commit()
+
+
+def _seed_anianiau_bucket(db):
+    """Seed one species folder mirroring the real bug: a scored pick, two
+    unscored picks, scored/unscored non-picks, and a rejected photo. Returns
+    (folder_id, {label: photo_id})."""
+    fid = db.add_folder('/photos/hawaii', name='hawaii')
+    kid = db.add_keyword('Anianiau', is_species=True)
+    spec = [
+        # label, quality, flag, timestamp
+        ("scored_pick",   0.45, "flagged", "2024-01-05T10:00:00"),
+        ("unscored_pickB", None, "flagged", "2024-01-02T10:00:00"),
+        ("unscored_pickA", None, "flagged", "2024-01-09T10:00:00"),
+        ("np_high",       0.90, None,       "2024-01-06T10:00:00"),
+        ("np_low",        0.40, None,       "2024-01-07T10:00:00"),
+        ("unp_early",     None, None,       "2024-03-01T10:00:00"),
+        ("unp_late",      None, None,       "2024-03-02T10:00:00"),
+        ("rejected",      0.99, "rejected", "2024-01-01T10:00:00"),
+    ]
+    ids = {}
+    for i, (label, quality, flag, ts) in enumerate(spec):
+        pid = db.add_photo(
+            folder_id=fid, filename=f"{label}.jpg", extension='.jpg',
+            file_size=1000 + i, file_mtime=float(i), timestamp=ts,
+        )
+        db.tag_photo(pid, kid)
+        _set_photo_quality_flag(db, pid, quality=quality, flag=flag)
+        ids[label] = pid
+    return fid, ids
+
+
+def test_highlights_candidates_include_unscored_picks_and_order(app_and_db):
+    """Unscored photos now flow into Highlights: all three picks appear (the
+    real bug was two vanishing), ordered picks -> scored -> unscored, with
+    is_analyzed flags and unanalyzed_count set for the divider."""
+    from app import (
+        _apply_highlight_preferences,
+        _apply_ordered_highlights,
+        _collect_highlight_buckets,
+    )
+
+    app, db = app_and_db
+    fid, ids = _seed_anianiau_bucket(db)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    # unanalyzed_count is assigned in _apply_highlight_preferences (which
+    # always runs after ordering in the real flow) so its tail count
+    # reflects any curated promotion. Mirror the full pipeline here.
+    _apply_highlight_preferences(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Anianiau")
+
+    order = [p["filename"] for p in bucket["photos"]]
+    assert order == [
+        "scored_pick.jpg",       # scored pick leads
+        "unscored_pickB.jpg",    # unscored picks next, capture order
+        "unscored_pickA.jpg",
+        "np_high.jpg",           # scored non-picks by score
+        "np_low.jpg",
+        "unp_early.jpg",         # unscored non-picks last, capture order
+        "unp_late.jpg",
+    ]
+    # rejected photo is still excluded entirely
+    assert "rejected.jpg" not in order
+
+    by_name = {p["filename"]: p for p in bucket["photos"]}
+    assert by_name["scored_pick.jpg"]["is_analyzed"] is True
+    assert by_name["unscored_pickA.jpg"]["is_analyzed"] is False
+    assert by_name["unp_early.jpg"]["is_analyzed"] is False
+    # Only unscored non-picks form the labeled "not yet analyzed" tail.
+    assert bucket["unanalyzed_count"] == 2
+
+
+def test_highlights_candidates_exclude_unscored_when_quality_floor_raised(app_and_db):
+    """Raising the quality floor above 0 drops unscored photos (no measured
+    quality) and low-scored ones, leaving only photos above the floor."""
+    from app import _collect_highlight_buckets
+
+    app, db = app_and_db
+    fid, ids = _seed_anianiau_bucket(db)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.5)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    bucket = next(b for b in buckets if b["species"] == "Anianiau")
+    names = {p["filename"] for p in bucket["photos"]}
+
+    # Only np_high (0.90) clears the 0.5 floor; the rejected 0.99 stays excluded.
+    assert names == {"np_high.jpg"}
+
+
+def test_highlights_unscored_only_workspace_returns_content_with_empty_folders(app_and_db):
+    """Unscored-only workspaces must not silently blank the Highlights page.
+
+    ``get_folders_with_quality_data`` is scored-only, so the payload's
+    ``folders`` list is empty when nothing has been analyzed. But the
+    highlights payload can still return eligible content (buckets and
+    unidentified photos) via the min_quality<=0 admission of unscored
+    candidates. The frontend gate must key off actual content, not folder
+    presence — this test pins the API contract so a future regression that
+    drops content when ``folders == []`` is caught here.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/highlights")
+    assert resp.status_code == 200
+    data = resp.get_json()
+
+    # The scored-only folder dropdown is legitimately empty in this fixture.
+    assert data["folders"] == []
+    # ...but the payload still carries eligible content — the workspace has
+    # three unscored, unrejected photos in the unidentified section.
+    assert data["unidentified"]["photo_count"] == 3
+    assert data["meta"]["eligible"] == 3
+
+
+def test_highlights_unanalyzed_count_reflects_tail_after_representative_promotion(app_and_db):
+    """Curated promotion of an unscored photo must not misplace the divider.
+
+    ``_apply_highlight_preferences`` runs after the initial bucket sort and
+    can promote an unscored, non-flagged photo to the front when it's saved
+    as the species representative. The tail count anchors the "Not yet
+    analyzed" divider, so under the old (total-unscored-non-picks) semantic
+    a promoted unscored rep would inflate the count and the frontend divider
+    would misfire above analyzed photos. The tail semantic (trailing
+    contiguous run of unscored non-picks) fixes that: after promotion, the
+    count is the number of unscored non-picks that remain at the actual
+    tail, not the total in the bucket.
+    """
+    from app import (
+        _apply_highlight_preferences,
+        _apply_ordered_highlights,
+        _collect_highlight_buckets,
+    )
+
+    _app, db = app_and_db
+    fid = db.add_folder('/photos/curate', name='curate')
+    kid = db.add_keyword('Iiwi', is_species=True)
+    scored_a = db.add_photo(
+        folder_id=fid, filename='scored_a.jpg', extension='.jpg',
+        file_size=1000, file_mtime=1.0, timestamp='2024-01-01T10:00:00',
+    )
+    scored_b = db.add_photo(
+        folder_id=fid, filename='scored_b.jpg', extension='.jpg',
+        file_size=1001, file_mtime=2.0, timestamp='2024-01-02T10:00:00',
+    )
+    unscored_rep = db.add_photo(
+        folder_id=fid, filename='unscored_rep.jpg', extension='.jpg',
+        file_size=1002, file_mtime=3.0, timestamp='2024-01-03T10:00:00',
+    )
+    unscored_tail = db.add_photo(
+        folder_id=fid, filename='unscored_tail.jpg', extension='.jpg',
+        file_size=1003, file_mtime=4.0, timestamp='2024-01-04T10:00:00',
+    )
+    for pid in (scored_a, scored_b, unscored_rep, unscored_tail):
+        db.tag_photo(pid, kid)
+    _set_photo_quality_flag(db, scored_a, quality=0.9)
+    _set_photo_quality_flag(db, scored_b, quality=0.4)
+    # unscored_rep and unscored_tail deliberately left with quality_score=NULL.
+
+    # Sanity-check the pre-curation ordering: unscored non-picks form a
+    # contiguous tail, so the tail count equals the total unscored non-pick
+    # count (2). This is the state the divider was designed for.
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    _apply_highlight_preferences(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Iiwi")
+    assert [p["filename"] for p in bucket["photos"]] == [
+        "scored_a.jpg", "scored_b.jpg",
+        "unscored_rep.jpg", "unscored_tail.jpg",
+    ]
+    assert bucket["unanalyzed_count"] == 2
+
+    # Now promote unscored_rep to species representative. Preferences run
+    # after the initial sort and push it to the front, so the tail shrinks
+    # to just unscored_tail — anything else would place the divider above
+    # analyzed content.
+    db.set_species_representative("Iiwi", unscored_rep)
+
+    candidates = db.get_highlights_candidates(fid, min_quality=0.0)
+    buckets, _unid = _collect_highlight_buckets(candidates, 0.70)
+    _apply_ordered_highlights(db, buckets)
+    _apply_highlight_preferences(db, buckets)
+    bucket = next(b for b in buckets if b["species"] == "Iiwi")
+
+    order = [p["filename"] for p in bucket["photos"]]
+    assert order[0] == "unscored_rep.jpg"  # rep promoted to the front
+    assert order[-1] == "unscored_tail.jpg"  # tail intact
+    assert bucket["unanalyzed_count"] == 1  # tail-only, not 2
+
+
+def test_bucket_unanalyzed_count_ignores_non_trailing_unscored():
+    """Only the trailing contiguous run of unscored non-picks counts.
+
+    Curated ordering can leave an unscored, non-flagged photo above analyzed
+    content; those interior unscored photos must NOT be counted, or the
+    frontend divider would misfire on the first one and leave analyzed
+    photos below the label.
+    """
+    from app import _bucket_unanalyzed_count
+
+    # Interior unscored rep, then a contiguous analyzed run, then two tail
+    # photos: only the trailing pair counts.
+    photos = [
+        {"id": 1, "quality_score": None, "flag": "none"},   # promoted, interior
+        {"id": 2, "quality_score": 0.9, "flag": "none"},
+        {"id": 3, "quality_score": 0.5, "flag": "none"},
+        {"id": 4, "quality_score": None, "flag": "none"},   # tail
+        {"id": 5, "quality_score": None, "flag": "none"},   # tail
+    ]
+    assert _bucket_unanalyzed_count(photos) == 2
+
+    # No trailing tail at all — an analyzed photo at the end means the
+    # divider must not fire.
+    photos = [
+        {"id": 1, "quality_score": None, "flag": "none"},
+        {"id": 2, "quality_score": 0.9, "flag": "none"},
+    ]
+    assert _bucket_unanalyzed_count(photos) == 0
 
 
 def test_rename_homonym_non_species_keyword_leaves_species_preferences(app_and_db):
@@ -3977,6 +5428,154 @@ def test_batch_keyword_route_handles_non_string_type(app_and_db):
     )
 
 
+def test_add_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
+    """Names like `'` are non-empty as raw text (so the `not name` guard
+    passes) but strip to '' during normalization. The route must return a
+    clean 400 rather than 500-ing on add_keyword's ValueError, and must not
+    insert an empty keyword row."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/pe")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "pe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    before = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    for empty in ("'", '"', "‘", "“”"):
+        resp = client.post(
+            f"/api/photos/{photo_id}/keywords",
+            json={"name": empty},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400, (
+            f"expected 400 for name={empty!r}, got {resp.status_code} "
+            f"{resp.get_data(as_text=True)}"
+        )
+    after = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    assert after == before
+    assert (
+        db.conn.execute("SELECT COUNT(*) FROM keywords WHERE name = ''").fetchone()[0]
+        == 0
+    )
+
+
+def test_batch_keyword_route_rejects_name_that_normalizes_to_empty(app_and_db):
+    """Same normalized-empty guard on the batch endpoint."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qe")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qe.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    client = app.test_client()
+    before = db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0]
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "name": "‘"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 400, (
+        f"expected 400 for edge-quote-only name, got {resp.status_code} "
+        f"{resp.get_data(as_text=True)}"
+    )
+    assert (
+        db.conn.execute("SELECT COUNT(*) FROM keywords").fetchone()[0] == before
+    )
+
+
+def test_add_keyword_route_queues_stored_name_after_normalization(app_and_db):
+    """When a stray-quote name is submitted, the pending-change queue must
+    record the stored (normalized) name — not the raw request string —
+    so a later delete (which reads k.name from the DB) queues the same
+    string and the add/remove pair cancels instead of both persisting to
+    XMP."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qn")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qn.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+    client = app.test_client()
+
+    resp = client.post(
+        f"/api/photos/{photo_id}/keywords",
+        json={"name": "‘quailquail"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    kid = resp.get_json()["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert stored == "quailquail"
+
+    queued_add = db.conn.execute(
+        "SELECT value FROM pending_changes "
+        "WHERE photo_id = ? AND change_type = 'keyword_add'",
+        (photo_id,),
+    ).fetchall()
+    assert [row["value"] for row in queued_add] == [stored], (
+        "keyword_add queue must record the stored name so it matches what a "
+        "later keyword_remove would queue via k.name"
+    )
+
+    resp = client.delete(f"/api/photos/{photo_id}/keywords/{kid}")
+    assert resp.status_code == 200
+    remaining = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchall()
+    assert remaining == [], (
+        f"add/remove should cancel, but pending_changes still has "
+        f"{[dict(r) for r in remaining]}"
+    )
+
+
+def test_batch_keyword_route_queues_stored_name_after_normalization(app_and_db):
+    """Batch endpoint must queue the stored keyword name too, so the
+    per-photo add/remove pair cancels the same way the single endpoint does."""
+    app, db = app_and_db
+    folder_id = db.add_folder("/tmp/qb")
+    db.add_workspace_folder(db._active_workspace_id, folder_id)
+    photo_id = db.add_photo(
+        folder_id, "qb.jpg", extension=".jpg", file_size=1, file_mtime=1.0,
+    )
+    db.conn.execute("DELETE FROM pending_changes")
+    db.conn.commit()
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "name": "‘quailquail"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    kid = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?", (photo_id,)
+    ).fetchone()["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert stored == "quailquail"
+
+    queued_add = db.conn.execute(
+        "SELECT value FROM pending_changes "
+        "WHERE photo_id = ? AND change_type = 'keyword_add'",
+        (photo_id,),
+    ).fetchall()
+    assert [row["value"] for row in queued_add] == [stored]
+
+    resp = client.delete(f"/api/photos/{photo_id}/keywords/{kid}")
+    assert resp.status_code == 200
+    remaining = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes WHERE photo_id = ?",
+        (photo_id,),
+    ).fetchall()
+    assert remaining == []
+
+
 def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     """Multi-select suggestions should offer keywords present on only some photos."""
     app, db = app_and_db
@@ -4002,6 +5601,11 @@ def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     assert sorted(by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
     assert by_name["Sparrow"]["count"] == 1
     assert by_name["Sparrow"]["missing_count"] == 2
+
+    keywords_by_name = {item["name"]: item for item in data["keywords"]}
+    assert keywords_by_name["Cardinal"]["present_photo_ids"] == [ids[0]]
+    assert sorted(keywords_by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
+    assert keywords_by_name["Sparrow"]["present_photo_ids"] == [ids[1]]
 
 
 def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
@@ -4072,6 +5676,192 @@ def test_batch_keyword_route_accepts_existing_keyword_id(app_and_db):
         (cardinal_id,),
     ).fetchall()
     assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
+
+
+def test_batch_keyword_remove_route_removes_existing_keyword_id(app_and_db):
+    """Selected-keyword removal should only affect selected photos that have it."""
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+    cardinal_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Cardinal'"
+    ).fetchone()["id"]
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": cardinal_id},
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 1
+    tagged = db.conn.execute(
+        """SELECT photo_id FROM photo_keywords
+           WHERE keyword_id = ?""",
+        (cardinal_id,),
+    ).fetchall()
+    assert tagged == []
+
+    pending = db.conn.execute(
+        """SELECT photo_id, change_type, value FROM pending_changes
+           WHERE change_type = 'keyword_remove' AND value = 'Cardinal'"""
+    ).fetchall()
+    assert [row["photo_id"] for row in pending] == [ids[0]]
+
+    undo_resp = client.post("/api/undo")
+    assert undo_resp.status_code == 200
+    tagged_after_undo = db.conn.execute(
+        """SELECT photo_id FROM photo_keywords
+           WHERE keyword_id = ?
+           ORDER BY photo_id""",
+        (cardinal_id,),
+    ).fetchall()
+    assert [row["photo_id"] for row in tagged_after_undo] == [ids[0]]
+
+
+def test_batch_keyword_remove_cancels_pending_add_queued_with_variant_spelling(app_and_db):
+    """Batch remove must cancel a pending add that was queued via a
+    stray-quote spelling variant.
+
+    Keyword normalization happens at the choke points: POSTing `‘apapane`
+    stores both the keyword row and its pending `keyword_add` under the
+    clean spelling `apapane`. A later batch remove of the clean keyword
+    must find and cancel that still-unsynced pending add instead of
+    queuing a `keyword_remove` alongside it — otherwise the next XMP sync
+    would see a remove for a keyword that was never written.
+    """
+    app, db = app_and_db
+    rows = db.conn.execute(
+        "SELECT id, filename FROM photos ORDER BY filename"
+    ).fetchall()
+    ids = [row["id"] for row in rows]
+    client = app.test_client()
+
+    # Queue the pending add through the API with a variant spelling.
+    resp = client.post(
+        f"/api/photos/{ids[1]}/keywords",
+        json={"name": "‘apapane"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    kid = resp.get_json()["keyword_id"]
+    stored = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()["name"]
+    assert stored == "apapane"
+
+    # The pending change is stored under the clean spelling, not the raw
+    # request variant.
+    pending = db.conn.execute(
+        "SELECT value FROM pending_changes "
+        "WHERE photo_id = ? AND change_type = 'keyword_add'",
+        (ids[1],),
+    ).fetchall()
+    assert [row["value"] for row in pending] == ["apapane"]
+
+    resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": ids, "keyword_id": kid},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == 1
+
+    still_tagged = db.conn.execute(
+        "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+        (kid,),
+    ).fetchall()
+    assert still_tagged == []
+
+    remaining = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes "
+        "WHERE photo_id = ? AND value = 'apapane'",
+        (ids[1],),
+    ).fetchall()
+    assert remaining == [], (
+        "the pending add should be cancelled, not left alongside a remove"
+    )
+
+
+def test_batch_keyword_remove_undo_restores_pending_add(app_and_db):
+    """Add → bulk remove → undo must leave a pending sidecar write.
+
+    Bulk remove of a not-yet-synced pending add cancels the pending
+    `keyword_add` (via `_queue_keyword_remove`) instead of queuing a
+    `keyword_remove`. Undoing the recorded `keyword_remove` retags the
+    photo but must also re-queue the `keyword_add` so the restored
+    keyword is actually written back to the sidecar; otherwise the tag
+    silently diverges from disk.
+    """
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY filename LIMIT 1"
+    ).fetchone()["id"]
+    sparrow_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Sparrow'"
+    ).fetchone()["id"]
+    client = app.test_client()
+
+    add_resp = client.post(
+        "/api/batch/keyword",
+        json={"photo_ids": [photo_id], "keyword_id": sparrow_id},
+        content_type="application/json",
+    )
+    assert add_resp.status_code == 200
+    pending_add = db.conn.execute(
+        """SELECT photo_id FROM pending_changes
+           WHERE change_type = 'keyword_add' AND value = 'Sparrow'"""
+    ).fetchall()
+    assert [row["photo_id"] for row in pending_add] == [photo_id]
+
+    remove_resp = client.post(
+        "/api/batch/keyword-remove",
+        json={"photo_ids": [photo_id], "keyword_id": sparrow_id},
+        content_type="application/json",
+    )
+    assert remove_resp.status_code == 200
+    pending_after_remove = db.conn.execute(
+        """SELECT change_type FROM pending_changes
+           WHERE photo_id = ? AND value = 'Sparrow'""",
+        (photo_id,),
+    ).fetchall()
+    assert pending_after_remove == []
+
+    undo_resp = client.post("/api/undo")
+    assert undo_resp.status_code == 200
+    tagged = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (photo_id, sparrow_id),
+    ).fetchone()
+    assert tagged is not None, "undo should restore the Sparrow tag"
+    pending_after_undo = db.conn.execute(
+        """SELECT change_type, value FROM pending_changes
+           WHERE photo_id = ? AND value = 'Sparrow'""",
+        (photo_id,),
+    ).fetchall()
+    assert [(row["change_type"], row["value"]) for row in pending_after_undo] == [
+        ("keyword_add", "Sparrow"),
+    ]
+
+    redo_resp = client.post("/api/redo")
+    assert redo_resp.status_code == 200
+    tagged_after_redo = db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (photo_id, sparrow_id),
+    ).fetchone()
+    assert tagged_after_redo is None, "redo should re-remove the Sparrow tag"
+    pending_after_redo = db.conn.execute(
+        """SELECT change_type FROM pending_changes
+           WHERE photo_id = ? AND value = 'Sparrow'""",
+        (photo_id,),
+    ).fetchall()
+    assert pending_after_redo == [], (
+        "redo of the cancel-a-pending-add remove must leave no pending "
+        "change — mirroring the original bulk remove that cancelled the add"
+    )
 
 
 def test_batch_keyword_route_chunks_large_existing_keyword_lookup(app_and_db):
@@ -4158,6 +5948,79 @@ def test_create_app_runs_wildlife_backfill_synchronously_on_first_boot(tmp_path,
     db2.close()
 
 
+def test_create_app_runs_keyword_normalization_migration_on_file_db(
+    tmp_path, monkeypatch,
+):
+    """Regression: create_app must run the one-shot keyword-name
+    normalization migration on the startup connection for a file-backed
+    database. Database.__init__ only runs it when initialize_schema=True,
+    and every connection this app opens (startup init_db and every
+    per-request _get_db) passes initialize_schema=False, so without an
+    explicit run in create_app upgraded DBs could serve requests with
+    ‘apapane-style variant rows still present.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"))
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    # Seed a legacy edge-quote variant keyword row that the write-side
+    # normalization would reject at runtime; only the migration can heal
+    # it. Insert via raw SQL to bypass add_keyword's normalization.
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    db.conn.execute("DELETE FROM db_meta WHERE key = 'keyword_names_normalized'")
+    kid = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES (?, NULL, 1, 'taxonomy')",
+        ("‘apapane",),
+    ).lastrowid
+    db.conn.commit()
+    assert db.get_meta("keyword_names_normalized") != "1", (
+        "Pre-condition: normalization marker should be unset before create_app"
+    )
+    db.close()
+
+    fake_tax = MagicMock()
+    fake_tax.lookup.return_value = None
+
+    with patch("taxonomy.load_local_taxonomy", return_value=fake_tax):
+        app = create_app(
+            db_path=db_path, thumb_cache_dir=thumb_dir, api_token="test",
+        )
+        assert app is not None
+
+    # After create_app returns, the seeded variant row must have been
+    # normalized in place and the marker set.
+    db2 = Database(db_path, initialize_schema=False)
+    row = db2.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row is not None
+    assert row["name"] == "apapane", (
+        "create_app must normalize legacy variant keyword names before "
+        "serving requests, but the '‘apapane' row is still stored verbatim."
+    )
+    assert db2.get_meta("keyword_names_normalized") == "1", (
+        "keyword_names_normalized marker must be set after create_app "
+        "runs the one-shot migration synchronously."
+    )
+    db2.close()
+
+
 def test_add_keyword_route_does_not_clobber_existing_individual_type(app_and_db):
     """Regression: POST /api/photos/<id>/keywords with type='taxonomy' for a
     keyword that already exists as 'individual' must not silently rewrite
@@ -4206,7 +6069,7 @@ def test_get_active_subject_types_workspace_override_wins(app_and_db, tmp_path, 
 
 
 def test_workspace_page_no_scan_button(app_and_db):
-    """Workspace page should not have a Scan & Add button — folders are added via Pipeline."""
+    """Workspace page should not expose the retired Scan & Add action."""
     app, _ = app_and_db
     with app.test_client() as c:
         resp = c.get('/workspace')
@@ -4216,15 +6079,15 @@ def test_workspace_page_no_scan_button(app_and_db):
         assert 'scanAndAddFolder' not in html
 
 
-def test_workspace_page_has_add_folder_link(app_and_db):
-    """Workspace page should have an Add Folder button linking to Pipeline."""
+def test_workspace_page_has_import_photos_link(app_and_db):
+    """Workspace page should send users to Import when they need photos."""
     app, _ = app_and_db
     with app.test_client() as c:
         resp = c.get('/workspace')
         assert resp.status_code == 200
         html = resp.data.decode()
-        assert 'href="/pipeline"' in html
-        assert 'Add Folder' in html
+        assert 'href="/import"' in html
+        assert 'Import Photos' in html
 
 
 # -- Missing folder API tests --
@@ -4257,8 +6120,27 @@ def test_api_folders_check_health(app_and_db):
     assert isinstance(data["missing"], list)
 
 
+def test_api_photos_missing_uncached_is_immediate(app_and_db, monkeypatch):
+    """GET /api/photos/missing returns cache status without scanning."""
+    from db import Database
+    app, _db = app_and_db
+    client = app.test_client()
+
+    def fail_scan(*_args, **_kwargs):
+        raise AssertionError("GET /api/photos/missing must not scan")
+
+    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "not_ready"
+    assert data["pending"] is False
+    assert data["photos"] == []
+
+
 def test_api_photos_missing(app_and_db, tmp_path):
-    """GET /api/photos/missing returns photos with absent source files."""
+    """Background check caches photos with absent source files."""
     from PIL import Image
     app, db = app_and_db
     client = app.test_client()
@@ -4289,12 +6171,10 @@ def test_api_photos_missing(app_and_db, tmp_path):
     # Drop an XMP sidecar next to the ghost.
     (real_dir / "ghost.xmp").write_text("<x:xmpmeta/>")
 
-    resp = client.get("/api/photos/missing")
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert isinstance(data, list)
-    assert [row["id"] for row in data] == [pid_ghost]
-    row = data[0]
+    data = _run_missing_originals_check(client)
+    assert data["status"] == "ready"
+    assert [row["id"] for row in data["photos"]] == [pid_ghost]
+    row = data["photos"][0]
     assert row["filename"] == "ghost.NEF"
     assert row["folder_path"] == str(real_dir)
     assert row["timestamp"] == "2024-03-08T10:00:00"
@@ -4302,6 +6182,1235 @@ def test_api_photos_missing(app_and_db, tmp_path):
     assert row["has_preview"] is False
     assert row["has_working_copy"] is False
     assert row["has_xmp_sidecar"] is True
+
+
+def test_api_photos_missing_cached_result_does_not_rescan(app_and_db, monkeypatch, tmp_path):
+    """A cached Missing Originals result is served without filesystem work."""
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    cached = _run_missing_originals_check(client)
+    assert [row["id"] for row in cached["photos"]] == [pid_ghost]
+
+    def fail_scan(*_args, **_kwargs):
+        raise AssertionError("cached GET must not rescan")
+
+    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ready"
+    assert [row["id"] for row in data["photos"]] == [pid_ghost]
+
+
+def test_api_photos_missing_automatic_uses_fresh_cache(app_and_db, monkeypatch, tmp_path):
+    """Automatic checks should not rescan when the cached result is still fresh."""
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    cached = _run_missing_originals_check(client)
+    assert [row["id"] for row in cached["photos"]] == [pid_ghost]
+
+    def fail_scan(*_args, **_kwargs):
+        raise AssertionError("fresh automatic check must not rescan")
+
+    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+
+    resp = client.post("/api/photos/missing/check", json={"automatic": True})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "ready"
+    assert data["pending"] is False
+    assert [row["id"] for row in data["photos"]] == [pid_ghost]
+
+
+def test_api_photos_missing_automatic_gate_uses_scan_start_time(
+    app_and_db, tmp_path
+):
+    """Automatic freshness gate must compare against scan-start, not scan-end.
+
+    Regression: the navbar re-arms its 30-minute automatic timer from POST
+    time, but the server used to gate against ``set_at`` (scan-completion
+    time). On any scan that took real wall-clock time, the next tick fired
+    with ``set_at`` under the 30-minute threshold and got skipped — actual
+    filesystem scans then ran only every second tick and deletions could
+    stay undiscovered for nearly an hour.
+    """
+    import time
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    # Seed the cache to simulate a scan that started > 30 min ago but
+    # only completed recently. The old (buggy) gate would compare ``now``
+    # against ``set_at`` and treat this as fresh; the fix compares against
+    # ``started_at`` so the next automatic tick rescans as intended.
+    key = (db._db_path, db._active_workspace_id, None)
+    now = time.monotonic()
+    stale_seconds = getattr(
+        Database, "_MISSING_ORIGINALS_STALE_SECONDS", 30 * 60
+    )
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": now - 60,  # completed 1 minute ago
+            "started_at": now - (stale_seconds + 60),  # scheduled long ago
+        }
+
+    resp = client.post("/api/photos/missing/check", json={"automatic": True})
+    # A rescan was actually launched — either it finished synchronously
+    # (returning ready with the just-found ghost) or it's still pending.
+    assert resp.status_code in (200, 202)
+    data = resp.get_json()
+    if data.get("pending"):
+        wait_for_job_via_client(client, data["job_id"])
+        follow = client.get("/api/photos/missing").get_json()
+        assert follow["status"] == "ready"
+        assert [row["id"] for row in follow["photos"]] == [pid_ghost]
+    else:
+        assert data["status"] == "ready"
+        assert [row["id"] for row in data["photos"]] == [pid_ghost]
+
+
+def test_api_photos_missing_check_coalesces_duplicate_jobs(app_and_db, monkeypatch):
+    """Duplicate refreshes for the same scope reuse the active background job."""
+    import time
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_get_missing = Database.get_missing_photos
+
+    def slow_get_missing(self, *args, **kwargs):
+        time.sleep(0.2)
+        return real_get_missing(self, *args, **kwargs)
+
+    monkeypatch.setattr(Database, "get_missing_photos", slow_get_missing)
+
+    first = client.post("/api/photos/missing/check", json={})
+    second = client.post("/api/photos/missing/check", json={})
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    first_data = first.get_json()
+    second_data = second.get_json()
+    assert first_data["pending"] is True
+    assert second_data["pending"] is True
+    assert first_data["job_id"] == second_data["job_id"]
+    wait_for_job_via_client(client, first_data["job_id"])
+
+
+def test_api_photos_missing_stale_in_flight_result_is_discarded(
+    app_and_db, monkeypatch, tmp_path
+):
+    """An invalidation mid-scan must drop the in-flight scan's stale snapshot.
+
+    Regression: when a batch delete fired while a long missing-originals
+    scan was walking the disk, the completing scan wrote its
+    pre-invalidation photo list back into the ready cache — resurrecting
+    just-deleted photos in the banner/modal until a later scan overwrote
+    them.
+    """
+    import threading
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    # Simplify assertions by removing seed rows from other folders.
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    snapshot_captured = threading.Event()
+    release = threading.Event()
+    real_get_missing = Database.get_missing_photos
+
+    def slow_get_missing(self, *args, **kwargs):
+        # Take the "pre-delete" snapshot first so the scan's result would
+        # otherwise resurrect pid_ghost, then park until the test has
+        # fired the batch delete that bumps the generation counter.
+        photos = list(real_get_missing(self, *args, **kwargs))
+        snapshot_captured.set()
+        assert release.wait(timeout=5.0)
+        return photos
+
+    monkeypatch.setattr(Database, "get_missing_photos", slow_get_missing)
+
+    started = client.post("/api/photos/missing/check", json={})
+    assert started.status_code == 202
+    job_id = started.get_json()["job_id"]
+    assert snapshot_captured.wait(timeout=5.0)
+
+    # Batch delete the ghost row. This drops it from the DB and fires
+    # _invalidate_missing_originals_cache, which bumps the in-flight
+    # scan's generation counter.
+    delete_resp = client.post(
+        "/api/batch/delete",
+        json={"photo_ids": [pid_ghost], "mode": "vireo"},
+    )
+    assert delete_resp.status_code == 200, delete_resp.get_json()
+    assert delete_resp.get_json()["deleted"] == 1
+
+    release.set()
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed"
+    assert job["result"]["stale"] is True
+
+    # The scan finished successfully but its results were discarded, so
+    # the endpoint reports no cache — not a ready payload still holding
+    # the just-deleted pid_ghost.
+    resp = client.get("/api/photos/missing")
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+
+def test_api_photos_missing_automatic_skips_during_heavy_job(app_and_db):
+    """Automatic idle checks must not start while heavy jobs are running."""
+    import time
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    scan_job = app._job_runner.start(
+        "scan",
+        lambda job: (time.sleep(0.2), {"ok": True})[1],
+        workspace_id=db._active_workspace_id,
+        ephemeral=True,
+    )
+    resp = client.post("/api/photos/missing/check", json={"automatic": True})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["suppressed"] is True
+    assert data["reason"] == "heavy_job_active"
+    assert data["status"] == "skipped"
+    wait_for_job_via_client(client, scan_job)
+
+
+def test_api_photos_missing_automatic_skips_during_missing_originals_scan(app_and_db):
+    """A folder-scoped scan already walking disk must suppress the automatic
+    workspace-wide check.
+
+    Regression: workspace and folder-scoped scans have distinct cache keys, so
+    the same-key in-flight coalescing does not catch them. Without treating
+    ``missing_originals_scan`` as a heavy job, the 30-minute automatic timer
+    can kick off a second walk over the same tree while a folder scan is
+    still running.
+    """
+    import threading
+    import time
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Hold a fake missing_originals_scan job in the running queue long enough
+    # to exercise the automatic-check gate. A real folder-scoped scan would
+    # register the same job type; we don't need the actual scan logic to
+    # observe the heavy-job suppression.
+    release = threading.Event()
+
+    def _hold_running(job):
+        release.wait(timeout=5.0)
+        return {"ok": True}
+
+    scan_job = app._job_runner.start(
+        "missing_originals_scan",
+        _hold_running,
+        workspace_id=db._active_workspace_id,
+        ephemeral=True,
+    )
+    try:
+        # Give the runner a moment to move the job to "running" so
+        # _missing_originals_heavy_job_active sees it.
+        for _ in range(50):
+            jobs = app._job_runner.list_jobs()
+            if any(
+                j.get("id") == scan_job and j.get("status") in ("running", "queued")
+                for j in jobs
+            ):
+                break
+            time.sleep(0.02)
+
+        resp = client.post(
+            "/api/photos/missing/check", json={"automatic": True}
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["suppressed"] is True, data
+        assert data["reason"] == "heavy_job_active", data
+        assert data["status"] == "skipped", data
+    finally:
+        release.set()
+        wait_for_job_via_client(client, scan_job)
+
+
+def test_api_folder_delete_invalidates_missing_cache(app_and_db, tmp_path):
+    """Deleting a folder must clear the Missing Originals cache.
+
+    Regression: ``api_folder_delete`` cascades photo-row deletion but never
+    hit ``_invalidate_missing_originals_cache``. A ready payload built before
+    the delete would keep listing photos from the now-removed folder in the
+    banner/modal, offering them for removal a second time.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    # Drop unrelated seed photos so the cache payload is deterministic.
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    cached = _run_missing_originals_check(client)
+    assert [row["id"] for row in cached["photos"]] == [pid_ghost]
+
+    resp = client.delete(f"/api/folders/{fid}")
+    assert resp.status_code == 200
+
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+
+def test_api_folder_relocate_invalidates_missing_cache(app_and_db, tmp_path):
+    """Relocating a folder must clear the Missing Originals cache.
+
+    Regression: ``api_folder_relocate`` rewrites ``folders.path`` and flips
+    status to ``ok`` (and can merge/delete rows via the missing→existing
+    branch), but never called ``_invalidate_missing_originals_cache``.
+    After moving a missing folder to a path where the originals exist, a
+    ready cached payload would keep offering the pre-relocation ghost
+    rows for removal — and the modal's remove flow would happily delete
+    photos whose originals just came back online.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Folder exists on disk (get_missing_photos skips folders whose root
+    # is offline), but the tracked photo file isn't there — so it shows up
+    # as a ghost.
+    old_dir = tmp_path / "orig"
+    old_dir.mkdir()
+    fid = db.add_folder(str(old_dir), name="orig")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    # Strip unrelated seed photos so the cached payload is deterministic.
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    cached = _run_missing_originals_check(client)
+    assert [row["id"] for row in cached["photos"]] == [pid_ghost], cached
+
+    # Relocate to a new path where the original actually exists.
+    new_dir = tmp_path / "moved"
+    new_dir.mkdir()
+    (new_dir / "ghost.NEF").write_bytes(b"stub")
+
+    resp = client.post(
+        f"/api/folders/{fid}/relocate",
+        json={"path": str(new_dir)},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    # Cache must be invalidated: GET falls through to not_ready rather
+    # than serving the pre-relocate ghost payload.
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+
+def test_api_folders_check_health_invalidates_missing_cache(app_and_db, tmp_path):
+    """A folder health flip must clear the Missing Originals cache.
+
+    Regression: ``api_folders_check_health`` calls
+    ``db.check_folder_health`` which flips folders to/from ``missing`` as
+    disk state changes. Without invalidation, a ready cached payload
+    survives the flip: a folder going ok→missing hides the new ghosts,
+    and missing→ok keeps resurfacing photos whose originals just came
+    back.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    live_dir = tmp_path / "live"
+    live_dir.mkdir()
+    fid = db.add_folder(str(live_dir), name="live")
+    (live_dir / "keep.NEF").write_bytes(b"stub")
+    db.add_photo(
+        folder_id=fid,
+        filename="keep.NEF",
+        extension=".nef",
+        file_size=len(b"stub"),
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    # Prime a ready cache while the folder is healthy — no ghosts.
+    cached = _run_missing_originals_check(client)
+    assert cached["photos"] == [], cached
+
+    # Now the folder disappears from disk. The next check-health call
+    # flips its status to missing, which turns every one of its photos
+    # into a ghost. A stale cache would still say "no ghosts".
+    import shutil
+    shutil.rmtree(live_dir)
+
+    resp = client.post("/api/folders/check-health")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["changed"] >= 1
+
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+
+
+def test_workspace_delete_and_create_invalidate_missing_cache(app_and_db):
+    """Workspace create/delete must clear their id from the missing cache.
+
+    Regression: the cache key is ``(db_path, workspace_id, folder_id)``,
+    and SQLite ``INTEGER PRIMARY KEY`` can reuse the rowid of a deleted
+    workspace for the next ``create_workspace``. If the deleted workspace
+    left a ready Missing Originals payload behind, ``GET /api/photos/missing``
+    on the freshly created workspace would serve the previous workspace's
+    ghost photos and folder paths until a rescan overwrote the entry.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    # Create a second workspace and give it a fake ready cache entry.
+    resp = client.post(
+        "/api/workspaces",
+        json={"name": "temp-ws"},
+    )
+    assert resp.status_code == 200
+    ws = resp.get_json()
+    ws_id = ws["id"]
+    key = (db._db_path, ws_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 99999, "filename": "ghost.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    # Delete the workspace via the API and confirm the cache entry
+    # (which is keyed on this ws_id) is gone. Without invalidation on
+    # delete, a subsequent workspace that reused this rowid would still
+    # see the stale payload.
+    resp = client.delete(f"/api/workspaces/{ws_id}")
+    assert resp.status_code == 200
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+    # Prime a stale cache entry directly at the next id SQLite could
+    # hand out, then create a workspace to verify the create path also
+    # clears the specific workspace's key even if the store somehow
+    # retained one (e.g. a concurrent write racing between the delete
+    # invalidation and the new insert).
+    next_id_row = db.conn.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'workspaces'"
+    ).fetchone()
+    likely_next_id = (next_id_row["seq"] + 1) if next_id_row else ws_id + 1
+    poison_key = (db._db_path, likely_next_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[poison_key] = {
+            "photos": [{"id": 42, "filename": "poison.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+    resp = client.post("/api/workspaces", json={"name": "fresh-ws"})
+    assert resp.status_code == 200
+    new_ws_id = resp.get_json()["id"]
+    with app._missing_originals_lock:
+        assert (db._db_path, new_ws_id, None) not in app._missing_originals_cache
+
+
+def test_api_photos_missing_automatic_respects_failure_backoff(app_and_db, monkeypatch):
+    """A failed manual scan suppresses automatic retries during backoff."""
+    from db import Database
+
+    app, _db = app_and_db
+    client = app.test_client()
+
+    def fail_scan(self, *args, **kwargs):
+        raise RuntimeError("network volume unavailable")
+
+    monkeypatch.setattr(Database, "get_missing_photos", fail_scan)
+
+    started = client.post("/api/photos/missing/check", json={})
+    assert started.status_code == 202
+    job = wait_for_job_via_client(client, started.get_json()["job_id"])
+    assert job["status"] == "failed"
+
+    retry = client.post("/api/photos/missing/check", json={"automatic": True})
+    assert retry.status_code == 200
+    data = retry.get_json()
+    assert data["status"] == "error"
+    assert data["suppressed"] is True
+    assert data["reason"] == "backoff"
+    assert data["backoff_seconds"] > 0
+
+
+def test_api_photos_missing_worker_db_open_failure_clears_inflight(
+    app_and_db, monkeypatch,
+):
+    """A worker DB-open failure must not leave the scope permanently pending."""
+    import app as app_module
+
+    app, db = app_and_db
+    client = app.test_client()
+    key = (db._db_path, db._active_workspace_id, None)
+    captured = {}
+
+    real_database = app_module.Database
+
+    class FailingDatabase:
+        def __init__(self, path):
+            raise RuntimeError("open failed")
+
+    def run_with_broken_worker_db(job_type, work, **kwargs):
+        job = {"id": "missing-originals-fail", "progress": {}}
+        app_module.Database = FailingDatabase
+        try:
+            work(job)
+        except RuntimeError as exc:
+            captured["error"] = str(exc)
+        finally:
+            app_module.Database = real_database
+        return job["id"]
+
+    monkeypatch.setattr(app._job_runner, "start", run_with_broken_worker_db)
+
+    resp = client.post("/api/photos/missing/check", json={})
+    assert resp.status_code == 202, resp.get_json()
+    assert captured["error"] == "open failed"
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_inflight
+        assert app._missing_originals_errors[key]["error"] == "open failed"
+
+
+def test_api_photos_missing_progress_phase_only_sent_via_runner(
+    app_and_db, monkeypatch,
+):
+    """Missing Originals progress must not resize job["progress"] directly."""
+    from db import Database
+
+    app, _db = app_and_db
+    client = app.test_client()
+    pushed = []
+
+    class GuardedProgress(dict):
+        def __setitem__(self, key, value):
+            if key not in self:
+                raise AssertionError(f"unexpected progress key resize: {key}")
+            super().__setitem__(key, value)
+
+    def fake_missing_photos(self, folder_id=None, progress_callback=None, **kwargs):
+        if progress_callback is not None:
+            progress_callback({
+                "photos_considered": 7,
+                "total_photos": 10,
+                "missing_found": 2,
+                "folders_checked": 1,
+                "current_folder": "/photos",
+            })
+        return []
+
+    def fake_start(job_type, work, **kwargs):
+        job = {
+            "id": "missing-progress",
+            "progress": GuardedProgress({
+                "current": 0,
+                "total": 0,
+                "current_file": "",
+            }),
+        }
+        work(job)
+        return job["id"]
+
+    def fake_push_event(job_id, event_type, data):
+        pushed.append((job_id, event_type, data))
+
+    monkeypatch.setattr(Database, "get_missing_photos", fake_missing_photos)
+    monkeypatch.setattr(app._job_runner, "start", fake_start)
+    monkeypatch.setattr(app._job_runner, "push_event", fake_push_event)
+
+    resp = client.post("/api/photos/missing/check", json={})
+    assert resp.status_code == 200, resp.get_json()
+    progress_events = [data for _jid, typ, data in pushed if typ == "progress"]
+    assert progress_events
+    assert progress_events[-1]["phase"] == (
+        "1 folders checked, 7 photos considered, 2 missing"
+    )
+
+
+def test_get_missing_photos_honors_cancel_callback(app_and_db):
+    """The low-level missing-originals walk must be cooperatively cancellable."""
+    import pytest
+    from db import MissingPhotosCancelled
+
+    _app, db = app_and_db
+
+    with pytest.raises(MissingPhotosCancelled):
+        db.get_missing_photos(cancel_callback=lambda: True)
+
+
+def test_api_photos_missing_cancel_does_not_write_ready_cache(
+    app_and_db, monkeypatch,
+):
+    """Cancelling a Missing Originals job must stop without publishing results.
+
+    Regression: JobRunner marked the job cancelled, but the worker kept walking
+    the filesystem and could write a ready cache before terminal status flipped.
+    """
+    import threading
+    import time
+
+    from db import Database, MissingPhotosCancelled
+
+    app, db = app_and_db
+    client = app.test_client()
+    scan_entered = threading.Event()
+
+    def slow_missing_photos(
+        self,
+        folder_id=None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        scan_entered.set()
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if cancel_callback is not None and cancel_callback():
+                raise MissingPhotosCancelled("missing photos scan cancelled")
+            time.sleep(0.01)
+        return [{
+            "id": 999,
+            "folder_path": os.getcwd(),
+            "filename": "would-have-been-cached.jpg",
+            "timestamp": None,
+            "working_copy_path": None,
+        }]
+
+    monkeypatch.setattr(Database, "get_missing_photos", slow_missing_photos)
+
+    started = client.post("/api/photos/missing/check", json={})
+    assert started.status_code == 202, started.get_json()
+    job_id = started.get_json()["job_id"]
+    assert scan_entered.wait(timeout=1.0)
+
+    cancelled = client.post(f"/api/jobs/{job_id}/cancel")
+    assert cancelled.status_code == 200, cancelled.get_json()
+    assert cancelled.get_json()["cancelled"] is True
+
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "cancelled"
+
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+        assert key not in app._missing_originals_errors
+        assert key not in app._missing_originals_inflight
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+
+
+def test_api_photos_missing_prefers_fresher_error_over_ready_cache(app_and_db):
+    """A failed refresh must not be hidden behind an older ready cache.
+
+    Regression: after a successful scan populated the cache, a later
+    "Check now" that failed (e.g. NAS went offline) would leave the
+    ready photo list in place while recording the failure in
+    ``_missing_originals_errors``. The old ``_missing_originals_payload``
+    branch always won over the error, so ``GET /api/photos/missing``
+    would keep returning ``status: "ready"`` with the pre-failure photo
+    list — hiding the failure and letting the user act on stale ghosts
+    whose originals may have been restored between scans.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    key = (db._db_path, db._active_workspace_id, None)
+    # Fresher error must supersede the cached ready payload.
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 1, "filename": "ghost.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 1.0,
+        }
+        app._missing_originals_errors[key] = {
+            "error": "network volume unavailable",
+            "checked_at": "2026-01-01T00:05:00Z",
+            "set_at": 2.0,
+            "backoff_until": 999999.0,
+        }
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "error", payload
+    assert payload["error"] == "network volume unavailable"
+    assert payload["photos"] == []
+
+    # An older error (already superseded by a successful cache) must
+    # not clobber the ready state — the preference only fires when
+    # the error's set_at is fresher than the cache's.
+    with app._missing_originals_lock:
+        app._missing_originals_errors[key] = {
+            "error": "old",
+            "checked_at": "2025-12-31T23:59:00Z",
+            "set_at": 0.5,
+            "backoff_until": 999999.0,
+        }
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "ready", payload
+    assert payload["photos"] == [{"id": 1, "filename": "ghost.jpg"}]
+
+    # A fresh error alongside an in-flight scan must keep reporting
+    # "pending" so the modal doesn't flicker to an error state while
+    # the user's own refresh is still running.
+    with app._missing_originals_lock:
+        app._missing_originals_errors[key] = {
+            "error": "network volume unavailable",
+            "checked_at": "2026-01-01T00:05:00Z",
+            "set_at": 2.0,
+            "backoff_until": 999999.0,
+        }
+        app._missing_originals_inflight[key] = "job-xyz"
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "pending", payload
+
+
+def test_scan_job_invalidates_missing_originals_cache(app_and_db, tmp_path):
+    """A rescan must clear the Missing Originals cache even when the
+    pre-scan folder-health check doesn't flip anything.
+
+    Regression: the scan work function only invalidated the cache when
+    ``check_folder_health`` returned a nonzero change count. But a
+    normal scan (e.g. Browse's "Rescan this Folder" after the user
+    restored an original) still commits photo rows and can make a
+    ready missing-originals payload stale. Without a post-scan
+    invalidation, ``GET /api/photos/missing`` would keep serving the
+    pre-scan ghost list until a separate missing-originals scan.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    (real_dir / "keep.jpg").write_bytes(b"jpegbytes")
+    fid = db.add_folder(str(real_dir), name="live")
+
+    # Seed a stale ready cache directly (the folder is healthy, so
+    # the scan's own pre-flight would not invalidate it via the
+    # existing health-flip path).
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 99, "filename": "stale.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    resp = client.post(f"/api/folders/{fid}/rescan", json={})
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    wait_for_job_via_client(client, job_id)
+
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
+def test_import_full_scan_in_place_invalidates_missing_originals_cache(
+    app_and_db, tmp_path,
+):
+    """A scan-in-place import (POST /api/jobs/import-full, copy=false) must
+    drop the Missing Originals cache once its ``do_scan`` runs.
+
+    Regression: the scan job's ``finally`` block invalidated the
+    new-images cache but not the missing-originals cache, so a ready
+    ghost payload survived even after the import touched disk. If the
+    user restored an original before running Import Photos over the
+    same folder, GET ``/api/photos/missing`` would keep serving the
+    pre-import ghost list until a separate missing-originals scan
+    replaced the entry. See Codex review on c4cc32ec.
+    """
+    from PIL import Image
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    source = tmp_path / "import_src"
+    source.mkdir()
+    Image.new("RGB", (10, 10)).save(str(source / "keep.jpg"))
+
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 4242, "filename": "stale.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    resp = client.post("/api/jobs/import-full", json={
+        "source": str(source),
+        "copy": False,
+        "file_types": [".jpg"],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
+def test_import_in_place_invalidates_missing_originals_cache(
+    app_and_db, tmp_path,
+):
+    """POST /api/jobs/import-in-place must drop the Missing Originals cache
+    once its ``do_scan`` runs.
+
+    Regression: the in-place import's ``finally`` block invalidated the
+    new-images cache but not the missing-originals cache, so a ready
+    ghost payload survived even after the import touched disk. If the
+    user restored an original before importing that folder in place,
+    GET ``/api/photos/missing`` would keep serving the pre-import ghost
+    list. See Codex review on c4cc32ec.
+    """
+    from PIL import Image
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    source = tmp_path / "in_place_src"
+    source.mkdir()
+    Image.new("RGB", (10, 10)).save(str(source / "keep.jpg"))
+
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 4343, "filename": "stale.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [str(source)],
+        "after_import": None,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
+def test_import_photos_invalidates_missing_originals_cache(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """POST /api/jobs/import-photos must drop the Missing Originals cache
+    once ``run_import_job`` finishes.
+
+    Regression: unlike scan-in-place and import-in-place, the copy-mode
+    import job (``/api/jobs/import-photos``) never invalidated the
+    missing-originals cache after ``run_import_job`` completed. That job
+    can flip destination folders from ``missing`` to ``ok`` and scans
+    landed files, so a ready ghost payload survived even after the
+    import touched disk. Verify the ``finally`` block drops the cached
+    entry — and drops it even when the import raises, since rows land
+    incrementally.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    source = tmp_path / "import_src"
+    source.mkdir()
+    (source / "keep.jpg").write_bytes(b"stub")
+    destination = tmp_path / "archive"
+    destination.mkdir()
+
+    key = (db._db_path, db._active_workspace_id, None)
+
+    def _seed_cache():
+        with app._missing_originals_lock:
+            app._missing_originals_cache[key] = {
+                "photos": [{"id": 4444, "filename": "stale.jpg"}],
+                "checked_at": "2026-01-01T00:00:00Z",
+                "set_at": 0.0,
+            }
+
+    # Stub ``run_import_job`` so we exercise the endpoint's ``finally``
+    # block without depending on the real ingest+scan pipeline. The
+    # invariant under test is "cache is dropped after the job runs",
+    # not "the import succeeds"; we cover the happy path and the
+    # mid-run failure path separately.
+    import import_job as import_job_module
+
+    def _stub_run_import_job(job, runner, db_path, active_ws, params):
+        return {"ok": True, "photo_ids": []}
+
+    _seed_cache()
+    monkeypatch.setattr(
+        import_job_module, "run_import_job", _stub_run_import_job,
+    )
+    resp = client.post(
+        "/api/jobs/import-photos",
+        json={
+            "sources": [str(source)],
+            "destination": str(destination),
+            "after_import": None,
+        },
+    )
+    assert resp.status_code == 200, resp.get_json()
+    wait_for_job_via_client(client, resp.get_json()["job_id"])
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+    # Same invariant when the import raises: rows land incrementally,
+    # so a mid-run failure can still leave the cache stale.
+    _seed_cache()
+
+    def _boom(job, runner, db_path, active_ws, params):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(import_job_module, "run_import_job", _boom)
+    resp = client.post(
+        "/api/jobs/import-photos",
+        json={
+            "sources": [str(source)],
+            "destination": str(destination),
+            "after_import": None,
+        },
+    )
+    assert resp.status_code == 200, resp.get_json()
+    wait_for_job_via_client(client, resp.get_json()["job_id"])
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
+def test_api_audit_remove_orphans_invalidates_missing_cache(app_and_db, tmp_path):
+    """Removing orphaned photo rows must clear the Missing Originals cache.
+
+    Regression: without invalidation, the banner and modal keep serving the
+    pre-delete cache verbatim, so a photo the user just removed via the
+    Audit page reappears in the ghost list until a later manual or
+    automatic rescan.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    cached = _run_missing_originals_check(client)
+    assert [row["id"] for row in cached["photos"]] == [pid_ghost]
+
+    resp = client.post(
+        "/api/audit/remove-orphans", json={"photo_ids": [pid_ghost]}
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["removed"] == 1
+
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+
+def test_api_audit_import_untracked_invalidates_missing_cache(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Audit imports must clear the Missing Originals cache after scanning.
+
+    Regression: ``audit.import_untracked`` runs scanner.scan over the selected
+    parent directory, so it can reconcile a restored original. Without cache
+    invalidation, the banner and modal keep serving the pre-import ghost list.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    img_path = tmp_path / "shoot" / "IMG_0001.JPG"
+    img_path.parent.mkdir()
+    img_path.write_bytes(b"stub")
+
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 5555, "filename": "stale.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    import audit as audit_module
+    import metadata
+
+    def _stub_import_untracked(db_arg, paths, **kwargs):
+        assert db_arg._db_path == db._db_path
+        assert paths == [str(img_path)]
+
+    monkeypatch.setattr(audit_module, "import_untracked", _stub_import_untracked)
+    monkeypatch.setattr(metadata, "exiftool_available", lambda: True)
+
+    resp = client.post(
+        "/api/audit/import-untracked",
+        json={"paths": [str(img_path)]},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["imported"] == 1
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
+
+
+def test_api_duplicates_delete_loser_files_invalidates_missing_cache(
+    app_and_db, monkeypatch, tmp_path,
+):
+    """Trashing duplicate losers must clear the Missing Originals cache.
+
+    Regression: the duplicate-cleanup path calls ``db.delete_photos`` after
+    trashing loser files; without invalidation, a photo removed here still
+    shows up as a ghost in the banner/modal until the next rescan.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    winner_file = real_dir / "winner.jpg"
+    winner_file.write_bytes(b"jpeg-winner")
+    loser_file = real_dir / "loser.jpg"
+    loser_file.write_bytes(b"jpeg-loser")
+
+    # Add the photos without a hash so the ``add_photo`` auto-resolve
+    # hook doesn't reject either row on insert. We then set the shared
+    # hash + the loser's rejected flag directly, which is the exact
+    # state left behind by an earlier ``apply_duplicate_resolution``.
+    pid_winner = db.add_photo(
+        folder_id=fid, filename="winner.jpg", extension=".jpg",
+        file_size=len(b"jpeg-winner"), file_mtime=1.0,
+    )
+    pid_loser = db.add_photo(
+        folder_id=fid, filename="loser.jpg", extension=".jpg",
+        file_size=len(b"jpeg-loser"), file_mtime=2.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET file_hash='deadbeef' WHERE id IN (?, ?)",
+        (pid_winner, pid_loser),
+    )
+    db.conn.execute(
+        "UPDATE photos SET flag='rejected' WHERE id=?", (pid_loser,),
+    )
+    db.conn.commit()
+    # Make the winner the anchor row and drop unrelated seed photos so the
+    # missing-originals scan is small and deterministic.
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ? AND id NOT IN (?, ?)",
+            (fid, pid_winner, pid_loser),
+        ).fetchall()
+    ])
+
+    # Introduce a ghost row so the cache actually contains something to
+    # invalidate — otherwise the "cache cleared" assertion below is
+    # trivially satisfied even without the fix.
+    pid_ghost = db.add_photo(
+        folder_id=fid, filename="ghost.NEF", extension=".nef",
+        file_size=1, file_mtime=3.0,
+    )
+    cached = _run_missing_originals_check(client)
+    assert pid_ghost in [row["id"] for row in cached["photos"]]
+
+    # Stub send2trash so the test doesn't shell out to the platform trash
+    # implementation; the endpoint's contract is "trashed then row-deleted"
+    # and only the row-delete side is what invalidates the cache.
+    import send2trash as _send2trash_mod
+
+    def fake_send2trash(path):
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(path)
+
+    monkeypatch.setattr(_send2trash_mod, "send2trash", fake_send2trash)
+
+    resp = client.post(
+        "/api/duplicates/delete-loser-files",
+        json={"photo_ids": [pid_loser]},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["trashed"] == 1
+
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+
+def test_batch_delete_invalidates_missing_cache_across_workspaces(
+    app_and_db, tmp_path,
+):
+    """Deleting a photo must invalidate every workspace's Missing Originals cache.
+
+    Regression: photos are global (a folder can be linked into more than
+    one workspace), so removing a row from workspace A must clear
+    workspace B's ready cache too. Otherwise switching to B keeps serving
+    a stale payload that still lists the just-deleted photo until B's
+    next scan.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    default_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    fid = db.add_folder(str(shared_dir), name="shared")
+    db.add_workspace_folder(other_ws, fid)
+
+    pid_ghost = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=42,
+        file_mtime=2.0,
+    )
+    db.delete_photos([
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id != ?", (fid,)
+        ).fetchall()
+    ])
+
+    # Populate the cache for both workspaces so there's actually
+    # something for the delete path to invalidate in each.
+    db.set_active_workspace(other_ws)
+    other_cache = _run_missing_originals_check(client)
+    assert [row["id"] for row in other_cache["photos"]] == [pid_ghost]
+
+    db.set_active_workspace(default_ws)
+    default_cache = _run_missing_originals_check(client)
+    assert [row["id"] for row in default_cache["photos"]] == [pid_ghost]
+
+    # Delete the ghost while workspace A is active.
+    resp = client.post(
+        "/api/batch/delete",
+        json={"photo_ids": [pid_ghost], "mode": "vireo"},
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["deleted"] == 1
+
+    # The active workspace's cache is gone …
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
+
+    # … and so is workspace B's, even though it wasn't the caller.
+    db.set_active_workspace(other_ws)
+    payload = client.get("/api/photos/missing").get_json()
+    assert payload["status"] == "not_ready", payload
+    assert payload["photos"] == []
 
 
 def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
@@ -4340,6 +7449,247 @@ def test_api_photos_missing_delete_sidecars(app_and_db, tmp_path):
     assert data["skipped"] == 1
     assert not ghost_xmp.exists(), "ghost sidecar should be deleted"
     assert decoy_xmp.exists(), "sidecar with present original must not be deleted"
+
+
+def test_api_photos_missing_remove_skips_restored_originals(app_and_db, tmp_path):
+    """POST /api/photos/missing/remove re-checks each original before deletion.
+
+    Ready /api/photos/missing payloads are cached for up to 30 minutes without
+    a filesystem recheck. If a user restores a file between the last scan and
+    clicking Remove, trusting the cache would delete a valid Vireo row. The
+    endpoint's job is to re-check per photo and refuse to delete rows whose
+    original came back.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    # Ghost stays missing: nothing on disk for this row.
+    fid = db.add_folder(str(real_dir), name="live")
+    pid_ghost = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                             extension=".nef", file_size=1, file_mtime=1.0)
+    # Restored: original file is back on disk (simulated), sidecar too.
+    pid_restored = db.add_photo(folder_id=fid, filename="restored.NEF",
+                                extension=".nef", file_size=1, file_mtime=1.0)
+    (real_dir / "restored.NEF").write_bytes(b"raw")
+    (real_dir / "restored.xmp").write_text("<x:xmpmeta/>")
+    # Ghost sidecar left on disk — should be cleaned when delete_sidecars=True.
+    (real_dir / "ghost.xmp").write_text("<x:xmpmeta/>")
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [pid_ghost, pid_restored],
+        "delete_sidecars": True,
+        "mode": "vireo",
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    data = resp.get_json()
+    assert data["deleted"] == 1
+    assert data["restored"] == [pid_restored]
+    assert data["folder_offline"] == []
+    assert data["skipped"] == 0
+    assert data["sidecars_deleted"] == 1
+
+    # Ghost row is gone, restored row is kept.
+    assert db.get_photo(pid_ghost) is None
+    assert db.get_photo(pid_restored) is not None
+    # Ghost sidecar was cleaned up, restored one was left alone.
+    assert not (real_dir / "ghost.xmp").exists()
+    assert (real_dir / "restored.xmp").exists()
+
+
+def test_api_photos_missing_remove_skips_offline_folder(app_and_db, tmp_path):
+    """POST /api/photos/missing/remove must not delete rows from an offline folder.
+
+    A ready ``/api/photos/missing`` cache is served for up to 30 minutes
+    without a filesystem recheck. If a NAS/SMB mount goes offline between
+    the last scan and the user clicking Remove, ``os.path.exists(src)``
+    returns False for every row — but that is evidence the folder is
+    unreachable, not that the originals are gone. If any file was
+    restored before the mount dropped, a naive "still missing" check
+    would silently delete a valid Vireo row. The endpoint must skip
+    deletion when the folder is unreachable and surface the deferred
+    IDs so the modal can explain what happened.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                       extension=".nef", file_size=1, file_mtime=1.0)
+    # Ghost sidecar left on disk — must not be deleted while folder offline.
+    (real_dir / "ghost.xmp").write_text("<x:xmpmeta/>")
+
+    # Simulate the parent folder/NAS mount going offline by removing the
+    # folder from disk after the DB row is set up. ``os.path.isdir`` will
+    # now return False so the endpoint must treat this as ambiguous.
+    import shutil
+    shutil.rmtree(real_dir)
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [pid],
+        "delete_sidecars": True,
+        "mode": "vireo",
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["restored"] == []
+    assert data["folder_offline"] == [pid]
+    assert data["sidecars_deleted"] == 0
+    # Row must still be present — we did not delete it.
+    assert db.get_photo(pid) is not None
+
+
+def test_api_photos_missing_remove_skips_unreadable_folder(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A present but unreadable folder is still unverified for removal.
+
+    Regression: ``os.path.isdir`` can succeed for a NAS/local folder that the
+    process cannot traverse. In that state ``os.path.exists(child)`` may return
+    false for every original, so removal must defer instead of deleting rows.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=1,
+        file_mtime=1.0,
+    )
+    sidecar = real_dir / "ghost.xmp"
+    sidecar.write_text("<x:xmpmeta/>")
+
+    import app as app_module
+
+    real_scandir = app_module.os.scandir
+
+    def unreadable_scandir(path):
+        if os.fspath(path) == str(real_dir):
+            raise PermissionError("permission denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(app_module.os, "scandir", unreadable_scandir)
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [pid],
+        "delete_sidecars": True,
+        "mode": "vireo",
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["restored"] == []
+    assert data["folder_offline"] == [pid]
+    assert data["sidecars_deleted"] == 0
+    assert sidecar.exists()
+    assert db.get_photo(pid) is not None
+
+
+def test_api_photos_missing_delete_sidecars_skips_offline_folder(app_and_db, tmp_path):
+    """delete-sidecars must skip when the parent folder is unreachable.
+
+    Same reasoning as the /remove endpoint: an offline mount makes
+    ``os.path.exists`` uninformative, so touching the .xmp for a photo
+    whose original may have been restored risks deleting a valid sidecar.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid = db.add_photo(folder_id=fid, filename="ghost.NEF",
+                       extension=".nef", file_size=1, file_mtime=1.0)
+
+    import shutil
+    shutil.rmtree(real_dir)
+
+    resp = client.post("/api/photos/missing/delete-sidecars", json={
+        "photo_ids": [pid],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["skipped"] == 1
+
+
+def test_api_photos_missing_delete_sidecars_skips_unreadable_folder(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Present-but-unreadable folder must not have its sidecars deleted.
+
+    Regression: ``os.path.isdir`` returns True for a NAS/local folder the
+    process cannot traverse; in that state ``os.path.exists(child)`` may
+    return false for every original even though the file is still there,
+    so unlinking the paired .xmp would remove a valid sidecar. Mirrors
+    the ``/api/photos/missing/remove`` accessibility check.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    real_dir = tmp_path / "live"
+    real_dir.mkdir()
+    fid = db.add_folder(str(real_dir), name="live")
+    pid = db.add_photo(
+        folder_id=fid,
+        filename="ghost.NEF",
+        extension=".nef",
+        file_size=1,
+        file_mtime=1.0,
+    )
+    sidecar = real_dir / "ghost.xmp"
+    sidecar.write_text("<x:xmpmeta/>")
+
+    import app as app_module
+
+    real_scandir = app_module.os.scandir
+
+    def unreadable_scandir(path):
+        if os.fspath(path) == str(real_dir):
+            raise PermissionError("permission denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(app_module.os, "scandir", unreadable_scandir)
+
+    resp = client.post("/api/photos/missing/delete-sidecars", json={
+        "photo_ids": [pid],
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["skipped"] == 1
+    assert sidecar.exists()
+
+
+def test_api_photos_missing_remove_rejects_ids_outside_workspace(app_and_db, tmp_path):
+    """Unknown or out-of-workspace photo_ids must not affect anything.
+
+    Symmetry with /api/photos/missing/delete-sidecars: the endpoint resolves
+    IDs against the active workspace and refuses to touch rows or files it
+    can't own.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+
+    resp = client.post("/api/photos/missing/remove", json={
+        "photo_ids": [999_999],
+        "mode": "vireo",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["deleted"] == 0
+    assert data["restored"] == []
+    assert data["folder_offline"] == []
+    assert data["skipped"] == 1
 
 
 def test_api_photos_missing_delete_sidecars_rejects_untracked_paths(app_and_db, tmp_path):
@@ -4406,9 +7756,8 @@ def test_api_photos_missing_detects_preview_variants(app_and_db, tmp_path):
     # Stray non-numeric filename in the cache must not crash the indexer.
     Image.new("RGB", (10, 10)).save(os.path.join(preview_dir, "stray.jpg"))
 
-    resp = client.get("/api/photos/missing")
-    assert resp.status_code == 200
-    by_id = {r["id"]: r for r in resp.get_json()}
+    payload = _run_missing_originals_check(client)
+    by_id = {r["id"]: r for r in payload["photos"]}
     assert by_id[pid_sized]["has_preview"] is True
     assert by_id[pid_legacy]["has_preview"] is True
     assert by_id[pid_no_preview]["has_preview"] is False
@@ -4446,9 +7795,7 @@ def test_api_photos_missing_reports_default_working_copy(app_and_db, tmp_path):
     Image.new("RGB", (10, 10)).save(os.path.join(working_dir, f"{pid}.jpg"))
     assert db.get_photo(pid)["working_copy_path"] is None
 
-    resp = client.get("/api/photos/missing")
-    assert resp.status_code == 200
-    data = resp.get_json()
+    data = _run_missing_originals_check(client)["photos"]
     assert len(data) == 1
     assert data[0]["has_working_copy"] is True
 
@@ -4471,9 +7818,8 @@ def test_api_photos_missing_excludes_present_files(app_and_db, tmp_path):
         ).fetchall()
     ])
 
-    resp = client.get("/api/photos/missing")
-    assert resp.status_code == 200
-    assert resp.get_json() == []
+    payload = _run_missing_originals_check(client)
+    assert payload["photos"] == []
 
 
 def test_api_folder_relocate(app_and_db, tmp_path):
@@ -4495,6 +7841,50 @@ def test_api_folder_relocate(app_and_db, tmp_path):
     row = db.conn.execute("SELECT status, path FROM folders WHERE id = ?", (fid,)).fetchone()
     assert row["status"] == "ok"
     assert row["path"] == new_path
+
+
+def test_api_folder_relocate_conflict_after_revalidation_invalidates_missing_cache(
+    app_and_db, tmp_path,
+):
+    """A relocate conflict can still mutate folder health and stale the cache.
+
+    ``Database.relocate_folder`` revalidates a missing source folder whose old
+    path came back online, commits ``status='ok'``, then raises if the requested
+    new path is already tracked. The API returns 409, but the ready Missing
+    Originals cache must still be dropped because the folder is now online.
+    """
+    app, db = app_and_db
+    source_path = tmp_path / "source"
+    target_path = tmp_path / "target"
+    source_path.mkdir()
+    target_path.mkdir()
+    source_id = db.add_folder(str(source_path), name="source")
+    db.add_folder(str(target_path), name="target")
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (source_id,)
+    )
+    db.conn.commit()
+
+    key = (db._db_path, db._active_workspace_id, None)
+    with app._missing_originals_lock:
+        app._missing_originals_cache[key] = {
+            "photos": [{"id": 8888, "filename": "hidden.jpg"}],
+            "checked_at": "2026-01-01T00:00:00Z",
+            "set_at": 0.0,
+        }
+
+    client = app.test_client()
+    resp = client.post(
+        f"/api/folders/{source_id}/relocate",
+        json={"path": str(target_path)},
+    )
+    assert resp.status_code == 409
+    row = db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (source_id,)
+    ).fetchone()
+    assert row["status"] == "ok"
+    with app._missing_originals_lock:
+        assert key not in app._missing_originals_cache
 
 
 def test_api_folder_relocate_rebases_configured_developed_dir(app_and_db, tmp_path):
@@ -4699,17 +8089,22 @@ def test_highlights_page_renders_after_redesign(app_and_db):
     assert b"Per row" in resp.data
 
 
-def test_highlights_get_empty(app_and_db):
-    """GET /api/highlights returns empty buckets when no quality data exists."""
+def test_highlights_get_includes_unscored_photos(app_and_db):
+    """Unscored photos now surface on Highlights (the page used to be empty
+    until analysis ran). The fixture's three unanalyzed photos — none carrying
+    an accepted species keyword — appear in the unidentified section, marked
+    not-yet-analyzed so the divider can label them."""
     app, _ = app_and_db
     client = app.test_client()
     resp = client.get("/api/highlights")
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["buckets"] == []
-    assert data["unidentified"]["photo_count"] == 0
-    assert data["folders"] == []
-    assert data["meta"]["eligible"] == 0
+    unid = data["unidentified"]
+    assert unid["photo_count"] == 3
+    assert unid["unanalyzed_count"] == 3
+    assert all(p["is_analyzed"] is False for p in unid["photos"])
+    assert data["meta"]["eligible"] == 3
 
 
 def test_highlights_buckets_by_accepted_species(app_and_db):
@@ -4752,10 +8147,134 @@ def test_highlights_buckets_by_accepted_species(app_and_db):
     assert qs == sorted(qs, reverse=True)
 
 
+def test_highlights_expose_pre_pick_base_score(app_and_db):
+    """Each photo carries `highlight_base_score` = pre-pick-bonus baseline.
+
+    Regression for Codex feedback on PR #1176 (line 874): the client-side
+    lightbox pick handler must recompute highlight_score without losing
+    precision to clamping. A flagged photo whose raw score is 0.97 gets
+    +0.08 → 1.05, clamped and cached as highlight_score=1.0; subtracting
+    the bonus on unpick would give 0.92 while the correct value is 0.97.
+    Exposing the pre-bonus baseline lets the client compute the exact same
+    value the backend would on a full reload.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/b', 'b', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    robin_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('Robin', 'taxonomy', 1)"
+    ).lastrowid
+    picked_id = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'picked.jpg', 0.97, 'flagged')",
+        (fid,),
+    ).lastrowid
+    unpicked_id = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'unpicked.jpg', 0.60, 'none')",
+        (fid,),
+    ).lastrowid
+    for pid in (picked_id, unpicked_id):
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, robin_kw),
+        )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}")
+    assert resp.status_code == 200
+    photos = {p["id"]: p for p in resp.get_json()["buckets"][0]["photos"]}
+    # Picked photo: 0.97 + 0.08 = 1.05, clamped to 1.0 for highlight_score.
+    # highlight_base_score keeps the pre-bonus 0.97 so the client can
+    # reverse the pick without under-counting.
+    assert photos[picked_id]["highlight_score"] == 1.0
+    assert photos[picked_id]["highlight_base_score"] == 0.97
+    # Unpicked photo: no bonus, so base == score.
+    assert photos[unpicked_id]["highlight_score"] == 0.60
+    assert photos[unpicked_id]["highlight_base_score"] == 0.60
+
+
+def test_highlights_bucket_returns_full_bucket_ordering_keys(app_and_db):
+    """/api/highlights/bucket returns full-bucket best_score/best_timestamp
+    so a client refetch of a paged bucket doesn't shrink the ordering
+    keys to just the loaded window.
+
+    Regression for Codex feedback on PR #1176 (line 923): after a
+    lightbox pick, the client calls refetchBucketFromZero to mirror the
+    server's post-pick order. When has_more is still true (large bucket
+    with a low limit) the response was only the first page, so the
+    client recomputed bucket.best_score from that partial slice — if the
+    highest-scored photo lives past the loaded window, the bucket's
+    Recommended/Best sort key would silently shrink and the species
+    would drop below its true position until a full reload.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/pg', 'pg', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('Robin', 'taxonomy', 1)"
+    ).lastrowid
+    # Three photos; the highest-scored one (0.9) sits at offset 2 so
+    # a limit=1 request would miss it and a naive client recompute
+    # from the loaded window would land on 0.7, not 0.9.
+    photo_ids = []
+    for filename, quality, ts in [
+        ("hi.jpg", 0.7, 3000),
+        ("mid.jpg", 0.5, 2000),
+        ("top.jpg", 0.9, 1000),
+    ]:
+        pid = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag, timestamp) "
+            "VALUES (?, ?, ?, 'none', ?)",
+            (fid, filename, quality, ts),
+        ).lastrowid
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (pid, kw),
+        )
+        photo_ids.append(pid)
+    db.conn.commit()
+
+    resp = client.get(
+        "/api/highlights/bucket",
+        query_string={
+            "folder_id": fid,
+            "species": "Robin",
+            "offset": 0,
+            "limit": 1,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Only the first page came back...
+    assert data["has_more"] is True
+    assert len(data["photos"]) == 1
+    # ...but the ordering keys reflect the ENTIRE filtered bucket, so
+    # the client can copy them onto bucket.best_score / best_timestamp
+    # without shrinking the sort key to whatever the loaded window
+    # happens to hold.
+    assert data["best_score"] == 0.9
+    # best_timestamp mirrors the backend `top.get("timestamp")` on
+    # photos[0] of the full ordered bucket, not the loaded slice.
+    assert data["best_timestamp"] == data["photos"][0]["timestamp"]
+
+
 def test_highlights_bucket_mixed_accepted_predicted_is_not_accepted(app_and_db):
     """A bucket whose photos are a mix of accepted-tag and prediction-only
-    must report is_accepted=False. The "Confirmed" badge means the whole
-    row is confirmed, not just some of it (UI transparency rule)."""
+    must report is_accepted=False. The "Keyword confirmed" badge means every
+    photo in the row is keyword-confirmed, not just some of it."""
     app, db = app_and_db
     client = app.test_client()
     fid = db.conn.execute(
@@ -4904,6 +8423,178 @@ def test_highlights_confirmation_filter_splits_confirmed_and_unconfirmed(app_and
     data = resp.get_json()
     assert data["photo_count"] == 1
     assert data["photos"][0]["id"] == predicted_pid
+
+
+def test_highlights_curation_filters_combine_independently(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/curated', 'curated', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+
+    photo_ids = {}
+    keyword_ids = {}
+    for index, species in enumerate(("Alpha Bird", "Beta Bird", "Gamma Bird", "Delta Bird")):
+        keyword_id = db.conn.execute(
+            "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+            (species,),
+        ).lastrowid
+        photo_id = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+            "VALUES (?, ?, ?, 'none')",
+            (fid, f"{index}.jpg", 0.9 - index * 0.1),
+        ).lastrowid
+        db.conn.execute(
+            "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+            (photo_id, keyword_id),
+        )
+        photo_ids[species] = photo_id
+        keyword_ids[species] = keyword_id
+
+    alpha_alternate = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'alpha-alternate.jpg', 0.65, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (alpha_alternate, keyword_ids["Alpha Bird"]),
+    )
+    beta_alternate = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'beta-alternate.jpg', 0.6, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (beta_alternate, keyword_ids["Beta Bird"]),
+    )
+    db.conn.commit()
+
+    # Alpha has only a highlight, Beta only a representative, Gamma has both,
+    # and Delta has neither. Every pair of filters should intersect cleanly.
+    db.add_species_highlight("Alpha Bird", photo_ids["Alpha Bird"])
+    db.set_species_representative("Beta Bird", photo_ids["Beta Bird"])
+    db.add_species_highlight("Gamma Bird", photo_ids["Gamma Bird"])
+    db.set_species_representative("Gamma Bird", photo_ids["Gamma Bird"])
+
+    def species_for(**filters):
+        response = client.get(
+            "/api/highlights",
+            query_string={"folder_id": fid, **filters},
+        )
+        assert response.status_code == 200
+        return {bucket["species"] for bucket in response.get_json()["buckets"]}
+
+    assert species_for(highlight_selection="yes") == {"Alpha Bird", "Gamma Bird"}
+    assert species_for(species_representative="yes") == {"Beta Bird", "Gamma Bird"}
+    assert species_for(
+        highlight_selection="yes", species_representative="yes"
+    ) == {"Gamma Bird"}
+    assert species_for(
+        confirmation="confirmed",
+        highlight_selection="no",
+        species_representative="no",
+    ) == {"Delta Bird"}
+
+    # Rejecting Alpha's selected photo leaves another eligible Alpha photo in
+    # the bucket. The stored rank is retained for undo, but it must not make the
+    # active-selection filter report that Alpha still has a chosen highlight.
+    db.update_photo_flag(photo_ids["Alpha Bird"], "rejected")
+    assert species_for(highlight_selection="yes") == {"Gamma Bird"}
+    assert species_for(
+        highlight_selection="no", species_representative="no"
+    ) == {"Alpha Bird", "Delta Bird"}
+    assert db.get_species_highlights("Alpha Bird") == {
+        "Alpha Bird": {photo_ids["Alpha Bird"]: 1}
+    }
+    db.update_photo_flag(photo_ids["Alpha Bird"], "none")
+    assert species_for(highlight_selection="yes") == {"Alpha Bird", "Gamma Bird"}
+
+    # Representative preferences follow the same active-state rule while
+    # keeping their stored row available for an un-reject.
+    db.update_photo_flag(photo_ids["Beta Bird"], "rejected")
+    assert species_for(species_representative="yes") == {"Gamma Bird"}
+    assert db.get_species_representatives() == {
+        "Beta Bird": photo_ids["Beta Bird"],
+        "Gamma Bird": photo_ids["Gamma Bird"],
+    }
+    db.update_photo_flag(photo_ids["Beta Bird"], "none")
+    assert species_for(species_representative="yes") == {"Beta Bird", "Gamma Bird"}
+
+    response = client.get(
+        "/api/highlights",
+        query_string={
+            "folder_id": fid,
+            "highlight_selection": "not-a-filter",
+            "species_representative": "not-a-filter",
+        },
+    )
+    assert response.get_json()["meta"]["highlight_selection"] == "all"
+    assert response.get_json()["meta"]["species_representative"] == "all"
+
+
+def test_highlights_curation_filter_ignores_rejected_selected_prediction(app_and_db):
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/pred-filter', 'pred-filter', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+
+    photo_ids = []
+    prediction_ids = []
+    for index in range(2):
+        photo_id = db.conn.execute(
+            "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+            "VALUES (?, ?, ?, 'none')",
+            (fid, f"predicted-{index}.jpg", 0.9 - index * 0.1),
+        ).lastrowid
+        detection_id = db.conn.execute(
+            "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.95)",
+            (photo_id,),
+        ).lastrowid
+        prediction_id = db.conn.execute(
+            "INSERT INTO predictions "
+            "(detection_id, classifier_model, labels_fingerprint, species, confidence) "
+            "VALUES (?, 'test-model', 'test-labels', 'Prediction Bird', ?)",
+            (detection_id, 0.95 - index * 0.05),
+        ).lastrowid
+        photo_ids.append(photo_id)
+        prediction_ids.append(prediction_id)
+    db.conn.commit()
+    db.add_species_highlight("Prediction Bird", photo_ids[0])
+
+    response = client.get(
+        "/api/highlights",
+        query_string={"folder_id": fid, "highlight_selection": "yes"},
+    )
+    assert {b["species"] for b in response.get_json()["buckets"]} == {
+        "Prediction Bird"
+    }
+
+    # Rejecting the selected photo's prediction removes that photo from the
+    # species bucket, but the second prediction keeps the species visible.
+    db.update_prediction_status(prediction_ids[0], "rejected")
+    response = client.get(
+        "/api/highlights",
+        query_string={"folder_id": fid, "highlight_selection": "yes"},
+    )
+    assert response.get_json()["buckets"] == []
+    response = client.get(
+        "/api/highlights",
+        query_string={"folder_id": fid, "highlight_selection": "no"},
+    )
+    assert {b["species"] for b in response.get_json()["buckets"]} == {
+        "Prediction Bird"
+    }
 
 
 def test_highlights_predictions_above_threshold_populate_buckets(app_and_db):
@@ -5292,6 +8983,1088 @@ def test_highlights_relabel_unidentified_sets_species(app_and_db):
     assert "Song Sparrow" in {kw["name"] for kw in db.get_photo_keywords(pid)}
 
 
+def test_highlights_relabel_moves_species_highlights_to_new_bucket(app_and_db):
+    """Relabel migrates ordered species_highlights rows to the new species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrh', 'hrh', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    p1 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'h1.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    p2 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'h2.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p1, old_kid)
+    db.tag_photo(p2, old_kid)
+    db.add_species_highlight("Bald Eagle", p1)
+    db.add_species_highlight("Bald Eagle", p2)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p1, p2], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("Bald Eagle") == {}
+    assert db.get_species_highlights("Golden Eagle") == {
+        "Golden Eagle": {p1: 1, p2: 2}
+    }
+
+
+def test_highlights_relabel_merges_into_existing_new_species_bucket(app_and_db):
+    """Relabel appends after rows already present in the destination bucket."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrm', 'hrm', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    db.add_keyword("Bald Eagle", is_species=True)
+    new_kid = db.add_keyword("Golden Eagle", is_species=True)
+    p_dest = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'dest.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    p_moving = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'moving.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_dest, new_kid)
+    db.tag_photo(p_moving, db.add_keyword("Bald Eagle", is_species=True))
+    db.add_species_highlight("Golden Eagle", p_dest)
+    db.add_species_highlight("Bald Eagle", p_moving)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_moving], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    assert db.get_species_highlights("Bald Eagle") == {}
+    assert db.get_species_highlights("Golden Eagle") == {
+        "Golden Eagle": {p_dest: 1, p_moving: 2}
+    }
+
+
+def test_highlights_relabel_migrates_species_representative(app_and_db):
+    """Relabel moves species_representative preferences to the new species
+    so `get_species_representatives()` returns the photo under its new bucket
+    rather than stranding it under the old species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrrep', 'hrrep', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'rep.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.set_species_representative("Bald Eagle", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    assert reps.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps
+
+
+def test_highlights_relabel_undo_restores_curation(app_and_db):
+    """Undoing a Highlights relabel restores the migrated ordered-highlight
+    row and species_representative preference back under the old species,
+    so the photo isn't stranded under the new species when the relabel
+    itself is undone. Redo re-applies the migration."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrundo', 'hrundo', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'undo-cur.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.set_species_representative("Bald Eagle", pid)
+    db.add_species_highlight("Bald Eagle", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+    assert db.get_species_representatives().get("Golden Eagle") == pid
+    assert pid in (db.get_species_highlights("Golden Eagle") or {}).get(
+        "Golden Eagle", {}
+    )
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "species_replace"
+    reps = db.get_species_representatives()
+    assert reps.get("Bald Eagle") == pid
+    assert "Golden Eagle" not in reps
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Bald Eagle") or {})
+    assert "Golden Eagle" not in hl
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    assert redone["action_type"] == "species_replace"
+    reps_redo = db.get_species_representatives()
+    assert reps_redo.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps_redo
+    hl_redo = db.get_species_highlights()
+    assert pid in (hl_redo.get("Golden Eagle") or {})
+    assert "Bald Eagle" not in hl_redo
+
+
+def test_highlights_relabel_undo_preserves_original_rank(app_and_db):
+    """Undoing a relabel puts the highlighted photo back at its original
+    rank rather than dumping it at MAX(rank)+1 of the old bucket, so
+    curated order survives a round-trip through undo."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrrank', 'hrrank', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Old Rank Bird", is_species=True)
+    db.add_keyword("New Rank Bird", is_species=True)
+    p1 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'rank-1.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p2 = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'rank-2.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p1, old_kid)
+    db.tag_photo(p2, old_kid)
+    db.add_species_highlight("Old Rank Bird", p1)
+    db.add_species_highlight("Old Rank Bird", p2)
+
+    # Sanity: original ranks are 1 (p1) and 2 (p2).
+    assert db.get_species_highlights("Old Rank Bird") == {
+        "Old Rank Bird": {p1: 1, p2: 2}
+    }
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p1], "species": "New Rank Bird"},
+    )
+    assert resp.status_code == 200
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+
+    restored = db.get_species_highlights("Old Rank Bird")["Old Rank Bird"]
+    # Before the fix, p1 landed at rank 3 (MAX(rank)+1) and appeared
+    # after p2 in the ordered list.
+    assert restored[p1] == 1
+    assert restored[p2] == 2
+
+
+def test_highlights_relabel_prediction_only_undo_restores_curation(app_and_db):
+    """Predicted-only relabels record `keyword_add`, not `species_replace`,
+    but can still carry a `curation` payload when the photo already held a
+    representative or highlight under another species. Undo/redo must
+    move those rows back and forth just like the `species_replace` case."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrpo', 'hrpo', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    db.add_keyword("New Species", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'pred-cur.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # No prior species tag: only representative + highlight rows exist
+    # for an unrelated species. This is what makes the relabel record as
+    # `keyword_add` (has_old_species stays False) rather than
+    # `species_replace`.
+    db.set_species_representative("Predicted Bird", pid)
+    db.add_species_highlight("Predicted Bird", pid)
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Predicted Bird", 0.88, "m")
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "New Species"},
+    )
+    assert resp.status_code == 200
+    assert db.get_edit_history(limit=1)[0]["action_type"] == "keyword_add"
+    assert db.get_species_representatives().get("New Species") == pid
+    assert pid in (db.get_species_highlights("New Species") or {}).get(
+        "New Species", {}
+    )
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "keyword_add"
+    reps = db.get_species_representatives()
+    assert reps.get("Predicted Bird") == pid
+    assert "New Species" not in reps
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Predicted Bird") or {})
+    assert "New Species" not in hl
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    assert redone["action_type"] == "keyword_add"
+    reps_redo = db.get_species_representatives()
+    assert reps_redo.get("New Species") == pid
+    assert "Predicted Bird" not in reps_redo
+    hl_redo = db.get_species_highlights()
+    assert pid in (hl_redo.get("New Species") or {})
+    assert "Predicted Bird" not in hl_redo
+
+
+def test_highlights_relabel_undo_preserves_existing_destination_highlight(app_and_db):
+    """When a photo is highlighted under both the old and new species,
+    the relabel drops the old-bucket row and leaves the pre-existing
+    destination row alone. Undo must not delete that destination row —
+    it wasn't created by the relabel."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrdst', 'hrdst', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Both Bird A", is_species=True)
+    db.add_keyword("Both Bird B", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'both.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    # Highlighted under both species before the relabel.
+    db.add_species_highlight("Both Bird A", pid)
+    db.add_species_highlight("Both Bird B", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Both Bird B"},
+    )
+    assert resp.status_code == 200
+    # Old-bucket row dropped; destination row retained.
+    assert db.get_species_highlights("Both Bird A") == {}
+    assert pid in (db.get_species_highlights("Both Bird B") or {}).get(
+        "Both Bird B", {}
+    )
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    hl = db.get_species_highlights()
+    # Old bucket restored AND destination row survives — before the fix
+    # the undo deleted the pre-existing (Both Bird B, pid) row.
+    assert pid in (hl.get("Both Bird A") or {})
+    assert pid in (hl.get("Both Bird B") or {})
+
+
+def test_highlights_relabel_undo_restores_representative_over_collision(app_and_db):
+    """When the destination species already has a different representative,
+    rename_photo_preferences_species's INSERT OR IGNORE is ignored and no
+    row for our photo is written at the new species, but the old-species
+    row is still deleted. Undo must restore the old-species representative
+    even though there's no destination row for this photo to key off of."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrcol', 'hrcol', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Rep Old", is_species=True)
+    db.add_keyword("Rep New", is_species=True)
+    p_moving = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'moving.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p_incumbent = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'incumbent.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_moving, old_kid)
+    db.set_species_representative("Rep Old", p_moving)
+    db.set_species_representative("Rep New", p_incumbent)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_moving], "species": "Rep New"},
+    )
+    assert resp.status_code == 200
+    reps_after = db.get_species_representatives()
+    # Old-species rep dropped; Rep New keeps its original incumbent.
+    assert "Rep Old" not in reps_after
+    assert reps_after.get("Rep New") == p_incumbent
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    reps = db.get_species_representatives()
+    # Before the fix, the old-species representative stayed stranded
+    # because the destination row for p_moving never existed at "Rep New".
+    assert reps.get("Rep Old") == p_moving
+    assert reps.get("Rep New") == p_incumbent
+
+
+def test_highlights_relabel_undo_preserves_preexisting_target_representative(
+    app_and_db,
+):
+    """When the relabeled photo was already a global representative for
+    the destination species — e.g. a multi-species photo picked as rep
+    for both A and B before relabeling A→B — the relabel's
+    ``INSERT OR IGNORE`` keeps the pre-existing ``(B, photo_id)`` row and
+    only deletes the old-species row. Undo must not erase that
+    pre-existing target-species rep while processing ``pref_prev``."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/prekeep', 'prekeep', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Rep Both A", is_species=True)
+    new_kid = db.add_keyword("Rep Both B", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'both.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.tag_photo(pid, new_kid)
+    db.set_species_representative("Rep Both A", pid)
+    db.set_species_representative("Rep Both B", pid)
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Rep Both B"},
+    )
+    assert resp.status_code == 200
+    reps_after = db.get_species_representatives()
+    # A has been retagged away and its rep row moved into B (whose row
+    # was pre-existing, so INSERT OR IGNORE was a no-op).
+    assert "Rep Both A" not in reps_after
+    assert reps_after.get("Rep Both B") == pid
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    reps_undone = db.get_species_representative_lists()
+    # Both reps must be present after undo: A is restored from pref_prev,
+    # and B must survive the pref_prev-driven cleanup because the target
+    # rep row pre-existed the relabel.
+    assert pid in (reps_undone.get("Rep Both A") or [])
+    assert pid in (reps_undone.get("Rep Both B") or [])
+
+
+def test_highlights_relabel_migrates_cross_workspace_representative(app_and_db):
+    """A photo picked as a global representative in a different workspace
+    has no compatibility row in the relabel-workspace's ``photo_preferences``,
+    only a global ``species_representatives`` row. Relabel must still move
+    that global row to the new species; otherwise the representative
+    disappears from both species after the retag."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/xwsrep', 'xwsrep', 'ok')"
+    ).lastrowid
+    ws_a = db._active_workspace_id
+    ws_b = db.create_workspace("XWSRep Other")
+    for ws in (ws_a, ws_b):
+        db.conn.execute(
+            "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+            (ws, fid),
+        )
+    old_kid = db.add_keyword("Bald Eagle", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'xrep.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    # Select the representative from workspace B, so the compatibility
+    # photo_preferences row lives under ws_b — not under ws_a where we
+    # relabel from. The global species_representatives row is workspace-
+    # independent and stays.
+    db.set_active_workspace(ws_b)
+    db.set_species_representative("Bald Eagle", pid)
+    db.set_active_workspace(ws_a)
+
+    # Sanity: no local photo_preferences row for this photo in ws_a.
+    local_pref = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_a, "Bald Eagle", pid),
+    ).fetchone()
+    assert local_pref is None
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    assert reps.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps
+
+    # Undo/redo round-trips the global rep even when there's no local
+    # pref row to piggyback on.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    reps_undone = db.get_species_representatives()
+    assert reps_undone.get("Bald Eagle") == pid
+    assert "Golden Eagle" not in reps_undone
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    reps_redone = db.get_species_representatives()
+    assert reps_redone.get("Golden Eagle") == pid
+    assert "Bald Eagle" not in reps_redone
+
+
+def test_highlights_relabel_ignores_stale_representative_rows(app_and_db):
+    """A photo can retain a global ``species_representatives`` row for a
+    species it no longer carries (untag_photo doesn't clear the global
+    rep row, and a rep picked from another workspace has no active-
+    workspace pref row to sweep it through the preference pass).
+    Relabeling the photo's current species must not renaming that stale
+    rep into the target species — it should stay under the old species,
+    and only the rep for the species actually being replaced should
+    move."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/stalerep', 'stalerep', 'ok')"
+    ).lastrowid
+    ws_a = db._active_workspace_id
+    ws_b = db.create_workspace("StaleRep Other")
+    for ws in (ws_a, ws_b):
+        db.conn.execute(
+            "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+            (ws, fid),
+        )
+    stale_kid = db.add_keyword("Bald Eagle", is_species=True)
+    current_kid = db.add_keyword("Osprey", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'stale.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, stale_kid)
+    db.tag_photo(pid, current_kid)
+    # Select the Bald Eagle rep from ws_b — the compat pref row lives
+    # under ws_b, so the active workspace ws_a's preference-rename pass
+    # won't sweep this rep during a ws_a relabel. Only the direct rep-
+    # only pass could pick it up, which is the code path under test.
+    db.set_active_workspace(ws_b)
+    db.set_species_representative("Bald Eagle", pid)
+    db.set_active_workspace(ws_a)
+    # The current-species rep is set from the active workspace and has
+    # a local pref row, so its migration goes through the preference
+    # pass and is unrelated to the rep-only filter.
+    db.set_species_representative("Osprey", pid)
+    # Untag Bald Eagle from the photo. The global species_representatives
+    # row remains, so the photo now carries only Osprey as a taxonomy
+    # keyword but still has a stale (Bald Eagle, pid) rep row.
+    db.untag_photo(pid, stale_kid)
+
+    stale_before = db.conn.execute(
+        "SELECT 1 FROM species_representatives WHERE species = ? AND photo_id = ?",
+        ("Bald Eagle", pid),
+    ).fetchone()
+    assert stale_before is not None
+    # And no ws_a pref row exists for Bald Eagle either — confirms the
+    # preference pass won't touch it.
+    local_pref = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_a, "Bald Eagle", pid),
+    ).fetchone()
+    assert local_pref is None
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    # The Osprey rep moved to Golden Eagle (the relabel target).
+    assert reps.get("Golden Eagle") == pid
+    assert "Osprey" not in reps
+    # The stale Bald Eagle rep stays under Bald Eagle — it was never
+    # part of the relabel and must not be renamed to Golden Eagle.
+    assert reps.get("Bald Eagle") == pid
+
+
+def test_highlights_relabel_ignores_stale_representative_with_local_pref(app_and_db):
+    """When a photo has a stale ``photo_preferences`` row for a species it
+    no longer carries (from setting the rep in the active workspace and
+    then untagging that species), a relabel of the photo's current species
+    must not sweep the stale row through ``rename_photo_preferences_species``
+    — which would also rename the matching global ``species_representatives``
+    row into the target species, losing the preserved state and making the
+    target look manually selected."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/stalepref', 'stalepref', 'ok')"
+    ).lastrowid
+    ws_id = db._active_workspace_id
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    stale_kid = db.add_keyword("Bald Eagle", is_species=True)
+    current_kid = db.add_keyword("Osprey", is_species=True)
+    db.add_keyword("Golden Eagle", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'stalepref.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, stale_kid)
+    db.tag_photo(pid, current_kid)
+    # Set both reps from the active workspace so each has a local
+    # compat pref row in ws_id. This makes the stale row travel through
+    # the pref-covered pass rather than the rep-only pass.
+    db.set_species_representative("Bald Eagle", pid)
+    db.set_species_representative("Osprey", pid)
+    # Untag Bald Eagle. The pref row and global rep row for Bald Eagle
+    # both remain (untag_photo does not clear either), so the photo now
+    # carries only Osprey as a taxonomy keyword but retains stale
+    # (Bald Eagle, pid) rows in both tables.
+    db.untag_photo(pid, stale_kid)
+
+    stale_pref = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_id, "Bald Eagle", pid),
+    ).fetchone()
+    assert stale_pref is not None
+    stale_rep = db.conn.execute(
+        "SELECT 1 FROM species_representatives WHERE species = ? AND photo_id = ?",
+        ("Bald Eagle", pid),
+    ).fetchone()
+    assert stale_rep is not None
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Golden Eagle"},
+    )
+    assert resp.status_code == 200
+
+    reps = db.get_species_representatives()
+    # The Osprey rep moved to Golden Eagle (the relabel target).
+    assert reps.get("Golden Eagle") == pid
+    assert "Osprey" not in reps
+    # The stale Bald Eagle rep stays under Bald Eagle — the pref-covered
+    # rename must not carry it into Golden Eagle.
+    assert reps.get("Bald Eagle") == pid
+    # The stale Bald Eagle pref row is likewise left untouched.
+    stale_pref_after = db.conn.execute(
+        """SELECT 1 FROM photo_preferences
+           WHERE workspace_id = ? AND species = ? AND photo_id = ?""",
+        (ws_id, "Bald Eagle", pid),
+    ).fetchone()
+    assert stale_pref_after is not None
+
+
+def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_and_db):
+    """A prediction-only relabel (no taxonomy keywords → ``keyword_add``,
+    not ``species_replace``) must not sweep stale global
+    ``species_representatives`` or ``photo_preferences`` rows for species
+    the photo previously carried and then had untagged. Only curation for
+    a species matching the photo's active prediction should migrate to
+    the target species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/predstale', 'predstale', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    stale_kid = db.add_keyword("Old Bird", is_species=True)
+    db.add_keyword("New Species", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'pred-stale.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # Photo used to be tagged Old Bird and was picked as its rep; then the
+    # keyword was untagged. The rep/pref rows survive untag_photo, so the
+    # photo now carries no taxonomy but retains stale curation for Old
+    # Bird — a legitimate scenario Codex flagged for prediction-only
+    # relabels.
+    db.tag_photo(pid, stale_kid)
+    db.set_species_representative("Old Bird", pid)
+    db.add_species_highlight("Old Bird", pid)
+    db.untag_photo(pid, stale_kid)
+    # Prediction added AFTER untag so the "predicted-only" relabel path
+    # runs (has_old_species stays False → action_type = "keyword_add").
+    # The prediction is for a *different* species than the stale curation,
+    # so the prediction-species migration guard must skip the stale rows.
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Predicted Bird", 0.88, "m")
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "New Species"},
+    )
+    assert resp.status_code == 200
+    assert db.get_edit_history(limit=1)[0]["action_type"] == "keyword_add"
+
+    reps = db.get_species_representatives()
+    # Stale Old Bird rep survives — it is NOT renamed to New Species.
+    assert reps.get("Old Bird") == pid
+    assert "New Species" not in reps
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Old Bird") or {})
+    assert "New Species" not in hl
+
+
+def test_highlights_relabel_does_not_fold_non_ascii_case_variants(app_and_db):
+    """`_accept_curation_source` must key by ``keyword_match_key`` (SQLite's
+    ASCII-only NOCASE fold), not Python's ``str.lower()``. SQLite/add_keyword
+    keep ``Éclair`` and ``éclair`` as distinct species rows, but
+    ``str.lower()`` folds them together — so a stale ``éclair`` curation
+    row on a photo currently carrying ``Éclair`` would be swept into the
+    relabel target if the filter used ``.lower()``. Under the fix, the
+    stale row stays under ``éclair``.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/nonascii', 'nonascii', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    # Two DISTINCT species keywords: `Éclair` (uppercase É) and `éclair`
+    # (lowercase é). add_keyword's NOCASE dedupe is ASCII-only, so they
+    # coexist. Insert directly to avoid any casing-convention rewrite.
+    kid_upper = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('Éclair', NULL, 1, 'taxonomy')"
+    ).lastrowid
+    kid_target = db.add_keyword("Warbler", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'nonascii.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # Photo currently carries `Éclair`.
+    db.tag_photo(pid, kid_upper)
+    # Stale species_highlights row keyed to the DIFFERENT species `éclair`
+    # — SQLite treats it as unrelated to the tagged `Éclair`. The photo
+    # has no `éclair` tag, so this row must stay under `éclair` after a
+    # relabel of its actual (Éclair) tag.
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'éclair', ?, 0)",
+        (ws_id, pid),
+    )
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Warbler"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    # The lowercase `éclair` highlight is STALE — the photo doesn't carry
+    # that species — so it must remain under `éclair`, not migrate to the
+    # relabel target.
+    remaining = db.conn.execute(
+        "SELECT species FROM species_highlights "
+        "WHERE workspace_id = ? AND photo_id = ?",
+        (ws_id, pid),
+    ).fetchall()
+    remaining_species = {r["species"] for r in remaining}
+    assert "éclair" in remaining_species, (
+        "stale non-ASCII-case-variant curation row must not be folded "
+        "onto the relabel target"
+    )
+    assert "Warbler" not in remaining_species
+
+
+def test_highlights_relabel_queues_remove_for_non_ascii_case_variant(app_and_db):
+    """Relabeling a photo from `Éclair` to a distinct SQLite species must
+    queue a `keyword_remove` for the old spelling. SQLite's NOCASE fold
+    is ASCII-only, so `Éclair` and `éclair` live as separate keyword rows
+    with separate ids — but Python `.lower()` folds them equal. A
+    name-based `.lower()` skip on the remove would leave the old spelling
+    in the sidecar even though the tag was flipped in the DB, so the
+    next XMP sync would still export `Éclair`. Comparing by keyword id
+    sidesteps the ASCII/Unicode fold mismatch.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/nonascii-remove', 'nonascii-remove', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    kid_upper = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('Éclair', NULL, 1, 'taxonomy')"
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'nonascii-remove.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, kid_upper)
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "éclair"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    rows = db.conn.execute(
+        "SELECT name FROM keywords WHERE name IN ('Éclair', 'éclair')"
+    ).fetchall()
+    assert {r["name"] for r in rows} == {"Éclair", "éclair"}, (
+        "SQLite NOCASE is ASCII-only, so the two spellings must remain "
+        "as distinct rows"
+    )
+    tagged = db.conn.execute(
+        "SELECT k.name FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ?",
+        (pid,),
+    ).fetchall()
+    tagged_names = {r["name"] for r in tagged}
+    assert "éclair" in tagged_names
+    assert "Éclair" not in tagged_names, (
+        "photo should carry only the new species row, not the old one"
+    )
+    pending = db.conn.execute(
+        "SELECT change_type, value FROM pending_changes "
+        "WHERE workspace_id = ? AND photo_id = ?",
+        (ws_id, pid),
+    ).fetchall()
+    remove_values = {
+        r["value"] for r in pending if r["change_type"] == "keyword_remove"
+    }
+    add_values = {
+        r["value"] for r in pending if r["change_type"] == "keyword_add"
+    }
+    assert "Éclair" in remove_values, (
+        "keyword_remove must be queued for the pre-existing non-ASCII "
+        "case variant; a name-based `.lower()` compare would have folded "
+        "it equal to the new species and skipped the remove, leaving the "
+        "old spelling in the exported XMP"
+    )
+    assert "éclair" in add_values
+
+
+def test_highlights_relabel_undo_preserves_representative_order(app_and_db):
+    """Undoing a relabel that moved a secondary representative must
+    restore it at its original ``selected_order`` — otherwise
+    ``_set_global_species_representative`` would assign MAX+1 and promote
+    the restored photo above the pre-existing primary representative for
+    the same species."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/reporder', 'reporder', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Order Bird", is_species=True)
+    db.add_keyword("Other Bird", is_species=True)
+    p_primary = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'primary.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p_secondary = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'secondary.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_primary, old_kid)
+    db.tag_photo(p_secondary, old_kid)
+    # Select secondary first so primary ends up newest and lists first.
+    db.set_species_representative("Order Bird", p_secondary)
+    db.set_species_representative("Order Bird", p_primary)
+    assert db.get_species_representative_lists()["Order Bird"] == [
+        p_primary, p_secondary,
+    ]
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_secondary], "species": "Other Bird"},
+    )
+    assert resp.status_code == 200
+    assert db.get_species_representative_lists()["Order Bird"] == [p_primary]
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    # Before the fix, undo called _set_global_species_representative and
+    # p_secondary landed at MAX(selected_order)+1 — jumping it ahead of
+    # p_primary.
+    restored = db.get_species_representative_lists()["Order Bird"]
+    assert restored == [p_primary, p_secondary]
+
+
+def test_highlights_relabel_redo_preserves_representative_order(app_and_db):
+    """Redoing a previously-undone relabel that moved a secondary
+    representative must restore it at the original ``selected_order``
+    captured before the first relabel. Before the fix, redo called
+    ``_set_global_species_representative`` and pushed the redone
+    representative above pre-existing entries under ``new_species``,
+    changing which photo shows up as the Life List/Highlights primary
+    after an undo/redo round trip."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/reporder-redo', 'reporder-redo', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Redo Order Bird", is_species=True)
+    new_kid = db.add_keyword("Redo Other Bird", is_species=True)
+    p_source = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'source.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    p_target_primary = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'target_primary.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(p_source, old_kid)
+    db.tag_photo(p_target_primary, new_kid)
+    # Select p_source (in the old species) first so p_target_primary
+    # takes the newer selected_order in the shared global counter and
+    # stays the primary of "Redo Other Bird" after the relabel migrates
+    # p_source in at its lower captured order.
+    db.set_species_representative("Redo Order Bird", p_source)
+    db.set_species_representative("Redo Other Bird", p_target_primary)
+    assert db.get_species_representative_lists()["Redo Other Bird"] == [
+        p_target_primary,
+    ]
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [p_source], "species": "Redo Other Bird"},
+    )
+    assert resp.status_code == 200
+    after_relabel = db.get_species_representative_lists()["Redo Other Bird"]
+    # p_target_primary's global order is newer than p_source's, so the
+    # migrated p_source lands as a secondary rep, not the primary.
+    assert after_relabel == [p_target_primary, p_source]
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert db.get_species_representative_lists()["Redo Other Bird"] == [
+        p_target_primary,
+    ]
+
+    redone = db.redo_last_undo()
+    assert redone is not None
+    # Before the fix, redo called _set_global_species_representative and
+    # p_source landed at MAX(selected_order)+1, promoting it above
+    # p_target_primary. With the captured order restored on redo, the
+    # round trip preserves both the list and its primary photo.
+    redone_list = db.get_species_representative_lists()["Redo Other Bird"]
+    assert redone_list == after_relabel
+
+
+def test_rename_species_representatives_species_chunks_large_photo_lists(tmp_path):
+    """``rename_species_representatives_species`` must chunk the IN(...)
+    clause so a species tagged on thousands of photos doesn't blow
+    SQLite's ``SQLITE_MAX_VARIABLE_NUMBER`` on legacy builds. Before the
+    fix, ``rename_photo_preferences_species`` funneled every affected
+    photo through a single unchunked IN clause and raised
+    ``too many SQL variables``."""
+    from vireo.db import Database
+
+    db_path = tmp_path / "chunk-reps.db"
+    db = Database(str(db_path))
+    ws_id = db._ws_id()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/chunk', 'chunk', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    pid_start = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename) VALUES (?, 'p0.jpg')",
+        (fid,),
+    ).lastrowid
+    # 1500 > 999 (legacy SQLITE_MAX_VARIABLE_NUMBER), so an unchunked
+    # IN(...) with new_species, old_species, plus every id would exceed
+    # the parameter cap.
+    photo_ids = [pid_start]
+    for i in range(1, 1500):
+        photo_ids.append(db.conn.execute(
+            "INSERT INTO photos (folder_id, filename) VALUES (?, ?)",
+            (fid, f"p{i}.jpg"),
+        ).lastrowid)
+    for pid in photo_ids:
+        db.conn.execute(
+            """INSERT INTO species_representatives
+                   (species, photo_id, selected_order)
+               VALUES ('Old Species', ?, ?)""",
+            (pid, pid),
+        )
+    db.conn.commit()
+
+    moved = db.rename_species_representatives_species(
+        "Old Species", "New Species", photo_ids=photo_ids,
+    )
+    assert moved == len(photo_ids)
+
+    remaining_old = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM species_representatives WHERE species = ?",
+        ("Old Species",),
+    ).fetchone()["c"]
+    moved_new = db.conn.execute(
+        "SELECT COUNT(*) AS c FROM species_representatives WHERE species = ?",
+        ("New Species",),
+    ).fetchone()["c"]
+    assert remaining_old == 0
+    assert moved_new == len(photo_ids)
+
+
+def test_backfill_species_highlights_from_legacy_preferences(tmp_path):
+    """On upgraded databases, legacy photo_preferences rows with
+    purpose='highlights' should seed species_highlights so pre-existing
+    Highlights picks stay visible under the new ordered-highlights UI."""
+    from vireo.db import Database
+
+    db_path = tmp_path / "legacy.db"
+    db = Database(str(db_path))
+    ws_id = db._ws_id()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/legacy', 'legacy', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'legacy.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+               (workspace_id, purpose, species, photo_id,
+                created_at, updated_at)
+           VALUES (?, 'highlights', 'Legacy Bird', ?,
+                   datetime('now'), datetime('now'))""",
+        (ws_id, pid),
+    )
+    # Clear the one-shot marker so re-running the backfill picks up the
+    # newly-added legacy row (simulates opening a DB that predated the
+    # ordered-highlights feature).
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
+    )
+    db.conn.commit()
+    db.backfill_species_highlights_from_legacy_preferences()
+
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Legacy Bird") or {})
+
+    # Marker set so subsequent calls are no-ops even if the row is missing.
+    marker = db.conn.execute(
+        "SELECT value FROM db_meta WHERE key = ?",
+        (db._SPECIES_HIGHLIGHTS_BACKFILL_KEY,),
+    ).fetchone()
+    assert marker is not None
+    db.close()
+
+
 def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_and_db):
     """Manual species tag is authoritative even when a high-confidence
     prediction disagrees."""
@@ -5449,6 +10222,30 @@ def test_api_import_folder_preview_duplicate_count_deferred(app_and_db, tmp_path
     data = resp.get_json()
     assert data["total_count"] == 2
     assert data["duplicate_count"] == 0
+
+
+def test_api_import_folder_preview_summary_only_omits_file_rows(app_and_db, tmp_path):
+    """Summary-only folder preview keeps count cheap for import source rows."""
+    app, _ = app_and_db
+
+    source = tmp_path / "source_summary"
+    source.mkdir()
+    from PIL import Image
+    Image.new("RGB", (100, 100)).save(str(source / "bird1.jpg"))
+    Image.new("RGB", (100, 100)).save(str(source / "bird2.jpg"))
+    (source / "notes.txt").write_text("ignore me")
+
+    client = app.test_client()
+    resp = client.post("/api/import/folder-preview", json={
+        "folders": [str(source)],
+        "file_types": "both",
+        "summary_only": True,
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_count"] == 2
+    assert data["type_breakdown"][".jpg"] == 2
+    assert data["files"] == []
 
 
 def test_api_import_folder_preview_no_folders(app_and_db):
@@ -6428,6 +11225,280 @@ def test_save_grouping_defaults_rejects_bad_values(tmp_path, monkeypatch):
         assert _math.isfinite(pipe["tau_enc"])
 
 
+def test_collections_list_survives_one_unresolvable_rule(app_and_db):
+    """A single collection whose rule can't be resolved must not 500 the
+    whole /api/collections list. Before this, one bad rule raised an
+    unhandled ValueError, the endpoint 500'd, and every collection
+    dropdown in the UI came back empty. The bad collection should degrade
+    to photo_count=None with count_error=True; the others still count.
+    """
+    import json
+    app, db = app_and_db
+    client = app.test_client()
+
+    good = db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    resp = client.get("/api/collections")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()}
+
+    assert by_id[good]["photo_count"] == 1
+    assert "count_error" not in by_id[good]
+
+    assert by_id[bad]["photo_count"] is None
+    assert by_id[bad]["count_error"] is True
+
+
+def test_browse_init_flags_degraded_without_counting(app_and_db, monkeypatch):
+    """/api/browse/init must mark collections with unresolvable rules as
+    degraded (count_error=True) so the sidebar first paint disables them —
+    but it must NOT run COUNT(DISTINCT p.id) per collection to figure that
+    out. That N+1 is what the async loadCollectionCounts() in
+    bootstrapBrowse() was designed to avoid, and re-adding it to the
+    critical first-paint path makes Browse wait on every smart-collection
+    query.
+    """
+    import json
+    import sqlite3
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    good = db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    # If browse init still ran a full count per collection, this monkeypatch
+    # would blow up the request. The endpoint must derive the count_error
+    # flag from rule validation alone, with actual counts left to the
+    # client's async /api/collections call.
+    def boom(self, _cid):
+        raise sqlite3.OperationalError("count_collection_photos should not run on browse init")
+
+    monkeypatch.setattr(Database, "count_collection_photos", boom)
+
+    resp = client.get("/api/browse/init")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()["collections"]}
+
+    # The healthy collection is neither degraded nor eagerly counted.
+    assert by_id[good].get("count_error") in (None, False)
+    assert "photo_count" not in by_id[good]
+
+    # The broken one is still flagged so the sidebar renders it disabled
+    # before loadCollectionCounts() has a chance to run.
+    assert by_id[bad]["count_error"] is True
+
+
+def test_collections_list_surfaces_non_rule_failures(app_and_db, monkeypatch):
+    """The count_error path is for rule-validation failures only. If
+    count_collection_photos raises a genuine infrastructure error (locked or
+    corrupt DB, bad generated query), /api/collections must NOT silently
+    downgrade it to a count_error row — the pickers would then tell the user
+    to fix the rule when the real problem is DB-side. Non-ValueError errors
+    must bubble up so the 5xx surfaces where a human will see it.
+    """
+    import json
+    import sqlite3
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    db.add_collection(
+        "Rating 5", json.dumps([{"field": "rating", "op": ">=", "value": 5}])
+    )
+
+    # Patch the class so the per-request Database instance built by
+    # _get_db() is affected too — the route does not share the fixture's
+    # instance.
+    def boom(self, _cid):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Database, "count_collection_photos", boom)
+
+    resp = client.get("/api/collections")
+    # Not a 200 with count_error — a real 5xx so the incident is visible.
+    assert resp.status_code >= 500
+
+
+def test_collection_photos_returns_400_for_unresolvable_rule(app_and_db):
+    """When a collection's rules can't be resolved, /photos, /photo-ids and
+    /api/import/collection-preview must return a 400, not 500. Otherwise the
+    pipeline picker (which just shows every collection from /api/collections)
+    would advertise a source whose downstream endpoints crash the moment a
+    user selects it — leaving the UI stuck.
+    """
+    import json
+    app, db = app_and_db
+    client = app.test_client()
+
+    bad = db.add_collection(
+        "Broken", json.dumps([{"field": "nonexistent_field", "op": "is", "value": 1}])
+    )
+
+    resp = client.get(f"/api/collections/{bad}/photos")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    resp = client.get(f"/api/collections/{bad}/photo-ids")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+    resp = client.post(
+        "/api/import/collection-preview",
+        json={"collection_id": bad},
+    )
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+
+def test_pipeline_picker_disables_degraded_collections(app_and_db):
+    """The pipeline page's collection picker must not offer degraded
+    collections as selectable — count_error entries render with a `disabled`
+    attribute so users can't accidentally pick a source that would 500 the
+    downstream /photos endpoint.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+    html = client.get("/pipeline").get_data(as_text=True)
+    # The renderer keys off c.count_error and adds ' disabled' to the option
+    # (plus a tooltip explaining why it's unavailable). Assert the branch is
+    # actually in the template rather than probing it from the DOM.
+    assert "c.count_error" in html
+    assert "unavailable" in html
+
+
+def test_collection_pickers_disable_degraded_collections(app_and_db):
+    """Every page that renders a collection picker from /api/collections must
+    honor count_error. Before this fix only the pipeline picker did — the
+    review, cull, compare, pipeline-review, and browse pickers still appended
+    every collection as selectable, so picking a broken one 400'd the
+    downstream request. Regression guard: the same count_error /
+    'unavailable' branch that exists on the pipeline page must exist on each
+    of these pages too.
+    """
+    app, _db = app_and_db
+    client = app.test_client()
+    for route in ("/review", "/cull", "/compare", "/pipeline/review", "/browse"):
+        html = client.get(route).get_data(as_text=True)
+        assert "count_error" in html, (
+            f"{route} does not check count_error on its collection picker"
+        )
+        assert "unavailable" in html, (
+            f"{route} does not label degraded collections as unavailable"
+        )
+
+
+def test_degraded_collections_never_advertise_manual_add(app_and_db, monkeypatch):
+    """A count_error collection must not report can_add_photos=True from
+    either /api/collections or /api/browse/init. The add-to-collection
+    modal filters only on can_add_photos, and /api/collections/<id>/add-photos
+    reaches set(ids_rule["value"]) — which 500s on any malformed photo_ids
+    payload. Defense-in-depth alongside the picker guards: degraded rows
+    are surfaced (so the user can edit them) but never offered as an
+    append target.
+    """
+    import json
+
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+
+    # A static photo_ids collection whose count query fails at rule-resolve
+    # time: the shape looks like a manual-add target, but the DB can't
+    # count it, so it lands in the count_error path.
+    bad = db.add_collection(
+        "Broken static",
+        json.dumps([
+            {"field": "photo_ids", "value": [1, 2, 3]},
+            {"field": "nonexistent_field", "op": "is", "value": 1},
+        ]),
+    )
+
+    resp = client.get("/api/collections")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()}
+    assert by_id[bad]["count_error"] is True
+    assert by_id[bad]["can_add_photos"] is False, (
+        "degraded /api/collections row must not advertise manual-add support"
+    )
+
+    # /api/browse/init derives count_error from cheap rule validation, so
+    # patch that instead of count_collection_photos to trigger the branch.
+    monkeypatch.setattr(Database, "rules_resolvable", lambda self, rules: False)
+
+    resp = client.get("/api/browse/init")
+    assert resp.status_code == 200
+    by_id = {c["id"]: c for c in resp.get_json()["collections"]}
+    assert by_id[bad]["count_error"] is True
+    assert by_id[bad]["can_add_photos"] is False, (
+        "degraded /api/browse/init row must not advertise manual-add support"
+    )
+
+
+def test_browse_filter_by_collection_guards_degraded_rows():
+    """The Browse sidebar renders every collection from /api/collections as a
+    clickable filter target (filterByCollection). Before this fix,
+    left-clicking a degraded row hit /api/collections/<id>/photos, which now
+    400s, leaving Browse advertising a source that can't load. Regression
+    guard: filterByCollection must bail out at the top for count_error rows
+    (with a toast) rather than firing the request.
+    """
+    from pathlib import Path
+    src = Path(__file__).parent.parent / "templates" / "browse.html"
+    text = src.read_text(encoding="utf-8")
+    fn_start = text.find("async function filterByCollection")
+    assert fn_start != -1, "filterByCollection function not found"
+    # Grab enough of the function body to include the guard block. The guard
+    # must reference count_error and return before the normal load path runs.
+    body = text[fn_start:fn_start + 2000]
+    assert "count_error" in body, (
+        "browse.html filterByCollection does not check count_error"
+    )
+    guard_end = body.find("return;")
+    fetch_start = body.find("loadPhotos")
+    assert guard_end != -1 and fetch_start != -1 and guard_end < fetch_start, (
+        "browse.html filterByCollection does not early-return before loading"
+    )
+
+
+def test_review_switch_collection_does_not_silently_widen_scope():
+    """When /api/collections/<id>/photos fails, the review page must not fall
+    back to `allPredictions.slice()` — that silently widened the scope back
+    to every prediction, the opposite of what the user asked for. Regression
+    guard on the template source itself.
+    """
+    from pathlib import Path
+    src = Path(__file__).parent.parent / "templates" / "review.html"
+    text = src.read_text(encoding="utf-8")
+    # Locate the switchCollection function and the catch branch inside it.
+    fn_start = text.find("async function switchCollection")
+    assert fn_start != -1, "switchCollection function not found"
+    fn_end = text.find("\n}", fn_start)
+    assert fn_end != -1
+    body = text[fn_start:fn_end]
+    # The old silent fallback assigned allPredictions.slice() from the catch;
+    # the new behavior keeps the scope empty and surfaces a toast.
+    assert "predictions = allPredictions.slice()" not in body.split("catch")[1], (
+        "review.html still silently widens scope on collection load failure"
+    )
+    assert "predictions = []" in body
+    assert "showToast" in body
+
+
 def test_collection_preview_returns_match_count(app_and_db):
     """POST /api/collections/preview returns the count of photos that
     would match an unsaved rules list. Powers the smart-collection
@@ -6816,3 +11887,394 @@ def test_api_audit_import_untracked_silent_when_exiftool_present(
     assert data["ok"] is True
     assert data["imported"] == 1
     assert "warning" not in data
+
+
+# ---------------------------------------------------------------------------
+# Import page (import/process split PR 3)
+# ---------------------------------------------------------------------------
+
+
+def test_import_page_returns_200(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/import")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "navbar" in html
+    # Core controls, by id: the import mode radios, the after-import strategy
+    # menu (including the import-only null choice), the duplicate preview
+    # trigger, the safe-to-format pill container, and the start button posting
+    # to the in-place and copy import endpoints.
+    assert 'id="modeInPlace"' in html
+    assert 'id="modeCopy"' in html
+    assert 'id="afterImportSelect"' in html
+    assert 'value="__none__"' in html  # "None — import only" option
+    assert "/api/import/check-duplicates" in html
+    assert "Trust likely duplicates" in html
+    assert "Verify duplicates byte-for-byte" in html
+    assert "capture time to the second" in html
+    assert "res.unverified_duplicates_only" in html
+    assert 'id="safeToFormatPill"' in html
+    assert "/api/jobs/import-in-place" in html
+    assert "/api/jobs/import-photos" in html
+
+
+def test_import_page_resolves_default_process_client_side(app_and_db):
+    """Templates are Jinja-free by convention, so the after-import menu's
+    default resolves in page JS from the workspace's config_overrides
+    merged over /api/config, and the process options load from
+    /api/processes — assert the wiring exists (behavior is covered by the
+    user-first scenario)."""
+    app, _ = app_and_db
+    client = app.test_client()
+    html = client.get("/import").data.decode()
+    assert "/api/workspaces/active" in html
+    assert "default_process_id" in html
+    assert "/api/processes" in html
+    assert "config_overrides" in html
+
+
+def test_import_page_offers_common_and_custom_folder_templates(app_and_db):
+    """Folder organization is approachable without removing strftime's
+    flexibility or breaking custom templates loaded from config."""
+    app, _ = app_and_db
+    client = app.test_client()
+    html = client.get("/import").data.decode()
+
+    assert 'id="folderTemplatePreset"' in html
+    assert '%Y/%m/%d — 2026/07/12' in html
+    assert '%Y/%Y-%m-%d — 2026/2026-07-12' in html
+    assert '<option value="__custom__">Custom…</option>' in html
+    assert 'id="folderTemplate"' in html
+    assert "function selectedFolderTemplate()" in html
+    assert "preset.value = commonOption ? template : '__custom__'" in html
+
+
+def test_process_page_has_no_import_source(app_and_db):
+    """The wizard is the Process page now: the Import Photos radio flow is
+    gone (it lives at /import); Folders / Collection / New images scopes
+    and the strategy menu are present. A compatibility source-folder
+    browse/type control was restored so users can point Process at
+    raw folders directly — it is present but does not re-add the full
+    Import radio or /api/jobs/import-full entry point."""
+    app, _ = app_and_db
+    client = app.test_client()
+    html = client.get("/pipeline").data.decode()
+    assert 'id="radioImport"' not in html
+    assert "/api/jobs/import-full" not in html
+    assert 'id="radioFolders"' in html
+    assert 'id="radioCollection"' in html
+    assert 'id="radioNewImages"' in html
+    assert 'id="strategySelect"' in html
+    assert "folder_ids" in html
+    assert "Open Import to add photos" in html
+    assert "<title>Vireo - Process</title>" in html
+
+
+def test_browse_empty_state_import_link_targets_import_page(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    html = client.get("/browse").data.decode()
+    assert 'href="/import"' in html
+    assert 'href="/pipeline" style="display:inline-block' not in html
+
+
+def test_native_import_commands_route_to_import_page():
+    import os
+
+    repo_root = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..")
+    )
+    navbar_path = os.path.join(repo_root, "vireo", "templates", "_navbar.html")
+    menu_path = os.path.join(repo_root, "src-tauri", "src", "menu.rs")
+
+    with open(navbar_path, encoding="utf-8") as f:
+        navbar = f.read()
+    with open(menu_path, encoding="utf-8") as f:
+        menu = f.read()
+
+    assert "ids::NAV_IMPORT => Some(\"/import\")" in menu
+    assert "case 'import_photos':\n        nativeMenuRoute('/import');" in navbar
+    # Import Folder... must stay a distinct action from Import Photos...:
+    # it deep-links into Copy-to-archive with the source picker open.
+    assert (
+        "nativeMenuRoute('/import?mode=copy&pick=source');" in navbar
+    )
+
+
+def test_native_shell_owns_external_navigation_policy():
+    """The native shell must deny external and child-webview navigation."""
+    import os
+
+    repo_root = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..")
+    )
+    lib_path = os.path.join(repo_root, "src-tauri", "src", "lib.rs")
+    config_path = os.path.join(repo_root, "src-tauri", "tauri.conf.json")
+
+    with open(lib_path, encoding="utf-8") as f:
+        lib = f.read()
+    with open(config_path, encoding="utf-8") as f:
+        config = f.read()
+
+    assert '"create": false' in config
+    assert ".on_navigation(move |url|" in lib
+    assert "navigation::handle_navigation(&navigation_app, url)" in lib
+    assert ".on_new_window(" in lib
+    assert "NewWindowResponse::Deny" in lib
+
+
+def test_pipeline_plan_accepts_folder_scope(app_and_db):
+    """The Process page's folder scope must produce truthful readiness
+    pills: the plan is computed over the folders' subtree photos, not the
+    whole workspace (CORE_PHILOSOPHY: no cheaper-proxy counts)."""
+    app, db = app_and_db
+    root = db.conn.execute(
+        "SELECT id FROM folders WHERE path = '/photos/2024'"
+    ).fetchone()["id"]
+    client = app.test_client()
+    resp = client.post("/api/pipeline/plan", json={"folder_ids": [root]})
+    assert resp.status_code == 200
+    scope = resp.get_json()["scope"]
+    # Fixture: 2 photos on the root + 1 in its child folder.
+    assert scope["photo_count"] == 3
+
+
+def test_pipeline_plan_folder_scope_unlinked_404(app_and_db):
+    app, db = app_and_db
+    original_ws = db._active_workspace_id
+    other = db.create_workspace("PlanOther")
+    db.set_active_workspace(other)
+    foreign = db.add_folder("/photos/plan-foreign", name="plan-foreign")
+    db.set_active_workspace(original_ws)
+    client = app.test_client()
+    resp = client.post("/api/pipeline/plan", json={"folder_ids": [foreign]})
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Life list explorer (taxonomic completeness)
+# ---------------------------------------------------------------------------
+
+def _seed_bird_taxonomy(db):
+    """Insert a tiny Aves subtree: class Aves > 2 orders > families > genera > species.
+    Returns dict of name -> taxa id. (Mirror of the helper in test_db.py.)"""
+    rows = [
+        (3,     "Aves",           "Birds",         "class",   None,             "Animalia"),
+        (7251,  "Passeriformes",  "Perching Birds", "order",  "Aves",           "Animalia"),
+        (67566, "Passerellidae",  "New World Sparrows", "family", "Passeriformes", "Animalia"),
+        (9100,  "Melospiza",      None,            "genus",   "Passerellidae",  "Animalia"),
+        (9101,  "Melospiza melodia", "Song Sparrow", "species", "Melospiza",    "Animalia"),
+        (9102,  "Melospiza georgiana", "Swamp Sparrow", "species", "Melospiza",  "Animalia"),
+        (9200,  "Zonotrichia",    None,            "genus",   "Passerellidae",  "Animalia"),
+        (9201,  "Zonotrichia albicollis", "White-throated Sparrow", "species", "Zonotrichia", "Animalia"),
+        (4000,  "Anseriformes",   "Waterfowl",     "order",   "Aves",           "Animalia"),
+        (4100,  "Anatidae",       "Ducks",         "family",  "Anseriformes",   "Animalia"),
+        (4200,  "Anas",           None,            "genus",   "Anatidae",       "Animalia"),
+        (4201,  "Anas platyrhynchos", "Mallard",   "species", "Anas",           "Animalia"),
+    ]
+    ids = {}
+    for inat_id, name, common, rank, parent, kingdom in rows:
+        parent_id = ids.get(parent)
+        cur = db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank, parent_id, kingdom)"
+            " VALUES (?,?,?,?,?,?)",
+            (inat_id, name, common, rank, parent_id, kingdom),
+        )
+        ids[name] = cur.lastrowid
+    db.conn.commit()
+    return ids
+
+
+def test_build_explorer_payload_rollup(db):
+    from app import _build_explorer_payload
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+
+    payload = _build_explorer_payload(db)
+    assert payload['taxonomy_ready'] is True
+    assert payload['root']['name'] == 'Aves'
+    s = payload['summary']
+    assert s['species'] == {'found': 1, 'total': 4}     # 4 species seeded
+    assert s['genus'] == {'found': 1, 'total': 3}
+    assert s['family'] == {'found': 1, 'total': 2}
+    assert s['order'] == {'found': 1, 'total': 2}
+    # Passeriformes order node carries family child counts + species rollup
+    orders = {n['name']: n for n in payload['nodes']}
+    passeri = orders['Passeriformes']
+    assert passeri['found_species'] == 1 and passeri['total_species'] == 3
+    assert passeri['child_rank'] == 'family'
+    assert passeri['found_children'] == 1 and passeri['total_children'] == 1
+
+
+def test_build_explorer_payload_not_ready(db):
+    from app import _build_explorer_payload
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    payload = _build_explorer_payload(db)
+    assert payload['taxonomy_ready'] is False
+    assert payload['nodes'] == []
+
+
+def test_build_explorer_payload_rejects_non_class_root(db):
+    from app import _build_explorer_payload
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    # An order-rank taxon is NOT a valid explorer root: reject it.
+    payload = _build_explorer_payload(db, root_id=ids['Passeriformes'])
+    assert payload['taxonomy_ready'] is True
+    assert payload['valid_root'] is False
+    assert payload['root'] is None
+    assert payload['nodes'] == []
+    assert payload['summary'] == {}
+    # The default (Aves, a class) is a valid root.
+    default_payload = _build_explorer_payload(db)
+    assert default_payload['taxonomy_ready'] is True
+    assert default_payload['valid_root'] is not False
+    assert default_payload['root']['name'] == 'Aves'
+
+
+def test_build_explorer_payload_multi_found_species_rollup(db):
+    from app import _build_explorer_payload
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                      file_size=1, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                      file_size=1, file_mtime=2.0)
+    # Tag BOTH Melospiza species as found (two keywords, one per taxon).
+    k1 = db.add_keyword('Song Sparrow')
+    db.tag_photo(p1, k1)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k1))
+    k2 = db.add_keyword('Swamp Sparrow')
+    db.tag_photo(p2, k2)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza georgiana'], k2))
+    db.conn.commit()
+
+    payload = _build_explorer_payload(db)
+    nodes = {n['name']: n for n in payload['nodes']}
+    # Passeriformes order -> Passerellidae family -> Melospiza + Zonotrichia genera.
+    passeri = nodes['Passeriformes']
+    passerellidae = {c['name']: c for c in passeri['children']}['Passerellidae']
+    melospiza = {c['name']: c for c in passerellidae['children']}['Melospiza']
+    # Both Melospiza species found.
+    assert melospiza['found_species'] == 2
+    assert melospiza['total_species'] == 2
+    # Family: both found species roll up, but only ONE genus (Melospiza) has any.
+    assert passerellidae['found_species'] == 2
+    assert passerellidae['found_children'] == 1
+    # Zonotrichia albicollis is NOT tagged -> Zonotrichia genus has none.
+    zonotrichia = {c['name']: c for c in passerellidae['children']}['Zonotrichia']
+    assert zonotrichia['found_species'] == 0
+    # Summary: 2 species found, but only 1 genus counts as found.
+    assert payload['summary']['species']['found'] == 2
+    assert payload['summary']['genus']['found'] == 1
+
+
+def test_build_explorer_species_leaf(db):
+    from app import _build_explorer_species
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+    out = _build_explorer_species(db, ids['Melospiza'])
+    by = {s['name']: s for s in out['species']}
+    assert by['Melospiza melodia']['found'] is True
+    assert by['Melospiza melodia']['photo']['filename'] == 'a.jpg'
+    assert by['Melospiza georgiana']['found'] is False
+    assert by['Melospiza georgiana'].get('photo') is None
+    # found first, then missing; each block alphabetical
+    assert [s['found'] for s in out['species']] == [True, False]
+
+
+def test_api_explorer_endpoint(app_and_db):
+    app, db = app_and_db
+    ids = _seed_bird_taxonomy(db)
+    # Link the fixture's existing 'Cardinal' keyword to a bird taxon so it counts.
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE name='Cardinal'",
+                    (ids['Melospiza melodia'],))
+    db.conn.commit()
+    client = app.test_client()
+    r = client.get('/api/life-list/explorer')
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data['taxonomy_ready'] is True
+    assert data['root']['name'] == 'Aves'
+    assert data['summary']['order']['total'] == 2
+    # species leaf
+    r2 = client.get(f"/api/life-list/explorer/species?genus={ids['Melospiza']}")
+    assert r2.status_code == 200
+    assert {s['name'] for s in r2.get_json()['species']} == \
+        {'Melospiza melodia', 'Melospiza georgiana'}
+
+
+def test_api_explorer_not_ready(app_and_db):
+    app, db = app_and_db  # fixture has no taxa
+    r = app.test_client().get('/api/life-list/explorer')
+    assert r.status_code == 200
+    assert r.get_json()['taxonomy_ready'] is False
+
+
+def _seed_mammal_taxon(db):
+    """Add a second class-rank taxon (Mammalia) so multi-class selector tests
+    have somewhere to switch to. Returns the class row id."""
+    cur = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, parent_id, kingdom)"
+        " VALUES (?,?,?,?,?,?)",
+        (40151, 'Mammalia', 'Mammals', 'class', None, 'Animalia'),
+    )
+    db.conn.commit()
+    return cur.lastrowid
+
+
+def test_build_explorer_payload_always_includes_default_aves_class(db):
+    # Codex P2: after switching away from Aves, the default Birds class must
+    # stay in the selector so the user has an in-page way back to it. Recomputing
+    # `classes` only from *found* taxa would otherwise drop Birds when the user's
+    # only tagged species are outside Aves.
+    from app import _build_explorer_payload
+    ids = _seed_bird_taxonomy(db)
+    mammalia_id = _seed_mammal_taxon(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    # User has tagged species — but NONE of them are birds.
+    fid = db.add_folder('/p', name='p')
+    # No mammal species seeded; leave the mammal tag unmatched so `found` is
+    # empty but the class ancestor list would still not include Aves without
+    # the fix. That still isolates the "default Aves always present" behavior.
+
+    # No found taxa at all -> Aves must still be in the returned classes when
+    # the root is the default (Aves).
+    payload_default = _build_explorer_payload(db)
+    assert any(c['name'] == 'Aves' for c in payload_default['classes'])
+
+    # Switching to Mammalia (a class the user has no *matched* species in):
+    # the returned classes list must STILL include Aves as a fallback, so the
+    # client can rebuild the selector without losing Birds.
+    payload_mammal = _build_explorer_payload(db, root_id=mammalia_id)
+    class_names = [c['name'] for c in payload_mammal['classes']]
+    assert 'Aves' in class_names, (
+        "Default Aves class must remain in the selector after switching to a "
+        "non-Aves class, otherwise the user has no in-page way back to Birds"
+    )

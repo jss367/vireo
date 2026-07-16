@@ -13,42 +13,33 @@ from image_loader import (
 
 log = logging.getLogger(__name__)
 
-# Mirror ``vireo/scanner.py`` ``_pair_raw_jpeg_companions``: a JPG sitting next
-# to a RAW with the same basename in the same folder is the RAW's working-copy
-# companion, not a separate photo. Keeping these sets in sync with the scanner
-# is what guarantees the detector and the ingest path agree on what counts as
-# a new image.
-_RAW_EXTS = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
-_JPEG_EXTS = {".jpg", ".jpeg"}
-
-
 def _known_paths_for_workspace(db, workspace_id):
-    """Return the set of absolute paths of photos already ingested into the workspace."""
+    """Return absolute primary and companion paths already ingested.
+
+    A newly-created same-stem JPEG is intentionally *not* known until a scan
+    attaches it to the RAW record. It therefore appears once in New Images,
+    giving the user a visible path to ingest the developed file. After pairing,
+    ``companion_path`` makes the same walk converge to zero instead of leaving
+    a stuck banner.
+    """
     rows = db.conn.execute(
-        """SELECT f.path AS folder_path, p.filename
+        """SELECT f.path AS folder_path, p.filename, p.companion_path
            FROM photos p
            JOIN folders f ON f.id = p.folder_id
            JOIN workspace_folders wf ON wf.folder_id = f.id
            WHERE wf.workspace_id = ?""",
         (workspace_id,),
     ).fetchall()
-    return {os.path.join(r["folder_path"], r["filename"]) for r in rows}
-
-
-def _known_raw_stems_for_workspace(db, workspace_id):
-    """Return the set of ``(folder_path, stem)`` pairs for already-imported
-    RAW photos in the workspace, used to suppress JPG working-copy companions
-    from the "new images" count."""
-    rows = db.conn.execute(
-        """SELECT f.path AS folder_path, p.filename
-           FROM photos p
-           JOIN folders f ON f.id = p.folder_id
-           JOIN workspace_folders wf ON wf.folder_id = f.id
-           WHERE wf.workspace_id = ?
-             AND lower(p.extension) IN ('.nef','.cr2','.cr3','.arw','.raf','.dng','.rw2','.orf')""",
-        (workspace_id,),
-    ).fetchall()
-    return {(r["folder_path"], Path(r["filename"]).stem) for r in rows}
+    known = set()
+    for row in rows:
+        known.add(os.path.join(row["folder_path"], row["filename"]))
+        if row["companion_path"]:
+            companion = row["companion_path"]
+            known.add(
+                companion if os.path.isabs(companion)
+                else os.path.join(row["folder_path"], companion)
+            )
+    return known
 
 
 def mapped_roots(db, workspace_id):
@@ -122,7 +113,6 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
     needing to refactor the walk.
     """
     known = _known_paths_for_workspace(db, workspace_id)
-    known_raw_stems = _known_raw_stems_for_workspace(db, workspace_id)
     roots = mapped_roots(db, workspace_id)
 
     per_root = []
@@ -130,6 +120,7 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
     total = 0
     files_checked = 0
     last_emitted = 0
+    seen_new_paths = set()
 
     def _maybe_emit():
         nonlocal last_emitted
@@ -189,14 +180,10 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
                 if not os.path.isfile(full):
                     _maybe_emit()
                     continue
-                # Suppress JPG working-copy companions of already-imported
-                # RAWs in the same folder. The scanner pairs them as
-                # ``companion_path`` rather than create a new primary photo,
-                # so flagging them as "new" misleads the user into thinking
-                # there's something to ingest.
-                if ext in _JPEG_EXTS and (dirpath, Path(name).stem) in known_raw_stems:
+                if full in seen_new_paths:
                     _maybe_emit()
                     continue
+                seen_new_paths.add(full)
                 root_new += 1
                 total += 1
                 if sample_limit is None or len(sample) < sample_limit:
@@ -277,24 +264,6 @@ class NewImagesCache:
                 del self._entries[key]
                 return None
             return result
-
-    def get_entry_set_at(self, db_path, workspace_id):
-        """Return the monotonic timestamp at which the current cache entry was
-        written, or ``None`` if there is no live entry. Callers use this to
-        distinguish a cache write that happened *before* their request from
-        one that happened *after*, so that a snapshot POST can tell whether
-        the cached sample reflects disk state at click time or was left over
-        from an earlier navbar probe."""
-        key = (db_path, workspace_id)
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is None:
-                return None
-            _result, set_at = entry
-            if time.monotonic() - set_at > self._ttl:
-                del self._entries[key]
-                return None
-            return set_at
 
     def has_inflight(self, db_path, workspace_id):
         """Return True if a background compute is currently running for
@@ -400,6 +369,23 @@ class NewImagesCache:
         """
         key = (db_path, workspace_id)
         with self._lock:
+            # Race guard: a worker finishing between the caller's
+            # ``cache.get()`` (which returned None) and this call would
+            # write the result to ``_entries`` and then clear
+            # ``_inflight`` — under separate lock acquires — so by the
+            # time we arrive both are visible but the ``_inflight`` slot
+            # is gone. Without this check we would spawn a redundant walk
+            # that duplicates the just-finished one. If a fresh entry is
+            # already cached, return an already-set event so the caller's
+            # follow-up ``cache.get()`` picks it up.
+            entry = self._entries.get(key)
+            if entry is not None:
+                _result, set_at = entry
+                if time.monotonic() - set_at <= self._ttl:
+                    done = threading.Event()
+                    done.set()
+                    return done
+
             err_entry = self._errors.get(key)
             if err_entry is not None:
                 _err_msg, set_at = err_entry
@@ -410,6 +396,26 @@ class NewImagesCache:
                     return done
                 # Backoff window elapsed — let a fresh attempt run.
                 del self._errors[key]
+
+            # Skip the spawn if a fresh, complete walk already sits in the
+            # cache. Without this, a caller that saw an empty cache moments
+            # ago can race the in-flight worker's finally block: worker
+            # populates the cache, then clears its in-flight slot; the
+            # caller then arrives here and sees no in-flight, so we'd fan
+            # out a second walk over the same directories. All async walks
+            # run with sample_limit=None (so sample_complete=True), so
+            # gating on that flag is a precise "a completed walk exists"
+            # check — sync ``get_new_images_for_workspace`` writes at
+            # sample_limit=5 (sample_complete potentially False) and must
+            # still fall through to spawn a real walk.
+            entry = self._entries.get(key)
+            if entry is not None:
+                cached_result, set_at = entry
+                if (time.monotonic() - set_at <= self._ttl
+                        and cached_result.get("sample_complete")):
+                    done = threading.Event()
+                    done.set()
+                    return done
 
             generation = self._generations.get(key, 0)
             existing = self._inflight.get(key)

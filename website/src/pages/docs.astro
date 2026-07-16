@@ -29,22 +29,22 @@ for (const entry of helpData) {
 
       <div class="docs-step">
         <h3>1. Install Vireo</h3>
-        <p>Download the installer for your platform from the <a href={`${base}download/`}>download page</a> and run it. On macOS, drag Vireo to your Applications folder. On Windows, run the setup wizard. On Linux, install the .deb package.</p>
+        <p>Download the installer for your platform from the <a href={`${base}download/`}>download page</a> and run it. On macOS, drag Vireo to your Applications folder. On Windows 11, run the public-beta setup wizard. On Linux, install the .deb package.</p>
       </div>
 
       <div class="docs-step">
-        <h3>2. Add your photo folders</h3>
-        <p>Open Vireo and click <strong>Add Folder</strong> in the sidebar. Navigate to any directory containing your wildlife photos. Vireo reads your files in place — nothing is moved or copied. You can add multiple folders.</p>
+        <h3>2. Import your photos</h3>
+        <p>Open <strong>Import</strong>, leave <strong>Add in place</strong> selected, and click <strong>Browse</strong> to choose one or more folders. Vireo indexes the photos where they already live — nothing is moved or copied. Choose <strong>Copy to archive</strong> instead only when you want Vireo to copy photos from a card or source folder into your archive.</p>
       </div>
 
       <div class="docs-step">
-        <h3>3. Run your first scan</h3>
-        <p>Click <strong>Scan</strong> to start the classification pipeline. Vireo will detect subjects, classify species, and score quality for every photo. Progress streams in real time — you can watch the log panel for details. First runs download the AI models — anywhere from a few hundred megabytes to a few gigabytes depending on the classifier you choose — so give it a few minutes.</p>
+        <h3>3. Choose what happens after import</h3>
+        <p>Under <strong>After import</strong>, choose a processing option such as <strong>Identify birds</strong>, then click <strong>Start import</strong>. Vireo adds the photos to the active workspace and starts processing as a background job. First runs may download AI models — anywhere from a few hundred megabytes to a few gigabytes — so give them a few minutes. Use <strong>Jobs</strong> only to monitor progress.</p>
       </div>
 
       <div class="docs-step">
         <h3>4. Review results</h3>
-        <p>Once the scan completes, every photo has a label: <strong>keep</strong>, <strong>review</strong>, or <strong>reject</strong>. Open the <strong>Cull</strong> page to rapidly sort through them. Use keyboard shortcuts to move through photos and make decisions.</p>
+        <p>Open <strong>Process Review</strong> to inspect classifications and any available quality recommendations. When culling analysis is available, open <strong>Cull</strong> to rapidly mark photos keep, review, or reject with keyboard shortcuts. Use <strong>Process</strong> later when you want to rerun processing for photos already in the workspace.</p>
       </div>
 
       <div class="docs-step">

@@ -295,7 +295,10 @@ def adjust_capture_time(
     cancel_check=None,
 ):
     """Apply a capture-time correction to selected photos via ExifTool."""
-    if shutil.which("exiftool") is None:
+    from metadata import find_exiftool
+
+    exiftool = find_exiftool() or shutil.which("exiftool")
+    if exiftool is None:
         raise RuntimeError("exiftool is not installed")
 
     target_minutes, manual_shift, target_offset_str = _normalize_inputs(
@@ -350,7 +353,7 @@ def adjust_capture_time(
                 progress_callback(index, total, photo["filename"])
             continue
 
-        cmd = ["exiftool"]
+        cmd = [exiftool]
         if not keep_backups:
             cmd.append("-overwrite_original")
         if photo_shift:

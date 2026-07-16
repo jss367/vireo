@@ -46,6 +46,31 @@ def test_count_new_images_detects_unscanned_files(db_with_workspace):
     assert len(result["sample"]) == 2
 
 
+def test_count_new_images_deduplicates_repeated_walk_entries(
+    db_with_workspace, monkeypatch
+):
+    """SMB mounts may repeat exact names from one directory listing."""
+    import new_images
+    from new_images import count_new_images_for_workspace
+
+    db, ws_id, tmp_path = db_with_workspace
+    root = tmp_path / "USA2026"
+    photo = root / "IMG_0001.JPG"
+    _touch_image(str(photo))
+    db.add_folder(str(root), name="USA2026")
+
+    def duplicate_walk(_root):
+        yield str(root), [], ["IMG_0001.JPG", "IMG_0001.JPG", "IMG_0001.JPG"]
+
+    monkeypatch.setattr(new_images, "safe_scan_walk", duplicate_walk)
+
+    result = count_new_images_for_workspace(db, ws_id, sample_limit=None)
+
+    assert result["new_count"] == 1
+    assert result["per_root"][0]["new_count"] == 1
+    assert result["sample"] == [str(photo)]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks required")
 def test_count_new_images_ignores_broken_symlinks(db_with_workspace):
     """A dangling *.jpg symlink must not be counted as a "new image".
@@ -374,19 +399,19 @@ def test_count_new_images_basename_collision_across_subdirs(db_with_workspace):
     assert any("day2" in s for s in result["sample"])
 
 
-def test_count_new_images_skips_jpg_companion_of_existing_raw(db_with_workspace):
+def test_count_new_images_reports_jpg_until_it_is_attached_to_existing_raw(
+    db_with_workspace,
+):
     """A JPG sitting next to an already-imported RAW with the same basename
-    is the RAW's working-copy companion, not a new image. The scanner's
-    ``_pair_raw_jpeg_companions`` would attach it as ``companion_path``
-    rather than create a new primary photo, so the detector must not flag
-    it in the "N new images" banner.
+    is a meaningful newly-available display source. It should appear once in
+    New Images, then disappear after scanning records ``companion_path``.
     """
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     # NEF is already in the database; the .jpg sidecar is on disk only.
     _touch_image(str(root / "_D851928.jpg"))
     root_id = db.add_folder(str(root), name="shoot")
-    db.add_photo(
+    photo_id = db.add_photo(
         folder_id=root_id, filename="_D851928.NEF", extension=".nef",
         file_size=1, file_mtime=0.0,
     )
@@ -394,15 +419,20 @@ def test_count_new_images_skips_jpg_companion_of_existing_raw(db_with_workspace)
     from new_images import count_new_images_for_workspace
     result = count_new_images_for_workspace(db, ws_id)
 
-    assert result["new_count"] == 0, (
-        f"JPG companion of existing RAW should not be flagged as new; "
-        f"got new_count={result['new_count']} sample={result['sample']}"
+    assert result["new_count"] == 1
+    assert result["sample"] == [str(root / "_D851928.jpg")]
+
+    db.conn.execute(
+        "UPDATE photos SET companion_path='_D851928.jpg' WHERE id=?",
+        (photo_id,),
     )
+    db.conn.commit()
+    attached = count_new_images_for_workspace(db, ws_id)
+    assert attached["new_count"] == 0
 
 
-def test_count_new_images_skips_jpg_companion_for_all_raw_extensions(db_with_workspace):
-    """The suppression must cover the same RAW extension set the scanner
-    pairs against (vireo/scanner.py: ``_pair_raw_jpeg_companions``)."""
+def test_count_new_images_reports_jpg_companion_for_all_raw_extensions(db_with_workspace):
+    """Every supported RAW format gets the same discoverable companion flow."""
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     raw_exts = [".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"]
@@ -418,15 +448,11 @@ def test_count_new_images_skips_jpg_companion_for_all_raw_extensions(db_with_wor
     from new_images import count_new_images_for_workspace
     result = count_new_images_for_workspace(db, ws_id)
 
-    assert result["new_count"] == 0, (
-        f"All JPG companions of known RAWs should be suppressed; "
-        f"got new_count={result['new_count']} sample={result['sample']}"
-    )
+    assert result["new_count"] == len(raw_exts)
 
 
-def test_count_new_images_skips_jpeg_extension_companion(db_with_workspace):
-    """``.jpeg`` (long form) is a JPEG too — must be suppressed when paired
-    with an existing RAW."""
+def test_count_new_images_reports_long_jpeg_extension_companion(db_with_workspace):
+    """``.jpeg`` gets the same one-time discovery behavior as ``.jpg``."""
     db, ws_id, tmp_path = db_with_workspace
     root = tmp_path / "shoot"
     _touch_image(str(root / "IMG_0001.jpeg"))
@@ -439,7 +465,7 @@ def test_count_new_images_skips_jpeg_extension_companion(db_with_workspace):
     from new_images import count_new_images_for_workspace
     result = count_new_images_for_workspace(db, ws_id)
 
-    assert result["new_count"] == 0
+    assert result["new_count"] == 1
 
 
 def test_count_new_images_counts_jpg_without_raw_companion(db_with_workspace):

@@ -3,19 +3,19 @@
     "question": "How do I add photos to Vireo?",
     "category": "Getting Started",
     "keywords": ["scan", "import", "add", "folder", "photos", "directory"],
-    "answer": "Open Settings and add a folder under Scan Roots. Then go to the Jobs page and click Scan. Vireo will find all supported image files in that folder and its subfolders. First runs download AI models — anywhere from a few hundred megabytes to a few gigabytes depending on the classifier you choose — so give it a few minutes."
+    "answer": "Open Import, leave Add in place selected, and click Browse to choose one or more folders. Select an After import processing option, then click Start import. Vireo adds supported photos and their subfolders to the active workspace without moving or copying them. Choose Copy to archive instead when you want Vireo to copy photos into your archive."
   },
   {
     "question": "How do I classify my photos?",
     "category": "Getting Started",
     "keywords": ["classify", "identify", "species", "scan", "pipeline", "AI"],
-    "answer": "Run a scan from the Jobs page. The classification pipeline detects subjects, identifies species, and scores quality for every photo. Progress streams in real time in the log panel."
+    "answer": "When adding photos, choose a processing option under After import before clicking Start import. For photos already in the workspace, open Process, select the workspace folders, choose a strategy, and click Start Pipeline. Jobs shows progress; it is not where processing starts."
   },
   {
-    "question": "How do I review scan results?",
+    "question": "How do I review processing results?",
     "category": "Getting Started",
     "keywords": ["review", "results", "cull", "keep", "reject", "triage"],
-    "answer": "After a scan completes, every photo gets a label: keep, review, or reject. Open the Cull page to rapidly sort through them using keyboard shortcuts."
+    "answer": "Open Process Review to inspect classifications and any available quality recommendations. When culling analysis is available, open Cull to rapidly mark photos keep, review, or reject using keyboard shortcuts."
   },
   {
     "question": "How do I save my decisions to my photo files?",
@@ -48,10 +48,10 @@
     "answer": "Use the Move page to relocate photos to a different folder. Select photos and choose a destination. Vireo moves the actual files on disk and updates its database."
   },
   {
-    "question": "What is the Pipeline page?",
+    "question": "What is the Process page?",
     "category": "Classification",
     "keywords": ["pipeline", "steps", "detection", "classification", "quality", "scoring"],
-    "answer": "The Pipeline page shows you exactly how Vireo processes each photo: subject detection, species classification, and quality scoring. You can see bounding boxes, confidence scores, and quality metrics for any photo."
+    "answer": "The Process page runs indexing, species classification, feature extraction, and quality scoring for photos already in the active workspace. Use Import to add new photos; use Process when you want to run or rerun selected processing stages."
   },
   {
     "question": "What species can Vireo identify?",
@@ -70,12 +70,6 @@
     "category": "Keywords",
     "keywords": ["keyword", "tag", "label", "taxonomy", "hierarchy"],
     "answer": "Open the Keywords page to manage your keyword hierarchy. You can add keywords to individual photos or in bulk. Keywords are global \u2014 they're shared across all workspaces."
-  },
-  {
-    "question": "Can I import keywords from Lightroom?",
-    "category": "Keywords",
-    "keywords": ["lightroom", "import", "lrcat", "catalog", "keyword", "hierarchy"],
-    "answer": "Yes. Vireo can import keyword hierarchies from Lightroom catalog files (.lrcat). Your XMP sidecars are also compatible with Lightroom, so you can use both tools on the same library."
   },
   {
     "question": "What are collections?",

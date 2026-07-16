@@ -1,0 +1,266 @@
+from playwright.sync_api import expect
+
+
+def test_photo_editor_search_opens_matching_species(live_server, page):
+    """Typing a species name on /edit opens a matching photo for editing."""
+    url = live_server["url"]
+    robin_id = live_server["data"]["photos"][3]
+
+    page.goto(f"{url}/edit")
+    expect(page.locator("#editorFilename")).to_have_text("No photo to edit")
+
+    with page.expect_response("**/api/photos/ids?*"):
+        page.locator("#editorSearchInput").fill("American Robin")
+
+    expect(page).to_have_url(f"{url}/edit/{robin_id}")
+    expect(page.locator("#editorFilename")).to_have_text("robin1.jpg")
+    expect(page.locator("#editorSearchStatus")).to_have_text("1 match")
+
+
+def test_photo_editor_clear_search_invalidates_pending_response(live_server, page):
+    """Clearing search should ignore an older in-flight search response."""
+    url = live_server["url"]
+    held_routes = []
+
+    def hold_photo_ids(route):
+        held_routes.append(route)
+
+    page.route("**/api/photos/ids?*", hold_photo_ids)
+    page.goto(f"{url}/edit")
+
+    page.locator("#editorSearchInput").fill("American Robin")
+    for _ in range(20):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "search request was not issued"
+
+    page.locator("#editorSearchInput").fill("")
+    held_routes[0].continue_()
+
+    expect(page).to_have_url(f"{url}/edit")
+    expect(page.locator("#editorFilename")).to_have_text("No photo to edit")
+    expect(page.locator("#editorSearchStatus")).to_have_text("")
+
+
+def test_photo_editor_search_invalidates_pending_response_when_query_changes(live_server, page):
+    """Typing a new query while a prior search is in flight discards the older response."""
+    url = live_server["url"]
+    hawk_id = live_server["data"]["photos"][0]
+    held_routes = []
+
+    def hold(route):
+        held_routes.append(route)
+
+    page.goto(f"{url}/edit/{hawk_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+
+    page.route("**/api/photos/ids?*", hold)
+
+    page.locator("#editorSearchInput").fill("American Robin")
+    for _ in range(20):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "first search request was not issued"
+
+    # Replace the query while the robin response is still held. The seq must
+    # be bumped now, not only when the next debounced search fires 300ms later.
+    page.locator("#editorSearchInput").fill("zzzz-no-match")
+
+    held_routes[0].continue_()
+
+    # Give the stale response a chance to (incorrectly) navigate or restatus.
+    page.wait_for_timeout(300)
+
+    expect(page).to_have_url(f"{url}/edit/{hawk_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    expect(page.locator("#editorSearchStatus")).not_to_have_text("1 match")
+
+
+def test_photo_editor_search_trailing_space_applies_in_flight_response(live_server, page):
+    """Whitespace-only input changes must not invalidate an in-flight search."""
+    url = live_server["url"]
+    robin_id = live_server["data"]["photos"][3]
+    held_routes = []
+
+    def hold(route):
+        held_routes.append(route)
+
+    page.goto(f"{url}/edit")
+    page.route("**/api/photos/ids?*", hold)
+
+    page.locator("#editorSearchInput").fill("American Robin")
+    for _ in range(20):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "search request was not issued"
+
+    # Add a trailing space while the response is held. The trimmed query is
+    # unchanged, so the in-flight response must still apply — bumping the
+    # seq here would strand the UI at "Searching..." because the debounced
+    # replacement would early-return on the same-query check.
+    page.locator("#editorSearchInput").fill("American Robin ")
+
+    held_routes[0].continue_()
+
+    expect(page).to_have_url(f"{url}/edit/{robin_id}")
+    expect(page.locator("#editorFilename")).to_have_text("robin1.jpg")
+    expect(page.locator("#editorSearchStatus")).to_have_text("1 match")
+
+
+def test_photo_editor_search_confirms_dirty_edits_from_in_flight_search(live_server, page):
+    """Edits made while a search is in flight must not be silently discarded."""
+    url = live_server["url"]
+    hawk_id = live_server["data"]["photos"][0]
+    held_routes = []
+
+    def hold(route):
+        held_routes.append(route)
+
+    page.goto(f"{url}/edit/{hawk_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+
+    page.route("**/api/photos/ids?*", hold)
+
+    page.locator("#editorSearchInput").fill("American Robin")
+    for _ in range(20):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "search request was not issued"
+
+    # Dirty the recipe while the search is in flight.
+    exposure = page.locator("#exposureRange")
+    exposure.evaluate("(el) => { el.value = '1.2'; el.dispatchEvent(new Event('input')); }")
+
+    dialogs = []
+
+    def on_dialog(dialog):
+        dialogs.append(dialog.message)
+        dialog.dismiss()
+
+    page.once("dialog", on_dialog)
+
+    held_routes[0].continue_()
+
+    # The confirm must be shown, and dismissing it keeps us on the current
+    # (dirty) photo instead of navigating to a search match.
+    for _ in range(20):
+        if dialogs:
+            break
+        page.wait_for_timeout(100)
+    assert dialogs, "expected a discard confirmation for dirty in-flight edits"
+    assert "Discard" in dialogs[0]
+    expect(page).to_have_url(f"{url}/edit/{hawk_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    # Dismissing the discard prompt must leave the editor visibly untouched:
+    # the "N matches" status and the nav position/list must NOT already
+    # describe the search target, since we haven't navigated to it.
+    expect(page.locator("#editorSearchStatus")).not_to_have_text("1 match")
+
+
+def test_photo_editor_search_revert_to_in_flight_query_refetches(live_server, page):
+    """Reverting to the in-flight query after an intermediate keystroke must refetch."""
+    url = live_server["url"]
+    robin_id = live_server["data"]["photos"][3]
+    held_routes = []
+
+    def hold(route):
+        held_routes.append(route)
+
+    page.goto(f"{url}/edit")
+    page.route("**/api/photos/ids?*", hold)
+
+    # First search fires the debounce and its response is held.
+    page.locator("#editorSearchInput").fill("American Robin")
+    for _ in range(20):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "first search request was not issued"
+
+    # Type a different query — this bumps the seq and invalidates the held
+    # response — then quickly revert to the original query before the 300ms
+    # debounce fires. Without the revert-refetch fix, scheduleEditorSearch
+    # would early-return on the same-query check and no replacement fetch
+    # would be dispatched, leaving the UI stranded at "Searching...".
+    page.locator("#editorSearchInput").fill("American Robins")
+    page.locator("#editorSearchInput").fill("American Robin")
+
+    # Wait for a second (replacement) fetch to be issued.
+    for _ in range(20):
+        if len(held_routes) >= 2:
+            break
+        page.wait_for_timeout(100)
+    assert len(held_routes) >= 2, "replacement search after revert was not issued"
+
+    # Release both responses. The first (invalidated) must be ignored; the
+    # replacement must apply and navigate to the robin.
+    held_routes[0].continue_()
+    held_routes[1].continue_()
+
+    expect(page).to_have_url(f"{url}/edit/{robin_id}")
+    expect(page.locator("#editorFilename")).to_have_text("robin1.jpg")
+    expect(page.locator("#editorSearchStatus")).to_have_text("1 match")
+
+
+def test_photo_editor_crop_lock_keeps_current_aspect(live_server, page):
+    """The crop ratio lock should preserve the current crop aspect while resizing."""
+    url = live_server["url"]
+    hawk_id = live_server["data"]["photos"][0]
+    preview_svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'>"
+        "<rect width='400' height='400' fill='green'/>"
+        "</svg>"
+    )
+
+    page.route(
+        "**/photos/*/edit-preview**",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="image/svg+xml",
+            body=preview_svg,
+        ),
+    )
+    page.goto(f"{url}/edit/{hawk_id}")
+    expect(page.locator("#editorFilename")).to_have_text("hawk1.jpg")
+    page.wait_for_function(
+        "() => document.getElementById('editorImg').naturalWidth > 0"
+    )
+
+    page.evaluate(
+        """() => {
+            setCropField('x', '10');
+            setCropField('y', '10');
+            setCropField('w', '60');
+            setCropField('h', '40');
+        }"""
+    )
+    page.locator("#aspectLockBtn").click()
+    assert "active" in (page.locator("#aspectLockBtn").get_attribute("class") or "")
+
+    def crop_aspect():
+        return page.evaluate(
+            """() => {
+                const crop = editorState.recipe.crop;
+                const img = document.getElementById('editorImg');
+                return (crop.w * img.clientWidth) / (crop.h * img.clientHeight);
+            }"""
+        )
+
+    before = crop_aspect()
+    handle = page.locator(".crop-handle.se").bounding_box()
+    assert handle is not None
+    page.mouse.move(handle["x"] + handle["width"] / 2, handle["y"] + handle["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(
+        handle["x"] + handle["width"] / 2 + 24,
+        handle["y"] + handle["height"] / 2,
+        steps=4,
+    )
+    page.mouse.up()
+
+    after = crop_aspect()
+    assert abs(after - before) < 0.001

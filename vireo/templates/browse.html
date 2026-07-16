@@ -26,12 +26,49 @@ body {
 /* ---------- Sidebar ---------- */
 .sidebar {
   width: 260px;
-  min-width: 260px;
+  min-width: 200px;
+  max-width: 600px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border-primary);
   overflow-y: auto;
   padding: 12px 0;
   flex-shrink: 0;
+}
+.sidebar-resizer,
+.detail-panel-resizer {
+  width: 7px;
+  flex: 0 0 7px;
+  position: relative;
+  z-index: 3;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.sidebar-resizer { margin-left: -4px; }
+.detail-panel-resizer { margin-right: -4px; }
+.sidebar-resizer::after,
+.detail-panel-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after,
+.sidebar-resizer.dragging::after,
+.detail-panel-resizer:hover::after,
+.detail-panel-resizer:focus-visible::after,
+.detail-panel-resizer.dragging::after {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+body.sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 .sidebar-section { padding: 0 14px; margin-bottom: 16px; }
 .sidebar-title {
@@ -110,6 +147,23 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
+/* Collections whose rules can't be resolved (count_error). We keep the row
+   visible + right-clickable so the user can edit or delete it, but the
+   left-click filter path bails out with a toast — filtering to it would
+   400 /api/collections/<id>/photos. */
+.tree-item.unavailable { color: var(--text-faint); cursor: not-allowed; }
+.tree-item.unavailable .collection-name { text-decoration: line-through; }
+.tree-item .collection-unavailable-badge {
+  margin-left: auto;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--warning-bg, #fef3c7);
+  color: var(--warning-fg, #92400e);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
 .tree-indent { width: 16px; flex-shrink: 0; }
 .tree-toggle {
   width: 16px;
@@ -151,6 +205,7 @@ body {
   outline: none;
 }
 .filter-bar input:focus { border-color: var(--accent); }
+.filter-bar .search-control { min-width: 240px; max-width: 420px; flex: 1 1 280px; }
 .filter-bar select {
   background: var(--bg-tertiary);
   color: var(--text-primary);
@@ -266,6 +321,49 @@ body {
   border-radius: 3px;
   pointer-events: none;
 }
+.representative-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+.pair-source-badge {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  background: rgba(10, 14, 17, 0.84);
+  color: #f4f7f8;
+  border: 1px solid rgba(255, 255, 255, 0.52);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 3px 6px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+.detail-source-control {
+  display: none;
+  width: 100%;
+  margin: -4px 0 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-secondary));
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.detail-source-control:hover {
+  background: color-mix(in srgb, var(--accent) 20%, var(--bg-secondary));
+}
 .grid-card-info {
   padding: 8px 10px;
 }
@@ -283,6 +381,22 @@ body {
   margin-top: 4px;
 }
 .grid-card-rating { font-size: 12px; color: var(--warning); }
+.grid-location-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.grid-location-status.exif { color: var(--accent); }
+.grid-location-status.assigned { color: var(--info); }
+.grid-location-status.none { color: var(--text-ghost); }
 .grid-card-flag {
   font-size: 10px;
   padding: 1px 5px;
@@ -300,10 +414,43 @@ body {
 .grid-card-color[data-color="blue"] { background: #3498db; }
 .grid-card-color[data-color="purple"] { background: #9b59b6; }
 
+/* Placeholder cells for the next photos that haven't loaded yet. The grid
+   keeps a bounded runway after the loaded cards so users can scroll smoothly
+   while the next pages arrive without implying that arbitrary unloaded
+   positions support random access. Deliberately NOT .grid-card — selection,
+   keyboard, and summary code queries that class and must only see real photos. */
+.skel-card {
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  overflow: hidden;
+}
+.skel-thumb {
+  width: 100%;
+  aspect-ratio: 3/2;
+  background: var(--bg-tertiary);
+  animation: skelPulse 1.6s ease-in-out infinite;
+}
+.skel-info {
+  padding: 8px 10px;
+  height: var(--skel-info-h, 35px);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.skel-line {
+  height: 10px;
+  width: 65%;
+  border-radius: 3px;
+  background: var(--bg-tertiary);
+  margin-top: 2px;
+}
+@keyframes skelPulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+
 /* ---------- Detail Panel ---------- */
 .detail-panel {
   width: 340px;
-  min-width: 340px;
+  min-width: 280px;
+  max-width: 600px;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border-primary);
   overflow-y: auto;
@@ -376,6 +523,22 @@ body {
   cursor: pointer;
 }
 .selection-keyword-add:hover { filter: brightness(1.05); }
+.selection-keyword-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.selection-keyword-remove {
+  flex-shrink: 0;
+  background: var(--bg-primary);
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 60%, var(--border-secondary));
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.selection-keyword-remove:hover { background: color-mix(in srgb, var(--danger) 12%, var(--bg-primary)); }
 .selection-empty {
   color: var(--text-muted);
   font-size: 12px;
@@ -855,6 +1018,21 @@ body {
   font-size: 11px;
   color: var(--warning);
 }
+.coordinate-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0 0 8px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 5px;
+  padding: 7px 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.coordinate-status.exif { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-secondary)); }
+.coordinate-status.assigned { border-color: color-mix(in srgb, var(--info) 45%, var(--border-secondary)); }
+.coordinate-status.none { color: var(--text-ghost); }
 /* Google Places autocomplete dropdown z-index — must sit above the detail panel. */
 .pac-container { z-index: 10000 !important; }
 .detail-summary {
@@ -1126,16 +1304,50 @@ body {
 .browse-compare-image-wrap {
   flex: 1;
   min-height: 0;
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 18px;
+  cursor: zoom-in;
+  touch-action: none;
+  user-select: none;
+}
+.browse-compare-image-wrap.zoomed {
+  cursor: grab;
+}
+.browse-compare-image-wrap.zoomed:active {
+  cursor: grabbing;
 }
 .browse-compare-image {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
   display: block;
+  transform-origin: center center;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.browse-compare-zoom-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  min-width: 44px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.68);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: center;
+  pointer-events: none;
+}
+.browse-compare-hint {
+  color: var(--text-dim);
+  font-size: 11px;
 }
 .browse-compare-meta {
   flex-shrink: 0;
@@ -1233,50 +1445,6 @@ body {
 .modal-btn-primary { background: var(--accent); color: var(--bg-primary); }
 .modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
 .modal-preview { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
-.gps-resolve-summary {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 12px;
-  line-height: 1.4;
-}
-.gps-resolve-list {
-  max-height: 280px;
-  overflow-y: auto;
-  border: 1px solid var(--border-primary);
-  border-radius: 4px;
-  margin-bottom: 12px;
-}
-.gps-resolve-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border-primary);
-}
-.gps-resolve-row:last-child { border-bottom: 0; }
-.gps-resolve-place {
-  min-width: 0;
-  color: var(--text-primary);
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.gps-resolve-samples {
-  color: var(--text-dim);
-  font-size: 11px;
-  margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.gps-resolve-count {
-  flex-shrink: 0;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 600;
-}
 .export-var-pill {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -1331,7 +1499,7 @@ body {
 <div class="main-layout">
 
   <!-- Sidebar -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="browseSidebar">
     <div class="sidebar-section">
       <div class="sidebar-title">Folders</div>
       <div id="folderTree"></div>
@@ -1345,12 +1513,24 @@ body {
     </div>
   </aside>
 
+  <div class="sidebar-resizer" id="browseSidebarResizer" role="separator"
+       aria-label="Resize Browse sidebar" aria-orientation="vertical"
+       aria-controls="browseSidebar" aria-valuemin="200" aria-valuemax="600"
+       aria-valuenow="260" tabindex="0"
+       title="Drag to resize the sidebar"></div>
+
   <!-- Content -->
   <div class="content-area">
 
     <!-- Filter Bar -->
     <div class="filter-bar">
-      <input type="text" id="searchInput" placeholder="Search keywords or filenames..." onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
+      <div class="search-control">
+        <input type="text" id="searchInput" placeholder="Search keywords or filenames..."
+               autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
+               onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
+        <button id="keywordMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('match_case')" title="Match case">Aa</button>
+        <button id="keywordWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('whole_word')" title="Match whole word">ab</button>
+      </div>
       <input type="text" id="clipSearchInput" placeholder="CLIP search: describe what you see..."
              style="flex:1;min-width:200px;"
              onkeydown="if(event.key==='Enter')runClipSearch()">
@@ -1384,6 +1564,12 @@ body {
         <option value="green">Green</option>
         <option value="blue">Blue</option>
         <option value="purple">Purple</option>
+      </select>
+      <select id="locationStatusFilter" onchange="applyFilters()" title="Filter by coordinate source" style="font-size:12px;">
+        <option value="">Coordinates: Any</option>
+        <option value="exif">EXIF GPS</option>
+        <option value="assigned">Assigned map location</option>
+        <option value="none">No coordinates</option>
       </select>
       <select id="sortSelect" onchange="applyFilters()" title="Sort order">
         <option value="date">Capture date (oldest)</option>
@@ -1437,12 +1623,12 @@ body {
       <button onclick="batchSetFlag('flagged')" style="background:var(--bg-tertiary);color:var(--accent);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
       <button onclick="batchSetFlag('rejected')" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
-      <button id="resolveGpsSelectedBtn" onclick="openGpsResolveForSelection()" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Resolve GPS</button>
+      <button id="resolveGpsSelectedBtn" onclick="reviewLocationsForSelection()" title="Review selected photo coordinates on a map and assign friendly place names" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review on Map</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
-      <button onclick="openCaptureTimeModal()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Adjust Time</button>
       <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
       <button id="bestBatchBtn" onclick="openBestBatch()" title="Find and rank neighboring frames around the selected photo" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Best Batch</button>
       <button id="burstReviewBtn" onclick="openSelectedInBurstReview()" title="Open selected photos in burst review" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review Burst</button>
+      <button id="prepareFullResolutionBtn" onclick="prepareFullResolutionSelection()" title="Cache originals and full-resolution renders before inspecting detail" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Prepare Full Resolution</button>
       <button id="developBtn" onclick="developSelected()" title="Develop selected RAW photos with darktable" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Develop</button>
       <button onclick="batchSubmitInat()" style="background:var(--bg-tertiary);color:#74ac00;border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">iNaturalist</button>
       <button onclick="makeAvailableOffline()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Make Offline</button>
@@ -1522,13 +1708,19 @@ body {
         <div style="margin-bottom:16px;font-size:18px;color:var(--text-primary);font-weight:600;">Welcome to Vireo</div>
         <p style="max-width:460px;margin:0 auto 20px;line-height:1.6;color:var(--text-muted);">
           To get started, import your photos. You can scan a folder of images
-          (with or without existing XMP sidecars), or import keywords from a Lightroom catalog.
+          (with or without existing XMP sidecars).
         </p>
-        <a href="/pipeline" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 28px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;">Import Photos</a>
+        <a href="/import" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 28px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;">Import Photos</a>
       </div>
       <div class="loading-state" id="loadingState">Loading...</div>
     </div>
   </div>
+
+  <div class="detail-panel-resizer" id="detailPanelResizer" role="separator"
+       aria-label="Resize detail sidebar" aria-orientation="vertical"
+       aria-controls="detailPanel" aria-valuemin="280" aria-valuemax="600"
+       aria-valuenow="340" tabindex="0"
+       title="Drag to resize the detail sidebar"></div>
 
   <!-- Detail Panel -->
   <div class="detail-panel" id="detailPanel">
@@ -1573,6 +1765,7 @@ body {
       <button class="detail-close" onclick="closeDetail()">&times;</button>
       <img class="detail-preview single-only" id="detailImg" src="" alt="" style="cursor:pointer;" onclick="openLightbox(window._detailPhotoId, document.getElementById('detailFilename').textContent, photos)">
       <div class="detail-filename single-only" id="detailFilename"></div>
+      <button class="detail-source-control single-only" id="detailSourceControl" type="button" onclick="event.stopPropagation(); vireoTogglePairSource(window._detailPhotoId);"></button>
 
       <div class="detail-section">
         <div class="detail-section-title">Rating <span class="batch-mixed" id="ratingMixed" hidden>· Mixed</span></div>
@@ -1606,10 +1799,12 @@ body {
 
       <div class="detail-section location-section" id="locationSection">
         <div class="detail-section-title">Location</div>
+        <div id="locationCoordinateStatus" class="coordinate-status none"></div>
         <div id="locationFilled" class="single-only" hidden></div>
         <div id="locationEmpty">
           <div class="keyword-autocomplete">
-            <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..." autocomplete="off">
+            <input type="text" id="locationInput" class="add-kw-input" placeholder="📍 Add location..."
+                   autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
             <div class="keyword-suggestion-list location-keyword-suggestion-list" id="locationKeywordSuggestions" role="listbox"></div>
           </div>
           <div id="locationExifSuggestion" class="location-suggestion" hidden></div>
@@ -1621,7 +1816,8 @@ body {
         <div class="detail-section-title">Keywords</div>
         <div id="detailKeywords" class="single-only"></div>
         <div class="keyword-autocomplete">
-          <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..." autocomplete="off">
+          <input class="add-kw-input" id="addKeywordInput" placeholder="Add keyword..."
+                 autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
           <div class="keyword-suggestion-list" id="addKeywordSuggestions" role="listbox"></div>
         </div>
       </div>
@@ -1680,7 +1876,8 @@ body {
   <div class="modal">
     <h3 id="batchKeywordTitle">Add Keyword</h3>
     <div class="keyword-autocomplete">
-      <input class="modal-input" id="batchKeywordInput" placeholder="Keyword name" autocomplete="off">
+      <input class="modal-input" id="batchKeywordInput" placeholder="Keyword name"
+             autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false">
       <div class="keyword-suggestion-list" id="batchKeywordSuggestions" role="listbox"></div>
     </div>
     <div class="modal-actions">
@@ -1699,20 +1896,6 @@ body {
     <div class="modal-actions">
       <button class="modal-btn modal-btn-primary" onclick="confirmBatchCollection()">Add</button>
       <button class="modal-btn modal-btn-cancel" onclick="hideBatchCollectionModal()">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- Resolve GPS Locations Modal -->
-<div class="modal-overlay" id="gpsResolveModal">
-  <div class="modal" style="width:560px;max-width:calc(100vw - 32px);">
-    <h3>Resolve GPS Locations</h3>
-    <div id="gpsResolveSummary" class="gps-resolve-summary">Loading...</div>
-    <div id="gpsResolveGroups" class="gps-resolve-list"></div>
-    <div class="modal-preview" id="gpsResolveNote"></div>
-    <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" id="gpsResolveApplyBtn" onclick="applyGpsResolve()">Apply</button>
-      <button class="modal-btn modal-btn-cancel" onclick="hideGpsResolveModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -1773,15 +1956,18 @@ body {
   <div class="browse-compare-toolbar" onclick="event.stopPropagation()">
     <span class="browse-compare-title">Compare</span>
     <span class="browse-compare-count" id="browseCompareCount"></span>
+    <span class="browse-compare-hint">Scroll to zoom · drag to pan · double-click to toggle</span>
     <span class="browse-compare-spacer"></span>
+    <button class="browse-compare-btn" onclick="resetBrowseCompareViews()" title="Fit both photos to their panes">Reset views</button>
     <button class="browse-compare-btn" id="browseComparePrev" onclick="browseCompareStep(-1)" title="Previous pair">Previous</button>
     <button class="browse-compare-btn" id="browseCompareNext" onclick="browseCompareStep(1)" title="Next pair">Next</button>
     <button class="browse-compare-close" onclick="closeBrowseCompare(event)" title="Close">&times;</button>
   </div>
   <div class="browse-compare-stage" onclick="event.stopPropagation()">
     <div class="browse-compare-pane">
-      <div class="browse-compare-image-wrap">
-        <img class="browse-compare-image" id="browseCompareImgA" src="" alt="">
+      <div class="browse-compare-image-wrap" id="browseCompareWrapA" data-pane="A" title="Scroll to zoom, then drag to pan">
+        <span class="browse-compare-zoom-badge" id="browseCompareZoomA">Fit</span>
+        <img class="browse-compare-image" id="browseCompareImgA" src="" alt="" draggable="false">
       </div>
       <div class="browse-compare-meta">
         <div class="browse-compare-name" id="browseCompareNameA"></div>
@@ -1789,8 +1975,9 @@ body {
       </div>
     </div>
     <div class="browse-compare-pane">
-      <div class="browse-compare-image-wrap">
-        <img class="browse-compare-image" id="browseCompareImgB" src="" alt="">
+      <div class="browse-compare-image-wrap" id="browseCompareWrapB" data-pane="B" title="Scroll to zoom, then drag to pan">
+        <span class="browse-compare-zoom-badge" id="browseCompareZoomB">Fit</span>
+        <img class="browse-compare-image" id="browseCompareImgB" src="" alt="" draggable="false">
       </div>
       <div class="browse-compare-meta">
         <div class="browse-compare-name" id="browseCompareNameB"></div>
@@ -1817,12 +2004,15 @@ var allLoaded = false;
 var selectedPhotoId = null;
 var selectedIndex = -1;
 var anchorRestoreEpoch = 0;
+var anchorScanDepth = 0;
 var selectedPhotos = new Set(); // multi-select
 var selectionKeywordRequestSeq = 0;
 var selectionKeywordKey = '';
 var selectionKeywordMissingById = {};
+var selectionKeywordPresentById = {};
+var selectionKeywordNameById = {};
 var showDetectionBoxes = false;
-var cardFields = ["filename", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
+var cardFields = ["filename", "location_status", "rating", "flag", "color_label", "sharpness"]; // default, overridden by config
 var inatSubmitted = {};  // {photo_id: true}
 var colorLabels = {};    // {photo_id: color_string}
 // Which photo ids we've confirmed color-label state for. `colorLabels[id]`
@@ -1838,6 +2028,11 @@ var flagFilter = '';
 var activeFolderId = null;
 var activeKeyword = null;
 var activeCollectionId = null;
+// A Dashboard deep link can combine a collection with date/keyword filters.
+// Normal collection clicks keep the historical collection-only behavior.
+var dashboardCollectionScope = false;
+var keywordSearchMatchCase = false;
+var keywordSearchWholeWord = false;
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
 var selectedDay = null;
@@ -1845,6 +2040,7 @@ var calendarData = null;
 var clipSearchActive = false;
 var clipSearchSeq = 0;
 var searchFilterTimer = null;
+var appliedKeywordSearch = '';
 var bestBatchData = null;
 var keywordAutocompleteCache = null;
 var keywordAutocompletePromise = null;
@@ -1856,6 +2052,228 @@ var browseCompareIds = [];
 var browseCompareOffset = 0;
 var browseCompareSeq = 0;
 var browseCompareEscToken = null;
+var browseCompareViews = {
+  A: { zoom: 1, panX: 0, panY: 0 },
+  B: { zoom: 1, panX: 0, panY: 0 }
+};
+var browseComparePointer = null;
+
+/* ---------- Resizable sidebar ---------- */
+var BROWSE_SIDEBAR_DEFAULT_WIDTH = 260;
+var BROWSE_SIDEBAR_MIN_WIDTH = 200;
+var BROWSE_SIDEBAR_MAX_WIDTH = 600;
+var BROWSE_SIDEBAR_STORAGE_KEY = 'vireo.browse.sidebarWidth';
+var BROWSE_DETAIL_PANEL_DEFAULT_WIDTH = 340;
+var BROWSE_DETAIL_PANEL_MIN_WIDTH = 280;
+var BROWSE_DETAIL_PANEL_MAX_WIDTH = 600;
+var BROWSE_DETAIL_PANEL_STORAGE_KEY = 'vireo.browse.detailPanelWidth';
+// Room the resize cap must leave for the rest of the Browse layout: the
+// other adjustable sidebar, both resize handles, and a minimum photo/content
+// column so the grid stays usable.
+var BROWSE_SIDEBAR_HANDLE_WIDTH = 7;
+var BROWSE_MIN_CONTENT_WIDTH = 360;
+
+function currentBrowseSidebarWidth() {
+  var sidebar = document.getElementById('browseSidebar');
+  return sidebar ? sidebar.getBoundingClientRect().width : BROWSE_SIDEBAR_DEFAULT_WIDTH;
+}
+
+function currentBrowseDetailPanelWidth() {
+  var detailPanel = document.getElementById('detailPanel');
+  return detailPanel ? detailPanel.getBoundingClientRect().width : BROWSE_DETAIL_PANEL_DEFAULT_WIDTH;
+}
+
+function browseSidebarMaxWidth() {
+  return Math.max(
+    BROWSE_SIDEBAR_MIN_WIDTH,
+    Math.min(
+      BROWSE_SIDEBAR_MAX_WIDTH,
+      window.innerWidth
+        - currentBrowseDetailPanelWidth()
+        - (2 * BROWSE_SIDEBAR_HANDLE_WIDTH)
+        - BROWSE_MIN_CONTENT_WIDTH
+    )
+  );
+}
+
+function browseDetailPanelMaxWidth() {
+  return Math.max(
+    BROWSE_DETAIL_PANEL_MIN_WIDTH,
+    Math.min(
+      BROWSE_DETAIL_PANEL_MAX_WIDTH,
+      window.innerWidth
+        - currentBrowseSidebarWidth()
+        - (2 * BROWSE_SIDEBAR_HANDLE_WIDTH)
+        - BROWSE_MIN_CONTENT_WIDTH
+    )
+  );
+}
+
+function updateBrowsePanelResizeLimits() {
+  var sidebarResizer = document.getElementById('browseSidebarResizer');
+  var detailResizer = document.getElementById('detailPanelResizer');
+  if (sidebarResizer) sidebarResizer.setAttribute('aria-valuemax', String(browseSidebarMaxWidth()));
+  if (detailResizer) detailResizer.setAttribute('aria-valuemax', String(browseDetailPanelMaxWidth()));
+}
+
+function setBrowseSidebarWidth(width, persist) {
+  var sidebar = document.getElementById('browseSidebar');
+  var resizer = document.getElementById('browseSidebarResizer');
+  if (!sidebar || !resizer) return;
+  var nextWidth = Math.round(Math.max(
+    BROWSE_SIDEBAR_MIN_WIDTH,
+    Math.min(browseSidebarMaxWidth(), Number(width) || BROWSE_SIDEBAR_DEFAULT_WIDTH)
+  ));
+  sidebar.style.width = nextWidth + 'px';
+  sidebar.style.flexBasis = nextWidth + 'px';
+  resizer.setAttribute('aria-valuenow', String(nextWidth));
+  updateBrowsePanelResizeLimits();
+  if (persist) {
+    try { localStorage.setItem(BROWSE_SIDEBAR_STORAGE_KEY, String(nextWidth)); } catch (e) {}
+  }
+  requestAnimationFrame(updateGridTail);
+}
+
+function initBrowseSidebarResize() {
+  var sidebar = document.getElementById('browseSidebar');
+  var resizer = document.getElementById('browseSidebarResizer');
+  if (!sidebar || !resizer) return;
+
+  var storedWidth = BROWSE_SIDEBAR_DEFAULT_WIDTH;
+  try { storedWidth = Number(localStorage.getItem(BROWSE_SIDEBAR_STORAGE_KEY)) || storedWidth; } catch (e) {}
+  setBrowseSidebarWidth(storedWidth, false);
+
+  resizer.addEventListener('pointerdown', function(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    var startX = e.clientX;
+    var startWidth = sidebar.getBoundingClientRect().width;
+    resizer.setPointerCapture(e.pointerId);
+    resizer.classList.add('dragging');
+    document.body.classList.add('sidebar-resizing');
+
+    function onPointerMove(moveEvent) {
+      setBrowseSidebarWidth(startWidth + moveEvent.clientX - startX, false);
+    }
+    function stopDragging(upEvent) {
+      setBrowseSidebarWidth(sidebar.getBoundingClientRect().width, true);
+      resizer.classList.remove('dragging');
+      document.body.classList.remove('sidebar-resizing');
+      resizer.removeEventListener('pointermove', onPointerMove);
+      resizer.removeEventListener('pointerup', stopDragging);
+      resizer.removeEventListener('pointercancel', stopDragging);
+      if (resizer.hasPointerCapture(upEvent.pointerId)) {
+        resizer.releasePointerCapture(upEvent.pointerId);
+      }
+    }
+    resizer.addEventListener('pointermove', onPointerMove);
+    resizer.addEventListener('pointerup', stopDragging);
+    resizer.addEventListener('pointercancel', stopDragging);
+  });
+
+  resizer.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      e.stopPropagation();
+      var direction = e.key === 'ArrowRight' ? 1 : -1;
+      var step = e.shiftKey ? 50 : 10;
+      setBrowseSidebarWidth(sidebar.getBoundingClientRect().width + direction * step, true);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseSidebarWidth(BROWSE_SIDEBAR_MIN_WIDTH, true);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseSidebarWidth(browseSidebarMaxWidth(), true);
+    }
+  });
+
+  resizer.addEventListener('dblclick', function() {
+    setBrowseSidebarWidth(BROWSE_SIDEBAR_DEFAULT_WIDTH, true);
+  });
+}
+
+function setBrowseDetailPanelWidth(width, persist) {
+  var detailPanel = document.getElementById('detailPanel');
+  var resizer = document.getElementById('detailPanelResizer');
+  if (!detailPanel || !resizer) return;
+  var nextWidth = Math.round(Math.max(
+    BROWSE_DETAIL_PANEL_MIN_WIDTH,
+    Math.min(browseDetailPanelMaxWidth(), Number(width) || BROWSE_DETAIL_PANEL_DEFAULT_WIDTH)
+  ));
+  detailPanel.style.width = nextWidth + 'px';
+  detailPanel.style.flexBasis = nextWidth + 'px';
+  resizer.setAttribute('aria-valuenow', String(nextWidth));
+  updateBrowsePanelResizeLimits();
+  if (persist) {
+    try { localStorage.setItem(BROWSE_DETAIL_PANEL_STORAGE_KEY, String(nextWidth)); } catch (e) {}
+  }
+  requestAnimationFrame(updateGridTail);
+}
+
+function initBrowseDetailPanelResize() {
+  var detailPanel = document.getElementById('detailPanel');
+  var resizer = document.getElementById('detailPanelResizer');
+  if (!detailPanel || !resizer) return;
+
+  var storedWidth = BROWSE_DETAIL_PANEL_DEFAULT_WIDTH;
+  try { storedWidth = Number(localStorage.getItem(BROWSE_DETAIL_PANEL_STORAGE_KEY)) || storedWidth; } catch (e) {}
+  setBrowseDetailPanelWidth(storedWidth, false);
+
+  resizer.addEventListener('pointerdown', function(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    var startX = e.clientX;
+    var startWidth = detailPanel.getBoundingClientRect().width;
+    resizer.setPointerCapture(e.pointerId);
+    resizer.classList.add('dragging');
+    document.body.classList.add('sidebar-resizing');
+
+    function onPointerMove(moveEvent) {
+      setBrowseDetailPanelWidth(startWidth + startX - moveEvent.clientX, false);
+    }
+    function stopDragging(upEvent) {
+      setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width, true);
+      resizer.classList.remove('dragging');
+      document.body.classList.remove('sidebar-resizing');
+      resizer.removeEventListener('pointermove', onPointerMove);
+      resizer.removeEventListener('pointerup', stopDragging);
+      resizer.removeEventListener('pointercancel', stopDragging);
+      if (resizer.hasPointerCapture(upEvent.pointerId)) {
+        resizer.releasePointerCapture(upEvent.pointerId);
+      }
+    }
+    resizer.addEventListener('pointermove', onPointerMove);
+    resizer.addEventListener('pointerup', stopDragging);
+    resizer.addEventListener('pointercancel', stopDragging);
+  });
+
+  resizer.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      e.stopPropagation();
+      var direction = e.key === 'ArrowLeft' ? 1 : -1;
+      var step = e.shiftKey ? 50 : 10;
+      setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width + direction * step, true);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseDetailPanelWidth(BROWSE_DETAIL_PANEL_MIN_WIDTH, true);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      e.stopPropagation();
+      setBrowseDetailPanelWidth(browseDetailPanelMaxWidth(), true);
+    }
+  });
+
+  resizer.addEventListener('dblclick', function() {
+    setBrowseDetailPanelWidth(BROWSE_DETAIL_PANEL_DEFAULT_WIDTH, true);
+  });
+}
+
+initBrowseSidebarResize();
+initBrowseDetailPanelResize();
 
 function refreshPendingSyncBanner() {
   if (typeof checkPendingSync === 'function') {
@@ -2040,6 +2458,7 @@ function bindKeywordAutocomplete(inputId, dropdownId, submitFn) {
 function hasActiveBrowseFilter() {
   var searchInput = document.getElementById('searchInput');
   var colorFilter = document.getElementById('colorFilter');
+  var locationStatusFilter = document.getElementById('locationStatusFilter');
   var dateFrom = document.getElementById('dateFrom');
   var dateTo = document.getElementById('dateTo');
   return !!(
@@ -2051,6 +2470,7 @@ function hasActiveBrowseFilter() {
     flagFilter ||
     (searchInput && searchInput.value.trim()) ||
     (colorFilter && colorFilter.value) ||
+    (locationStatusFilter && locationStatusFilter.value) ||
     (dateFrom && dateFrom.value) ||
     (dateTo && dateTo.value)
   );
@@ -2099,6 +2519,16 @@ function renderCardField(field, p) {
   switch (field) {
     case 'filename':
       return '<div class="grid-card-name" title="' + escapeAttr(p.filename) + '">' + escapeHtml(p.filename) + '</div>';
+    case 'location_status':
+      var locationStatus = p.location_status || 'none';
+      var locationLabels = {
+        exif: ['📍', 'EXIF GPS', 'Embedded GPS coordinates from the photo'],
+        assigned: ['●', 'Assigned map location', 'Map coordinates from an assigned Vireo location'],
+        none: ['⊘', 'No coordinates', 'No EXIF GPS or assigned map coordinates']
+      };
+      var locationLabel = locationLabels[locationStatus] || locationLabels.none;
+      return '<span class="grid-location-status ' + locationStatus + '" title="' + escapeAttr(locationLabel[2]) + '">' +
+        locationLabel[0] + ' ' + locationLabel[1] + '</span>';
     case 'rating':
       if (p.rating > 0) {
         var stars = '';
@@ -2164,6 +2594,13 @@ function renderCardInfo(p) {
 
 function renderPhotoCard(p, idx) {
   var selectedClass = (p.id === selectedPhotoId || selectedPhotos.has(p.id)) ? ' selected' : '';
+  var isRawJpegPair = typeof window.vireoPhotoIsRawJpegPair === 'function'
+    ? window.vireoPhotoIsRawJpegPair(p)
+    : false;
+  if (typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(p);
+  }
+  var pairSource = _vireoPairSource(p.id) || 'jpeg';
   if (
     typeof window.vireoRememberPhotoEditRecipe === 'function' &&
     Object.prototype.hasOwnProperty.call(p, 'edit_recipe')
@@ -2173,8 +2610,11 @@ function renderPhotoCard(p, idx) {
     });
   }
   var hideDetectionOverlays = (
-    typeof window.vireoPhotoHasOrientationEdit === 'function' &&
-    window.vireoPhotoHasOrientationEdit(p.id)
+    (isRawJpegPair && pairSource === 'jpeg') ||
+    (
+      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+      window.vireoPhotoHasOrientationEdit(p.id)
+    )
   );
 
   // Detection box overlays — render one per detection in the photo
@@ -2196,6 +2636,12 @@ function renderPhotoCard(p, idx) {
   }
   var inatBadge = inatSubmitted[String(p.id)] ? '<span class="inat-badge">iNat</span>' : '';
   var wildlifeBadge = p.wildlife_excluded ? '<span class="no-wildlife-badge">No Wildlife</span>' : '';
+  var representativeBadge = p.is_species_representative ? '<span class="representative-badge">Representative</span>' : '';
+  var pairBadge = isRawJpegPair
+    ? '<span class="pair-source-badge" data-pair-source-id="' + p.id + '">'
+      + (pairSource === 'raw' ? 'RAW · JPEG pair' : 'JPEG · RAW pair')
+      + '</span>'
+    : '';
 
   // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
   var speciesBadgeHtml = '';
@@ -2220,6 +2666,8 @@ function renderPhotoCard(p, idx) {
       boxHtml +
       inatBadge +
       wildlifeBadge +
+      representativeBadge +
+      pairBadge +
       speciesBadgeHtml +
     '</div>' +
     '<div class="grid-card-info">' +
@@ -2232,8 +2680,14 @@ document.addEventListener('lightbox:renderchanged', function(e) {
   var ids = e && e.detail && Array.isArray(e.detail.photoIds) ? e.detail.photoIds : [];
   ids.forEach(function(id) {
     var hideDetectionOverlays = (
-      typeof window.vireoPhotoHasOrientationEdit === 'function' &&
-      window.vireoPhotoHasOrientationEdit(id)
+      (
+        _vireoPairKnownByPhoto[String(id)] &&
+        _vireoPairSource(id) === 'jpeg'
+      ) ||
+      (
+        typeof window.vireoPhotoHasOrientationEdit === 'function' &&
+        window.vireoPhotoHasOrientationEdit(id)
+      )
     );
     document.querySelectorAll('.grid-card[data-id="' + id + '"] .det-box').forEach(function(box) {
       box.style.display = hideDetectionOverlays ? 'none' : '';
@@ -2248,7 +2702,51 @@ function appendGridPhotos(newPhotos, startIdx) {
   newPhotos.forEach(function(p, offset) {
     html += renderPhotoCard(p, startIdx + offset);
   });
-  grid.insertAdjacentHTML('beforeend', html);
+  var tail = document.getElementById('gridTail');
+  if (tail) tail.insertAdjacentHTML('beforebegin', html);
+  else grid.insertAdjacentHTML('beforeend', html);
+  updateGridTail();
+}
+
+/* The grid tail reserves a bounded amount of scroll space for the next photos
+   that haven't loaded yet. It must not reserve the entire dataset: Browse
+   loads a contiguous prefix, so an absolute-bottom jump in a large library
+   would otherwise force every preceding page to load before the viewport
+   could show a real card. Rebuilt after every page append. Lives in a
+   display:contents wrapper so its children participate in the grid layout
+   but real cards can be inserted before it as a unit. */
+var SKEL_POOL = 300;
+
+function updateGridTail() {
+  var grid = document.getElementById('grid');
+  var tail = document.getElementById('gridTail');
+  var remaining = (allLoaded || clipSearchActive) ? 0 : totalPhotos - photos.length;
+  var cards = grid.getElementsByClassName('grid-card');
+  var lastCard = cards.length ? cards[cards.length - 1] : null;
+  if (remaining <= 0 || !lastCard) {
+    if (tail) tail.remove();
+    return;
+  }
+
+  // Size skeleton cells to match real cards: the thumb tracks column width
+  // via aspect-ratio, the info block copies its measured height.
+  var infoEl = lastCard.querySelector('.grid-card-info');
+  if (infoEl && infoEl.offsetHeight) {
+    grid.style.setProperty('--skel-info-h', infoEl.offsetHeight + 'px');
+  }
+
+  var skel = '<div class="skel-card"><div class="skel-thumb"></div><div class="skel-info"><div class="skel-line"></div></div></div>';
+  var html = '';
+  var visible = Math.min(remaining, SKEL_POOL);
+  for (var i = 0; i < visible; i++) html += skel;
+
+  if (!tail) {
+    tail = document.createElement('div');
+    tail.id = 'gridTail';
+    tail.style.display = 'contents';
+    grid.appendChild(tail);
+  }
+  tail.innerHTML = html;
 }
 
 function refreshGridCards(photoIds) {
@@ -2270,9 +2768,50 @@ function refreshGridCards(photoIds) {
       } else if (!shouldShow && existing) {
         existing.remove();
       }
+      var rep = wrap.querySelector('.representative-badge');
+      if (p.is_species_representative && !rep) {
+        wrap.insertAdjacentHTML('beforeend', '<span class="representative-badge">Representative</span>');
+      } else if (!p.is_species_representative && rep) {
+        rep.remove();
+      }
     }
   });
 }
+
+document.addEventListener('lifelist:changed', function(e) {
+  var detail = e && e.detail ? e.detail : {};
+  var species = detail.species;
+  var photoId = detail.photoId;
+  if (!species || !photoId) return;
+  var changed = [];
+  photos.forEach(function(p) {
+    var entries = Array.isArray(p.life_list) ? p.life_list : [];
+    var touched = false;
+    entries.forEach(function(entry) {
+      if (!entry || entry.species !== species) return;
+      var isCurrent = p.id === photoId;
+      if (entry.is_current_photo !== isCurrent || entry.is_species_representative !== isCurrent) {
+        entry.is_current_photo = isCurrent;
+        entry.is_species_representative = isCurrent;
+        touched = true;
+      }
+    });
+    if (p.id === photoId && !entries.some(function(entry) { return entry && entry.species === species; })) {
+      entries.push({species: species, is_current_photo: true, is_species_representative: true});
+      p.life_list = entries;
+      touched = true;
+    }
+    var isRep = entries.some(function(entry) {
+      return entry && entry.is_species_representative;
+    });
+    if (p.is_species_representative !== isRep) {
+      p.is_species_representative = isRep;
+      touched = true;
+    }
+    if (touched) changed.push(p.id);
+  });
+  if (changed.length) refreshGridCards(changed);
+});
 
 function getGridCard(photoId) {
   return document.querySelector('.grid-card[data-id="' + photoId + '"]');
@@ -2344,7 +2883,48 @@ async function bootstrapBrowse() {
   var bootstrapSucceeded = false;
   try {
     applyBrowseConfig(await _cfgPromise);
-    var data = await safeFetch('/api/browse/init?per_page=' + perPage + '&sort=' + document.getElementById('sortSelect').value);
+    var pageParams = new URLSearchParams(window.location.search);
+    var initialFolderId = parseInt(pageParams.get('folder_id'), 10);
+    if (!isNaN(initialFolderId)) activeFolderId = initialFolderId;
+    var initialCollectionId = parseInt(pageParams.get('collection_id'), 10);
+    if (!isNaN(initialCollectionId)) {
+      activeCollectionId = initialCollectionId;
+      dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
+    }
+    document.getElementById('dateFrom').value = pageParams.get('date_from') || '';
+    document.getElementById('dateTo').value = pageParams.get('date_to') || '';
+    var initialKeyword = pageParams.get('keyword') || '';
+    if (initialKeyword) {
+      document.getElementById('searchInput').value = initialKeyword;
+      appliedKeywordSearch = initialKeyword;
+    }
+    var initialRating = parseInt(pageParams.get('rating_min'), 10);
+    if (!isNaN(initialRating) && initialRating >= 1 && initialRating <= 5) {
+      filterRating = initialRating;
+      document.querySelectorAll('.rating-filter .rating-star').forEach(function(el) {
+        el.classList.toggle('active', parseInt(el.dataset.val, 10) <= filterRating);
+      });
+    }
+    var initialFlag = pageParams.get('flag') || '';
+    if (['none', 'flagged', 'rejected'].indexOf(initialFlag) !== -1) {
+      flagFilter = initialFlag;
+      updateFlagFilterButtons();
+    }
+    var initialLocationStatus = pageParams.get('location_status') || '';
+    if (!initialLocationStatus && pageParams.get('missing_gps') === '1') {
+      initialLocationStatus = 'none';
+    }
+    if (['exif', 'assigned', 'none'].indexOf(initialLocationStatus) !== -1) {
+      document.getElementById('locationStatusFilter').value = initialLocationStatus;
+    }
+    var initParams = buildCurrentBrowseParams();
+    // Collection-only deep links keep their historical endpoint behavior,
+    // while Dashboard links opt into composable filters via dashboard_scope.
+    // The combined init endpoint still needs the collection id for first paint
+    // in either case.
+    if (activeCollectionId) initParams.set('collection_id', activeCollectionId);
+    initParams.set('per_page', perPage);
+    var data = await safeFetch('/api/browse/init?' + initParams.toString());
 
     // Populate everything from a single response
     photos = data.photos || [];
@@ -2369,7 +2949,12 @@ async function bootstrapBrowse() {
     document.getElementById('loadingState').textContent = 'Error loading.';
   }
   loading = false;
-  if (bootstrapSucceeded) rearmInfiniteScrollObserver();
+  if (bootstrapSucceeded) {
+    rearmInfiniteScrollObserver();
+    // Make sure a tall viewport still gets its second page even when the
+    // sentinel callback does not fire after the initial layout.
+    requestAnimationFrame(ensureViewportHydrated);
+  }
 }
 
 function renderCollectionList(collections) {
@@ -2377,18 +2962,31 @@ function renderCollectionList(collections) {
   var html = '';
   collections.forEach(function(c) {
     collectionsById[c.id] = c;
-    var count = c.photo_count != null ? c.photo_count : '';
     var canAddPhotos = collectionAcceptsManualPhotos(c);
     var kind = canAddPhotos ? 'manual' : 'smart';
     var kindLabel = canAddPhotos ? 'Manual' : 'Smart';
-    var resolveBtn = (c.name === 'GPS Without Location Keyword')
-      ? '<button class="collection-resolve-btn" type="button" title="Resolve locations from GPS" onclick="event.stopPropagation(); openGpsResolveForCollection(' + c.id + ')">Resolve GPS</button>'
+    // count_error: /api/collections couldn't resolve this collection's rules,
+    // so filtering to it would 400 the /photos endpoint. Show it as
+    // unavailable (with edit still reachable via right-click) instead of
+    // rendering a clickable filter that silently fails.
+    var unavailable = !!c.count_error;
+    // Suppress location review on unavailable collections because the review
+    // page resolves the same collection rules when it builds its queue.
+    var resolveBtn = (c.name === 'GPS Without Location Keyword' && !unavailable)
+      ? '<button class="collection-resolve-btn" type="button" title="Review photo locations on a map" onclick="event.stopPropagation(); reviewLocationsForCollection(' + c.id + ')">Review on Map</button>'
       : '';
-    html += '<div class="tree-item" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '" onclick="filterByCollection(' + c.id + ')">' +
+    var itemClass = 'tree-item' + (unavailable ? ' unavailable' : '');
+    var titleAttr = unavailable
+      ? ' title="This collection\'s rules could not be resolved. Right-click → Edit Rules to fix it."'
+      : '';
+    var trailing = unavailable
+      ? '<span class="collection-unavailable-badge">unavailable</span>'
+      : '<span class="count">' + (c.photo_count != null ? c.photo_count : '') + '</span>';
+    html += '<div class="' + itemClass + '" data-collection-id="' + c.id + '" data-collection-kind="' + kind + '"' + titleAttr + ' onclick="filterByCollection(' + c.id + ')">' +
       '<span class="collection-name">' + escapeHtml(c.name) + '</span>' +
       '<span class="collection-kind-badge ' + kind + '">' + kindLabel + '</span>' +
       resolveBtn +
-      '<span class="count">' + count + '</span></div>';
+      trailing + '</div>';
   });
   document.getElementById('collectionList').innerHTML = html || '<div style="font-size:12px;color:var(--text-ghost);padding:4px 8px;">No collections</div>';
 }
@@ -2487,6 +3085,7 @@ async function loadKeywords() {
 }
 
 function renderKeywordTree(keywords) {
+  _rememberKeywordNames(keywords);
   var byParent = {};
   keywords.forEach(function(k) {
     var pid = k.parent_id || 'root';
@@ -2557,8 +3156,8 @@ async function loadCollectionCounts() {
     if (gen !== collectionCountLoadGen) return;
     if (!data) return;
     var items = document.querySelectorAll('#collectionList .tree-item');
-    var countsById = {};
-    data.forEach(function(c) { countsById[c.id] = c.photo_count; });
+    var metaById = {};
+    data.forEach(function(c) { metaById[c.id] = c; });
     items.forEach(function(el) {
       var id = parseInt(el.dataset.collectionId, 10);
       if (isNaN(id)) {
@@ -2567,9 +3166,36 @@ async function loadCollectionCounts() {
         var m = onclick.match(/filterByCollection\((\d+)\)/);
         if (m) id = parseInt(m[1], 10);
       }
-      if (!isNaN(id)) {
+      var meta = !isNaN(id) ? metaById[id] : null;
+      if (!meta) return;
+      // Keep our in-memory copy in sync so filterByCollection's guard fires
+      // for collections that transitioned to (or out of) unavailable.
+      collectionsById[id] = meta;
+      var wasUnavailable = el.classList.contains('unavailable');
+      var isUnavailable = !!meta.count_error;
+      if (wasUnavailable !== isUnavailable) {
+        el.classList.toggle('unavailable', isUnavailable);
+        var trailing = el.querySelector('.count, .collection-unavailable-badge');
+        if (trailing) {
+          if (isUnavailable) {
+            trailing.className = 'collection-unavailable-badge';
+            trailing.textContent = 'unavailable';
+          } else {
+            trailing.className = 'count';
+            trailing.textContent = meta.photo_count != null ? meta.photo_count : '';
+          }
+        }
+        if (isUnavailable) {
+          el.setAttribute(
+            'title',
+            "This collection's rules could not be resolved. Right-click → Edit Rules to fix it."
+          );
+        } else {
+          el.removeAttribute('title');
+        }
+      } else if (!isUnavailable) {
         var span = el.querySelector('.count');
-        if (span && countsById[id] != null) span.textContent = countsById[id];
+        if (span && meta.photo_count != null) span.textContent = meta.photo_count;
       }
     });
   } catch(e) {}
@@ -2588,6 +3214,50 @@ function refreshActiveCollectionAfterMembershipChange() {
   filterByCollection(activeCollectionId, { preserveAnchor: false });
 }
 
+// When bulk-removing the keyword that currently drives the filter, the
+// photos we just untagged no longer match the query. Without this reload
+// they stay in the grid and in the selection until the user manually
+// changes filters. Two paths can drive the current keyword filter — the
+// keyword tree (via `activeKeyword`) or the search box text (via
+// `appendKeywordSearchParams`) — so check both. Reloading is safe either
+// way (a photo still matching via another keyword or filename token
+// just comes back on the next fetch).
+function refreshActiveKeywordAfterRemoval(removedName) {
+  if (!removedName) return;
+  if (activeKeyword && activeKeyword === removedName) {
+    reloadBrowseResults();
+    return;
+  }
+  // While a collection is active, `refreshActiveCollectionAfterMembershipChange`
+  // has already reloaded via `filterByCollection`. Collections ignore the
+  // search input, so any stale `#searchInput` text is not driving the
+  // current grid. Calling `reloadBrowseResults` here would run
+  // `resetAndLoad`, which clears `activeCollectionId` and drops the user
+  // into the global keyword search.
+  if (activeCollectionId) return;
+  var searchInput = document.getElementById('searchInput');
+  var query = searchInput ? searchInput.value.trim() : '';
+  if (!query) return;
+  // The backend keyword filter tokenizes `keyword=<query>` and satisfies
+  // each token independently — a token can match via a different keyword
+  // or the filename. So a photo can appear in the grid because
+  // `removedName` satisfied one token while other tokens matched
+  // elsewhere. Reload whenever any query token still matches the removed
+  // keyword name; requiring the whole query to match would miss those
+  // multi-token cases.
+  var opts = {
+    matchCase: keywordSearchMatchCase,
+    wholeWord: keywordSearchWholeWord,
+  };
+  var tokens = query.split(/\s+/);
+  var anyTokenMatches = tokens.some(function(token) {
+    return token && VireoTextSearch.tokenMatches(removedName, token, opts);
+  });
+  if (anyTokenMatches) {
+    reloadBrowseResults();
+  }
+}
+
 function refreshBrowseSidebarCounts() {
   loadFolders();
   loadKeywords();
@@ -2595,6 +3265,23 @@ function refreshBrowseSidebarCounts() {
 }
 
 async function filterByCollection(id, options) {
+  // Guard: degraded (count_error) collections would 400 /api/collections/<id>/photos.
+  // Surface the reason instead of silently reloading into an error state. The
+  // sidebar renders these rows as `.tree-item.unavailable` and the context menu
+  // suppresses "Filter by this Collection", so this branch also catches any
+  // programmatic caller (deep-link, membership-change refresh) that pre-dates
+  // the guard.
+  var collectionMeta = collectionsById[id];
+  if (collectionMeta && collectionMeta.count_error) {
+    if (typeof showToast === 'function') {
+      showToast(
+        (collectionMeta.name || 'This collection') +
+          " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
+        'error'
+      );
+    }
+    return;
+  }
   cancelScheduledSearchFilter();
   var preserveAnchor = !(options && options.preserveAnchor === false);
   var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
@@ -2602,6 +3289,7 @@ async function filterByCollection(id, options) {
   activeFolderId = null;
   activeKeyword = null;
   activeCollectionId = id;
+  dashboardCollectionScope = false;
   if (clipSearchActive && getClipSearchQuery()) {
     selectedPhotos.clear();
     selectedPhotoId = null;
@@ -2637,28 +3325,43 @@ async function filterByCollection(id, options) {
   function anchorScanShouldContinue() {
     return collectionRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
   }
-  await loadPhotos();
-  if (!collectionRequestIsCurrent()) return;
-  if (!anchor) return;
-
-  var card = await loadUntilPhotoRendered(anchor.photoId, anchorScanShouldContinue);
-  if (!collectionRequestIsCurrent()) return;
-  if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
-  if (!card) {
-    clearActiveSelectionAndDetail();
-    return;
-  }
-  selectedPhotoId = anchor.photoId;
-  selectedIndex = photos.findIndex(function(p) { return p.id === anchor.photoId; });
-  refreshCardSelectionVisuals();
-  updateBatchBar();
-  if (anchor.detailVisible) loadDetail(anchor.photoId);
-  requestAnimationFrame(function() {
+  if (anchor) anchorScanDepth++;
+  try {
+    await loadPhotos();
     if (!collectionRequestIsCurrent()) return;
-    if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
-    restorePhotoAnchor(anchor);
-    updateScrollPosition();
-  });
+    if (!anchor) return;
+
+    var card = await loadUntilPhotoRendered(anchor.photoId, anchorScanShouldContinue);
+    if (!collectionRequestIsCurrent()) return;
+    if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
+    if (!card) {
+      clearActiveSelectionAndDetail();
+      return;
+    }
+    selectedPhotoId = anchor.photoId;
+    selectedIndex = photos.findIndex(function(p) { return p.id === anchor.photoId; });
+    refreshCardSelectionVisuals();
+    updateBatchBar();
+    if (anchor.detailVisible) loadDetail(anchor.photoId);
+    requestAnimationFrame(function() {
+      if (!collectionRequestIsCurrent()) return;
+      if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
+      restorePhotoAnchor(anchor);
+      updateScrollPosition();
+    });
+  } finally {
+    if (anchor) {
+      anchorScanDepth = Math.max(0, anchorScanDepth - 1);
+      // Auto-hydration was suppressed for every loadPhotos() call while a scan
+      // was open (including ones from unrelated folder/keyword switches). When
+      // the last scan ends, resume the normal path so the current grid fills
+      // its viewport instead of stalling on skeletons until a manual scroll.
+      if (anchorScanDepth === 0) {
+        rearmInfiniteScrollObserver();
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
+  }
 }
 
 /* ---------- Collection Modal ---------- */
@@ -2689,6 +3392,7 @@ var FIELD_OPS = {
   noise_estimate: ['is', 'is not', '>=', '<='],
   crop_complete: ['is', 'is not', '>=', '<='],
   has_mask: ['equals'],
+  has_jpeg_companion: ['equals'],
   active_mask_variant: ['is', 'is not', 'contains'],
   has_gps: ['equals'],
   has_location_keyword: ['equals'],
@@ -2716,6 +3420,7 @@ var FIELD_LABELS = {
   noise_estimate: 'Noise',
   crop_complete: 'Crop Complete',
   has_mask: 'Has Mask',
+  has_jpeg_companion: 'Has JPEG Companion',
   active_mask_variant: 'Mask Variant',
   has_gps: 'Has GPS',
   has_location_keyword: 'Has Location Keyword',
@@ -2758,7 +3463,7 @@ function defaultValueForRule(field, op) {
   if (field === 'active_mask_variant') return 'sam2-large';
   if (field === 'prediction_status') return 'pending';
   if (field === 'wildlife_excluded') return 0;
-  if (['has_mask', 'has_gps', 'has_location_keyword', 'location_keyword_missing',
+  if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword', 'location_keyword_missing',
        'inat_submitted', 'is_duplicate', 'needs_review'].indexOf(field) !== -1) return 1;
   return '';
 }
@@ -2990,7 +3695,7 @@ function renderRuleValueInput(r, i) {
   if (r.field === 'all') {
     return '<span style="flex:1;color:var(--text-ghost);font-size:12px;">Matches every photo in this workspace</span>';
   }
-  if (['has_mask', 'has_gps', 'has_location_keyword', 'wildlife_excluded',
+  if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword', 'wildlife_excluded',
        'location_keyword_missing', 'inat_submitted', 'is_duplicate',
        'needs_review'].indexOf(r.field) !== -1) {
     var boolVal = (r.value === true || r.value === 1 || r.value === '1' || r.value === 'true') ? '1' : '0';
@@ -3150,7 +3855,7 @@ function coerceRuleForSave(node) {
        'noise_estimate', 'crop_complete', 'prediction_confidence'].indexOf(node.field) !== -1) {
     val = parseFloat(val);
     if (isNaN(val)) val = 0;
-  } else if (['has_mask', 'has_gps', 'has_location_keyword',
+  } else if (['has_mask', 'has_jpeg_companion', 'has_gps', 'has_location_keyword',
               'location_keyword_missing', 'inat_submitted', 'is_duplicate',
               'needs_review', 'all'].indexOf(node.field) !== -1) {
     val = (val === true || val === 1 || val === '1' || val === 'true') ? 1 : 0;
@@ -3197,8 +3902,18 @@ async function saveCollection() {
 }
 
 /* ---------- Photo Loading ---------- */
-function resetAndLoad() {
+async function resetAndLoad(options) {
   cancelScheduledSearchFilter();
+  var searchInput = document.getElementById('searchInput');
+  var currentSearch = searchInput ? searchInput.value.trim() : '';
+  var searchWasCleared = appliedKeywordSearch !== '' && currentSearch === '';
+  var preserveAnchor = !!(options && options.preserveAnchor) || searchWasCleared;
+  var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
+  var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
+  // Any non-collection reload also applies the current text box through
+  // buildCurrentBrowseParams(). Keep the tracker aligned when another control
+  // (sort/date/color/etc.) beats the search debounce to this reset.
+  appliedKeywordSearch = currentSearch;
   if (clipSearchActive) {
     clipSearchActive = false;
     document.getElementById('clipSearchInput').value = '';
@@ -3207,7 +3922,7 @@ function resetAndLoad() {
   photos = [];
   currentPage = 1;
   allLoaded = false;
-  loadEpoch++;
+  var resetLoadEpoch = ++loadEpoch;
   selectAllRequestSeq++;
   loading = false;
   // Dataset is about to change; any prior selection (multi-select Set or
@@ -3220,9 +3935,51 @@ function resetAndLoad() {
   // Leaving collection mode when applying non-collection filters (sort, rating,
   // date, keyword, folder) so the summary stays in sync with the visible grid.
   activeCollectionId = null;
-  closeDetail();
+  if (anchor) hideDetailPanel();
+  else closeDetail();
   document.getElementById('grid').innerHTML = '';
-  loadPhotos();
+  document.getElementById('gridContainer').scrollTop = 0;
+
+  function resetRequestIsCurrent() {
+    return resetLoadEpoch === loadEpoch && activeCollectionId == null;
+  }
+  function anchorScanShouldContinue() {
+    return resetRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
+  }
+
+  if (anchor) anchorScanDepth++;
+  try {
+    await loadPhotos();
+    if (!resetRequestIsCurrent() || !anchor) return;
+
+    var card = await loadUntilPhotoRendered(anchor.photoId, anchorScanShouldContinue);
+    if (!resetRequestIsCurrent()) return;
+    if (!anchorRestoreIsPending(anchor, restoreEpoch)) return;
+    if (!card) {
+      clearActiveSelectionAndDetail();
+      return;
+    }
+
+    selectedPhotoId = anchor.photoId;
+    selectedIndex = photos.findIndex(function(p) { return p.id === anchor.photoId; });
+    refreshCardSelectionVisuals();
+    updateBatchBar();
+    if (anchor.detailVisible) loadDetail(anchor.photoId);
+    requestAnimationFrame(function() {
+      if (!resetRequestIsCurrent()) return;
+      if (!anchorSelectionIsCurrent(anchor, restoreEpoch)) return;
+      restorePhotoAnchor(anchor);
+      updateScrollPosition();
+    });
+  } finally {
+    if (anchor) {
+      anchorScanDepth = Math.max(0, anchorScanDepth - 1);
+      if (anchorScanDepth === 0) {
+        rearmInfiniteScrollObserver();
+        requestAnimationFrame(ensureViewportHydrated);
+      }
+    }
+  }
 }
 
 function buildCurrentBrowseParams() {
@@ -3230,21 +3987,54 @@ function buildCurrentBrowseParams() {
   params.set('sort', document.getElementById('sortSelect').value);
 
   if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (activeCollectionId && dashboardCollectionScope) {
+    params.set('collection_id', activeCollectionId);
+  }
   if (filterRating > 0) params.set('rating_min', filterRating);
   if (flagFilter) params.set('flag', flagFilter);
 
   var colorFilter = document.getElementById('colorFilter').value;
   if (colorFilter) params.set('color_label', colorFilter);
 
+  var locationStatus = document.getElementById('locationStatusFilter').value;
+  if (locationStatus) params.set('location_status', locationStatus);
+
   var dateFrom = document.getElementById('dateFrom').value;
   var dateTo = document.getElementById('dateTo').value;
   if (dateFrom) params.set('date_from', dateFrom);
   if (dateTo) params.set('date_to', dateTo);
 
+  appendKeywordSearchParams(params);
+  return params;
+}
+
+function appendKeywordSearchParams(params) {
   var search = document.getElementById('searchInput').value.trim();
   if (search) params.set('keyword', search);
   if (activeKeyword) params.set('keyword', activeKeyword);
-  return params;
+  if (params.has('keyword')) {
+    VireoTextSearch.appendParams(
+      params,
+      { matchCase: keywordSearchMatchCase, wholeWord: keywordSearchWholeWord },
+      'keyword_match_case',
+      'keyword_whole_word'
+    );
+  }
+}
+
+function renderKeywordSearchOptions() {
+  VireoTextSearch.renderOptions('keyword', {
+    matchCase: keywordSearchMatchCase,
+    wholeWord: keywordSearchWholeWord,
+  });
+}
+
+function toggleKeywordSearchOption(option) {
+  VireoTextSearch.toggle('keyword', option, function(options) {
+    keywordSearchMatchCase = options.matchCase;
+    keywordSearchWholeWord = options.wholeWord;
+    applySearchFilterNow();
+  });
 }
 
 async function loadPhotos(options) {
@@ -3259,16 +4049,33 @@ async function loadPhotos(options) {
     loadingState.style.display = 'block';
   }
 
+  // When placeholder cells are already visible, the user is actively
+  // waiting on this load — fetch several pages in one request. Chunks must
+  // stay aligned to perPage-sized pages so page/per_page arithmetic holds
+  // (server caps per_page at 500).
+  var chunk = 1;
+  var tailEl = document.getElementById('gridTail');
+  if (tailEl && tailEl.firstElementChild) {
+    var contRect = document.getElementById('gridContainer').getBoundingClientRect();
+    if (tailEl.firstElementChild.getBoundingClientRect().top < contRect.bottom) {
+      var pagesLoaded = currentPage - 1;
+      if (perPage * 4 <= 500 && pagesLoaded % 4 === 0) chunk = 4;
+      else if (perPage * 2 <= 500 && pagesLoaded % 2 === 0) chunk = 2;
+    }
+  }
+  var reqPage = (currentPage - 1) / chunk + 1;
+  var reqPerPage = perPage * chunk;
+
   var url;
-  if (activeCollectionId) {
+  if (activeCollectionId && !dashboardCollectionScope) {
     var cparams = new URLSearchParams();
-    cparams.set('page', currentPage);
-    cparams.set('per_page', perPage);
+    cparams.set('page', reqPage);
+    cparams.set('per_page', reqPerPage);
     url = '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString();
   } else {
     var params = buildCurrentBrowseParams();
-    params.set('page', currentPage);
-    params.set('per_page', perPage);
+    params.set('page', reqPage);
+    params.set('per_page', reqPerPage);
     url = '/api/photos?' + params.toString();
   }
 
@@ -3282,12 +4089,13 @@ async function loadPhotos(options) {
       allLoaded = true;
     } else {
       photos = photos.concat(data.photos);
-      currentPage++;
+      currentPage += chunk;
       if (photos.length >= totalPhotos) allLoaded = true;
     }
 
     if (firstNewIdx === 0) renderGrid();
     else appendGridPhotos(data.photos, firstNewIdx);
+    updateGridTail();
     updateFilterSummary();
 
     // Refresh appended cards once async metadata resolves — appendGridPhotos
@@ -3312,7 +4120,16 @@ async function loadPhotos(options) {
     if (epoch === loadEpoch) {
       loading = false;
       if (showLoading && loadingState) loadingState.style.display = 'none';
-      if (loadSucceeded) rearmInfiniteScrollObserver();
+      // Re-check the scan depth live (not a load-start snapshot): a stale
+      // scan can drain during our fetch, and its own hydration rAF then
+      // bails on loading=true. In that overlap this load is the current
+      // view's only chance to re-arm.
+      if (loadSucceeded && anchorScanDepth === 0) {
+        rearmInfiniteScrollObserver();
+        // Chain: keep loading while the viewport is at or past the loading
+        // boundary (rAF so the freshly appended cards have a layout first).
+        requestAnimationFrame(ensureViewportHydrated);
+      }
     }
   }
 }
@@ -3342,9 +4159,9 @@ async function loadCalendarData() {
   if (flagFilter) params.set('flag', flagFilter);
   var colorFilter = document.getElementById('colorFilter').value;
   if (colorFilter) params.set('color_label', colorFilter);
-  var search = document.getElementById('searchInput').value.trim();
-  if (search) params.set('keyword', search);
-  if (activeKeyword) params.set('keyword', activeKeyword);
+  var locationStatus = document.getElementById('locationStatusFilter').value;
+  if (locationStatus) params.set('location_status', locationStatus);
+  appendKeywordSearchParams(params);
 
   calendarData = await safeFetch('/api/photos/calendar?' + params.toString());
   renderCalendar();
@@ -3490,6 +4307,12 @@ function calendarChangeYear(delta) {
 }
 
 function applyFilters() {
+  var locationStatus = document.getElementById('locationStatusFilter').value;
+  var url = new URL(window.location.href);
+  if (locationStatus) url.searchParams.set('location_status', locationStatus);
+  else url.searchParams.delete('location_status');
+  url.searchParams.delete('missing_gps');
+  window.history.replaceState({}, '', url.pathname + url.search);
   if (timelineMode) loadCalendarData();
   activeCollectionId = null;
   reloadBrowseResults();
@@ -3499,7 +4322,7 @@ function scheduleSearchFilter() {
   cancelScheduledSearchFilter();
   searchFilterTimer = setTimeout(function() {
     searchFilterTimer = null;
-    applyFilters();
+    applySearchFilters();
   }, 250);
 }
 
@@ -3512,7 +4335,17 @@ function cancelScheduledSearchFilter() {
 
 function applySearchFilterNow() {
   cancelScheduledSearchFilter();
-  applyFilters();
+  applySearchFilters();
+}
+
+function applySearchFilters() {
+  var input = document.getElementById('searchInput');
+  var nextSearch = input ? input.value.trim() : '';
+  var preserveAnchor = appliedKeywordSearch !== '' && nextSearch === '';
+  appliedKeywordSearch = nextSearch;
+  if (timelineMode) loadCalendarData();
+  activeCollectionId = null;
+  reloadBrowseResults({ preserveAnchor: preserveAnchor });
 }
 
 function setFilterRating(val) {
@@ -3549,6 +4382,7 @@ function updateFilterSummary() {
 
 function updateThumbSize(val) {
   document.getElementById('grid').style.setProperty('--thumb-size', val + 'px');
+  updateGridTail();
 }
 
 function toggleDetectionBoxes() {
@@ -3575,22 +4409,22 @@ function appendClipSearchScopeParams(params) {
 
   var colorFilter = document.getElementById('colorFilter').value;
   if (colorFilter) params.set('color_label', colorFilter);
+  var locationStatus = document.getElementById('locationStatusFilter').value;
+  if (locationStatus) params.set('location_status', locationStatus);
 
   var dateFrom = document.getElementById('dateFrom').value;
   var dateTo = document.getElementById('dateTo').value;
   if (dateFrom) params.set('date_from', dateFrom);
   if (dateTo) params.set('date_to', dateTo);
 
-  var search = document.getElementById('searchInput').value.trim();
-  if (search) params.set('keyword', search);
-  if (activeKeyword) params.set('keyword', activeKeyword);
+  appendKeywordSearchParams(params);
 }
 
-function reloadBrowseResults() {
+function reloadBrowseResults(options) {
   if (clipSearchActive && getClipSearchQuery()) {
     runClipSearch();
   } else {
-    resetAndLoad();
+    resetAndLoad(options);
   }
 }
 
@@ -3693,6 +4527,20 @@ function updateScrollPosition() {
   var container = document.getElementById('gridContainer');
   var scrollTop = container.scrollTop;
   var viewHeight = container.clientHeight;
+
+  // Viewport entirely below every loaded card (placeholder territory):
+  // reporting the loaded range would be a lie, so estimate within the
+  // bounded runway represented by the rendered skeleton cells.
+  var lastCard = cards[cards.length - 1];
+  if (lastCard.offsetTop + lastCard.offsetHeight < scrollTop) {
+    var frac = Math.min(1, (scrollTop + viewHeight / 2) / Math.max(1, container.scrollHeight));
+    var skeletonCount = document.querySelectorAll('#gridTail .skel-card').length;
+    var representedPhotos = Math.min(totalPhotos, photos.length + skeletonCount);
+    var approx = Math.max(1, Math.min(representedPhotos, Math.round(frac * representedPhotos)));
+    el.textContent = '≈' + approx.toLocaleString() + ' of ' + totalPhotos.toLocaleString();
+    return;
+  }
+
   var first = 1;
   var last = cards.length;
   for (var i = 0; i < cards.length; i++) {
@@ -3723,7 +4571,11 @@ async function loadInatStatus(photoIds) {
 
 function batchSubmitInat() {
   var ids = getActiveSelection();
-  if (ids.length === 0) return;
+  if (ids.length === 0) {
+    if (typeof showToast === 'function') showToast('Select one or more photos to send to iNaturalist.', 'error');
+    else alert('Select one or more photos to send to iNaturalist.');
+    return;
+  }
   submitToInatBatch(ids);
 }
 
@@ -3753,6 +4605,7 @@ function renderGrid() {
     html += renderPhotoCard(p, idx);
   });
   grid.innerHTML = html;
+  updateGridTail();
 }
 
 /* ---------- Grid dblclick delegation (XSS-safe) ---------- */
@@ -3805,6 +4658,10 @@ function browseKeyMatchesConfiguredShortcut(e) {
 /* ---------- Infinite Scroll ---------- */
 var gridContainer = document.getElementById('gridContainer');
 var infiniteScrollObserverDisconnected = false;
+var infiniteScrollObserverIsNative = (
+  typeof window.IntersectionObserver === 'function' &&
+  String(window.IntersectionObserver).indexOf('[native code]') !== -1
+);
 var observer = new IntersectionObserver(function(entries) {
   if (entries[0].isIntersecting) loadPhotos({ silent: photos.length > 0 });
 }, { root: gridContainer, rootMargin: '3200px 0px' });
@@ -3822,7 +4679,7 @@ observer.disconnect = function() {
 observer.observe(document.getElementById('scrollSentinel'));
 
 function rearmInfiniteScrollObserver() {
-  // With the 1200px root margin, the sentinel can remain intersecting after
+  // With the 3200px root margin, the sentinel can remain intersecting after
   // bootstrap or page loads. Re-observing asks IntersectionObserver to deliver
   // a fresh callback for the current layout instead of waiting for a scroll
   // transition that may never occur.
@@ -3834,9 +4691,33 @@ function rearmInfiniteScrollObserver() {
   observer.observe(sentinel);
 }
 
+/* Scroll-driven page loading. The primary trigger is proximity to the loading
+   boundary (the first skeleton cell). Fires on scroll and chains after each
+   successful page load until the viewport is covered by real cards. */
+function ensureViewportHydrated() {
+  if (infiniteScrollObserverDisconnected || !infiniteScrollObserverIsNative) return;
+  if (loading || allLoaded || clipSearchActive || anchorScanDepth > 0) return;
+  if (photos.length === 0) return;
+  var tail = document.getElementById('gridTail');
+  if (!tail || !tail.firstElementChild) return;
+  var contRect = document.getElementById('gridContainer').getBoundingClientRect();
+  var skelRect = tail.firstElementChild.getBoundingClientRect();
+  if (skelRect.top - contRect.bottom <= 3200) loadPhotos({ silent: true });
+}
+
+window.addEventListener('resize', function() {
+  var sidebar = document.getElementById('browseSidebar');
+  if (sidebar) setBrowseSidebarWidth(sidebar.getBoundingClientRect().width, false);
+  var detailPanel = document.getElementById('detailPanel');
+  if (detailPanel) setBrowseDetailPanelWidth(detailPanel.getBoundingClientRect().width, false);
+  // Column count and card heights change with width — re-estimate the tail
+  requestAnimationFrame(updateGridTail);
+});
+
 /* ---------- Scroll Position Tracking ---------- */
 var scrollTimer = null;
 gridContainer.addEventListener('scroll', function() {
+  ensureViewportHydrated();
   if (scrollTimer) clearTimeout(scrollTimer);
   scrollTimer = setTimeout(updateScrollPosition, 50);
 });
@@ -3879,6 +4760,22 @@ function selectPhoto(e, id, idx) {
         if (summary) summary.classList.remove('hidden');
         loadSummary();
       }
+      // Same reason as closeDetail: the dropped anchor's EXIF suggestion is
+      // still tagged with its data-photo-id (hidden along with the detail
+      // panel). This path bypasses closeDetail entirely, so without an
+      // explicit scrub a later Select All (or any batch that still contains
+      // the dropped photo) would satisfy renderLocationEmpty's owner-in-
+      // selection check and resurrect the anchor's Accept line for the
+      // whole batch — clicking it would apply the dropped anchor's GPS
+      // place to every selected photo. Codex P2 on PR #1097.
+      clearExifSuggestion();
+      // And null the ambient detail-photo pointer maybeShowExifSuggestion's
+      // post-await guard reads. If A's reverse-geocode is still in flight
+      // when we drop A here, the completion runs later; leaving
+      // _detailPhotoId pointing at A means a subsequent Select All that
+      // contains A would let the async paint path resurrect A's Accept line
+      // into the batch inspector. Codex P2 on PR #1097 (17:04Z follow-up).
+      window._detailPhotoId = null;
     }
   } else {
     // Normal click: single select
@@ -3941,7 +4838,7 @@ async function selectAllMatchingPhotos() {
   }
 
   var url;
-  if (activeCollectionId) {
+  if (activeCollectionId && !dashboardCollectionScope) {
     url = '/api/collections/' + activeCollectionId + '/photo-ids';
   } else {
     url = '/api/photos/ids?' + buildCurrentBrowseParams().toString();
@@ -4197,6 +5094,8 @@ function updateSelectionPanel(ids) {
     panel.classList.add('hidden');
     selectionKeywordKey = '';
     selectionKeywordMissingById = {};
+    selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
     selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) list.innerHTML = '';
@@ -4225,10 +5124,15 @@ function updateSelectionPanel(ids) {
   panel.classList.remove('hidden');
   document.getElementById('selectionCount').textContent = ids.length.toLocaleString() + ' photos selected';
   updatePasteEditSection(ids);
-  renderBatchInspector(ids);
+  // Keep any EXIF suggestion fetched for the anchor photo: Accept is
+  // batch-aware (_locationApplyPhotoIds), so growing the selection is the
+  // designed way to apply one suggestion to many photos.
+  renderBatchInspector(ids, { preserveExifSuggestion: true });
   if (ids.length > 1000) {
     selectionKeywordKey = selectionIdsKey(ids);
     selectionKeywordMissingById = {};
+    selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
     selectionKeywordRequestSeq++;
     var list = document.getElementById('selectionKeywordSuggestions');
     if (list) {
@@ -4280,8 +5184,16 @@ async function pasteEditSettingsToSelection() {
     var count = data.count || 0;
     var skipped = Array.isArray(data.skipped) ? data.skipped.length : 0;
     if (typeof window.vireoRefreshEditRecipeCache === 'function' && Array.isArray(data.applied)) {
+      // Prefer the server's per-id recipe map: with local adjustments each
+      // target now carries its own mask-snapshot ref, so reusing the copied
+      // recipe (or the first applied one) would cache wrong refs on all
+      // non-first ids until a full refetch.
+      var recipes = data.recipes && typeof data.recipes === 'object' ? data.recipes : null;
       var updates = {};
-      data.applied.forEach(function(pid) { updates[String(pid)] = data.recipe || copied.recipe; });
+      data.applied.forEach(function(pid) {
+        var key = String(pid);
+        updates[key] = (recipes && recipes[key]) || data.recipe || copied.recipe;
+      });
       window.vireoRefreshEditRecipeCache(updates);
     }
     var appliedMsg = 'Pasted edit settings to ' + count.toLocaleString() + ' photo' + (count === 1 ? '' : 's');
@@ -4347,6 +5259,165 @@ function browseCompareStep(delta) {
   renderBrowseCompare();
 }
 
+function browseCompareElements(prefix) {
+  return {
+    wrap: document.getElementById('browseCompareWrap' + prefix),
+    img: document.getElementById('browseCompareImg' + prefix),
+    badge: document.getElementById('browseCompareZoom' + prefix)
+  };
+}
+
+function clampBrowseComparePan(prefix) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap || !els.img) return;
+  if (view.zoom <= 1.001) {
+    view.panX = 0;
+    view.panY = 0;
+    return;
+  }
+  var maxX = Math.max(0, (els.img.clientWidth * view.zoom - els.wrap.clientWidth) / 2);
+  var maxY = Math.max(0, (els.img.clientHeight * view.zoom - els.wrap.clientHeight) / 2);
+  view.panX = Math.max(-maxX, Math.min(maxX, view.panX));
+  view.panY = Math.max(-maxY, Math.min(maxY, view.panY));
+}
+
+function applyBrowseCompareView(prefix) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap || !els.img) return;
+  clampBrowseComparePan(prefix);
+  els.img.style.transform = 'translate(' + view.panX + 'px, ' + view.panY + 'px) scale(' + view.zoom + ')';
+  els.wrap.classList.toggle('zoomed', view.zoom > 1.001);
+  if (els.badge) els.badge.textContent = view.zoom <= 1.001 ? 'Fit' : Math.round(view.zoom * 100) + '%';
+}
+
+function ensureBrowseCompareOriginal(prefix) {
+  var els = browseCompareElements(prefix);
+  if (!els.img || !els.img.dataset.photoId) return;
+  var loadState = els.img.dataset.originalLoaded;
+  if (loadState === 'true' || loadState === 'loading' || loadState === 'failed') return;
+  var photoId = els.img.dataset.photoId;
+  els.img.dataset.originalLoaded = 'loading';
+  var original = new Image();
+  els.img._browseCompareOriginalProbe = original;
+  original.onload = function() {
+    if (els.img.dataset.photoId !== photoId) return;
+    els.img.dataset.originalLoaded = 'true';
+    els.img.src = original.src;
+    els.img._browseCompareOriginalProbe = null;
+  };
+  original.onerror = function() {
+    if (els.img.dataset.photoId !== photoId) return;
+    els.img.dataset.originalLoaded = 'failed';
+    els.img._browseCompareOriginalProbe = null;
+  };
+  original.src = '/photos/' + photoId + '/original';
+}
+
+function setBrowseCompareZoom(prefix, zoom, clientX, clientY) {
+  var view = browseCompareViews[prefix];
+  var els = browseCompareElements(prefix);
+  if (!view || !els.wrap) return;
+  var oldZoom = view.zoom;
+  var nextZoom = Math.max(1, Math.min(8, zoom));
+  if (nextZoom > 1.001 && oldZoom > 0 && clientX != null && clientY != null) {
+    var rect = els.wrap.getBoundingClientRect();
+    var cursorX = clientX - (rect.left + rect.width / 2);
+    var cursorY = clientY - (rect.top + rect.height / 2);
+    var ratio = nextZoom / oldZoom;
+    view.panX = cursorX - ratio * (cursorX - view.panX);
+    view.panY = cursorY - ratio * (cursorY - view.panY);
+  }
+  view.zoom = nextZoom;
+  if (nextZoom <= 1.001) {
+    view.panX = 0;
+    view.panY = 0;
+  } else {
+    ensureBrowseCompareOriginal(prefix);
+  }
+  applyBrowseCompareView(prefix);
+}
+
+function resetBrowseCompareView(prefix) {
+  var view = browseCompareViews[prefix];
+  if (!view) return;
+  view.zoom = 1;
+  view.panX = 0;
+  view.panY = 0;
+  applyBrowseCompareView(prefix);
+}
+
+function resetBrowseCompareViews() {
+  resetBrowseCompareView('A');
+  resetBrowseCompareView('B');
+}
+
+function browseComparePaneFromEvent(e) {
+  var wrap = e.target && e.target.closest ? e.target.closest('.browse-compare-image-wrap') : null;
+  return wrap && wrap.dataset ? wrap.dataset.pane : null;
+}
+
+(function installBrowseCompareZoomHandlers() {
+  document.addEventListener('wheel', function(e) {
+    if (!isBrowseCompareOpen()) return;
+    var prefix = browseComparePaneFromEvent(e);
+    if (!prefix || !browseCompareViews[prefix]) return;
+    e.preventDefault();
+    var sensitivity = e.ctrlKey ? 0.02 : 0.0015;
+    var factor = Math.exp(-e.deltaY * sensitivity);
+    setBrowseCompareZoom(prefix, browseCompareViews[prefix].zoom * factor, e.clientX, e.clientY);
+  }, { passive: false });
+
+  document.addEventListener('dblclick', function(e) {
+    if (!isBrowseCompareOpen()) return;
+    var prefix = browseComparePaneFromEvent(e);
+    if (!prefix || !browseCompareViews[prefix]) return;
+    e.preventDefault();
+    setBrowseCompareZoom(prefix, browseCompareViews[prefix].zoom > 1.001 ? 1 : 2, e.clientX, e.clientY);
+  });
+
+  document.addEventListener('pointerdown', function(e) {
+    if (!isBrowseCompareOpen() || e.button !== 0) return;
+    var prefix = browseComparePaneFromEvent(e);
+    var view = prefix && browseCompareViews[prefix];
+    if (!view || view.zoom <= 1.001) return;
+    browseComparePointer = {
+      pointerId: e.pointerId,
+      prefix: prefix,
+      startX: e.clientX,
+      startY: e.clientY,
+      panX: view.panX,
+      panY: view.panY
+    };
+    if (e.target.setPointerCapture) e.target.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  document.addEventListener('pointermove', function(e) {
+    var drag = browseComparePointer;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    var view = browseCompareViews[drag.prefix];
+    view.panX = drag.panX + e.clientX - drag.startX;
+    view.panY = drag.panY + e.clientY - drag.startY;
+    applyBrowseCompareView(drag.prefix);
+    e.preventDefault();
+  });
+
+  function stopBrowseComparePan(e) {
+    if (browseComparePointer && (e.pointerId == null || browseComparePointer.pointerId === e.pointerId)) {
+      browseComparePointer = null;
+    }
+  }
+  document.addEventListener('pointerup', stopBrowseComparePan);
+  document.addEventListener('pointercancel', stopBrowseComparePan);
+  window.addEventListener('resize', function() {
+    if (!isBrowseCompareOpen()) return;
+    applyBrowseCompareView('A');
+    applyBrowseCompareView('B');
+  });
+})();
+
 function findBrowsePhoto(id) {
   return photos.find(function(p) { return p.id === id; }) || null;
 }
@@ -4376,7 +5447,10 @@ function setBrowseComparePane(prefix, photo) {
   var name = document.getElementById('browseCompareName' + prefix);
   var meta = document.getElementById('browseCompareMeta' + prefix);
   if (img) {
+    img._browseCompareOriginalProbe = null;
     img.alt = photo.filename || '';
+    img.dataset.photoId = photo.id;
+    img.dataset.originalLoaded = 'false';
     img.src = '/photos/' + photo.id + '/full';
   }
   if (name) name.textContent = photo.filename || ('Photo ' + photo.id);
@@ -4389,6 +5463,7 @@ async function renderBrowseCompare() {
   var leftId = browseCompareIds[browseCompareOffset];
   var rightId = browseCompareIds[browseCompareOffset + 1];
   if (leftId == null || rightId == null) return;
+  resetBrowseCompareViews();
 
   var count = document.getElementById('browseCompareCount');
   if (count) {
@@ -4429,7 +5504,7 @@ async function loadSelectionKeywordSuggestions(ids) {
       body: JSON.stringify({photo_ids: ids}),
     }, { toast: false });
     if (seq !== selectionKeywordRequestSeq) return;
-    renderSelectionKeywordSuggestions(data.suggestions || []);
+    renderSelectionKeywordSuggestions(data.suggestions || [], data.selected_count || ids.length);
   } catch(e) {
     if (seq === selectionKeywordRequestSeq && list) {
       list.innerHTML = '<div class="selection-empty">Could not load keyword suggestions.</div>';
@@ -4437,26 +5512,40 @@ async function loadSelectionKeywordSuggestions(ids) {
   }
 }
 
-function renderSelectionKeywordSuggestions(suggestions) {
+function renderSelectionKeywordSuggestions(keywords, selectedCount) {
   var list = document.getElementById('selectionKeywordSuggestions');
   if (!list) return;
-  if (!suggestions.length) {
+  if (!keywords.length) {
     selectionKeywordMissingById = {};
-    list.innerHTML = '<div class="selection-empty">No partial keywords in this selection.</div>';
+    selectionKeywordPresentById = {};
+    selectionKeywordNameById = {};
+    list.innerHTML = '<div class="selection-empty">No keywords on selected photos.</div>';
     return;
   }
 
   var html = '';
   selectionKeywordMissingById = {};
-  suggestions.slice(0, 8).forEach(function(k) {
+  selectionKeywordPresentById = {};
+  selectionKeywordNameById = {};
+  keywords.forEach(function(k) {
     var missing = k.missing_count || 0;
+    var count = k.count || 0;
     selectionKeywordMissingById[String(k.id)] = k.missing_photo_ids || [];
+    selectionKeywordPresentById[String(k.id)] = k.present_photo_ids || [];
+    selectionKeywordNameById[String(k.id)] = k.name;
+    var actions = '';
+    if (missing > 0) {
+      actions += '<button class="selection-keyword-add" onclick="applySelectionKeyword(' + k.id + ')" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>';
+    }
+    if (count > 0) {
+      actions += '<button class="selection-keyword-remove" onclick="removeSelectionKeyword(' + k.id + ')" title="Remove this keyword from selected photos that have it">Remove from ' + count + '</button>';
+    }
     html += '<div class="selection-keyword-row">' +
       '<div style="min-width:0;">' +
         '<div class="selection-keyword-name">' + escapeHtml(k.name) + '</div>' +
-        '<div class="selection-keyword-meta">On ' + k.count + ', missing from ' + missing + '</div>' +
+        '<div class="selection-keyword-meta">On ' + count + ' of ' + selectedCount + (missing ? ', missing from ' + missing : '') + '</div>' +
       '</div>' +
-      '<button class="selection-keyword-add" onclick="applySelectionKeyword(' + k.id + ')" title="Add this keyword to the selected photos missing it">Add to ' + missing + '</button>' +
+      '<div class="selection-keyword-actions">' + actions + '</div>' +
     '</div>';
   });
   list.innerHTML = html;
@@ -4477,6 +5566,28 @@ async function applySelectionKeyword(keywordId) {
   loadKeywords();
   scheduleCollectionCountsRefresh();
   refreshActiveCollectionAfterMembershipChange();
+  refreshPendingSyncBanner();
+  showUndoToast();
+}
+
+async function removeSelectionKeyword(keywordId) {
+  var ids = selectionKeywordPresentById[String(keywordId)] || [];
+  if (!ids.length) return;
+  var removedName = selectionKeywordNameById[String(keywordId)] || null;
+  try {
+    await safeFetch('/api/batch/keyword-remove', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
+    });
+  } catch(e) { return; }
+  _clearRepresentativeStateAfterKeywordRemoval(ids, removedName);
+  selectionKeywordKey = '';
+  loadSelectionKeywordSuggestions(getActiveSelection());
+  loadKeywords();
+  scheduleCollectionCountsRefresh();
+  refreshActiveCollectionAfterMembershipChange();
+  refreshActiveKeywordAfterRemoval(removedName);
   refreshPendingSyncBanner();
   showUndoToast();
 }
@@ -4515,6 +5626,88 @@ async function batchSetRating(rating) {
   showUndoToast();
 }
 
+// Server-side representative eligibility (see get_species_representatives)
+// hides rejected photos. Mirror that here so the grid badge and the shared
+// representative context menu ("Already representative" hint on the current
+// entry) don't keep treating a just-rejected photo as still representative
+// until a reload. Un-rejecting is left as-is: the client can't know whether
+// the DB preference still points at this photo, so the badge stays hidden
+// until the page reloads rather than lighting up incorrectly.
+function _clearRepresentativeStateIfIneligible(photoId, flag) {
+  if (flag !== 'rejected') return;
+  var p = photos.find(function(x) { return x.id === photoId; });
+  if (!p) return;
+  if (p.is_species_representative) p.is_species_representative = false;
+  if (Array.isArray(p.life_list)) {
+    p.life_list.forEach(function(entry) {
+      if (!entry) return;
+      if (entry.is_current_photo) entry.is_current_photo = false;
+      if (entry.is_species_representative) entry.is_species_representative = false;
+    });
+  }
+}
+
+// Every render path that has (keywordId, name) pairs feeds this map so the
+// single-photo remove path can resolve the name even before the autocomplete
+// field is ever opened. keywordAutocompleteCache starts as null and only
+// populates after that field renders, so on a fresh Browse page the previous
+// lookup returned null and _clearRepresentativeStateAfterKeywordRemoval
+// no-oped — the grid badge/context-menu state stayed stale until reload.
+var _keywordNamesById = {};
+function _rememberKeywordNames(keywords) {
+  if (!Array.isArray(keywords)) return;
+  keywords.forEach(function(k) {
+    if (k && typeof k.id === 'number' && typeof k.name === 'string') {
+      _keywordNamesById[k.id] = k.name;
+    }
+  });
+}
+
+function _keywordNameFromCache(keywordId) {
+  if (Object.prototype.hasOwnProperty.call(_keywordNamesById, keywordId)) {
+    return _keywordNamesById[keywordId];
+  }
+  if (!Array.isArray(keywordAutocompleteCache)) return null;
+  for (var i = 0; i < keywordAutocompleteCache.length; i++) {
+    var k = keywordAutocompleteCache[i];
+    if (k && k.id === keywordId) return k.name;
+  }
+  return null;
+}
+
+// Server-side eligibility requires the photo to still carry the species
+// keyword, so removing a species keyword drops the photo from the eligible
+// representative set. Mirror that locally: strip life_list entries whose
+// species matches the removed keyword name and recompute the badge flag.
+// The context menu reads photo.life_list too, so this also stops the shared
+// "Already representative" hint from lingering on a photo the DB no longer
+// counts. Non-species keywords never appear in life_list, so the filter
+// no-ops for those. If the cache lookup fails to resolve the name, we
+// leave state alone rather than clearing the wrong entry.
+function _clearRepresentativeStateAfterKeywordRemoval(photoIds, keywordName) {
+  if (!Array.isArray(photoIds) || !photoIds.length) return;
+  if (!keywordName) return;
+  var touched = [];
+  photoIds.forEach(function(id) {
+    var p = photos.find(function(x) { return x.id === id; });
+    if (!p || !Array.isArray(p.life_list)) return;
+    var next = p.life_list.filter(function(entry) {
+      return !entry || entry.species !== keywordName;
+    });
+    if (next.length !== p.life_list.length) {
+      p.life_list = next;
+      var isRep = next.some(function(entry) {
+        return entry && entry.is_species_representative;
+      });
+      if (p.is_species_representative !== isRep) {
+        p.is_species_representative = isRep;
+      }
+      touched.push(id);
+    }
+  });
+  if (touched.length) refreshGridCards(touched);
+}
+
 async function batchSetFlag(flag) {
   var ids = getActiveSelection();
   try {
@@ -4526,6 +5719,7 @@ async function batchSetFlag(flag) {
   ids.forEach(function(id) {
     var p = photos.find(function(x) { return x.id === id; });
     if (p) p.flag = flag;
+    _clearRepresentativeStateIfIneligible(id, flag);
   });
   refreshGridCards(ids);
   if (selectedPhotoId != null && ids.indexOf(selectedPhotoId) !== -1) {
@@ -4751,139 +5945,57 @@ async function confirmBatchCollection() {
   clearSelection();
 }
 
-var _gpsResolveSource = null;
-var _gpsResolvePreview = null;
-
-function gpsResolveReasonLabel(reason) {
-  var labels = {
-    missing_gps: 'No GPS',
-    invalid_gps: 'Invalid GPS',
-    no_api_key: 'No Google Maps key',
-    no_match: 'No place found',
-    transient_error: 'Temporary lookup failure',
-    already_has_location: 'Already has location',
-  };
-  return labels[reason] || reason || 'Unresolved';
-}
-
-function renderGpsResolvePreview(data) {
-  _gpsResolvePreview = data || {};
-  var total = _gpsResolvePreview.total || 0;
-  var resolvable = _gpsResolvePreview.resolvable || 0;
-  var groups = _gpsResolvePreview.groups || [];
-  var unresolved = _gpsResolvePreview.unresolved || [];
-  var skipped = _gpsResolvePreview.skipped || [];
-  var summary = document.getElementById('gpsResolveSummary');
-  var groupEl = document.getElementById('gpsResolveGroups');
-  var note = document.getElementById('gpsResolveNote');
-  var applyBtn = document.getElementById('gpsResolveApplyBtn');
-
-  summary.textContent = resolvable.toLocaleString() + ' of ' + total.toLocaleString()
-    + ' photos can be assigned across ' + groups.length.toLocaleString()
-    + ' place' + (groups.length === 1 ? '' : 's') + '.';
-
-  groupEl.innerHTML = groups.map(function(g) {
-    var samples = (g.sample_filenames || []).join(', ');
-    return '<div class="gps-resolve-row">' +
-      '<div style="min-width:0;">' +
-        '<div class="gps-resolve-place">' + escapeHtml(g.summary || g.name || g.place_id || 'Unknown place') + '</div>' +
-        (samples ? '<div class="gps-resolve-samples">' + escapeHtml(samples) + '</div>' : '') +
-      '</div>' +
-      '<div class="gps-resolve-count">' + (g.count || 0).toLocaleString() + '</div>' +
-    '</div>';
-  }).join('') || '<div class="gps-resolve-row"><div class="gps-resolve-place">No resolvable GPS locations</div></div>';
-
-  var notes = [];
-  if (unresolved.length) {
-    var reasonCounts = {};
-    unresolved.forEach(function(item) {
-      var reason = item.reason || 'unresolved';
-      reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
-    });
-    var reasonText = Object.keys(reasonCounts).map(function(reason) {
-      return reasonCounts[reason].toLocaleString() + ' ' + gpsResolveReasonLabel(reason);
-    }).join(', ');
-    notes.push(unresolved.length.toLocaleString() + ' unresolved: ' + reasonText);
+function reviewLocationsForCollection(collectionId) {
+  // Same guard as filterByCollection: degraded collections would just
+  // re-hit the unresolvable rules while building the review queue.
+  var collectionMeta = collectionsById[collectionId];
+  if (collectionMeta && collectionMeta.count_error) {
+    if (typeof showToast === 'function') {
+      showToast(
+        (collectionMeta.name || 'This collection') +
+          " is unavailable — its rules could not be resolved. Right-click → Edit Rules to fix it.",
+        'error'
+      );
+    }
+    return;
   }
-  if (skipped.length) {
-    notes.push(skipped.length.toLocaleString() + ' skipped because they already have a location.');
-  }
-  note.textContent = notes.join(' ');
-  applyBtn.disabled = resolvable === 0;
-  applyBtn.style.opacity = resolvable === 0 ? '0.55' : '';
+  sessionStorage.setItem('vireoLocationReviewReturn', window.location.href);
+  sessionStorage.setItem('vireoLocationReviewSource', JSON.stringify({collection_id: collectionId}));
+  window.location.href = '/locations/review?collection_id=' + encodeURIComponent(collectionId);
 }
 
-async function openGpsResolve(source) {
-  _gpsResolveSource = source;
-  _gpsResolvePreview = null;
-  document.getElementById('gpsResolveSummary').textContent = 'Loading...';
-  document.getElementById('gpsResolveGroups').innerHTML = '';
-  document.getElementById('gpsResolveNote').textContent = '';
-  document.getElementById('gpsResolveApplyBtn').disabled = true;
-  document.getElementById('gpsResolveModal').classList.add('open');
-  try {
-    var data = await safeFetch('/api/batch/location/from-exif', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(Object.assign({apply: false}, source)),
-    });
-    renderGpsResolvePreview(data);
-  } catch(e) {
-    hideGpsResolveModal();
-  }
-}
-
-function openGpsResolveForCollection(collectionId) {
-  openGpsResolve({collection_id: collectionId});
-}
-
-function openGpsResolveForSelection() {
+function reviewLocationsForSelection() {
   var ids = getActiveSelection();
   if (!ids.length) return;
-  openGpsResolve({photo_ids: ids});
-}
-
-function hideGpsResolveModal() {
-  document.getElementById('gpsResolveModal').classList.remove('open');
-  _gpsResolveSource = null;
-  _gpsResolvePreview = null;
-  window._vireoNativeMenuPhotoIdsOverride = null;
-}
-
-async function applyGpsResolve() {
-  if (!_gpsResolveSource || !_gpsResolvePreview || !_gpsResolvePreview.resolvable) return;
-  var btn = document.getElementById('gpsResolveApplyBtn');
-  btn.disabled = true;
-  btn.textContent = 'Applying...';
+  var payload;
   try {
-    var data = await safeFetch('/api/batch/location/from-exif', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(Object.assign({apply: true}, _gpsResolveSource)),
-    });
-    var updated = data.updated || 0;
-    var updatedIds = [];
-    (data.groups || []).forEach(function(g) {
-      (g.photo_ids || []).forEach(function(id) { updatedIds.push(id); });
-    });
-    hideGpsResolveModal();
-    invalidateKeywordAutocompleteCache();
-    loadKeywords();
-    scheduleCollectionCountsRefresh();
-    refreshPendingSyncBanner();
-    var detailPhotoId = updatedIds.indexOf(selectedPhotoId) !== -1 ? selectedPhotoId : null;
-    await _afterLocationMutation(updatedIds, detailPhotoId);
-    var errors = (data.group_errors || []).length;
-    showToast(
-      'Resolved GPS locations for ' + updated.toLocaleString() + ' photo' + (updated === 1 ? '' : 's')
-      + (errors ? '; ' + errors + ' place group' + (errors === 1 ? '' : 's') + ' failed' : '')
-    );
-    if (updated > 0) showUndoToast();
-  } catch(e) {
-    btn.disabled = false;
-  } finally {
-    btn.textContent = 'Apply';
+    payload = JSON.stringify({photo_ids: ids});
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast('Could not open location review for this selection.', 'error');
+    }
+    return;
   }
+  try {
+    sessionStorage.setItem('vireoLocationReviewSource', payload);
+  } catch (e) {
+    // sessionStorage has a per-origin quota (typically ~5MB). Very large
+    // selections (e.g. "Select all matching photos" on a big library) can
+    // exceed it, in which case setItem throws synchronously. Guide the
+    // user to the collection-based flow, which passes an id in the URL
+    // and never touches sessionStorage for the id list.
+    if (typeof showToast === 'function') {
+      showToast(
+        'Selection is too large to open location review directly (' +
+          ids.length.toLocaleString() +
+          ' photos). Save the selection as a collection first, then use Review on Map from the collection menu.',
+        'error'
+      );
+    }
+    return;
+  }
+  sessionStorage.setItem('vireoLocationReviewReturn', window.location.href);
+  window.location.href = '/locations/review?source=selection';
 }
 
 var captureTimePreviewSeq = 0;
@@ -5056,6 +6168,23 @@ function clearSelection() {
   selectedPhotos.clear();
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Batch-bar Clear (and every other caller) has to scrub the EXIF suggestion
+  // too. Without this, the suggestion element keeps its data-photo-id and
+  // Accept button after clearing, so a later Select All that still contains
+  // the previously-open anchor satisfies renderLocationEmpty's owner-in-
+  // selection check and resurrects the anchor's Accept line for the whole
+  // batch — one click would apply the anchor's GPS-derived place to every
+  // selected photo. Codex P2 on PR #1097.
+  clearExifSuggestion();
+  // Also drop the ambient detail-photo pointer maybeShowExifSuggestion's
+  // post-await path uses as its owner check. Scrubbing the DOM alone isn't
+  // enough: a reverse-geocode fetch that was in flight when the user clicked
+  // Clear still resolves later, and if _detailPhotoId still points at the
+  // departed anchor a subsequent Select All that contains that photo
+  // re-satisfies both async guards and repaints A's Accept line into the
+  // batch inspector — clicking it would apply A's EXIF place to every
+  // selected photo. Codex P2 on PR #1097 (17:04Z follow-up).
+  window._detailPhotoId = null;
   document.querySelectorAll('.grid-card').forEach(function(el) {
     el.classList.remove('selected');
   });
@@ -5122,6 +6251,21 @@ async function loadDetail(id) {
   if (detail) detail.classList.remove('batch-mode');
   if (detail) detail.classList.toggle('visible', window._detailPhotoId === id);
 
+  // Kill any stale EXIF suggestion tagged for a *different* photo before the
+  // fetch returns. Otherwise: open A (suggestion shown, data-photo-id=A) →
+  // click B → Select All lands before B's /api/photos response resolves.
+  // renderBatchInspector's preserveExifSuggestion check finds A's stale
+  // data-photo-id, sees A is in the Select All ids, and resurrects A's
+  // Accept line for the whole batch — clicking it applies A's GPS place to
+  // every selected photo. Also null _detailPhotoId so any in-flight
+  // reverse-geocode for A can't repaint through maybeShowExifSuggestion's
+  // post-await guard once the batch inspector is on screen. Codex P2 on
+  // PR #1097 (17:23Z).
+  if (window._detailPhotoId !== id) {
+    clearExifSuggestion();
+    window._detailPhotoId = null;
+  }
+
   try {
     var photo = await safeFetch('/api/photos/' + id, {}, { toast: false });
     // Re-check after the fetch: a Cmd/Ctrl-click landing during the await can
@@ -5148,9 +6292,16 @@ function renderDetail(photo) {
       skipIfLocallyWritten: true,
     });
   }
+  if (typeof window.vireoRememberPhotoPair === 'function') {
+    window.vireoRememberPhotoPair(photo);
+  }
+  if (typeof window.vireoUpdatePairSourceControls === 'function') {
+    window.vireoUpdatePairSourceControls(photo.id);
+  }
   var detailThumb = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(photo) : '/thumbnails/' + photo.id + '.jpg';
   document.getElementById('detailImg').src = detailThumb;
   document.getElementById('detailFilename').textContent = photo.filename;
+  renderCoordinateStatus(photo);
 
   // Rating stars
   var ratingHtml = '';
@@ -5172,6 +6323,7 @@ function renderDetail(photo) {
   // Keywords
   var kwTypeIcons = {general:'●', taxonomy:'🌿', individual:'👤', location:'📍', genre:'🎭'};
   var kwTypeLabels = {general:'General', taxonomy:'Taxonomy', individual:'Individual', location:'Location', genre:'Genre'};
+  _rememberKeywordNames(photo.keywords || []);
   var kwHtml = '';
   (photo.keywords || []).forEach(function(k) {
     var ktype = k.type || 'general';
@@ -5399,6 +6551,21 @@ function closeDetail() {
   hideDetailPanel();
   selectedPhotoId = null;
   selectedIndex = -1;
+  // Drop any lingering EXIF suggestion attached to the closed detail photo.
+  // Without this, the element keeps its data-photo-id and Accept button; a
+  // later Ctrl+A (or any batch that still contains that photo) would satisfy
+  // renderLocationEmpty's owner-in-selection check and resurrect the anchor's
+  // Accept line for the whole batch — clicking it would apply the anchor's
+  // GPS-derived place to every selected photo. Codex P2 on PR #1097.
+  clearExifSuggestion();
+  // Null the ambient detail-photo pointer for the same reason. maybeShowExif
+  // Suggestion's post-await guard uses window._detailPhotoId as its owner
+  // check: if a reverse-geocode was in flight when we closed the panel, the
+  // fetch keeps running and later resolves. With the pointer still set, a
+  // Ctrl+A that includes the departed photo would satisfy both async guards
+  // and repaint A's Accept line into the batch inspector. Codex P2 on
+  // PR #1097 (17:04Z follow-up).
+  window._detailPhotoId = null;
   // Re-highlight any cmd/shift-click selections that survive detail close.
   // A blanket .remove('selected') would leave selectedPhotos armed for batch
   // actions with no visible indicator — e.g. click A -> cmd-click B -> cmd-click
@@ -5419,13 +6586,13 @@ async function loadSummary() {
   if (flagFilter) params.set('flag', flagFilter);
   var colorFilter = document.getElementById('colorFilter').value;
   if (colorFilter) params.set('color_label', colorFilter);
+  var locationStatus = document.getElementById('locationStatusFilter').value;
+  if (locationStatus) params.set('location_status', locationStatus);
   var dateFrom = document.getElementById('dateFrom').value;
   var dateTo = document.getElementById('dateTo').value;
   if (dateFrom) params.set('date_from', dateFrom);
   if (dateTo) params.set('date_to', dateTo);
-  var search = document.getElementById('searchInput').value.trim();
-  if (search) params.set('keyword', search);
-  if (activeKeyword) params.set('keyword', activeKeyword);
+  appendKeywordSearchParams(params);
   if (activeCollectionId) params.set('collection_id', activeCollectionId);
 
   try {
@@ -5501,6 +6668,7 @@ async function setFlag(flag) {
     });
     var p = photos.find(function(x) { return x.id === photoId; });
     if (p) p.flag = flag;
+    _clearRepresentativeStateIfIneligible(photoId, flag);
     refreshGridCards([photoId]);
     if (selectedPhotoId === photoId) updateDetailFlagButtons(flag);
     scheduleCollectionCountsRefresh();
@@ -5663,6 +6831,27 @@ function renderBatchInspector(ids, opts) {
   opts = opts || {};
   var known = _batchAllLoaded(ids);
 
+  var coordinateEl = document.getElementById('locationCoordinateStatus');
+  if (coordinateEl) {
+    if (!known) {
+      coordinateEl.className = 'coordinate-status none';
+      coordinateEl.textContent = 'Coordinate sources are mixed or still loading for this selection.';
+    } else {
+      var counts = {exif: 0, assigned: 0, none: 0};
+      ids.forEach(function(id) {
+        var p = photos.find(function(photo) { return photo.id === id; });
+        var status = p && counts[p.location_status] != null ? p.location_status : 'none';
+        counts[status]++;
+      });
+      coordinateEl.className = 'coordinate-status';
+      coordinateEl.textContent = [
+        counts.exif + ' EXIF GPS',
+        counts.assigned + ' assigned map location' + (counts.assigned === 1 ? '' : 's'),
+        counts.none + ' without coordinates'
+      ].join(' · ');
+    }
+  }
+
   var rs = known ? _batchRatingState(ids) : { unanimous: false, value: 0 };
   var r = rs.unanimous ? rs.value : 0;
   var ratingHtml = '';
@@ -5692,7 +6881,10 @@ function renderBatchInspector(ids, opts) {
   // (e.g. a /api/photos/color_labels fetch resolving, a batch rating shortcut)
   // triggers _refreshBatchInspectorIfActive, and we'd otherwise erase it.
   if (!opts.preserveLocation) {
-    renderLocationEmpty();
+    renderLocationEmpty({
+      preserveExifSuggestion: opts.preserveExifSuggestion,
+      selectionIds: ids,
+    });
   }
 }
 
@@ -5765,6 +6957,10 @@ async function removeKeyword(photoId, keywordId) {
     await safeFetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
       method: 'DELETE',
     });
+    _clearRepresentativeStateAfterKeywordRemoval(
+      [photoId],
+      _keywordNameFromCache(keywordId),
+    );
     loadDetail(photoId);
     loadKeywords();
     scheduleCollectionCountsRefresh();
@@ -5909,6 +7105,15 @@ function _locationApplyPhotoIds() {
 }
 
 async function _afterLocationMutation(photoIds, detailPhotoId) {
+  // Bump the location-mutation epoch so any in-flight reverse-geocode from an
+  // earlier maybeShowExifSuggestion(A) bails out of its post-await paint. Every
+  // save/clear/accept path funnels through here, so this is the single choke
+  // point where the batch-save-during-pending-geocode race can be closed.
+  // Codex P2 on PR #1097 (17:39Z): open A → Cmd-click B → save batch location
+  // for {A,B} → geocode resolves. renderBatchInspector rehides #locationFilled,
+  // so the DOM-only guard in maybeShowExifSuggestion can't tell the batch was
+  // just given a location and repaints A's stale Accept line.
+  window._locationMutationEpoch = (window._locationMutationEpoch || 0) + 1;
   invalidateKeywordAutocompleteCache();
   loadKeywords();
   scheduleCollectionCountsRefresh();
@@ -5917,7 +7122,28 @@ async function _afterLocationMutation(photoIds, detailPhotoId) {
     await filterByCollection(activeCollectionId);
     return;
   }
-  if (photoIds && photoIds.length) refreshGridCards(photoIds);
+  if (document.getElementById('locationStatusFilter').value) {
+    resetAndLoad();
+    return;
+  }
+  if (photoIds && photoIds.length) {
+    var loadedIds = new Set(photos.map(function(photo) { return photo.id; }));
+    var idsToRefresh = photoIds.filter(function(id) { return loadedIds.has(id); });
+    try {
+      for (var offset = 0; offset < idsToRefresh.length; offset += 500) {
+        var statusData = await safeFetch('/api/photos/by-ids', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({photo_ids: idsToRefresh.slice(offset, offset + 500)})
+        }, {toast: false});
+        (statusData.photos || []).forEach(function(updated) {
+          var local = photos.find(function(photo) { return photo.id === updated.id; });
+          if (local) local.location_status = updated.location_status || 'none';
+        });
+      }
+    } catch (e) {}
+    refreshGridCards(idsToRefresh);
+  }
   // If a multi-selection is still active, keep the batch inspector rendered.
   // Falling through to loadDetail(anchor) would strip .batch-mode and rewire
   // the rating stars to setRating(anchorId, i) — collapsing the panel to the
@@ -6099,6 +7325,43 @@ async function clearPhotoLocation() {
   }
 }
 
+// Scrub the inline EXIF suggestion line (hide, empty innerHTML, drop the
+// data-photo-id owner tag). Every scrub site must go through this helper so
+// they can't silently diverge — e.g. if a future scrub also needs to clear a
+// stored placeId. Codex nitpick on PR #1097.
+function clearExifSuggestion() {
+  var sugg = document.getElementById('locationExifSuggestion');
+  if (!sugg) return;
+  sugg.hidden = true;
+  sugg.innerHTML = '';
+  if (sugg.dataset) delete sugg.dataset.photoId;
+}
+
+function formatCoordinatePair(latitude, longitude) {
+  if (latitude == null || longitude == null) return '';
+  return Number(latitude).toFixed(5) + ', ' + Number(longitude).toFixed(5);
+}
+
+function renderCoordinateStatus(photo) {
+  var el = document.getElementById('locationCoordinateStatus');
+  if (!el) return;
+  var status = photo && photo.location_status ? photo.location_status : 'none';
+  var text;
+  if (status === 'exif') {
+    text = '📍 EXIF GPS — ' + formatCoordinatePair(photo.latitude, photo.longitude) +
+      '. Embedded in the original photo and used on the map.';
+  } else if (status === 'assigned') {
+    var loc = photo.location || {};
+    var coords = formatCoordinatePair(loc.latitude, loc.longitude);
+    text = '● Assigned map location' + (coords ? ' — ' + coords : '') +
+      '. The original photo does not contain a complete EXIF GPS pair.';
+  } else {
+    text = '⊘ No coordinates — this photo has no complete EXIF GPS pair or assigned map location.';
+  }
+  el.className = 'coordinate-status ' + status;
+  el.textContent = text;
+}
+
 function renderLocationFilled(loc) {
   var filled = document.getElementById('locationFilled');
   var empty = document.getElementById('locationEmpty');
@@ -6123,9 +7386,16 @@ function renderLocationFilled(loc) {
   // Reset the input value for next time.
   var input = document.getElementById('locationInput');
   if (input) input.value = '';
+  // Once a saved location is on screen any pending EXIF suggestion is moot,
+  // and leaving it (hidden) in #locationEmpty makes it stale state: open A
+  // (suggestion fetched) → open B with a saved location → Cmd-click A would
+  // otherwise resurrect A's Accept line for the {B, A} batch and overwrite
+  // B's location (Codex P2 on PR #1097). Clear it at the source instead.
+  clearExifSuggestion();
 }
 
-function renderLocationEmpty() {
+function renderLocationEmpty(opts) {
+  opts = opts || {};
   var filled = document.getElementById('locationFilled');
   var empty = document.getElementById('locationEmpty');
   if (!filled || !empty) return;
@@ -6137,12 +7407,23 @@ function renderLocationEmpty() {
   hideLocationKeywordSuggestions();
   // Reset any prior EXIF suggestion. The caller (renderDetail) re-runs
   // maybeShowExifSuggestion(photo) after this, which decides whether to
-  // populate the line for the new photo.
+  // populate the line for the new photo. Entering batch mode preserves it
+  // instead (preserveExifSuggestion) so the anchor's suggestion stays
+  // acceptable for the whole selection — but only while the photo that
+  // produced it is still in the selection. Otherwise Accept would apply
+  // that anchor's GPS-derived location to unrelated photos (Codex P1 on
+  // PR #1097: open A → Cmd-click B → Cmd-click A to drop → Cmd-click C).
   var sugg = document.getElementById('locationExifSuggestion');
-  if (sugg) {
-    sugg.hidden = true;
-    sugg.innerHTML = '';
+  if (!sugg) return;
+  var keepSugg = false;
+  if (opts.preserveExifSuggestion) {
+    var ownerAttr = sugg.dataset ? sugg.dataset.photoId : '';
+    var owner = ownerAttr ? parseInt(ownerAttr, 10) : NaN;
+    keepSugg = !isNaN(owner)
+      && Array.isArray(opts.selectionIds)
+      && opts.selectionIds.indexOf(owner) !== -1;
   }
+  if (!keepSugg) clearExifSuggestion();
 }
 
 /* When a photo with EXIF GPS but no location keyword is opened, fetch a
@@ -6150,29 +7431,70 @@ function renderLocationEmpty() {
    silently when there's no key or no coords; the proxy returns null when
    Google has no match for the cell. */
 async function maybeShowExifSuggestion(photo) {
+  clearExifSuggestion();
   var sugg = document.getElementById('locationExifSuggestion');
   if (!sugg) return;
-  sugg.hidden = true;
-  sugg.innerHTML = '';
 
   if (!photo) return;
   if (photo.location) return;
   if (photo.latitude == null || photo.longitude == null) return;
 
-  await _cfgPromise;
-  var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
-  if (!apiKey) return;
-
   // Capture the photo id at request time so a slow reverse-geocode for an
   // older photo doesn't paint into the suggestion line for a newer one.
   var requestPhotoId = photo.id;
+  // Capture the location-mutation epoch BEFORE the first await, so any
+  // save/clear/accept during _cfgPromise or the reverse-geocode fetch bumps
+  // the counter past what we captured. The post-await guard bails on any
+  // mismatch. Closes the batch-save-during-pending-geocode race that the
+  // DOM `!filled.hidden` check alone can't catch (see below).
+  var requestEpoch = window._locationMutationEpoch || 0;
+
+  await _cfgPromise;
+  var apiKey = (window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (!apiKey) return;
   try {
     var params = new URLSearchParams({lat: photo.latitude, lng: photo.longitude});
     var r = await fetch('/api/places/reverse-geocode?' + params.toString());
     if (!r.ok) return;
     var data = await r.json();
     if (!data || !data.place_id || !data.summary) return;
+    // Three races the post-await guards must handle.
+    //   1. Stale response for a photo the detail already navigated away
+    //      from (open A → open B): caught by _detailPhotoId, which
+    //      renderDetail overwrites on every open.
+    //   2. Slow response for an anchor the user has since dropped from a
+    //      batch (open A → Cmd-click B → Cmd-click A out → Cmd-click C):
+    //      renderBatchInspector never touches _detailPhotoId, so the anchor
+    //      pointer could still match while getActiveSelection() no longer
+    //      includes A. Accept posts to getActiveSelection(), so the guard
+    //      must recheck selection membership too. Codex P1 on PR #1097.
+    //   3. Slow response for a photo the user has left behind by closing
+    //      the detail panel, clearing the batch, or Cmd-click-dropping the
+    //      anchor, then Select All that brings the departed photo back
+    //      into the batch. The DOM scrub in each of those sites isn't
+    //      enough on its own: without also nulling _detailPhotoId the
+    //      pointer keeps matching after Select All re-includes the photo,
+    //      and Accept would apply the departed anchor's EXIF place to the
+    //      whole batch. Those sites now null _detailPhotoId, so the first
+    //      guard catches this race too. Codex P2 on PR #1097 (17:04Z).
     if (window._detailPhotoId !== requestPhotoId) return;
+    if (_locationApplyPhotoIds().indexOf(requestPhotoId) === -1) return;
+    // Fourth race: while we were awaiting reverse-geocode, the user saved
+    // a location for this photo (via the input, a keyword pick, or a batch
+    // op). Every mutation path funnels through _afterLocationMutation, which
+    // bumps _locationMutationEpoch. If it moved, bail. (Codex P2 on PR #1097
+    // at 17:39Z: save-batch-location-during-pending-geocode overwriting the
+    // just-saved batch location. The DOM `!filled.hidden` check below alone
+    // can't catch that — after a batch save, _afterLocationMutation runs
+    // renderBatchInspector → renderLocationEmpty, which rehides
+    // #locationFilled, so the paint sneaks through.)
+    if ((window._locationMutationEpoch || 0) !== requestEpoch) return;
+    // Defense-in-depth: if a filled row is on screen right now, whoever
+    // painted it wanted the suggestion gone. The epoch check above already
+    // covers the batch race; this catches any future save site that renders
+    // filled without funneling through _afterLocationMutation.
+    var filled = document.getElementById('locationFilled');
+    if (filled && !filled.hidden) return;
 
     sugg.innerHTML = '';
     var text = document.createElement('span');
@@ -6187,6 +7509,7 @@ async function maybeShowExifSuggestion(photo) {
     });
     sugg.appendChild(text);
     sugg.appendChild(btn);
+    sugg.dataset.photoId = String(requestPhotoId);
     sugg.hidden = false;
   } catch (e) {
     console.warn('reverse-geocode suggestion failed:', e);
@@ -6214,11 +7537,7 @@ async function acceptExifSuggestion(placeId) {
     if (resp && resp.location) {
       renderLocationFilled(resp.location);
     }
-    var sugg = document.getElementById('locationExifSuggestion');
-    if (sugg) {
-      sugg.hidden = true;
-      sugg.innerHTML = '';
-    }
+    clearExifSuggestion();
     await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
   } catch(e) {
     _showLocationError('Could not save location.');
@@ -6585,6 +7904,7 @@ async function setFlagFor(photoId, flag) {
   } catch(e) { return false; }
   var p = photos.find(function(x) { return x.id === photoId; });
   if (p) p.flag = flag;
+  _clearRepresentativeStateIfIneligible(photoId, flag);
   refreshGridCards([photoId]);
   _refreshInspectorAfterSinglePhotoEdit(photoId, function() { updateDetailFlagButtons(flag); });
   scheduleCollectionCountsRefresh();
@@ -6611,7 +7931,15 @@ function revealPhoto(photoId) {
   safeFetch('/api/files/reveal', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_id: photoId}),
-  }, { toast: false }).catch(function(){});
+  }, { toast: false }).then(function(data) {
+    if (typeof showRevealFeedback === 'function') showRevealFeedback(data);
+  }).catch(function(err) {
+    if (typeof showToast === 'function') {
+      showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
+    } else {
+      console.error('revealPhoto failed', err);
+    }
+  });
 }
 
 function viewPhotoOnMap(photoId) {
@@ -6724,6 +8052,8 @@ function buildPhotoContextMenu(photoIds) {
       onClick: function() { openBestBatchForIds(photoIds, photoIds[0]); } },
     { label: 'Review Burst', disabled: photoIds.length < 2, disabledHint: 'Select at least two photos',
       onClick: function() { openSelectedInBurstReview(); } },
+    { label: 'Prepare Full Resolution',
+      onClick: function() { prepareFullResolutionSelection(photoIds); } },
     { separator: true },
     { label: 'Edit Photo', disabled: !one, disabledHint: hint,
       onClick: function() { openPhotoEditor(photoIds[0]); } },
@@ -6735,55 +8065,17 @@ function buildPhotoContextMenu(photoIds) {
     { separator: true },
     { label: 'Add Keyword\u2026', onClick: function() { batchAddKeyword(); } },
     { label: 'Add to Collection\u2026', onClick: function() { addToCollection(); } },
-  ]).concat(buildLifeListMenuItems(photoIds)).concat([
+  ]).concat(window.buildSpeciesHighlightMenuItems(photoIds, {
+    showFetchFallback: true,
+  })).concat(window.buildSpeciesRepresentativeMenuItems(photoIds, {
+    getPhoto: function(id) {
+      return photos.find(function(p) { return p.id === id; });
+    },
+  })).concat([
     { label: 'Adjust Capture Time\u2026', onClick: function() { openCaptureTimeModal(); } },
     { separator: true },
     { label: 'Delete', onClick: function() { batchDelete(); } },
   ]);
-}
-
-// "Add to Life List" context-menu items. A photo is a lifelist representative
-// per species keyword, so one item per eligible species (the same species
-// names shown on the card). Fire-and-forget: it sets the representative and
-// toasts; the server (_photo_can_be_life_list_preference) is the backstop for
-// a stale menu. Disabled for a multi-selection because crowning one shot from
-// many is ambiguous; hidden entirely when nothing selected has a species.
-// Rejected photos are excluded here too \u2014 they'd fail the server backstop
-// (`_photo_can_be_life_list_preference` rejects `flag = 'rejected'`) and only
-// produce an error toast, so don't offer the action in the first place.
-function _lifeListEligibleClient(p) {
-  return !!(p && p.species && p.species.length && p.flag !== 'rejected');
-}
-function buildLifeListMenuItems(photoIds) {
-  var anyEligible = photoIds.some(function(id) {
-    return _lifeListEligibleClient(photos.find(function(x) { return x.id === id; }));
-  });
-  if (!anyEligible) return [];
-  if (photoIds.length !== 1) {
-    return [{ label: 'Add to Life List', disabled: true,
-              disabledHint: 'Select a single photo' }];
-  }
-  var photo = photos.find(function(p) { return p.id === photoIds[0]; });
-  if (!_lifeListEligibleClient(photo)) return [];
-  return (photo.species || []).map(function(sp) {
-    return {
-      label: 'Add to Life List \u2014 ' + sp,
-      onClick: function() { addPhotoToLifeList(sp, photoIds[0]); },
-    };
-  });
-}
-
-function addPhotoToLifeList(species, photoId) {
-  if (!species || !photoId) return;
-  safeFetch('/api/photo-preferences', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ purpose: 'life_list', species: species, photo_id: photoId }),
-  }).then(function() {
-    if (typeof showToast === 'function') {
-      showToast('Life List photo set for ' + species, 'success');
-    }
-  });
 }
 
 // Document-level delegation: grids re-render on sort/filter/scroll, so
@@ -6819,13 +8111,19 @@ document.addEventListener('contextmenu', function(e) {
 
 /* ---------- Folder tree context menu ---------- */
 function revealFolder(fid) {
-  // Fire-and-forget: user-visible feedback is the OS file manager opening.
-  // Server logs any failure via the reason field on the response body.
-  fetch('/api/files/reveal', {
+  safeFetch('/api/files/reveal', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({folder_id: fid}),
-  }).catch(function(err) { console.error('revealFolder failed', err); });
+  }, { toast: false }).then(function(data) {
+    if (typeof showRevealFeedback === 'function') showRevealFeedback(data);
+  }).catch(function(err) {
+    if (typeof showToast === 'function') {
+      showToast('Reveal failed: ' + (err.message || 'request failed'), 'error');
+    } else {
+      console.error('revealFolder failed', err);
+    }
+  });
 }
 
 async function copyFolderPath(fid) {
@@ -6841,12 +8139,20 @@ async function copyFolderPath(fid) {
   }
 }
 
-function rescanFolder(fid) {
-  fetch('/api/folders/' + fid + '/rescan', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({incremental: true}),
-  }).catch(function(err) { console.error('rescanFolder failed', err); });
+async function rescanFolder(fid) {
+  showToast('Starting folder rescan...', 'info');
+  try {
+    var data = await safeFetch('/api/folders/' + fid + '/rescan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({incremental: true}),
+    }, { toast: false });
+    var suffix = data && data.job_id ? ' (' + data.job_id + ')' : '';
+    showToast('Folder rescan queued' + suffix + '.', 'success');
+  } catch (err) {
+    console.error('rescanFolder failed', err);
+    showToast((err && err.message) || 'Could not start folder rescan.', 'error');
+  }
 }
 
 document.addEventListener('contextmenu', function(e) {
@@ -6930,18 +8236,24 @@ document.addEventListener('contextmenu', function(e) {
   if (isNaN(cid)) return;
   var nameEl = ti.querySelector('.collection-name');
   var name = nameEl ? nameEl.textContent : '';
-  var items = [
-    { label: 'Filter by this Collection',
-      onClick: function() { filterByCollection(cid); } },
-  ];
-  if (name === 'GPS Without Location Keyword') {
-    items.push({
-      label: 'Resolve GPS Locations',
-      onClick: function() { openGpsResolveForCollection(cid); },
-    });
+  var meta = collectionsById[cid];
+  var isUnavailable = !!(meta && meta.count_error);
+  // Degraded collections can't be filtered (the /photos endpoint would 400)
+  // and location review reads from the same collection rules — hide both while
+  // keeping the edit/rename/duplicate/delete actions reachable so the user
+  // can fix or discard the row.
+  var items = [];
+  if (!isUnavailable) {
+    items.push({ label: 'Filter by this Collection',
+      onClick: function() { filterByCollection(cid); } });
+    if (name === 'GPS Without Location Keyword') {
+      items.push({
+        label: 'Review Photo Locations',
+        onClick: function() { reviewLocationsForCollection(cid); },
+      });
+    }
   }
-  items = items.concat([
-    { separator: true },
+  var editActions = [
     { label: 'Edit Rules',
       onClick: function() { editCollection(cid); } },
     { label: 'Rename',
@@ -6951,7 +8263,11 @@ document.addEventListener('contextmenu', function(e) {
     { separator: true },
     { label: 'Delete Collection',
       onClick: function() { deleteCollectionById(cid, name); } },
-  ]);
+  ];
+  // Only emit a leading separator when there are filter/review actions above it
+  // to divide from — for degraded rows the menu starts at Edit Rules.
+  if (items.length) items.push({ separator: true });
+  items = items.concat(editActions);
   openContextMenu(e, items);
 });
 
@@ -7003,12 +8319,12 @@ document.addEventListener('contextmenu', function(e) {
       deepLinkLoaded = true;
     }
 
-    // Keep loading pages until we find the photo or run out
-    var el = document.querySelector('.grid-card[data-id="' + photoId + '"]');
-    while (!el && !allLoaded) {
-      await loadPhotos();
-      el = document.querySelector('.grid-card[data-id="' + photoId + '"]');
-    }
+    // Keep loading pages until we find the photo or run out. The setup guard
+    // above intentionally blocks IntersectionObserver-driven loads, but
+    // loadPhotos() also honors it; clear it before this explicit paging pass
+    // or a target beyond the first page spins in a resolved Promise loop.
+    loading = false;
+    var el = await loadUntilPhotoRendered(photoId);
 
     // Update folder tree active state
     document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
@@ -7027,7 +8343,10 @@ document.addEventListener('contextmenu', function(e) {
     }
   } catch(e) { /* ignore deep-link errors silently */ }
   loading = false;
-  if (deepLinkLoaded) rearmInfiniteScrollObserver();
+  if (deepLinkLoaded) {
+    rearmInfiniteScrollObserver();
+    requestAnimationFrame(ensureViewportHydrated);
+  }
 })();
 
 /* ---------- Export Modal ---------- */
@@ -7208,6 +8527,93 @@ async function makeAvailableOffline() {
     showToast('Offline caching started (' + activeIds.length + ' photo' + (activeIds.length === 1 ? '' : 's') + ')');
   } catch(err) {
     showToast('Offline cache failed: ' + err.message, 'error');
+  }
+}
+
+var _prepareFullResolutionJobId = null;
+
+function _setPrepareFullResolutionButton(running, current, total) {
+  var btn = document.getElementById('prepareFullResolutionBtn');
+  if (!btn) return;
+  btn.disabled = !!running;
+  if (running && current != null && total) {
+    btn.textContent = 'Preparing ' + current + '/' + total;
+  } else if (running) {
+    btn.textContent = 'Preparing…';
+  } else {
+    btn.textContent = 'Prepare Full Resolution';
+  }
+}
+
+async function prepareFullResolutionSelection(photoIds) {
+  var activeIds = Array.isArray(photoIds) ? photoIds.slice() : getActiveSelection();
+  if (!activeIds.length || _prepareFullResolutionJobId) return;
+  _setPrepareFullResolutionButton(true);
+  try {
+    var data = await safeFetch('/api/jobs/prepare-full-resolution', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: activeIds}),
+    });
+    _prepareFullResolutionJobId = data.job_id;
+    showToast(
+      'Preparing ' + activeIds.length.toLocaleString() +
+      ' photo' + (activeIds.length === 1 ? '' : 's') +
+      ' for full-resolution inspection…'
+    );
+    safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+      onProgress: function(progress) {
+        _setPrepareFullResolutionButton(
+          true, progress.current || 0, progress.total || activeIds.length
+        );
+      },
+      onComplete: function(done) {
+        _prepareFullResolutionJobId = null;
+        _setPrepareFullResolutionButton(false);
+        var result = done.result || {};
+        if (done.status === 'cancelled') {
+          showToast('Full-resolution preparation was stopped.', 'error');
+          return;
+        }
+        if (done.status === 'failed' && !done.result) {
+          var errors = done.errors || [];
+          var failureMessage = errors.length
+            ? errors[0]
+            : 'The preparation job ended before producing a result.';
+          showToast(
+            'Full-resolution preparation failed: ' + failureMessage,
+            'error'
+          );
+          return;
+        }
+        var ready = result.ready || 0;
+        var failed = result.failed || 0;
+        var copied = result.copied || 0;
+        var summary = ready.toLocaleString() + ' ready';
+        if (copied) summary += ', ' + copied.toLocaleString() + ' copied locally';
+        if (failed) summary += ', ' + failed.toLocaleString() + ' failed';
+        showToast(
+          'Full-resolution preparation complete: ' + summary,
+          failed ? 'error' : 'success'
+        );
+        try {
+          window.dispatchEvent(new CustomEvent('vireo-job-done', {
+            detail: {job_id: data.job_id}
+          }));
+        } catch (_) {}
+      },
+      onError: function() {
+        _prepareFullResolutionJobId = null;
+        _setPrepareFullResolutionButton(false);
+      },
+    });
+  } catch(err) {
+    _prepareFullResolutionJobId = null;
+    _setPrepareFullResolutionButton(false);
+    showToast(
+      'Could not start full-resolution preparation: ' + err.message,
+      'error'
+    );
   }
 }
 

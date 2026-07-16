@@ -118,6 +118,17 @@
 
 <div class="content">
 
+  <!-- Storage -->
+  <div class="section">
+    <div class="section-title">Storage</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
+      <p style="font-size:13px;color:var(--text-dim);margin:0;">
+        View disk usage, configure preview caches, and clean up generated files on the dedicated Storage page.
+      </p>
+      <a href="/storage" class="btn btn-secondary" style="white-space:nowrap;">Open Storage</a>
+    </div>
+  </div>
+
   <!-- Models -->
   <div class="section">
     <div class="section-title">Models</div>
@@ -315,58 +326,6 @@
                style="width:70px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
                onchange="saveConfig()">
       </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Thumbnail size
-        <small>Maximum dimension in pixels for cached thumbnails.</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="range" id="cfgThumbSize" min="200" max="800" step="50" value="400"
-               style="width:120px;accent-color:var(--accent);"
-               oninput="document.getElementById('cfgThumbSizeVal').textContent = this.value + 'px'; saveConfig()">
-        <span style="font-size:13px;color:var(--text-primary);min-width:42px;" id="cfgThumbSizeVal">400px</span>
-      </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Thumbnail quality
-        <small>JPEG quality for cached thumbnails (higher = larger files).</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="range" id="cfgThumbQuality" min="50" max="100" step="5" value="85"
-               style="width:120px;accent-color:var(--accent);"
-               oninput="document.getElementById('cfgThumbQualityVal').textContent = this.value; saveConfig()">
-        <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgThumbQualityVal">85</span>
-      </div>
-    </div>
-    <div class="setting-row">
-      <div class="setting-label">
-        Preview quality
-        <small>JPEG quality for full-size preview images.</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <input type="range" id="cfgPreviewQuality" min="50" max="100" step="5" value="90"
-               style="width:120px;accent-color:var(--accent);"
-               oninput="document.getElementById('cfgPreviewQualityVal').textContent = this.value; saveConfig()">
-        <span style="font-size:13px;color:var(--text-primary);min-width:30px;" id="cfgPreviewQualityVal">90</span>
-      </div>
-    </div>
-    <div class="setting-row" style="flex-direction:column;align-items:flex-start;gap:8px;">
-      <div class="setting-label" style="width:100%;">
-        Preview cache quota
-        <small>Maximum disk space for cached previews (MB). Oldest entries are evicted first. Set to 0 to disable caching.</small>
-      </div>
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;width:100%;">
-        <input type="number" id="cfgPreviewCacheMaxMb" min="0" step="128" value="20480"
-               style="width:90px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 8px;font-size:13px;text-align:center;"
-               onchange="saveConfig()">
-        <span style="font-size:13px;color:var(--text-dim);">MB</span>
-        <span id="previewCacheStatus" style="font-size:12px;color:var(--text-dim);margin-left:auto;">Loading...</span>
-        <button id="clearPreviewCacheBtn" onclick="clearPreviewCache()"
-                style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:4px;padding:6px 14px;font-size:12px;cursor:pointer;">Clear cache</button>
-      </div>
-      <div id="previewCacheWarning" style="display:none;width:100%;font-size:12px;color:var(--accent);background:var(--bg-tertiary);border-left:3px solid var(--accent);padding:8px 12px;border-radius:4px;"></div>
     </div>
     <div class="setting-row">
       <div class="setting-label">
@@ -647,10 +606,10 @@
       <div class="setting-row">
         <div class="setting-label">
           Enable eye-focus detection
-          <small>Runs the SuperAnimal keypoint stage to localize the animal's eye and use a windowed sharpness around it for the focus score. Weights are opt-in on the Pipeline page.</small>
+          <small>Runs the SuperAnimal keypoint stage to localize the animal's eye and use a windowed sharpness around it for the focus score. Weights are opt-in on the Process page.</small>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
-          <input type="checkbox" id="cfgEyeDetectEnabled" checked
+          <input type="checkbox" id="cfgEyeDetectEnabled"
                  onchange="saveConfig()" style="accent-color:var(--accent);">
         </div>
       </div>
@@ -879,12 +838,12 @@
   <div class="section">
     <div class="section-title">Google Maps</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Used for location autocomplete on photo keywords. Get a key from the Google Cloud console (Maps JavaScript API + Places API + Geocoding API enabled). Add an HTTP referrer restriction in the console (e.g. <code>localhost:8080/*</code>) so the key can only be used from your machine.
+      Used for location autocomplete and for map-based photo location review, including nearby park and landmark suggestions. Get a key from the Google Cloud console (Maps JavaScript API + Places API + Geocoding API enabled). Add an HTTP referrer restriction in the console (e.g. <code>localhost:8080/*</code>) so the key can only be used from your machine.
     </p>
     <div class="setting-row">
       <div class="setting-label">
         API Key
-        <small>Stored in <code>~/.vireo/config.json</code>. The key is embedded in the browse page when set so the Google Maps JS library can call autocomplete client-side.</small>
+        <small>Stored in <code>~/.vireo/config.json</code>. The key is sent to the browser when needed so Google Maps can provide maps, autocomplete, and nearby-place suggestions.</small>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="password" id="cfgGoogleMapsApiKey" placeholder="AIza..."
@@ -981,7 +940,7 @@
     <div class="setting-row">
       <div class="setting-label">
         Adobe DNG Converter path
-        <small>Leave empty to auto-detect the macOS app bundle or PATH. Required only when DNG conversion is enabled.</small>
+        <small>Leave empty to auto-detect the Windows installation, macOS app bundle, or PATH. Required only when DNG conversion is enabled.</small>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
         <input type="text" id="cfgDngConverterBin" placeholder="auto-detect"
@@ -1023,6 +982,17 @@
       </div>
       <span class="setting-value" id="exiftoolStatus">-</span>
     </div>
+    <div class="setting-row" id="windowsSupportRow" style="display:none;">
+      <div class="setting-label">
+        Windows support
+        <small id="windowsSupportDetail">Checking platform readiness...</small>
+      </div>
+      <span class="setting-value" id="windowsSupportStatus">-</span>
+    </div>
+    <div id="dependencyReadiness" style="display:none;margin-top:10px;">
+      <div style="font-size:11px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Integration readiness</div>
+      <div id="dependencyReadinessRows"></div>
+    </div>
   </div>
 
   <!-- First-Launch Setup -->
@@ -1043,27 +1013,6 @@
       Models used by the culling pipeline. Download the ones you need before running Extract Features.
     </p>
     <div id="pipelineModelsContainer" style="font-size:12px;color:var(--text-dim);">Loading...</div>
-  </div>
-
-
-  <!-- Detection Cache -->
-  <div class="section">
-    <div class="section-title">Detection Cache</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      MegaDetector results are cached globally per photo &amp; model. Switching workspaces or changing
-      the detector confidence threshold never re-runs detection on a photo that has already been scanned.
-    </p>
-    <div id="detectionCacheStats" style="font-size:13px;color:var(--text-secondary);">Loading&hellip;</div>
-  </div>
-
-  <!-- Embedding Matrix -->
-  <div class="section">
-    <div class="section-title">Embedding Cache</div>
-    <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Each model+labels combination needs pre-computed text embeddings. Cached combinations classify instantly.
-      Uncached ones will compute on first use (~30s on CPU).
-    </p>
-    <div id="matrixContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <!-- Scan Roots -->
@@ -1130,9 +1079,13 @@
   <div class="section" id="allSettingsSection">
     <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
       <span>All settings</span>
-      <input type="search" id="allSettingsSearch" placeholder="Search settings…" autocomplete="off"
-             oninput="filterAllSettings()"
-             style="flex:1;min-width:200px;max-width:280px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:4px 10px;font-size:13px;">
+      <div class="search-control" style="flex:1;min-width:240px;max-width:340px;">
+        <input type="search" id="allSettingsSearch" placeholder="Search settings…" autocomplete="off"
+               oninput="filterAllSettings()"
+               style="background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border-secondary);padding:4px 10px;font-size:13px;">
+        <button id="allSettingsMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('allSettings', 'match_case', filterAllSettings)" title="Match case">Aa</button>
+        <button id="allSettingsWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('allSettings', 'whole_word', filterAllSettings)" title="Match whole word">ab</button>
+      </div>
     </div>
     <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
       Every Vireo setting, including ones not surfaced by the curated sections above. Edits save automatically; click Reset to revert.
@@ -1163,12 +1116,9 @@ loadTaxonomy();
 loadSystemInfo();
 loadConfig();
 loadWsOverrides();
-loadEmbeddingMatrix();
 loadScanRoots();
 loadVersion();
 loadThemePicker();
-loadPreviewCacheStatus();
-loadDetectionCacheStats();
 loadAllSettings();
 
 var SETTINGS_FIND_STATE = {
@@ -1826,22 +1776,12 @@ async function loadConfig() {
     loadDarktableStatus();
     // Load display settings
     document.getElementById('cfgPhotosPerPage').value = cfg.photos_per_page != null ? cfg.photos_per_page : 50;
-    var ts = cfg.thumbnail_size != null ? cfg.thumbnail_size : 400;
-    document.getElementById('cfgThumbSize').value = ts;
-    document.getElementById('cfgThumbSizeVal').textContent = ts + 'px';
-    var tq = cfg.thumbnail_quality != null ? cfg.thumbnail_quality : 85;
-    document.getElementById('cfgThumbQuality').value = tq;
-    document.getElementById('cfgThumbQualityVal').textContent = tq;
-    var pq = cfg.preview_quality != null ? cfg.preview_quality : 90;
-    document.getElementById('cfgPreviewQuality').value = pq;
-    document.getElementById('cfgPreviewQualityVal').textContent = pq;
-    document.getElementById('cfgPreviewCacheMaxMb').value = cfg.preview_cache_max_mb != null ? cfg.preview_cache_max_mb : 20480;
     var bt = cfg.browse_thumb_default != null ? cfg.browse_thumb_default : 220;
     document.getElementById('cfgBrowseThumbDefault').value = bt;
     document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
     document.getElementById('cfgOpenInBrowser').checked = cfg.open_in_browser === true;
     // Load browse card fields
-    loadCardFieldCheckboxes(cfg.browse_card_fields || ["filename", "rating", "flag", "sharpness"]);
+    loadCardFieldCheckboxes(cfg.browse_card_fields || ["filename", "location_status", "rating", "flag", "sharpness"]);
     // Load detection settings
     var dc = Math.round((cfg.detector_confidence != null ? cfg.detector_confidence : 0.20) * 100);
     document.getElementById('cfgDetectorConf').value = dc;
@@ -1901,7 +1841,7 @@ async function loadConfig() {
 
     // Eye-focus detection tunables
     document.getElementById('cfgEyeDetectEnabled').checked =
-      p.eye_detect_enabled !== false;  // default true
+      p.eye_detect_enabled === true;  // default false
     var ecg = VireoPipelineConfig.percent(p.eye_classifier_conf_gate, 'eye_classifier_conf_gate');
     document.getElementById('cfgEyeClassifierConfGate').value = ecg;
     document.getElementById('cfgEyeClassifierConfGateVal').textContent = ecg + '%';
@@ -1957,6 +1897,7 @@ async function loadConfig() {
 
 var CARD_FIELD_OPTIONS = [
   { id: 'filename', label: 'Filename', desc: 'Photo filename' },
+  { id: 'location_status', label: 'Coordinate source', desc: 'EXIF GPS, assigned map location, or no coordinates' },
   { id: 'rating', label: 'Rating', desc: 'Star rating' },
   { id: 'flag', label: 'Flag', desc: 'Flagged / rejected indicator' },
   { id: 'sharpness', label: 'Sharpness', desc: 'Sharpness score' },
@@ -2031,10 +1972,6 @@ function saveConfig() {
           darktable_auto_convert_dng: document.getElementById('cfgDarktableAutoConvertDng').checked,
           dng_converter_bin: document.getElementById('cfgDngConverterBin').value.trim(),
           photos_per_page: parseInt(document.getElementById('cfgPhotosPerPage').value, 10) || 50,
-          thumbnail_size: parseInt(document.getElementById('cfgThumbSize').value, 10) || 400,
-          thumbnail_quality: parseInt(document.getElementById('cfgThumbQuality').value, 10) || 85,
-          preview_quality: parseInt(document.getElementById('cfgPreviewQuality').value, 10) || 90,
-          preview_cache_max_mb: Math.max(0, parseInt(document.getElementById('cfgPreviewCacheMaxMb').value, 10) || 0),
           browse_thumb_default: parseInt(document.getElementById('cfgBrowseThumbDefault').value, 10) || 220,
           open_in_browser: document.getElementById('cfgOpenInBrowser').checked,
           browse_card_fields: getSelectedCardFields(),
@@ -2157,7 +2094,7 @@ function resetPipelineDefaults() {
   document.getElementById('cfgEyeWindowK').value = eyeWindow;
   document.getElementById('cfgEyeWindowKVal').textContent =
     (eyeWindow / 100).toFixed(2);
-  document.getElementById('cfgEyeDetectEnabled').checked = p.eye_detect_enabled !== false;
+  document.getElementById('cfgEyeDetectEnabled').checked = p.eye_detect_enabled === true;
   document.getElementById('cfgMissEnabled').checked = p.miss_enabled !== false;
   setPercent('cfgMissDetConf', 'miss_det_confidence');
   var bboxMin = Math.round(
@@ -2267,9 +2204,51 @@ async function loadSystemInfo() {
       mdStatus.style.color = 'var(--danger)';
       mdDetail.textContent = d.megadetector_detail;
     }
+    renderPlatformReadiness(d.platform_support || null);
   } catch(e) {}
   loadExiftoolStatus();
   loadPipelineModels();
+}
+
+function renderPlatformReadiness(support) {
+  if (!support) return;
+  var row = document.getElementById('windowsSupportRow');
+  if (support.platform === 'win32') {
+    row.style.display = '';
+    var status = document.getElementById('windowsSupportStatus');
+    var detail = document.getElementById('windowsSupportDetail');
+    var supported = support.support_tier === 'public_beta';
+    status.textContent = supported ? 'Public beta' : 'Unsupported Windows version';
+    status.style.color = supported ? 'var(--warning)' : 'var(--danger)';
+    var bits = ['Windows ' + (support.windows_release || '11'), support.architecture || 'x64', 'CPU inference supported'];
+    if (support.webview2_version) bits.push('WebView2 ' + support.webview2_version);
+    if (support.long_paths && !support.long_paths.enabled) {
+      bits.push('Long paths need Windows policy');
+      status.textContent = 'Action needed';
+      status.style.color = 'var(--danger)';
+    }
+    detail.textContent = bits.join(' · ');
+  }
+
+  var deps = support.dependencies || {};
+  var names = {
+    exiftool: 'ExifTool', darktable: 'Darktable', dng_converter: 'Adobe DNG Converter',
+    openssh: 'OpenSSH Client', rsync: 'GNU rsync',
+    remote_transfer: 'Remote transfers'
+  };
+  var keys = Object.keys(names).filter(function(key) { return deps[key]; });
+  if (!keys.length) return;
+  document.getElementById('dependencyReadiness').style.display = '';
+  document.getElementById('dependencyReadinessRows').innerHTML = keys.map(function(key) {
+    var dep = deps[key];
+    var ready = dep.state === 'ready';
+    var color = ready ? 'var(--accent)' : (dep.required ? 'var(--danger)' : 'var(--warning)');
+    var label = ready ? 'Ready' : (dep.state === 'misconfigured' ? 'Needs repair' : 'Unavailable');
+    var detail = dep.path || dep.hint || '';
+    return '<div class="setting-row"><div class="setting-label">' + escapeHtml(names[key]) +
+      '<small>' + escapeHtml(detail) + '</small></div><span class="setting-value" style="color:' +
+      color + ';">' + label + '</span></div>';
+  }).join('');
 }
 
 // exiftool is the metadata backbone for every scan; a missing binary
@@ -3066,13 +3045,15 @@ function formatBytes(b) {
 
 /* ---------- Embedding Matrix ---------- */
 async function loadEmbeddingMatrix() {
+  var matrixEl = document.getElementById('matrixContent');
+  if (!matrixEl) return;
   try {
     var data = await safeFetch('/api/embedding-matrix', {}, { toast: false });
     var models = data.models || [];
     var matrix = data.matrix || [];
 
     if (models.length === 0 || matrix.length === 0) {
-      document.getElementById('matrixContent').innerHTML =
+      matrixEl.innerHTML =
         '<span style="color:var(--text-faint);font-size:13px;">Download a model and a species list to see the embedding matrix.</span>';
       return;
     }
@@ -3103,9 +3084,9 @@ async function loadEmbeddingMatrix() {
       html += '</tr>';
     });
     html += '</tbody></table>';
-    document.getElementById('matrixContent').innerHTML = html;
+    matrixEl.innerHTML = html;
   } catch(e) {
-    document.getElementById('matrixContent').innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
+    matrixEl.innerHTML = '<span style="color:var(--danger);font-size:13px;">Failed to load</span>';
   }
 }
 
@@ -3542,7 +3523,7 @@ function renderSettingRow(key) {
   } else if (!workspaceTab && hasGlobal) {
     meta += ' · default: ' + escapeHtml(formatSettingValue(defaultVal, spec, true));
   }
-  var search = (key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category).toLowerCase();
+  var search = key + ' ' + spec.label + ' ' + spec.desc + ' ' + spec.category;
   return '<div class="setting-row-card" data-search="' + escapeAttr(search) + '" data-key="' + escapeAttr(key) + '" '
        +    'style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border-primary);">'
        +   '<span class="provenance-dot ' + dotClass + '" title="' + escapeAttr(dotTitle) + '"></span>'
@@ -3578,6 +3559,15 @@ function renderSettingWidget(key, spec, effective) {
       var sel = (opt === effective) ? ' selected' : '';
       return '<option value="' + escapeAttr(opt) + '"' + sel + '>' + escapeHtml(label) + '</option>';
     }).join('');
+    if (spec.nullable) {
+      // Prepend the null option (value="" — the settings PATCH endpoint
+      // treats "" as null when spec.nullable is true) so users can pick
+      // "unset" as a first-class choice even after a non-null default has
+      // been assigned globally.
+      var nullLabel = spec.null_label || '(unset)';
+      var nullSel = (effective == null) ? ' selected' : '';
+      opts = '<option value=""' + nullSel + '>' + escapeHtml(nullLabel) + '</option>' + opts;
+    }
     return '<select ' + keyAttr + ' onchange="onSchemaInputChange(this, true)" '
          +    'style="' + inputStyle + 'min-width:120px;">'
          +   opts + '</select>';
@@ -3823,10 +3813,15 @@ async function importSettingsFile(file) {
 }
 
 function filterAllSettings() {
-  var q = (document.getElementById('allSettingsSearch').value || '').trim().toLowerCase();
+  var q = (document.getElementById('allSettingsSearch').value || '').trim();
+  var searchOptions = VireoTextSearch.readOptions('allSettings');
   var rows = document.querySelectorAll('#allSettingsCategories .setting-row-card');
   rows.forEach(function(row) {
-    row.style.display = (!q || row.getAttribute('data-search').indexOf(q) !== -1) ? '' : 'none';
+    row.style.display = (!q || VireoTextSearch.matchesFields(
+      row.getAttribute('data-search') || '',
+      q,
+      searchOptions
+    )) ? '' : 'none';
   });
   document.querySelectorAll('#allSettingsCategories .setting-category').forEach(function(cat) {
     var anyVisible = false;

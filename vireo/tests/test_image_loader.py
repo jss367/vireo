@@ -143,6 +143,54 @@ def test_raw_uses_embedded_jpeg_when_large_enough(tmp_path, monkeypatch):
     assert fake.postprocess_calls == 0, "postprocess should be skipped"
 
 
+def test_raw_camera_rendered_mode_uses_near_full_embedded_jpeg(
+    tmp_path, monkeypatch,
+):
+    """Full-size lightbox display keeps the camera rendition used by previews."""
+    from image_loader import RAW_DECODE_CAMERA_RENDERED, load_image
+
+    nef = tmp_path / "test.nef"
+    nef.write_bytes(b"fake NEF content")
+
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((8256, 5504), color="green"),
+        sensor_size=(8288, 5520),
+        postprocess_size=(8288, 5520),
+    ))
+
+    result = load_image(
+        str(nef), max_size=None, raw_decode=RAW_DECODE_CAMERA_RENDERED,
+    )
+
+    assert result is not None
+    assert result.size == (8256, 5504)
+    assert fake.postprocess_calls == 0
+
+
+def test_raw_camera_rendered_mode_rejects_cropped_embedded_jpeg(
+    tmp_path, monkeypatch,
+):
+    """A matching long edge cannot hide a substantially cropped short edge."""
+    from image_loader import RAW_DECODE_CAMERA_RENDERED, load_image
+
+    nef = tmp_path / "test.nef"
+    nef.write_bytes(b"fake NEF content")
+
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((6000, 3376)),
+        sensor_size=(6000, 4000),
+        postprocess_size=(6000, 4000),
+    ))
+
+    result = load_image(
+        str(nef), max_size=None, raw_decode=RAW_DECODE_CAMERA_RENDERED,
+    )
+
+    assert result is not None
+    assert result.size == (6000, 4000)
+    assert fake.postprocess_calls == 1
+
+
 def test_raw_preserve_highlights_mode_bypasses_embedded_jpeg(tmp_path, monkeypatch):
     """Edit-quality RAW loads demosaic instead of using camera-rendered JPEGs."""
     import rawpy
@@ -807,6 +855,53 @@ def test_safe_iter_dir_skips_bundle_children_and_yields_paths(tmp_path):
     assert "LibraryAlias" not in names
 
 
+def test_safe_iter_dir_deduplicates_duplicate_scandir_entries(tmp_path, monkeypatch):
+    """Some SMB mounts can return duplicate names from one ``scandir`` call."""
+    import image_loader
+    from image_loader import safe_iter_dir
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "real.jpg").write_bytes(b"")
+
+    real_scandir = image_loader.os.scandir
+
+    class FakeScandir:
+        def __init__(self, entries):
+            self.entries = entries
+
+        def __iter__(self):
+            return iter(self.entries)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_scandir(path):
+        if path == str(root):
+            return FakeScandir([
+                SimpleNamespace(
+                    name="real.jpg",
+                    path=str(root / "real.jpg"),
+                    is_symlink=lambda: False,
+                    is_dir=lambda follow_symlinks=True: False,
+                ),
+                SimpleNamespace(
+                    name="real.jpg",
+                    path=str(root / "real.jpg"),
+                    is_symlink=lambda: False,
+                    is_dir=lambda follow_symlinks=True: False,
+                ),
+            ])
+        return real_scandir(path)
+
+    monkeypatch.setattr(image_loader.os, "scandir", fake_scandir)
+
+    assert [p.name for p in safe_iter_dir(str(root))] == ["real.jpg"]
+
+
 def test_safe_iter_dir_surfaces_permission_errors_via_onerror(tmp_path):
     """Mirrors ``safe_scan_walk``: a directory the kernel refuses to
     open is reported via the callback, not swallowed. Scanner's
@@ -1044,6 +1139,73 @@ def test_safe_scan_walk_matches_os_walk_for_normal_trees(tmp_path):
         os.path.join("a", "mid.jpg"),
         os.path.join("a", "b", "deep.jpg"),
     }
+
+
+def test_safe_scan_walk_deduplicates_duplicate_scandir_entries(tmp_path, monkeypatch):
+    """Duplicate directory entries must not inflate new-image counts."""
+    import image_loader
+    from image_loader import safe_scan_walk
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    (root / "real.jpg").write_bytes(b"")
+    (root / "sub").mkdir()
+    (root / "sub" / "deep.jpg").write_bytes(b"")
+
+    real_scandir = image_loader.os.scandir
+
+    def file_entry(path, name):
+        return SimpleNamespace(
+            name=name,
+            path=str(path / name),
+            is_symlink=lambda: False,
+            is_dir=lambda follow_symlinks=True: False,
+        )
+
+    def dir_entry(path, name):
+        return SimpleNamespace(
+            name=name,
+            path=str(path / name),
+            is_symlink=lambda: False,
+            is_dir=lambda follow_symlinks=True: True,
+        )
+
+    class FakeScandir:
+        def __init__(self, entries):
+            self.entries = entries
+
+        def __iter__(self):
+            return iter(self.entries)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_scandir(path):
+        if path == str(root):
+            return FakeScandir([
+                file_entry(root, "real.jpg"),
+                file_entry(root, "real.jpg"),
+                dir_entry(root, "sub"),
+                dir_entry(root, "sub"),
+            ])
+        if path == str(root / "sub"):
+            return FakeScandir([
+                file_entry(root / "sub", "deep.jpg"),
+                file_entry(root / "sub", "deep.jpg"),
+            ])
+        return real_scandir(path)
+
+    monkeypatch.setattr(image_loader.os, "scandir", fake_scandir)
+
+    rows = list(safe_scan_walk(str(root)))
+
+    assert [(os.path.relpath(d, str(root)), dirs, files) for d, dirs, files in rows] == [
+        (".", ["sub"], ["real.jpg"]),
+        ("sub", [], ["deep.jpg"]),
+    ]
 
 
 def test_safe_scan_walk_surfaces_permission_errors_via_onerror(tmp_path):

@@ -14,8 +14,10 @@ import os
 log = logging.getLogger(__name__)
 
 
-def cleanup_cached_files_for_deleted_photos(thumb_cache_dir, files):
-    """Remove thumbnail, preview, and working-copy files for deleted photos.
+def cleanup_cached_files_for_deleted_photos(
+    thumb_cache_dir, files, progress_callback=None,
+):
+    """Remove thumbnail, preview, working-copy, and display files for deleted photos.
 
     ``files`` is the list returned by ``db.delete_photos`` /
     ``db.delete_folder``. The FK cascade drops preview_cache rows when
@@ -33,6 +35,7 @@ def cleanup_cached_files_for_deleted_photos(thumb_cache_dir, files):
     vireo_dir = os.path.dirname(thumb_cache_dir)
     preview_dir = os.path.join(vireo_dir, "previews")
     working_dir = os.path.join(vireo_dir, "working")
+    originals_dir = os.path.join(vireo_dir, "originals")
     # Offline-cache layout: offline/{originals,xmp,companions}/{pid}{ext}.
     # The FK cascade drops the offline_originals row when the photo is
     # deleted, so we lose the exact stored paths — glob by photo id to
@@ -43,11 +46,13 @@ def cleanup_cached_files_for_deleted_photos(thumb_cache_dir, files):
         os.path.join(vireo_dir, "offline", "xmp"),
         os.path.join(vireo_dir, "offline", "companions"),
     ]
-    for f in files:
+    total = len(files)
+    for idx, f in enumerate(files, start=1):
         pid = f["photo_id"]
-        # {id}.jpg lives in all three dirs (legacy full preview, thumb,
-        # working copy). {id}_{size}.jpg is sized preview variants.
-        for d in [thumb_cache_dir, preview_dir, working_dir]:
+        # {id}.jpg lives in these dirs as a legacy full preview, thumbnail,
+        # working copy, or prepared full-resolution render. {id}_{size}.jpg
+        # is used for sized preview variants.
+        for d in [thumb_cache_dir, preview_dir, working_dir, originals_dir]:
             cached = os.path.join(d, f"{pid}.jpg")
             if os.path.isfile(cached):
                 try:
@@ -56,6 +61,40 @@ def cleanup_cached_files_for_deleted_photos(thumb_cache_dir, files):
                     log.warning(
                         "Failed to remove cached file %s after photo "
                         "delete — will be reclaimed by Clear Cache: %s",
+                        cached, e,
+                    )
+        # Paired RAW+JPEG views keep source-specific thumbnail variants next
+        # to the legacy/default thumbnail. They are disposable derivatives
+        # and must follow the photo out of the cache on delete as well.
+        for variant in _glob.glob(os.path.join(thumb_cache_dir, f"{pid}_*.jpg")):
+            try:
+                os.remove(variant)
+            except OSError as e:
+                log.warning(
+                    "Failed to remove thumbnail variant %s after photo "
+                    "delete — will be reclaimed by Clear Cache: %s",
+                    variant, e,
+                )
+        for prepared_render in _glob.glob(
+            os.path.join(originals_dir, f"{pid}_*.jpg")
+        ):
+            try:
+                os.remove(prepared_render)
+            except OSError as e:
+                log.warning(
+                    "Failed to remove cached file %s after photo delete — "
+                    "will be reclaimed by Clear Cache: %s",
+                    prepared_render, e,
+                )
+        for name in (f"{pid}.display.jpg",):
+            cached = os.path.join(originals_dir, name)
+            if os.path.isfile(cached):
+                try:
+                    os.remove(cached)
+                except OSError as e:
+                    log.warning(
+                        "Failed to remove cached original rendition %s after "
+                        "photo delete — will be reclaimed by Clear Cache: %s",
                         cached, e,
                     )
         for variant in _glob.glob(os.path.join(preview_dir, f"{pid}_*.jpg")):
@@ -78,6 +117,8 @@ def cleanup_cached_files_for_deleted_photos(thumb_cache_dir, files):
                         "Cache: %s",
                         orphan, e,
                     )
+        if progress_callback:
+            progress_callback(idx, total, f.get("filename") or str(pid))
 
 
 def evict_if_over_quota(db, vireo_dir):

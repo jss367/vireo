@@ -478,6 +478,25 @@ def test_patch_workspace_value_beats_global_in_effective(app_and_db):
     assert values["global"]["classification_threshold"] == 0.5
 
 
+def test_patch_workspace_nullable_enum_accepts_null_for_import_only(app_and_db):
+    """A workspace can override the global pipeline.default_process_id back to
+    null (import-only, no automatic processing). The settings UI wires the
+    ``(unset)`` option as ``value=""`` — the endpoint must accept that as
+    null, not reject it, otherwise a workspace can never escape a globally-set
+    default from the UI."""
+    app, _ = app_and_db
+    client = app.test_client()
+    for wire_value in ("", None):
+        resp = client.patch(
+            "/api/settings/workspace",
+            json={"key": "pipeline.default_process_id", "value": wire_value},
+        )
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["value"] is None
+        values = client.get("/api/settings/values").get_json()
+        assert values["workspace"]["pipeline.default_process_id"] is None
+
+
 # ---------------------------------------------------------------------------
 # DELETE /api/settings/workspace/<dotted-key>
 # ---------------------------------------------------------------------------
@@ -570,6 +589,262 @@ def test_import_replaces_global_file(app_and_db):
     raw = cfg.load()
     assert raw["classification_threshold"] == 0.95
     assert raw["photos_per_page"] == 100
+
+
+def test_import_translates_legacy_default_strategy(app_and_db):
+    """A backup from before saved_processes existed carried
+    ``pipeline.default_strategy`` (a hardcoded name). Import must translate it
+    to ``pipeline.default_process_id`` — otherwise the legacy key would be
+    preserved as-is (non-schema pass-through) and every after-import default
+    would silently degrade to import-only until the user re-picks a default."""
+    app, db = app_and_db
+    client = app.test_client()
+    identify_id = next(
+        p["id"] for p in db.get_saved_processes() if p["name"] == "Identify birds"
+    )
+    payload = {"pipeline": {"default_strategy": "identify"}}
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] == identify_id
+    assert "default_strategy" not in raw["pipeline"]
+
+
+def test_import_translates_unknown_legacy_strategy_to_null(app_and_db):
+    """An unrecognized legacy strategy name maps to null (import only), same as
+    the startup migration — never a stale reference."""
+    app, _ = app_and_db
+    client = app.test_client()
+    payload = {"pipeline": {"default_strategy": "not_a_real_strategy"}}
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] is None
+    assert "default_strategy" not in raw["pipeline"]
+
+
+def test_import_prefers_default_process_id_over_legacy_key(app_and_db):
+    """When a payload carries both the new and legacy keys — e.g. a manually
+    hand-edited backup — the new key wins and the legacy key is dropped, so
+    translation never overwrites a user-specified id."""
+    app, db = app_and_db
+    client = app.test_client()
+    full_id = next(
+        p["id"] for p in db.get_saved_processes() if p["name"] == "Full"
+    )
+    payload = {
+        "pipeline": {
+            "default_strategy": "identify",
+            "default_process_id": full_id,
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] == full_id
+    assert "default_strategy" not in raw["pipeline"]
+
+
+def test_export_includes_default_process_name(app_and_db):
+    """The export emits the process name alongside the id so a foreign import
+    can translate to the target DB's id. saved_processes are DB-local — an
+    id alone would collide (seed ids 1-4 or coincidental custom ids) and
+    silently activate a different process on restore."""
+    app, db = app_and_db
+    full_id = next(p["id"] for p in db.get_saved_processes() if p["name"] == "Full")
+    import config as cfg
+    cfg.set("pipeline", {**cfg.load()["pipeline"], "default_process_id": full_id})
+    client = app.test_client()
+    resp = client.get("/api/settings/export")
+    assert resp.status_code == 200
+    body = json.loads(resp.get_data())
+    assert body["pipeline"]["default_process_id"] == full_id
+    assert body["pipeline"]["default_process_name"] == "Full"
+
+
+def test_export_omits_default_process_name_when_id_absent(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/api/settings/export")
+    body = json.loads(resp.get_data())
+    # No default_process_id was ever set — export is empty and the name
+    # field never appears.
+    assert "default_process_name" not in body.get("pipeline", {})
+
+
+def test_import_translates_default_process_name_to_target_id(app_and_db):
+    """A backup carrying ``pipeline.default_process_name`` translates to the
+    target DB's id for that name. The raw id in the payload is overridden
+    because saved_processes are DB-local — a foreign id would silently point
+    at a different process, but the name is a portable identity."""
+    app, db = app_and_db
+    cull_ready_id = next(
+        p["id"] for p in db.get_saved_processes() if p["name"] == "Cull-ready"
+    )
+    client = app.test_client()
+    # Payload's raw id is a random stale value; the name should still resolve.
+    payload = {
+        "pipeline": {
+            "default_process_id": 999,
+            "default_process_name": "Cull-ready",
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] == cull_ready_id
+    # The name field is stripped so it doesn't leak into the persisted file.
+    assert "default_process_name" not in raw["pipeline"]
+
+
+def test_import_default_process_name_missing_in_target_falls_back_to_null(app_and_db):
+    """When the payload names a process that doesn't exist in the target DB
+    (custom process from another install, renamed, or deleted), the default
+    falls back to null (import only) rather than silently reusing whatever
+    row happens to share the payload's raw id."""
+    app, _ = app_and_db
+    client = app.test_client()
+    payload = {
+        "pipeline": {
+            "default_process_id": 1,
+            "default_process_name": "A custom process from another DB",
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] is None
+    assert "default_process_name" not in raw["pipeline"]
+
+
+def test_import_default_process_name_null_clears_id(app_and_db):
+    """A payload with explicit null ``default_process_name`` clears the id."""
+    app, db = app_and_db
+    full_id = next(p["id"] for p in db.get_saved_processes() if p["name"] == "Full")
+    client = app.test_client()
+    payload = {
+        "pipeline": {
+            "default_process_id": full_id,
+            "default_process_name": None,
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] is None
+
+
+def test_export_includes_default_process_flags(app_and_db):
+    """Export emits the full flag snapshot alongside the name/id so import can
+    verify the target's same-named row means the same thing (see
+    test_import_flag_mismatch_falls_back_to_null)."""
+    app, db = app_and_db
+    full = next(p for p in db.get_saved_processes() if p["name"] == "Full")
+    import config as cfg
+
+    cfg.set("pipeline", {**cfg.load()["pipeline"], "default_process_id": full["id"]})
+    client = app.test_client()
+    resp = client.get("/api/settings/export")
+    body = json.loads(resp.get_data())
+    flags = body["pipeline"]["default_process_flags"]
+    for k in (
+        "skip_classify",
+        "skip_extract_masks",
+        "skip_eye_keypoints",
+        "skip_regroup",
+        "miss_enabled",
+        "review_mode",
+    ):
+        assert flags[k] == full[k], f"{k} mismatch on export"
+
+
+def test_import_flag_match_translates_to_target_id(app_and_db):
+    """When the payload's flag snapshot matches the target's same-named row, the
+    default is set to the target's id — the name+flag pair is a portable
+    identity that survives DB-local id collisions."""
+    app, db = app_and_db
+    cull_ready = next(p for p in db.get_saved_processes() if p["name"] == "Cull-ready")
+    client = app.test_client()
+    payload = {
+        "pipeline": {
+            "default_process_id": 999,
+            "default_process_name": "Cull-ready",
+            "default_process_flags": {
+                "skip_classify": cull_ready["skip_classify"],
+                "skip_extract_masks": cull_ready["skip_extract_masks"],
+                "skip_eye_keypoints": cull_ready["skip_eye_keypoints"],
+                "skip_regroup": cull_ready["skip_regroup"],
+                "miss_enabled": cull_ready["miss_enabled"],
+                "review_mode": cull_ready["review_mode"],
+            },
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] == cull_ready["id"]
+    assert "default_process_flags" not in raw["pipeline"]
+    assert "default_process_name" not in raw["pipeline"]
+
+
+def test_import_flag_mismatch_falls_back_to_null(app_and_db):
+    """When the target has a same-named row but its flags differ from the
+    exporter's, the default falls back to null. Silently linking to the local
+    row would misattribute the after-import default to a divergent process."""
+    app, db = app_and_db
+    full = next(p for p in db.get_saved_processes() if p["name"] == "Full")
+    client = app.test_client()
+    payload = {
+        "pipeline": {
+            "default_process_id": full["id"],
+            "default_process_name": "Full",
+            "default_process_flags": {
+                "skip_classify": True,   # target's Full has False
+                "skip_extract_masks": full["skip_extract_masks"],
+                "skip_eye_keypoints": full["skip_eye_keypoints"],
+                "skip_regroup": full["skip_regroup"],
+                "miss_enabled": full["miss_enabled"],
+                "review_mode": full["review_mode"],
+            },
+        },
+    }
+    resp = client.post(
+        "/api/settings/import",
+        json={"json": json.dumps(payload)},
+    )
+    assert resp.status_code == 200
+    import config as cfg
+    raw = cfg.load()
+    assert raw["pipeline"]["default_process_id"] is None
+    assert "default_process_flags" not in raw["pipeline"]
 
 
 def test_import_rejects_invalid_json(app_and_db):

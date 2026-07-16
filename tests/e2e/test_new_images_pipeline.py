@@ -151,3 +151,69 @@ def test_new_images_banner_drives_pipeline(fresh_server, page):
     page.goto(f"{url}/browse")
     card = page.locator(".grid-card[data-filename='IMG_0001.JPG']")
     expect(card).to_be_visible(timeout=5000)
+
+
+def test_banner_click_during_walk_shows_preparing_state(fresh_server, page, monkeypatch):
+    """Regression test for the reported banner-click bug: clicking "Create a
+    pipeline" while the server-side new-images walk is still running used to
+    freeze the banner button for ~60s and then silently dump the user on a
+    blank pipeline wizard. Now the click navigates immediately to the
+    pipeline page in a visible "preparing" state that shows live walk
+    progress and converges onto the snapshot once the walk finishes."""
+    import threading
+
+    import new_images as new_images_module
+    from new_images import get_shared_cache
+
+    url = fresh_server["url"]
+    photo_dir = fresh_server["photo_dir"]
+
+    _write_jpeg(photo_dir / "IMG_0002.JPG")
+    _clear_new_images_cache()
+
+    page.goto(f"{url}/browse")
+    banner = page.locator("#newImagesBanner")
+    expect(banner).to_be_visible(timeout=5000)
+
+    # Simulate the real failure conditions: the cache is cold at click time
+    # (as after a scan invalidation) and the walk is slow (as on a large
+    # network volume). The walk reports progress, then blocks until the test
+    # releases it — deterministic, no sleep races.
+    release = threading.Event()
+    real_count = new_images_module.count_new_images_for_workspace
+
+    def slow_count(*args, **kwargs):
+        cb = kwargs.get("progress_callback")
+        if cb:
+            cb(1500, 1)
+        release.wait(timeout=15)
+        return real_count(*args, **kwargs)
+
+    monkeypatch.setattr(
+        new_images_module, "count_new_images_for_workspace", slow_count,
+    )
+    get_shared_cache().clear()
+
+    try:
+        # Click lands on the pipeline page immediately — no frozen button.
+        page.locator("#newImagesBanner .banner-cta").click()
+        page.wait_for_url("**/pipeline?new_images=preparing", timeout=5000)
+
+        # The new-images card is visible and selected while preparing.
+        expect(page.locator("#sourceOptionNewImages")).to_be_visible()
+        expect(page.locator("[data-testid='source-new-images']")).to_be_checked()
+
+        # Live walk progress is shown, not an opaque spinner.
+        status = page.locator("#pipelineActionStatus")
+        expect(status).to_contain_text("1,500 files checked", timeout=10000)
+    finally:
+        release.set()
+
+    # Once the walk finishes, the page converges onto the real snapshot:
+    # URL rewritten to the id, subtitle shows the advertised count.
+    page.wait_for_url(
+        lambda u: "new_images=" in u and "preparing" not in u, timeout=15000,
+    )
+    expect(page.locator("#newImagesCardSubtitle")).to_contain_text(
+        "1 new image", timeout=5000,
+    )

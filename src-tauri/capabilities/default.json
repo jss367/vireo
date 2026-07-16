@@ -5,6 +5,12 @@
   "windows": [
     "main"
   ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*/*",
+      "http://localhost:*/*"
+    ]
+  },
   "permissions": [
     "core:default",
     {
@@ -20,12 +26,11 @@
     "shell:allow-spawn",
     "shell:allow-kill",
     "dialog:allow-open",
+    "clipboard-manager:allow-write-text",
     "process:allow-restart",
     "core:tray:default",
     "core:tray:allow-set-icon",
     "core:tray:allow-set-tooltip",
-    "opener:allow-open-url",
-    "opener:allow-default-urls",
     "log:default"
   ]
 }

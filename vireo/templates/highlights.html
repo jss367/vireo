@@ -14,6 +14,8 @@
   .control-group input[type=range] { width:120px; }
   .control-group input[type=search], .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
   .control-group input[type=search] { width:180px; }
+  .control-group .search-control { width:240px; }
+  .control-group .search-control input[type=search] { width:auto; border-radius:4px 0 0 4px; }
   .control-value { font-size:13px; color:var(--text-primary); min-width:36px; }
   .save-btn { margin-left:auto; padding:6px 16px; background:var(--accent); color:var(--accent-text); border:none; border-radius:4px; cursor:pointer; font-size:13px; }
   .save-btn:hover { opacity:0.9; }
@@ -36,10 +38,20 @@
   .bucket-strip { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:10px; }
   .highlights-card { position:relative; border-radius:6px; overflow:hidden; background:var(--bg-secondary); cursor:pointer; border:1px solid var(--border-primary); }
   .highlights-card:hover { border-color:var(--accent); }
-  .highlights-card.best-card { border-color:var(--accent); }
+  .highlights-card.highlight-card,
+  html[data-advanced-mode="true"] .highlights-card.best-card { border-color:var(--accent); }
+  .highlights-card.pick-flag-card { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 50%, transparent); }
   .best-ribbon { position:absolute; top:6px; left:6px; padding:2px 6px; border-radius:999px; background:var(--accent); color:var(--accent-text); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; }
+  .pick-flag-badge { position:absolute; top:6px; right:6px; z-index:2; padding:3px 8px; border-radius:999px; background:var(--accent); color:var(--accent-text); border:1px solid color-mix(in srgb, var(--accent-text) 65%, transparent); box-shadow:0 1px 6px rgba(0,0,0,0.45); font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:0.5px; pointer-events:none; }
+  .highlight-order { position:absolute; top:6px; right:6px; display:flex; gap:4px; opacity:0; transition:opacity .12s; }
+  .pick-flag-card .highlight-order { top:34px; }
+  .highlights-card:hover .highlight-order,
+  .highlights-card:focus-within .highlight-order { opacity:1; }
+  .highlight-order button { padding:2px 6px; border-radius:999px; border:1px solid rgba(255,255,255,.45); background:rgba(0,0,0,.62); color:#fff; font-size:10px; cursor:pointer; }
+  .highlight-order button:hover { border-color:#fff; }
   .highlights-card img { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
-  .card-info { padding:6px 8px; font-size:11px; color:var(--text-secondary); display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:4px; min-height:28px; }
+  .card-filename { padding:6px 8px 0; color:var(--text-primary); font-size:12px; line-height:1.35; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card-info { padding:4px 8px 6px; font-size:11px; color:var(--text-secondary); display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:4px; min-height:26px; }
   .card-chip { padding:1px 5px; border-radius:999px; background:var(--bg-tertiary); white-space:nowrap; }
   .card-chip.score { color:var(--text-primary); font-weight:600; }
   .card-chip.conf { color:var(--text-secondary); }
@@ -48,6 +60,7 @@
   .bucket-expand:hover { text-decoration:underline; }
 
   .unid-divider { padding:20px 24px 8px; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:1px; border-top:2px solid var(--border-primary); margin-top:8px; }
+  .analyzed-divider { grid-column:1 / -1; padding:8px 2px 2px; font-size:11px; color:var(--text-secondary); text-transform:uppercase; letter-spacing:1px; border-top:1px solid var(--border-primary); margin-top:4px; }
 
   .highlights-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
   .highlights-empty a { color:var(--accent); }
@@ -95,15 +108,43 @@
     <select id="folderSelect"></select>
   </div>
   <div class="control-group">
-    <label for="speciesSearch">Species</label>
-    <input type="search" id="speciesSearch" placeholder="Cardinal">
+    <label for="highlightSearch">Search</label>
+    <div class="search-control">
+      <input type="search" id="highlightSearch" placeholder="Name, filename, folder">
+      <button id="highlightSearchMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('highlightSearch', 'match_case', debounceLoad)" title="Match case">Aa</button>
+      <button id="highlightSearchWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('highlightSearch', 'whole_word', debounceLoad)" title="Match whole word">ab</button>
+    </div>
   </div>
   <div class="control-group">
-    <label for="confirmationFilter">Status</label>
-    <select id="confirmationFilter">
-      <option value="all">All</option>
-      <option value="confirmed">Confirmed only</option>
-      <option value="unconfirmed">Unconfirmed only</option>
+    <label for="speciesSearch">Species</label>
+    <div class="search-control">
+      <input type="search" id="speciesSearch" placeholder="Cardinal">
+      <button id="highlightSpeciesMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('highlightSpecies', 'match_case', debounceLoad)" title="Match case">Aa</button>
+      <button id="highlightSpeciesWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('highlightSpecies', 'whole_word', debounceLoad)" title="Match whole word">ab</button>
+    </div>
+  </div>
+  <div class="control-group">
+    <label for="confirmationFilter">Species keyword</label>
+    <select id="confirmationFilter" title="Whether the species keyword has been confirmed on the photo">
+      <option value="all">Any</option>
+      <option value="confirmed">Confirmed</option>
+      <option value="unconfirmed">Not confirmed</option>
+    </select>
+  </div>
+  <div class="control-group">
+    <label for="highlightSelectionFilter">Highlight chosen</label>
+    <select id="highlightSelectionFilter" title="Whether this species has at least one chosen highlight">
+      <option value="all">Any</option>
+      <option value="yes">Yes</option>
+      <option value="no">No</option>
+    </select>
+  </div>
+  <div class="control-group">
+    <label for="representativeFilter">Representative set</label>
+    <select id="representativeFilter" title="Whether this species has a representative photo set">
+      <option value="all">Any</option>
+      <option value="yes">Yes</option>
+      <option value="no">No</option>
     </select>
   </div>
   <div class="control-group">
@@ -124,10 +165,16 @@
   <div class="control-group">
     <label for="sortSelect">Sort</label>
     <select id="sortSelect">
-      <option value="best">Best photo first</option>
+      <option value="best" data-default-label="Recommended first" data-advanced-label="Best photo first">Recommended first</option>
       <option value="fewest">Fewest photos</option>
       <option value="most">Most photos</option>
-      <option value="worst">Worst photo first</option>
+      <option value="worst" data-advanced-best-sort>Worst photo first</option>
+      <option value="species_asc">Species A-Z</option>
+      <option value="species_desc">Species Z-A</option>
+      <option value="newest">Newest top photo</option>
+      <option value="oldest">Oldest top photo</option>
+      <option value="confidence">Highest ID confidence</option>
+      <option value="confirmed">Confirmed keywords first</option>
     </select>
   </div>
   <button class="save-btn" id="saveBtn" onclick="showSaveModal()">Save as Collection</button>
@@ -200,6 +247,11 @@ var lastHighlightReject = null;
 // out-of-band (another tab, Undo panel), which it must be trusted to include.
 var highlightsLoadSeq = 0;
 var rejectedAtLoadSeq = {};
+// Per-bucket monotonic counter for refetchBucketFromZero. Rapid Pick/Unpick
+// cycles on the same bucket can leave two /api/highlights/bucket refetches in
+// flight; without a stamp, an older response can arrive after a newer one and
+// overwrite the fresher photos/ordering keys.
+var bucketRefetchSeq = {};
 
 function escapeAttr(s) {
   if (s === null || s === undefined) return '';
@@ -226,15 +278,39 @@ function requestScopeParams() {
   params.set('min_quality', (parseInt(document.getElementById('qualitySlider').value) / 100).toFixed(2));
   params.set('confidence_threshold', (parseInt(document.getElementById('confidenceSlider').value) / 100).toFixed(2));
   params.set('confirmation', document.getElementById('confirmationFilter').value || 'all');
+  params.set('highlight_selection', document.getElementById('highlightSelectionFilter').value || 'all');
+  params.set('species_representative', document.getElementById('representativeFilter').value || 'all');
   return params;
+}
+
+function appendHighlightFilterParams(params) {
+  var search = document.getElementById('highlightSearch').value.trim();
+  var speciesSearch = document.getElementById('speciesSearch').value.trim();
+  if (search) {
+    params.set('q', search);
+    VireoTextSearch.appendParams(
+      params,
+      VireoTextSearch.readOptions('highlightSearch'),
+      'q_match_case',
+      'q_whole_word'
+    );
+  }
+  if (speciesSearch) {
+    params.set('species', speciesSearch);
+    VireoTextSearch.appendParams(
+      params,
+      VireoTextSearch.readOptions('highlightSpecies'),
+      'species_match_case',
+      'species_whole_word'
+    );
+  }
 }
 
 async function loadHighlights() {
   var params = requestScopeParams();
   var folderSelect = document.getElementById('folderSelect');
-  var speciesSearch = document.getElementById('speciesSearch').value.trim();
   params.set('limit_per_bucket', Math.max(20, parseInt(document.getElementById('perRowSlider').value)));
-  if (speciesSearch) params.set('species', speciesSearch);
+  appendHighlightFilterParams(params);
 
   // Capture the issue-time sequence so the prune below can tell rejections that
   // happened after this request was sent (response is stale for them) from
@@ -276,13 +352,56 @@ async function loadHighlights() {
 function sortedBuckets() {
   var sort = document.getElementById('sortSelect').value;
   var buckets = (currentData.buckets || []).slice();
+  function compareTimestamp(a, b, newest) {
+    var ta = a.best_timestamp || '';
+    var tb = b.best_timestamp || '';
+    if (!ta && !tb) return 0;
+    if (!ta) return 1;
+    if (!tb) return -1;
+    return newest ? String(tb).localeCompare(String(ta)) : String(ta).localeCompare(String(tb));
+  }
   buckets.sort(function(a, b) {
     if (sort === 'most') return b.photo_count - a.photo_count;
     if (sort === 'best') return (b.best_score || 0) - (a.best_score || 0);
     if (sort === 'worst') return (a.best_score || 0) - (b.best_score || 0);
+    if (sort === 'species_asc') return String(a.species || '').localeCompare(String(b.species || ''));
+    if (sort === 'species_desc') return String(b.species || '').localeCompare(String(a.species || ''));
+    if (sort === 'newest') return compareTimestamp(a, b, true);
+    if (sort === 'oldest') return compareTimestamp(a, b, false);
+    if (sort === 'confidence') return (b.avg_confidence || 0) - (a.avg_confidence || 0);
+    if (sort === 'confirmed') {
+      var status = Number(!!b.is_accepted) - Number(!!a.is_accepted);
+      if (status) return status;
+      return (b.best_score || 0) - (a.best_score || 0);
+    }
     return a.photo_count - b.photo_count; // 'fewest' default
   });
   return buckets;
+}
+
+function isHighlightsAdvancedMode() {
+  return !!(window.isAdvancedMode && window.isAdvancedMode());
+}
+
+function updateAdvancedHighlightsOptions() {
+  var advanced = isHighlightsAdvancedMode();
+  var sortSelect = document.getElementById('sortSelect');
+  if (sortSelect) {
+    var recommended = sortSelect.querySelector('option[value="best"]');
+    if (recommended) {
+      recommended.textContent = advanced
+        ? (recommended.dataset.advancedLabel || 'Best photo first')
+        : (recommended.dataset.defaultLabel || 'Recommended first');
+    }
+    sortSelect.querySelectorAll('[data-advanced-best-sort]').forEach(function(opt) {
+      opt.hidden = !advanced;
+      opt.disabled = !advanced;
+    });
+    if (!advanced && sortSelect.value === 'worst') {
+      sortSelect.value = 'best';
+    }
+  }
+  if (currentData) render();
 }
 
 function photoThumbnailUrl(p) {
@@ -294,20 +413,48 @@ function photoThumbnailUrl(p) {
 
 function renderCard(p, idx) {
   var thumbSrc = photoThumbnailUrl(p);
+  var advanced = isHighlightsAdvancedMode();
   var conf = p.has_accepted_species
     ? '<span class="card-chip conf">Tagged</span>'
     : (p.predicted_confidence != null ? '<span class="card-chip conf">ID ' + formatPercent(p.predicted_confidence) + '</span>' : '');
-  var reasons = (p.reasons || []).slice(0, 2).map(function(r) {
-    return '<span class="card-chip reason">' + escapeAttr(r) + '</span>';
-  }).join('');
-  var title = (p.reasons || []).join(', ');
-  var ribbon = p.is_highlights_photo
-    ? '<div class="best-ribbon">Highlight</div>'
-    : (idx === 0 ? '<div class="best-ribbon">Best</div>' : '');
-  return '<div class="highlights-card' + (idx === 0 ? ' best-card' : '') + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
+  var reasons = advanced
+    ? (p.reasons || []).slice(0, 2).map(function(r) {
+        return '<span class="card-chip reason">' + escapeAttr(r) + '</span>';
+      }).join('')
+    : '';
+  var scoreChip = advanced
+    ? '<span class="card-chip score">' + formatScore(p.highlight_score) + '</span>'
+    : '';
+  var title = advanced ? (p.reasons || []).join(', ') : '';
+  var ribbon = p.is_highlighted
+    ? '<div class="best-ribbon">Highlight ' + escapeAttr(p.highlight_rank || '') + '</div>'
+    : (p.is_species_representative
+      ? '<div class="best-ribbon">Representative</div>'
+      : (advanced && idx === 0 ? '<div class="best-ribbon">Best</div>' : ''));
+  var flagBadge = p.flag === 'flagged'
+    ? '<div class="pick-flag-badge" title="Flagged as pick">Pick</div>'
+    : '';
+  var rep = p.is_species_representative
+    ? '<span class="card-chip reason">Representative</span>'
+    : '';
+  var order = p.is_highlighted
+    ? '<div class="highlight-order">'
+      + '<button type="button" data-highlight-order="up" data-photo-id="' + p.id + '" data-species="' + escapeAttr(photoSpeciesName(p)) + '">Up</button>'
+      + '<button type="button" data-highlight-order="down" data-photo-id="' + p.id + '" data-species="' + escapeAttr(photoSpeciesName(p)) + '">Down</button>'
+      + '<button type="button" data-highlight-remove="1" data-photo-id="' + p.id + '" data-species="' + escapeAttr(photoSpeciesName(p)) + '">Remove</button>'
+      + '</div>'
+    : '';
+  return '<div class="highlights-card'
+    + (p.is_highlighted ? ' highlight-card' : '')
+    + (idx === 0 ? ' best-card' : '')
+    + (p.flag === 'flagged' ? ' pick-flag-card' : '')
+    + '" data-photo-id="' + p.id + '" title="' + escapeAttr(title) + '">'
     + ribbon
+    + flagBadge
+    + order
     + '<img src="' + thumbSrc + '" alt="' + escapeAttr(p.filename) + '" loading="lazy">'
-    + '<div class="card-info"><span class="card-chip score">' + formatScore(p.highlight_score) + '</span>' + conf + reasons + '</div>'
+    + '<div class="card-filename" title="' + escapeAttr(p.filename) + '">' + escapeAttr(p.filename) + '</div>'
+    + '<div class="card-info">' + scoreChip + conf + rep + reasons + '</div>'
     + '</div>';
 }
 
@@ -322,6 +469,21 @@ function attachCardClicks(container, photoSet) {
       if (window.openLightbox && photo) {
         activeLightboxPhotoId = pid;
         openLightbox(pid, photo.filename, photoSet);
+      }
+    });
+  });
+}
+
+function attachHighlightOrderButtons(container) {
+  container.querySelectorAll('[data-highlight-order], [data-highlight-remove]').forEach(function(btn) {
+    btn.addEventListener('click', function(event) {
+      event.stopPropagation();
+      var species = btn.getAttribute('data-species');
+      var photoId = parseInt(btn.getAttribute('data-photo-id'));
+      if (btn.hasAttribute('data-highlight-remove')) {
+        removeSpeciesHighlight(species, photoId, btn);
+      } else {
+        moveSpeciesHighlight(species, photoId, btn.getAttribute('data-highlight-order'), btn);
       }
     });
   });
@@ -352,7 +514,7 @@ async function unidPhotoIds() {
 function photoCurrentLabel(photo) {
   if (!photo) return '';
   if (photo.has_accepted_species && photo.species) {
-    return 'Confirmed: ' + photo.species;
+    return 'Keyword confirmed: ' + photo.species;
   }
   if (photo.predicted_species) {
     var conf = photo.predicted_confidence != null
@@ -380,7 +542,7 @@ async function confirmPhotoIds(photoIds, button) {
       body: JSON.stringify({ photo_ids: photoIds }),
     });
     await loadHighlights();
-    if (typeof showToast === 'function') showToast('Prediction confirmed', 'success');
+    if (typeof showToast === 'function') showToast('Species keyword confirmed', 'success');
   } finally {
     if (button) button.disabled = false;
   }
@@ -443,23 +605,104 @@ async function submitSpeciesModal() {
   }
 }
 
-async function setPhotoPreference(purpose, species, photoId, button) {
-  if (!purpose || !species || !photoId) return;
+async function setSpeciesRepresentative(species, photoId, button) {
+  if (!species || !photoId) return;
   if (button) button.disabled = true;
   try {
     await safeFetch('/api/photo-preferences', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ purpose: purpose, species: species, photo_id: photoId }),
+      body: JSON.stringify({ purpose: 'species_representative', species: species, photo_id: photoId }),
     });
     await loadHighlights();
     updateHighlightsLightboxControls(activeLightboxPhotoId);
     if (typeof showToast === 'function') {
-      showToast(purpose === 'life_list' ? 'Life List photo set' : 'Highlights photo set', 'success');
+      showToast('Species representative set', 'success');
     }
   } finally {
     if (button) button.disabled = false;
   }
+}
+
+async function addSpeciesHighlight(species, photoId, button) {
+  if (!species || !photoId) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/species-highlights', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ species: species, photo_id: photoId }),
+    });
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') showToast('Added to Highlights', 'success');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function removeSpeciesHighlight(species, photoId, button) {
+  if (!species || !photoId) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/species-highlights', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ species: species, photo_id: photoId }),
+    });
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+    if (typeof showToast === 'function') showToast('Removed from Highlights', 'success');
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function moveSpeciesHighlight(species, photoId, direction, button) {
+  if (!species || !photoId || !direction) return;
+  if (button) button.disabled = true;
+  try {
+    await safeFetch('/api/species-highlights/order', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ species: species, photo_id: photoId, direction: direction }),
+    });
+    await loadHighlights();
+    updateHighlightsLightboxControls(activeLightboxPhotoId);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+// Render a strip's cards, inserting the "Not yet analyzed" divider before the
+// trailing contiguous run of unscored non-pick photos. Walking backward from
+// the end anchors the divider to the actual tail boundary even after curated
+// ordering (species highlights, representatives) has promoted an unscored,
+// non-flagged photo to the front — a first-encountered check would have
+// misfired on that promoted card and left analyzed photos below the label.
+// If the visible slice ends on an analyzed photo (or on a flagged photo),
+// there is no tail and no divider fires. Unscored picks (flagged, at the
+// front) are always excluded from the tail.
+function renderStripCards(photos, _unanalyzedCount) {
+  var tailStart = photos.length;
+  for (var j = photos.length - 1; j >= 0; j--) {
+    var q = photos[j];
+    if (!q.is_analyzed && q.flag !== 'flagged') {
+      tailStart = j;
+    } else {
+      break;
+    }
+  }
+  var tailCount = photos.length - tailStart;
+  var html = '';
+  for (var i = 0; i < photos.length; i++) {
+    if (i === tailStart && tailCount) {
+      html += '<div class="analyzed-divider">Not yet analyzed — ' + tailCount
+        + ' photo' + (tailCount === 1 ? '' : 's') + '</div>';
+    }
+    html += renderCard(photos[i], i);
+  }
+  return html;
 }
 
 function renderBucket(bucket) {
@@ -468,12 +711,13 @@ function renderBucket(bucket) {
   var visible = expanded ? bucket.photos : bucket.photos.slice(0, perRow);
   var remaining = bucket.photo_count - visible.length;
   var badgeClass = bucket.is_accepted ? 'accepted' : (bucket.certainty === 'likely' ? 'likely' : 'candidate');
-  var badgeText = bucket.is_accepted ? 'Confirmed' : (bucket.certainty === 'likely' ? 'Likely ID' : 'Top candidates');
+  var badgeText = bucket.is_accepted ? 'Keyword confirmed' : (bucket.certainty === 'likely' ? 'Likely ID' : 'Top candidates');
   var badge = bucket.is_accepted
-    ? '<span class="bucket-badge accepted">Confirmed</span>'
+    ? '<span class="bucket-badge accepted">Keyword confirmed</span>'
     : '<span class="bucket-badge ' + badgeClass + '">' + badgeText + '</span>';
-  var meta = bucket.photo_count + ' photo' + (bucket.photo_count === 1 ? '' : 's')
-    + ' · best ' + formatScore(bucket.best_score);
+  var meta = bucket.photo_count + ' photo' + (bucket.photo_count === 1 ? '' : 's');
+  if (bucket.highlight_count) meta += ' · ' + bucket.highlight_count + ' highlighted';
+  if (isHighlightsAdvancedMode()) meta += ' · best ' + formatScore(bucket.best_score);
   if (!bucket.is_accepted && bucket.avg_confidence != null) meta += ' · ID ' + formatPercent(bucket.avg_confidence);
   var expandBtn = '';
   // Show the affordance whenever photos are hidden (more loaded than one row)
@@ -489,7 +733,7 @@ function renderBucket(bucket) {
   var actions = '<div class="bucket-actions">';
   if (!bucket.is_accepted) {
     actions += '<button class="bucket-action primary" data-action="confirm-bucket" data-species="'
-      + escapeAttr(bucket.species) + '">Confirm</button>';
+      + escapeAttr(bucket.species) + '">Confirm keyword</button>';
   }
   actions += '<button class="bucket-action" data-action="change-bucket" data-species="'
     + escapeAttr(bucket.species) + '">Change</button></div>';
@@ -499,7 +743,7 @@ function renderBucket(bucket) {
     + '<div class="bucket-meta">' + meta + '</div></div>'
     + actions
     + '</div>'
-    + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
+    + '<div class="bucket-strip">' + renderStripCards(visible, bucket.unanalyzed_count) + '</div>'
     + expandBtn
     + '</section>';
 }
@@ -526,7 +770,7 @@ function renderUnidentified() {
     + '<div class="bucket-meta">' + unid.photo_count + ' photos</div></div>'
     + '<div class="bucket-actions"><button class="bucket-action" data-action="change-unidentified">Set species</button></div>'
     + '</div>'
-    + '<div class="bucket-strip">' + visible.map(renderCard).join('') + '</div>'
+    + '<div class="bucket-strip">' + renderStripCards(visible, unid.unanalyzed_count) + '</div>'
     + expandBtn
     + '</section>';
 }
@@ -535,6 +779,8 @@ async function loadMoreBucket(species, isUnidentified) {
   var params = requestScopeParams();
   var target = isUnidentified ? currentData.unidentified : (currentData.buckets || []).find(function(b) { return b.species === species; });
   if (!target || !target.has_more) return;
+  params.set('species', isUnidentified ? '__unidentified__' : species);
+  appendHighlightFilterParams(params);
   params.set('species', isUnidentified ? '__unidentified__' : species);
   params.set('offset', target.photos.length);
   params.set('limit', 500);
@@ -550,7 +796,17 @@ function render() {
   var meta = document.getElementById('meta');
   var controls = document.getElementById('controlsBar');
 
-  if (!currentData.folders.length) {
+  // Only bail to the empty state when NOTHING is renderable. Gating on
+  // folders alone would hide unscored-only workspaces (or subtrees): the
+  // folder dropdown is sourced from get_folders_with_quality_data, which is
+  // scored-only, but the highlights payload can still return eligible
+  // buckets and unidentified photos from unscored candidates. The workspace
+  // scope option is prepended unconditionally, so an empty folder list
+  // remains navigable via that entry.
+  var hasBuckets = (currentData.buckets || []).length > 0;
+  var hasUnidentified = !!(currentData.unidentified
+    && currentData.unidentified.photo_count);
+  if (!currentData.folders.length && !hasBuckets && !hasUnidentified) {
     content.innerHTML = '';
     empty.style.display = 'block';
     meta.textContent = '';
@@ -561,12 +817,19 @@ function render() {
   controls.style.display = '';
 
   var buckets = sortedBuckets();
+  var search = document.getElementById('highlightSearch').value.trim();
   var speciesSearch = document.getElementById('speciesSearch').value.trim();
   var confirmation = document.getElementById('confirmationFilter').value;
-  var filterLabel = speciesSearch ? ' matching' : '';
-  if (confirmation === 'confirmed') filterLabel += ' confirmed';
-  if (confirmation === 'unconfirmed') filterLabel += ' unconfirmed';
-  meta.textContent = buckets.length + filterLabel + ' species · '
+  var highlightSelection = document.getElementById('highlightSelectionFilter').value;
+  var representative = document.getElementById('representativeFilter').value;
+  var filterLabel = (search || speciesSearch) ? ' matching species' : ' species';
+  if (confirmation === 'confirmed') filterLabel += ' with confirmed keywords';
+  if (confirmation === 'unconfirmed') filterLabel += ' without confirmed keywords';
+  if (highlightSelection === 'yes') filterLabel += ' with highlights chosen';
+  if (highlightSelection === 'no') filterLabel += ' without highlights chosen';
+  if (representative === 'yes') filterLabel += ' with representatives set';
+  if (representative === 'no') filterLabel += ' without representatives set';
+  meta.textContent = buckets.length + filterLabel + ' · '
     + currentData.meta.eligible + ' of '
     + currentData.meta.total_in_scope + ' photos scored';
 
@@ -585,6 +848,7 @@ function render() {
     }
     attachCardClicks(section, photoSet);
   });
+  attachHighlightOrderButtons(content);
 
   // Expand buttons
   content.querySelectorAll('.bucket-expand').forEach(function(btn) {
@@ -649,14 +913,111 @@ function render() {
 }
 
 function findHighlightPhoto(photoId) {
+  var hit = findHighlightPhotoWithContainer(photoId);
+  return hit ? hit.photo : null;
+}
+
+function findHighlightPhotoWithContainer(photoId) {
   if (!currentData || photoId == null) return null;
   var buckets = currentData.buckets || [];
   for (var i = 0; i < buckets.length; i++) {
-    var match = (buckets[i].photos || []).find(function(p) { return p.id === photoId; });
-    if (match) return match;
+    var photos = buckets[i].photos || [];
+    var match = photos.find(function(p) { return p.id === photoId; });
+    if (match) return { photo: match, photos: photos, bucket: buckets[i] };
   }
   var unid = currentData.unidentified && currentData.unidentified.photos || [];
-  return unid.find(function(p) { return p.id === photoId; }) || null;
+  var match = unid.find(function(p) { return p.id === photoId; });
+  return match ? { photo: match, photos: unid, bucket: null } : null;
+}
+
+// Copy the authoritative full-bucket ordering keys from a bucket-endpoint
+// page onto the client-side bucket so sortedBuckets() ranks species the
+// same way a reload would. Prefer the endpoint's `best_score` /
+// `best_timestamp` (computed over the entire filtered bucket) over
+// recomputing from `bucket.photos`, because a paged refetch (has_more
+// still true) only loads a prefix — recomputing would drop a species
+// below its true Recommended/Best position when the highest-scored photo
+// lives past the loaded window. Falls back to a local scan only if the
+// endpoint didn't return the keys (older server, defensive).
+function applyBucketOrderingKeysFromPage(bucket, page) {
+  if (!bucket) return;
+  if (page && Object.prototype.hasOwnProperty.call(page, 'best_score')) {
+    bucket.best_score = page.best_score;
+  } else if (Array.isArray(bucket.photos)) {
+    var best = null;
+    for (var i = 0; i < bucket.photos.length; i++) {
+      var s = bucket.photos[i].highlight_score;
+      if (typeof s !== 'number') continue;
+      if (best === null || s > best) best = s;
+    }
+    bucket.best_score = best;
+  }
+  if (page && Object.prototype.hasOwnProperty.call(page, 'best_timestamp')) {
+    bucket.best_timestamp = page.best_timestamp;
+  } else {
+    var top = Array.isArray(bucket.photos) ? bucket.photos[0] : null;
+    bucket.best_timestamp = top ? (top.timestamp || null) : null;
+  }
+}
+
+// Refetch a bucket (or the unidentified section) from offset 0 so the loaded
+// window matches the backend's post-pick ordering. A pick mutates
+// highlight_score (the +0.08 bonus, clamped to [0, 1]) and can flip ordering
+// against representatives, curated species_highlights, or the has_more tail;
+// rather than mirror `_highlight_score_bucket` / `_apply_ordered_highlights` /
+// `_apply_highlight_preferences` in JS (repeatedly getting it wrong on subtle
+// edge cases), let the server compute the authoritative order and copy it
+// back. Pages in up-to-500-row chunks so the final iteration only asks for
+// the remainder of the loaded window (`targetLen - offset`) — a full 500-row
+// last page would silently expand the loaded slice past what the user
+// actually loaded (e.g. 520 loaded would become 1000). The endpoint clamps
+// `limit` to 500, so the per-request cap is preserved automatically.
+// Refetch size mirrors the user's currently loaded window (`currentLen`) —
+// forcing it up to 500 would silently expand an unexpanded 20-row bucket to
+// 500 rows, and the next "Load more" (which offsets by `target.photos.length`)
+// would then start at 500 and render up to 1000 cards the user never paged
+// through, plus bloat every pick's Save-as-Collection payload.
+// Returns a promise resolving to true only when this call actually wrote to
+// `target.photos` — a superseded (older) refetch resolves to false so its
+// caller can skip rendering the stale locally-mutated flag against the old
+// bucket order and let the winning refetch's render fire instead.
+async function refetchBucketFromZero(target, isUnidentified) {
+  if (!target) return true;
+  var currentLen = Array.isArray(target.photos) ? target.photos.length : 0;
+  var speciesKey = isUnidentified ? '__unidentified__' : target.species;
+  var targetLen = currentLen;
+  if (targetLen <= 0) return true;
+  // Stamp this refetch so a slower earlier one for the same bucket can't
+  // clobber a newer response (Pick → Unpick before the first GET resolves).
+  var seq = (bucketRefetchSeq[speciesKey] || 0) + 1;
+  bucketRefetchSeq[speciesKey] = seq;
+  var allPhotos = [];
+  var lastPage = null;
+  for (var offset = 0; offset < targetLen; offset += 500) {
+    var params = requestScopeParams();
+    appendHighlightFilterParams(params);
+    // appendHighlightFilterParams may set 'species' for the species-search
+    // filter; force it back to the target species/unidentified sentinel so
+    // the endpoint returns the right bucket, not whatever the search box holds.
+    params.set('species', speciesKey);
+    params.set('offset', offset);
+    params.set('limit', Math.min(500, targetLen - offset));
+    var page = await safeFetch('/api/highlights/bucket?' + params);
+    if (bucketRefetchSeq[speciesKey] !== seq) return false;
+    if (!page || !Array.isArray(page.photos)) return true;
+    lastPage = page;
+    if (page.photos.length === 0) break;
+    allPhotos = allPhotos.concat(page.photos);
+    if (!page.has_more) break;
+  }
+  if (!lastPage) return true;
+  if (bucketRefetchSeq[speciesKey] !== seq) return false;
+  target.photos = allPhotos;
+  target.loaded_count = allPhotos.length;
+  target.has_more = !!lastPage.has_more;
+  if (typeof lastPage.photo_count === 'number') target.photo_count = lastPage.photo_count;
+  applyBucketOrderingKeysFromPage(target, lastPage);
+  return true;
 }
 
 function lightboxIsOpenOnPhoto(photoId) {
@@ -759,12 +1120,18 @@ function updateHighlightsLightboxControls(photoId) {
   if (photo) {
     var highlightSpecies = photoSpeciesName(photo);
     if (highlightSpecies) {
-      html += '<button data-lb-action="set-highlight"'
-        + (photo.is_highlights_photo ? ' class="primary"' : '') + '>'
-        + (photo.is_highlights_photo ? 'Highlights Photo' : 'Use as Highlights') + '</button>';
+      if (photo.is_highlighted) {
+        html += '<button class="primary" data-lb-action="remove-highlight">Highlighted</button>';
+        html += '<button data-lb-action="highlight-up">Move Up</button>';
+        html += '<button data-lb-action="highlight-down">Move Down</button>';
+      } else {
+        html += '<button data-lb-action="add-highlight">Add to Highlights</button>';
+      }
     }
     if (photo.has_accepted_species && photo.species) {
-      html += '<button data-lb-action="set-life-list">Use as Life List</button>';
+      html += '<button data-lb-action="set-representative"'
+        + (photo.is_species_representative ? ' class="primary"' : '') + '>'
+        + (photo.is_species_representative ? 'Representative' : 'Set Representative') + '</button>';
     }
     if (photo.is_confirmable_prediction) {
       html += '<button class="primary" data-lb-action="confirm">Confirm</button>';
@@ -785,10 +1152,16 @@ function updateHighlightsLightboxControls(photoId) {
         return;
       } else if (action === 'confirm') {
         confirmPhotoIds([photo.id], btn);
-      } else if (action === 'set-highlight') {
-        setPhotoPreference('highlights', photoSpeciesName(photo), photo.id, btn);
-      } else if (action === 'set-life-list') {
-        setPhotoPreference('life_list', photo.species, photo.id, btn);
+      } else if (action === 'add-highlight') {
+        addSpeciesHighlight(photoSpeciesName(photo), photo.id, btn);
+      } else if (action === 'remove-highlight') {
+        removeSpeciesHighlight(photoSpeciesName(photo), photo.id, btn);
+      } else if (action === 'highlight-up') {
+        moveSpeciesHighlight(photoSpeciesName(photo), photo.id, 'up', btn);
+      } else if (action === 'highlight-down') {
+        moveSpeciesHighlight(photoSpeciesName(photo), photo.id, 'down', btn);
+      } else if (action === 'set-representative') {
+        setSpeciesRepresentative(photo.species, photo.id, btn);
       } else {
         var modalTitle = (photo.is_confirmable_prediction || photo.has_accepted_species)
           ? 'Change species'
@@ -826,10 +1199,23 @@ document.getElementById('confidenceSlider').addEventListener('input', function()
   document.getElementById('confidenceValue').textContent = (this.value / 100).toFixed(2);
   debounceLoad();
 });
+document.getElementById('highlightSearch').addEventListener('input', function() {
+  debounceLoad();
+});
 document.getElementById('speciesSearch').addEventListener('input', function() {
   debounceLoad();
 });
 document.getElementById('confirmationFilter').addEventListener('change', function() {
+  expandedBuckets.clear();
+  unidentifiedExpanded = false;
+  loadHighlights();
+});
+document.getElementById('highlightSelectionFilter').addEventListener('change', function() {
+  expandedBuckets.clear();
+  unidentifiedExpanded = false;
+  loadHighlights();
+});
+document.getElementById('representativeFilter').addEventListener('change', function() {
   expandedBuckets.clear();
   unidentifiedExpanded = false;
   loadHighlights();
@@ -841,6 +1227,8 @@ document.getElementById('perRowSlider').addEventListener('input', function() {
 document.getElementById('sortSelect').addEventListener('change', function() {
   if (currentData) render();
 });
+window.addEventListener('advancedmodechange', updateAdvancedHighlightsOptions);
+window.addEventListener('devmodechange', updateAdvancedHighlightsOptions);
 document.getElementById('folderSelect').addEventListener('change', function() {
   // Reset per-row expand state when the user picks a different folder
   // so the new folder's rows don't inherit the previous folder's state.
@@ -915,6 +1303,21 @@ async function doSave(mode) {
   closeSaveModal();
 }
 
+// True when a rejection needs a reload rather than just a local prune: an
+// active yes/no curation filter treats the rejected photo's highlight or
+// representative role as an active bucket signal, and the eligible-only
+// query on the server would drop it. If we only prune locally the bucket
+// keeps its stale has_highlight_selection / has_species_representative
+// state and stays visible under the wrong filter.
+function curationFilterAffectedByReject(photo) {
+  if (!photo) return false;
+  var highlightFilter = document.getElementById('highlightSelectionFilter').value || 'all';
+  var repFilter = document.getElementById('representativeFilter').value || 'all';
+  if (highlightFilter !== 'all' && photo.is_highlighted) return true;
+  if (repFilter !== 'all' && photo.is_species_representative) return true;
+  return false;
+}
+
 // Drop a photo from the in-memory model after it is rejected, so the grid
 // matches the backend query (which excludes rejected photos). Returns true if
 // anything changed.
@@ -972,7 +1375,18 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     // it (a reload issued afterward already reflects the rejection server-side).
     rejectedFromGrid.add(detail.photoId);
     rejectedAtLoadSeq[detail.photoId] = highlightsLoadSeq;
-    if (removeRejectedPhotoFromModel(detail.photoId)) render();
+    // A curation filter set to yes/no may need to hide the bucket when the
+    // rejected photo is the last highlight or the species representative:
+    // eligible_only server-side drops that stored row, but the local prune
+    // path leaves has_highlight_selection / has_species_representative
+    // stale. Reload authoritatively so the visible buckets match the
+    // backend's filter state.
+    if (photo && curationFilterAffectedByReject(photo)) {
+      removeRejectedPhotoFromModel(detail.photoId);
+      loadHighlights();
+    } else if (removeRejectedPhotoFromModel(detail.photoId)) {
+      render();
+    }
   } else if (rejectedFromGrid.has(detail.photoId)) {
     // A previously-rejected photo was un-rejected — it re-qualifies for
     // highlights, so refetch to restore it (and the Save-as-Collection list)
@@ -981,9 +1395,51 @@ document.addEventListener('lightbox:flagchanged', function(e) {
     rejectedFromGrid.delete(detail.photoId);
     delete rejectedAtLoadSeq[detail.photoId];
     loadHighlights();
+  } else {
+    // Pick/Unpick from the lightbox: the visible row is a slice(0, perRow)
+    // of bucket.photos, and the backend applies the +0.08 highlight_score
+    // bonus + picked_first ordering + `_apply_ordered_highlights` +
+    // `_apply_highlight_preferences` before serving that ordering. Rather
+    // than mirror all of that in JS (which has already produced a stream
+    // of ordering bugs against representatives, curated highlights, the
+    // score clamp, best_timestamp, and the has_more offset), refetch the
+    // bucket authoritatively so the client window is always what a full
+    // reload would produce.
+    var prev = detail.previousFlag || 'none';
+    var next = detail.flag || 'none';
+    if (prev === next) return;
+    if (prev !== 'flagged' && next !== 'flagged') return;
+    var hit = findHighlightPhotoWithContainer(detail.photoId);
+    if (!hit) {
+      // Eviction path: a prior unpick's refetchBucketFromZero can drop a
+      // photo out of the loaded window when it was only visible because
+      // picked_first promoted it. If the lightbox is still open on that
+      // photo and the user re-picks, we no longer have a bucket reference
+      // for a targeted refetch — reload everything so the fresh
+      // picked_first ordering brings the photo back into a bucket window
+      // (and the Save-as-Collection payload).
+      loadHighlights();
+      return;
+    }
+    // Mutate the shared photo reference immediately so any UI that reads
+    // photo.flag between now and the refetch resolving (e.g. the still-open
+    // lightbox controls) reflects the new pick state; the refetch then
+    // replaces the bucket's photo array with the server-authoritative order.
+    hit.photo.flag = next;
+    var isUnidentified = hit.bucket === null;
+    var target = isUnidentified ? currentData.unidentified : hit.bucket;
+    if (!target) { render(); return; }
+    // Render after the authoritative refetch settles so the Pick badge/outline
+    // and the bucket ordering become visible together. Rendering before the
+    // refetch exposes a transient stale order: tests and collection saves can
+    // observe the picked class while the photo is still in its old position.
+    refetchBucketFromZero(target, isUnidentified)
+      .then(function(applied) { if (applied) render(); })
+      .catch(function() { render(); });
   }
 });
 
+updateAdvancedHighlightsOptions();
 loadHighlights();
 </script>
 </body>

@@ -457,10 +457,70 @@ def test_generate_all_does_not_record_thumb_path_on_failure(tmp_path, monkeypatc
     assert row["thumb_path"] is None
 
 
-def test_generate_all_skips_current_raw_marker_after_crop_rejects_working_copy(
+def test_generate_thumbnail_accepts_near_full_raw_active_area(tmp_path, monkeypatch):
+    import thumbnails as thumbnails_mod
+
+    monkeypatch.setattr(
+        thumbnails_mod, "load_image",
+        lambda *args, **kwargs: Image.new("RGB", (5392, 3592), "red"),
+    )
+
+    result = thumbnails_mod.generate_thumbnail(
+        1, str(tmp_path / "photo.NEF"), str(tmp_path / "thumbs"),
+        min_source_size=(5408, 3608),
+    )
+
+    assert result == str(tmp_path / "thumbs" / "1.jpg")
+
+
+def test_generate_thumbnail_accepts_unknown_min_source_size(tmp_path, monkeypatch):
+    """A photo row missing width/height feeds (0, 0) into min_source_size via
+    _scaled_recipe_source_dimensions. The gate must not reject an otherwise-
+    successfully-decoded thumbnail just because the expected dims are unknown
+    — that regresses legacy/unsupported-RAW libraries with no usable JPEG
+    fallback back to permanently thumbnail-less.
+    """
+    import thumbnails as thumbnails_mod
+
+    monkeypatch.setattr(
+        thumbnails_mod, "load_image",
+        lambda *args, **kwargs: Image.new("RGB", (800, 600), "red"),
+    )
+
+    result = thumbnails_mod.generate_thumbnail(
+        1, str(tmp_path / "photo.NEF"), str(tmp_path / "thumbs"),
+        min_source_size=(0, 0),
+    )
+
+    assert result == str(tmp_path / "thumbs" / "1.jpg")
+
+
+def test_generate_thumbnail_rejects_truncated_raw_preview(tmp_path, monkeypatch):
+    import thumbnails as thumbnails_mod
+
+    monkeypatch.setattr(
+        thumbnails_mod, "load_image",
+        lambda *args, **kwargs: Image.new("RGB", (6000, 3376), "red"),
+    )
+
+    result = thumbnails_mod.generate_thumbnail(
+        1, str(tmp_path / "photo.NEF"), str(tmp_path / "thumbs"),
+        min_source_size=(6000, 4000),
+    )
+
+    assert result is None
+
+
+def test_generate_all_uses_near_full_working_copy_after_current_raw_failure(
     tmp_path, monkeypatch,
 ):
-    """Batch thumbnails must not retry a RAW that has a current source failure."""
+    """Edited HE/unsupported RAW thumbnails should fall back to the JPEG copy.
+
+    A Nikon HE* embedded/working JPEG can be a few pixels smaller than the
+    RAW's nominal dimensions. Once the RAW source is marked failed for the
+    current mtime, the thumbnail path should use that JPEG when it can satisfy
+    the cropped render instead of leaving the photo permanently thumbnail-less.
+    """
     import thumbnails as thumbnails_mod
     from db import Database
 
@@ -473,7 +533,7 @@ def test_generate_all_skips_current_raw_marker_after_crop_rejects_working_copy(
     working_dir = vireo_dir / "working"
     working_dir.mkdir(parents=True)
     wc_path = working_dir / "1.jpg"
-    Image.new("RGB", (200, 150), color="red").save(wc_path, "JPEG")
+    Image.new("RGB", (792, 594), color="red").save(wc_path, "JPEG")
 
     db = Database(str(vireo_dir / "test.db"))
     fid = db.add_folder(str(photos_dir), name="photos")
@@ -504,21 +564,30 @@ def test_generate_all_skips_current_raw_marker_after_crop_rejects_working_copy(
         {"crop": {"x": 0, "y": 0, "w": 0.5, "h": 1}},
     )
 
-    def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("batch thumbnail generation retried failed RAW")
+    loaded_paths = []
+    original_load_image = thumbnails_mod.load_image
 
-    monkeypatch.setattr(thumbnails_mod, "generate_thumbnail", fail_if_called)
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded_paths.append(str(file_path))
+        if str(file_path).lower().endswith(".nef"):
+            raise AssertionError("batch thumbnail generation retried failed RAW")
+        return original_load_image(file_path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(thumbnails_mod, "load_image", tracking_load_image)
 
     result = thumbnails_mod.generate_all(
         db, str(vireo_dir / "thumbnails"), vireo_dir=str(vireo_dir),
     )
 
-    assert result["generated"] == 0
-    assert result["failed"] == 1
+    assert result["generated"] == 1
+    assert result["failed"] == 0
+    assert [os.path.normpath(path) for path in loaded_paths] == [
+        os.path.normpath(str(wc_path))
+    ]
     row = db.conn.execute(
         "SELECT thumb_path FROM photos WHERE id=?", (photo_id,),
     ).fetchone()
-    assert row["thumb_path"] is None
+    assert row["thumb_path"] == f"{photo_id}.jpg"
 
 
 def test_backfill_thumb_paths_sets_path_for_existing_files(tmp_path):
@@ -704,7 +773,8 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
     db.set_active_workspace(ws_id)
     fid = db.add_folder(str(photos_dir), name="photos")
     pid = db.add_photo(
-        folder_id=fid, filename=filename, extension=".jpg",
+        folder_id=fid, filename=filename,
+        extension=os.path.splitext(filename)[1].lower(),
         file_size=os.path.getsize(src),
         file_mtime=os.path.getmtime(src),
         width=800, height=600,
@@ -715,6 +785,226 @@ def _make_app_with_real_photo(tmp_path, monkeypatch, filename="bird.jpg"):
         api_token="test-token-123",
     )
     return app, db, pid, str(thumb_dir)
+
+
+def test_paired_photo_source_selection_defaults_cleanly_to_jpeg_pixels(
+    tmp_path, monkeypatch,
+):
+    """Explicit paired-source requests must return the selected physical
+    file at thumbnail, preview, and original sizes without sharing caches.
+
+    The browser defaults paired photos to ``source=jpeg`` and lets the user
+    switch to ``source=raw``. Distinct, recognizable colors make a cache-key
+    mix-up or accidental RAW fallback immediately visible.
+    """
+    app, db, pid, thumb_dir = _make_app_with_real_photo(
+        tmp_path, monkeypatch, filename="bird.nef",
+    )
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=(SELECT folder_id FROM photos WHERE id=?)",
+        (pid,),
+    ).fetchone()["path"]
+    companion = os.path.join(folder, "bird.jpg")
+    Image.new("RGB", (800, 600), (20, 210, 40)).save(
+        companion, "JPEG", quality=95,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='bird.jpg' WHERE id=?", (pid,),
+    )
+    db.conn.commit()
+    # Catalog edits are authored against RAW coordinates. The JPEG companion
+    # is already a developed image and must remain landscape rather than
+    # receiving this RAW-only rotation a second time.
+    db.set_photo_edit_recipe(pid, {"rotation": 90})
+
+    import image_loader
+    import thumbnails
+
+    real_load = image_loader.load_image
+    live_raw = os.path.join(folder, "bird.nef")
+
+    def load_selected(path, max_size=None, **kwargs):
+        if str(path).lower().endswith(".nef"):
+            if os.path.abspath(path) != os.path.abspath(live_raw):
+                with Image.open(path) as cached:
+                    return cached.convert("RGB")
+            return Image.new("RGB", (800, 600), (210, 25, 35))
+        return real_load(path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", load_selected)
+    monkeypatch.setattr(thumbnails, "load_image", load_selected)
+
+    def fetch_render(url):
+        import io
+
+        """Fetch image pixels and dimensions, closing the response so
+        Windows doesn't hold the sent file open (werkzeug's FileWrapper
+        keeps the fd until Response.close())."""
+        resp = client.get(url)
+        try:
+            assert resp.status_code == 200
+            with Image.open(io.BytesIO(resp.data)) as rendered:
+                rgb = rendered.convert("RGB").getpixel(
+                    (rendered.width // 2, rendered.height // 2),
+                )
+                return rgb, rendered.size
+        finally:
+            resp.close()
+
+    client = app.test_client()
+    jpeg_thumb_url = f"/thumbnails/{pid}.jpg?source=jpeg"
+    raw_thumb_url = f"/thumbnails/{pid}.jpg?source=raw"
+    jpeg_thumb_rgb, jpeg_thumb_size = fetch_render(jpeg_thumb_url)
+    raw_thumb_rgb, raw_thumb_size = fetch_render(raw_thumb_url)
+    assert jpeg_thumb_rgb[1] > 180
+    assert raw_thumb_rgb[0] > 180
+    assert jpeg_thumb_size == (400, 300)
+    assert raw_thumb_size == (300, 400)
+    assert os.path.isfile(os.path.join(thumb_dir, f"{pid}_jpeg.jpg"))
+    assert os.path.isfile(os.path.join(thumb_dir, f"{pid}_raw.jpg"))
+
+    jpeg_preview_url = f"/photos/{pid}/preview?size=1920&source=jpeg"
+    raw_preview_url = f"/photos/{pid}/preview?size=1920&source=raw"
+    jpeg_preview_rgb, jpeg_preview_size = fetch_render(jpeg_preview_url)
+    raw_preview_rgb, raw_preview_size = fetch_render(raw_preview_url)
+    assert jpeg_preview_rgb[1] > 180
+    assert raw_preview_rgb[0] > 180
+    assert jpeg_preview_size == (800, 600)
+    assert raw_preview_size == (600, 800)
+    assert db.preview_cache_get(pid, 1920) is None
+
+    jpeg_original_url = f"/photos/{pid}/original?source=jpeg"
+    raw_original_url = f"/photos/{pid}/original?source=raw"
+    jpeg_original_rgb, jpeg_original_size = fetch_render(jpeg_original_url)
+    raw_original_rgb, raw_original_size = fetch_render(raw_original_url)
+    assert jpeg_original_rgb[1] > 180
+    assert raw_original_rgb[0] > 180
+    assert jpeg_original_size == (800, 600)
+    assert raw_original_size == (600, 800)
+
+    os.remove(companion)
+    assert client.get(f"/thumbnails/{pid}.jpg?source=jpeg").status_code == 404
+    assert client.get(f"/photos/{pid}/preview?size=1920&source=jpeg").status_code == 404
+    assert client.get(f"/photos/{pid}/original?source=jpeg").status_code == 404
+
+    vireo_dir = os.path.dirname(thumb_dir)
+    cached_raw = os.path.join(vireo_dir, "offline", "originals", f"{pid}.nef")
+    cached_jpeg = os.path.join(vireo_dir, "offline", "companions", f"{pid}.jpg")
+    os.makedirs(os.path.dirname(cached_raw), exist_ok=True)
+    os.makedirs(os.path.dirname(cached_jpeg), exist_ok=True)
+    Image.new("RGB", (800, 600), (210, 25, 210)).save(
+        cached_raw, "JPEG",
+    )
+    Image.new("RGB", (800, 600), (20, 210, 210)).save(
+        cached_jpeg, "JPEG",
+    )
+    os.remove(os.path.join(folder, "bird.nef"))
+    db.offline_original_upsert(
+        pid,
+        os.path.relpath(cached_raw, vireo_dir),
+        None,
+        os.path.relpath(cached_jpeg, vireo_dir),
+        os.path.getsize(cached_raw) + os.path.getsize(cached_jpeg),
+        100,
+        1.0,
+        "2026-07-14T00:00:00Z",
+        "cached",
+    )
+
+    for endpoint in (
+        f"/thumbnails/{pid}.jpg",
+        f"/photos/{pid}/preview?size=1920",
+        f"/photos/{pid}/original",
+    ):
+        joiner = "&" if "?" in endpoint else "?"
+        jpeg_rgb, _ = fetch_render(endpoint + joiner + "source=jpeg")
+        raw_rgb, _ = fetch_render(endpoint + joiner + "source=raw")
+        assert jpeg_rgb[1] > 180 and jpeg_rgb[2] > 180
+        assert raw_rgb[0] > 180 and raw_rgb[2] > 180
+
+
+def test_pair_source_ignored_for_jpeg_primary_with_raw_companion(
+    tmp_path, monkeypatch,
+):
+    """A JPEG primary with a RAW companion is not a RAW+JPEG pair — the server
+    must silently ignore ?source= overrides and always serve the canonical
+    JPEG pixels, matching the client behavior of not exposing a toggle."""
+    app, db, pid, _ = _make_app_with_real_photo(
+        tmp_path, monkeypatch, filename="developed.jpg",
+    )
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=(SELECT folder_id FROM photos WHERE id=?)",
+        (pid,),
+    ).fetchone()["path"]
+    companion = os.path.join(folder, "developed.nef")
+    Image.new("RGB", (400, 300), (10, 10, 10)).save(companion, "JPEG")
+    db.conn.execute(
+        "UPDATE photos SET companion_path='developed.nef' WHERE id=?", (pid,),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    # For a JPEG primary, both source overrides must fall through to the
+    # canonical render path (which serves the primary JPEG) rather than 404
+    # or reach into the RAW companion.
+    for suffix in ("?source=jpeg", "?source=raw", ""):
+        resp = client.get(f"/thumbnails/{pid}.jpg{suffix}")
+        assert resp.status_code == 200, (suffix, resp.status_code)
+    for suffix in ("?source=jpeg", "?source=raw"):
+        resp = client.get(f"/photos/{pid}/preview?size=1920&source={suffix.split('=')[1]}")
+        assert resp.status_code == 200, (suffix, resp.status_code)
+        resp = client.get(f"/photos/{pid}/original{suffix}")
+        assert resp.status_code == 200, (suffix, resp.status_code)
+
+
+def test_pair_source_gated_for_raw_primary_with_non_jpeg_companion(
+    tmp_path, monkeypatch,
+):
+    """A RAW primary paired with a non-JPEG sidecar (e.g. an XMP) is not a
+    RAW+JPEG pair. ``?source=raw`` should still serve RAW pixels since the
+    primary itself is RAW, but ``?source=jpeg`` has no valid target and must
+    fail cleanly — the client must not present a toggle UI for these."""
+    app, db, pid, _ = _make_app_with_real_photo(
+        tmp_path, monkeypatch, filename="bird.nef",
+    )
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id=(SELECT folder_id FROM photos WHERE id=?)",
+        (pid,),
+    ).fetchone()["path"]
+    sidecar = os.path.join(folder, "bird.xmp")
+    with open(sidecar, "w") as fh:
+        fh.write("<x:xmpmeta/>")
+    db.conn.execute(
+        "UPDATE photos SET companion_path='bird.xmp' WHERE id=?", (pid,),
+    )
+    db.conn.commit()
+
+    import image_loader
+
+    real_load = image_loader.load_image
+
+    def load_selected(path, max_size=None, **kwargs):
+        if str(path).lower().endswith(".nef"):
+            return Image.new("RGB", (800, 600), (200, 30, 30))
+        return real_load(path, max_size=max_size, **kwargs)
+
+    monkeypatch.setattr(image_loader, "load_image", load_selected)
+    import thumbnails
+    monkeypatch.setattr(thumbnails, "load_image", load_selected)
+
+    client = app.test_client()
+    # source=raw is honored (primary is RAW).
+    assert client.get(f"/thumbnails/{pid}.jpg?source=raw").status_code == 200
+    assert (
+        client.get(f"/photos/{pid}/preview?size=1920&source=raw").status_code == 200
+    )
+    assert client.get(f"/photos/{pid}/original?source=raw").status_code == 200
+    # source=jpeg has no target (companion is not JPEG) — fail cleanly, not 500.
+    assert client.get(f"/thumbnails/{pid}.jpg?source=jpeg").status_code == 404
+    assert (
+        client.get(f"/photos/{pid}/preview?size=1920&source=jpeg").status_code == 404
+    )
+    assert client.get(f"/photos/{pid}/original?source=jpeg").status_code == 404
 
 
 def test_serve_thumbnail_regenerates_on_cache_miss(tmp_path, monkeypatch):

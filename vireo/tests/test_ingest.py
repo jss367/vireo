@@ -348,7 +348,7 @@ def test_ingest_uses_metadata_dates_when_lightweight_exif_fails(
     tmp_path, monkeypatch
 ):
     """ExifTool metadata keeps copied files split by capture date."""
-    import ingest as ingest_module
+    import import_dedup as import_dedup_module
     import metadata as metadata_module
 
     src = tmp_path / "sd_card"
@@ -362,7 +362,9 @@ def test_ingest_uses_metadata_dates_when_lightweight_exif_fails(
         mtime = datetime(2026, 3, 30, 12, 0, 0).timestamp()
         os.utime(str(src / name), (mtime, mtime))
 
-    monkeypatch.setattr(ingest_module, "read_exif_timestamp", lambda _path: None)
+    monkeypatch.setattr(
+        import_dedup_module, "read_exif_timestamp", lambda _path: None
+    )
 
     def fake_extract_metadata(paths, restricted_tags=None):
         return {
@@ -381,12 +383,13 @@ def test_ingest_uses_metadata_dates_when_lightweight_exif_fails(
     assert not (dst / "2026" / "2026-03-30" / "a.jpg").exists()
 
 
-def test_ingest_skips_timestamp_resolution_for_duplicates(
-    tmp_path, monkeypatch
-):
-    """Duplicate-only re-imports must not trigger EXIF or ExifTool work."""
-    import ingest as ingest_module
-    import metadata as metadata_module
+def test_ingest_duplicate_only_reimport_skips_all(tmp_path, monkeypatch):
+    """A card whose files all match extra_known_hashes copies nothing.
+
+    The heuristic gate resolves EXIF capture times up front (cheap header
+    reads — that's the point of the metadata-first design), but files
+    matching known hashes must still be skipped without being copied.
+    """
     from scanner import compute_file_hash
 
     src = tmp_path / "sd_card"
@@ -400,22 +403,6 @@ def test_ingest_skips_timestamp_resolution_for_duplicates(
         Image.new("RGB", (100, 100), color=(i * 80, 0, 0)).save(str(src / name))
         hashes.add(compute_file_hash(str(src / name)))
 
-    exif_calls: list[str] = []
-    extract_calls: list[list[str]] = []
-
-    def tracking_read_exif(path):
-        exif_calls.append(path)
-        return None
-
-    def tracking_extract_metadata(paths, restricted_tags=None):
-        extract_calls.append(list(paths))
-        return {}
-
-    monkeypatch.setattr(ingest_module, "read_exif_timestamp", tracking_read_exif)
-    monkeypatch.setattr(
-        metadata_module, "extract_metadata", tracking_extract_metadata
-    )
-
     db = Database(str(tmp_path / "test.db"))
     result = ingest(
         str(src),
@@ -427,10 +414,6 @@ def test_ingest_skips_timestamp_resolution_for_duplicates(
 
     assert result["copied"] == 0
     assert result["skipped_duplicate"] == 2
-    # The duplicate gate short-circuits before any timestamp work runs,
-    # so neither the lightweight EXIF reader nor ExifTool is touched.
-    assert exif_calls == []
-    assert extract_calls == []
 
 
 def test_ingest_unsorted_fallback(tmp_path):
@@ -511,17 +494,22 @@ def test_ingest_skip_duplicates_within_single_batch(tmp_path):
     assert len(on_disk) == 1
 
 
-def test_ingest_intra_batch_dup_retries_after_primary_failure(tmp_path):
-    """If the primary copy of a hash fails in pass 2, a byte-identical
-    sibling in the same batch still gets a chance to import the bytes.
+def test_ingest_intra_batch_dup_retries_after_primary_failure(
+    tmp_path, monkeypatch
+):
+    """If the primary copy of a duplicate pair fails in pass 2, a
+    byte-identical sibling in the same batch still gets a chance to
+    import the bytes.
 
     Regression: when intra-batch dedup was eagerly marked in pass 1, a
     failed primary copy left every byte-identical sibling permanently
-    skipped — no copy ever landed for that hash even though the user
+    skipped — no copy ever landed for that content even though the user
     asked for ``skip_duplicates=True`` (which only means "don't import
     bytes I already have", not "give up if the first try fails").
     """
     import shutil
+
+    import ingest as ingest_module
 
     src = tmp_path / "sd_card"
     dst = tmp_path / "nas"
@@ -535,12 +523,15 @@ def test_ingest_intra_batch_dup_retries_after_primary_failure(tmp_path):
     os.utime(str(src / "IMG_001.jpg"), (mtime, mtime))
     os.utime(str(src / "IMG_002.jpg"), (mtime, mtime))
 
-    # Squat the primary's destination path with a directory of the same
-    # name. shutil.copy2 (and compute_file_hash on the "dest_file")
-    # then raise IsADirectoryError, so the primary fails in pass 2.
-    dest_folder = dst / "2026" / "2026-03-28"
-    dest_folder.mkdir(parents=True)
-    (dest_folder / "IMG_001.jpg").mkdir()
+    # Fail the primary's copy only; the sibling's copy must proceed.
+    real_copy2 = ingest_module.shutil.copy2
+
+    def failing_copy2(src_path, dst_path):
+        if str(src_path).endswith("IMG_001.jpg"):
+            raise OSError("simulated copy failure")
+        return real_copy2(src_path, dst_path)
+
+    monkeypatch.setattr(ingest_module.shutil, "copy2", failing_copy2)
 
     db = Database(str(tmp_path / "test.db"))
     result = ingest(str(src), str(dst), db=db, skip_duplicates=True)
@@ -549,6 +540,7 @@ def test_ingest_intra_batch_dup_retries_after_primary_failure(tmp_path):
     assert result["copied"] == 1, result
     assert result["skipped_duplicate"] == 0, result
     # The sibling should have landed under the date folder.
+    dest_folder = dst / "2026" / "2026-03-28"
     files_on_disk = sorted(
         p.name for p in dest_folder.iterdir() if p.is_file()
     )
@@ -1719,13 +1711,16 @@ def test_preview_destination_groups_by_date(tmp_path):
     assert by_path["2026/2026-03-25"]["full_path"] == str(dst / "2026" / "2026-03-25")
     assert "2026/2026-03-26" in by_path
     assert by_path["2026/2026-03-26"]["count"] == 1
+    destinations = {f["path"]: f for f in result["files"]}
+    assert destinations[str(src / "a.jpg")]["folder"] == "2026/2026-03-25"
+    assert destinations[str(src / "c.jpg")]["full_folder"] == str(dst / "2026" / "2026-03-26")
 
 
 def test_preview_destination_uses_metadata_dates_when_lightweight_exif_fails(
     tmp_path, monkeypatch
 ):
     """Preview keeps capture-date folders when ExifTool has the date."""
-    import ingest as ingest_module
+    import import_dedup as import_dedup_module
     import metadata as metadata_module
 
     src = tmp_path / "sd_card"
@@ -1738,7 +1733,9 @@ def test_preview_destination_uses_metadata_dates_when_lightweight_exif_fails(
         mtime = datetime(2026, 3, 30, 12, 0, 0).timestamp()
         os.utime(str(src / name), (mtime, mtime))
 
-    monkeypatch.setattr(ingest_module, "read_exif_timestamp", lambda _path: None)
+    monkeypatch.setattr(
+        import_dedup_module, "read_exif_timestamp", lambda _path: None
+    )
 
     def fake_extract_metadata(paths, restricted_tags=None):
         return {

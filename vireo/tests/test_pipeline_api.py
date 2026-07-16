@@ -181,6 +181,7 @@ def test_import_full_rejects_relative_destination(setup):
         shutil.rmtree(src, ignore_errors=True)
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_requires_destination(setup):
     app, db_path = setup
     src = tempfile.mkdtemp()
@@ -199,6 +200,7 @@ def test_pipeline_local_processing_requires_destination(setup):
         shutil.rmtree(src, ignore_errors=True)
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_filesystem_root_destination(
     setup, tmp_path
 ):
@@ -219,11 +221,16 @@ def test_pipeline_local_processing_rejects_filesystem_root_destination(
         assert "filesystem root" in resp.get_json()["error"].lower()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_collection_id(setup, tmp_path):
     # Collection pipelines set skip_scan and never run ingest, so the
     # staging folder is never created/indexed. Without this rejection
     # the job would burn through every processing stage and then fail
     # at archive_stage with "local staging folder was not indexed".
+    # The destination+collection_id guard fires first for this shape and
+    # rejects it with a scope-specific message; the older
+    # local_processing+collection_id guard still catches the no-destination
+    # variant (covered separately by test_jobs_api.py).
     app, _db_path = setup
     dest = tmp_path / "archive"
     with app.test_client() as c:
@@ -237,10 +244,10 @@ def test_pipeline_local_processing_rejects_collection_id(setup, tmp_path):
         })
         assert resp.status_code == 400
         err = resp.get_json()["error"].lower()
-        assert "local_processing" in err
-        assert "collection_id" in err
+        assert "destination is not allowed with collection_id" in err
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_collection_id_with_stale_sources(
     setup, tmp_path,
 ):
@@ -248,8 +255,9 @@ def test_pipeline_local_processing_rejects_collection_id_with_stale_sources(
     # request that mixes collection_id with a stale source/sources field
     # still skips ingest — the staging folder never gets created or
     # indexed and archive_stage fails with "local staging folder was not
-    # indexed". The API guard must reject collection_id outright when
-    # local_processing is on, not just the no-source case.
+    # indexed". Same shape as above (destination + collection_id +
+    # local_processing) so the destination-scope guard rejects it first;
+    # the stale sources field must not slip past.
     app, _db_path = setup
     src = tmp_path / "card"
     src.mkdir()
@@ -266,10 +274,10 @@ def test_pipeline_local_processing_rejects_collection_id_with_stale_sources(
         })
         assert resp.status_code == 400
         err = resp.get_json()["error"].lower()
-        assert "local_processing" in err
-        assert "collection_id" in err
+        assert "destination is not allowed with collection_id" in err
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_archives_to_final_destination(
     setup, tmp_path, monkeypatch
 ):
@@ -306,6 +314,74 @@ def test_pipeline_local_processing_archives_to_final_destination(
     assert job["result"]["archive"]["final_destination"] == str(final_dest)
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
+def test_pipeline_local_processing_all_duplicates_is_clean_noop(
+    setup, tmp_path, monkeypatch
+):
+    """Re-running a local-processing import whose files are ALL already in
+    the library must complete as a clean no-op: ingest skips every file,
+    nothing reaches staging, and the archive stage merges the empty staging
+    root into the existing archive without failing or duplicating photos.
+    Regression guard for the "restart a failed import by re-running it"
+    flow — the retry must stay a safe no-op when everything already made
+    it across on the earlier attempt."""
+    app, db_path = setup
+    src = tmp_path / "card"
+    src.mkdir()
+    final_parent = tmp_path / "nas"
+    final_parent.mkdir()
+    final_dest = final_parent / "Photos"
+
+    img = Image.new("RGB", (16, 16), "white")
+    img.save(src / "test.jpg")
+
+    import local_processing
+
+    monkeypatch.setattr(local_processing, "MIN_DERIVED_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(local_processing, "RESERVED_FREE_BYTES", 0)
+
+    body = {
+        "sources": [str(src)],
+        "destination": str(final_dest),
+        "local_processing": True,
+        "folder_template": "",
+        "skip_duplicates": True,
+        "skip_classify": True,
+        "skip_extract_masks": True,
+        "skip_regroup": True,
+    }
+    with app.test_client() as c:
+        resp = c.post("/api/jobs/pipeline", json=body)
+        assert resp.status_code == 200
+        first = wait_for_job_via_client(c, resp.get_json()["job_id"])
+        assert first["status"] == "completed", first
+
+        # Second run: the same card, every file now a known duplicate.
+        resp = c.post("/api/jobs/pipeline", json=body)
+        assert resp.status_code == 200
+        second = wait_for_job_via_client(c, resp.get_json()["job_id"])
+
+    assert second["status"] == "completed", second
+    assert second["result"]["archive"]["moved"] == 0, second
+    # Pin the path under test: the file must have been SKIPPED by the
+    # duplicate gate, not re-copied and then deduplicated at the merge.
+    ingest_step = next(
+        s for s in second.get("steps", []) if s.get("id") == "ingest"
+    )
+    assert "skipped" in (ingest_step.get("summary") or ""), ingest_step
+    assert "copied" not in (ingest_step.get("summary") or ""), ingest_step
+    # The first run's archived file is untouched and still cataloged once.
+    assert (final_dest / "test.jpg").is_file()
+    from db import Database
+    db = Database(db_path)
+    n = db.conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE filename = 'test.jpg'"
+    ).fetchone()[0]
+    db.close()
+    assert n == 1
+
+
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_merges_into_tracked_destination(
     setup, tmp_path, monkeypatch
 ):
@@ -406,6 +482,7 @@ def test_pipeline_local_processing_merges_into_tracked_destination(
         db.close()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_merges_into_subfolder_of_tracked_root(
     setup, tmp_path, monkeypatch
 ):
@@ -493,6 +570,7 @@ def test_pipeline_local_processing_merges_into_subfolder_of_tracked_root(
         db.close()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_refuses_destination_that_wraps_tracked_subfolder(
     setup, tmp_path, monkeypatch,
 ):
@@ -591,6 +669,7 @@ def test_pipeline_refuses_destination_that_wraps_tracked_subfolder(
     assert landed == [], landed
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_merges_new_shoot_into_existing_archive(
     setup, tmp_path, monkeypatch
 ):
@@ -722,6 +801,7 @@ def test_pipeline_merges_new_shoot_into_existing_archive(
         db.close()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_creates_missing_archive_parent(
     setup, tmp_path, monkeypatch
 ):
@@ -763,6 +843,7 @@ def test_pipeline_local_processing_creates_missing_archive_parent(
     assert nonexistent_parent.is_dir()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_detects_missing_archive_mount_root(monkeypatch):
     """Unmounted NAS paths like /Volumes/NAS/Shoot must not be created as
     local stub directories during archive-parent preflight."""
@@ -784,6 +865,7 @@ def test_pipeline_local_processing_detects_missing_archive_mount_root(monkeypatc
     assert pipeline_job._missing_archive_mount_root("/Volumes/NAS") == "/Volumes/NAS"
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_missing_archive_mount_root(
     setup, tmp_path, monkeypatch
 ):
@@ -828,6 +910,7 @@ def test_pipeline_local_processing_rejects_missing_archive_mount_root(
     assert not final_dest.exists()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_skips_archive_when_previews_fail(
     setup, tmp_path, monkeypatch
 ):
@@ -952,6 +1035,7 @@ def test_pipeline_local_processing_skips_archive_when_previews_fail(
     check_db.close()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_retry_after_skip_actually_copies(
     setup, tmp_path, monkeypatch
 ):
@@ -1022,6 +1106,7 @@ def test_pipeline_local_processing_retry_after_skip_actually_copies(
     )
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_fails_ingest_when_files_fail_to_copy(
     setup, tmp_path, monkeypatch
 ):
@@ -1089,6 +1174,7 @@ def test_pipeline_local_processing_fails_ingest_when_files_fail_to_copy(
     assert (staging_root / "good.jpg").is_file()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_ingest_failure_short_circuits_pipeline(
     setup, tmp_path, monkeypatch
 ):
@@ -1173,6 +1259,7 @@ def test_pipeline_local_processing_ingest_failure_short_circuits_pipeline(
     assert (staging_root / "good.jpg").is_file()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_completes_when_cancel_during_archive(
     setup, tmp_path, monkeypatch
 ):
@@ -1243,6 +1330,7 @@ def test_pipeline_local_processing_completes_when_cancel_during_archive(
     assert job["result"]["archive"]["final_destination"] == str(final_dest)
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_cancels_before_archive_commit(
     setup, tmp_path, monkeypatch
 ):
@@ -1303,6 +1391,7 @@ def test_pipeline_local_processing_cancels_before_archive_commit(
     assert folder_row is None
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_failed_archive_reports_failed_even_after_cancel(
     setup, tmp_path, monkeypatch
 ):
@@ -1382,6 +1471,7 @@ def test_pipeline_local_processing_failed_archive_reports_failed_even_after_canc
     assert job["status"] == "failed", job
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_post_commit_cleanup_error_reports_completed(
     setup, tmp_path, monkeypatch
 ):
@@ -1458,6 +1548,7 @@ def test_pipeline_local_processing_post_commit_cleanup_error_reports_completed(
     assert job["result"]["errors"] == []
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_deindexes_staging_on_cancel_after_scan(
     setup, tmp_path, monkeypatch
 ):
@@ -1569,6 +1660,7 @@ def test_pipeline_local_processing_deindexes_staging_on_cancel_after_scan(
     check_db.close()
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_preflight_filters_duplicates(
     setup, tmp_path, monkeypatch
 ):
@@ -1603,7 +1695,8 @@ def test_pipeline_local_processing_preflight_filters_duplicates(
     db.add_workspace_folder(ws_id, folder_id)
     db.add_photo(
         folder_id=folder_id, filename="dup.jpg", extension=".jpg",
-        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+        file_size=(src / "dup.jpg").stat().st_size, file_mtime=1.0,
+        file_hash=dup_hash,
     )
     db.close()
 
@@ -1655,6 +1748,7 @@ def test_pipeline_local_processing_preflight_filters_duplicates(
     assert plan["source_bytes"] <= fresh_bytes, plan
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_plans_archive_credit_after_duplicate_filter(
     setup, tmp_path, monkeypatch
 ):
@@ -1685,7 +1779,8 @@ def test_pipeline_local_processing_plans_archive_credit_after_duplicate_filter(
     db.add_workspace_folder(ws_id, folder_id)
     db.add_photo(
         folder_id=folder_id, filename="dup.jpg", extension=".jpg",
-        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+        file_size=(src / "dup.jpg").stat().st_size, file_mtime=1.0,
+        file_hash=dup_hash,
     )
     db.close()
 
@@ -1738,6 +1833,7 @@ def test_pipeline_local_processing_plans_archive_credit_after_duplicate_filter(
     assert storage_calls[0]["archive_existing_bytes"] == 0
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_preflight_probes_existing_final_destination(
     setup, tmp_path, monkeypatch
 ):
@@ -1784,6 +1880,7 @@ def test_pipeline_local_processing_preflight_probes_existing_final_destination(
     assert set(archive_paths) == {str(final_dest)}
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_existing_file_archive_destination(
     setup, tmp_path, monkeypatch
 ):
@@ -1819,6 +1916,7 @@ def test_pipeline_local_processing_rejects_existing_file_archive_destination(
     assert "not a directory" in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_broken_symlink_archive_destination(
     setup, tmp_path, monkeypatch
 ):
@@ -1870,6 +1968,7 @@ def test_pipeline_local_processing_rejects_broken_symlink_archive_destination(
     assert "not a directory" in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_rejects_archive_path_conflicts(
     setup, tmp_path, monkeypatch
 ):
@@ -1909,6 +2008,7 @@ def test_pipeline_local_processing_rejects_archive_path_conflicts(
     assert "different files at the same import paths" in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_reports_incomplete_archive_files(
     setup, tmp_path, monkeypatch
 ):
@@ -1949,6 +2049,7 @@ def test_pipeline_local_processing_reports_incomplete_archive_files(
     assert "will not suffix around likely corrupt archive files" in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_recognises_indexed_archive_via_alias(
     setup, tmp_path, monkeypatch
 ):
@@ -2016,6 +2117,7 @@ def test_pipeline_local_processing_recognises_indexed_archive_via_alias(
     assert "different files at the same import paths" in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_limits_incomplete_examples_to_incomplete(
     setup, tmp_path, monkeypatch
 ):
@@ -2069,6 +2171,7 @@ def test_pipeline_local_processing_limits_incomplete_examples_to_incomplete(
     assert "conflict.jpg" not in error_text
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(
     setup, tmp_path, monkeypatch
 ):
@@ -2097,7 +2200,8 @@ def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(
     db.add_workspace_folder(ws_id, folder_id)
     db.add_photo(
         folder_id=folder_id, filename="dup.jpg", extension=".jpg",
-        file_size=10, file_mtime=1.0, file_hash=dup_hash,
+        file_size=dup_path.stat().st_size, file_mtime=1.0,
+        file_hash=dup_hash,
     )
     db.close()
 
@@ -2132,6 +2236,7 @@ def test_pipeline_local_processing_conflict_preflight_skips_known_duplicates(
     assert job["status"] == "completed", job
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_credits_existing_archive_for_resume(
     setup, tmp_path, monkeypatch
 ):
@@ -2184,6 +2289,7 @@ def test_pipeline_local_processing_credits_existing_archive_for_resume(
     assert job["status"] == "completed", job
 
 
+@pytest.mark.skip(reason="retired pipeline local-processing import/archive path")
 def test_pipeline_local_processing_does_not_credit_unrelated_archive_content(
     setup, tmp_path, monkeypatch
 ):
@@ -2724,6 +2830,70 @@ def test_pipeline_accepts_source_snapshot_id(setup, tmp_path):
         pipeline_job.run_pipeline_job = original
 
 
+def test_pipeline_endpoint_forwards_missing_originals_invalidator(
+    setup, tmp_path,
+):
+    """POST /api/jobs/pipeline must pass the app-level Missing Originals
+    invalidator through to run_pipeline_job.
+
+    Regression: without this callback the pipeline's finally block only
+    invalidates the new-images cache, so a ready GET /api/photos/missing
+    payload can survive a scan that added or removed photo rows. See
+    Codex review on 63f6ac78. This test spies on run_pipeline_job and
+    asserts the handler forwards a callable so the pipeline_job side
+    (covered by test_pipeline_job.py) can actually fire it.
+    """
+    import threading
+
+    from db import Database
+    app, db_path = setup
+
+    # Prime a source folder so the collection-less pipeline path takes
+    # the scan branch; the spy short-circuits before scanner.scan runs.
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    img_path = folder / "IMG_001.JPG"
+    Image.new("RGB", (1, 1), "white").save(str(img_path), "JPEG")
+    db = Database(db_path)
+    db.add_folder(str(folder))
+    db.conn.close()
+
+    import pipeline_job
+    original = pipeline_job.run_pipeline_job
+    captured = {}
+    called = threading.Event()
+
+    def spy_run(job, runner, db_path_arg, ws_id, params, **kwargs):
+        captured["missing_originals_invalidator"] = kwargs.get(
+            "missing_originals_invalidator"
+        )
+        called.set()
+
+    pipeline_job.run_pipeline_job = spy_run
+    try:
+        with app.test_client() as c:
+            resp = c.post("/api/jobs/pipeline", json={
+                "sources": [str(folder)],
+                "skip_classify": True,
+                "skip_extract_masks": True,
+                "skip_regroup": True,
+            })
+            assert resp.status_code == 200, resp.get_json()
+
+        assert called.wait(timeout=5.0), (
+            "run_pipeline_job spy was not invoked"
+        )
+        # The handler must forward a callable (the create_app closure's
+        # _invalidate_missing_originals_cache), not omit or None it out.
+        assert callable(captured.get("missing_originals_invalidator")), (
+            "POST /api/jobs/pipeline did not forward the "
+            "missing_originals_invalidator kwarg — pipeline scans will not "
+            "drop the GET /api/photos/missing cache after touching disk"
+        )
+    finally:
+        pipeline_job.run_pipeline_job = original
+
+
 def test_pipeline_snapshot_overrides_stale_source_paths(setup, tmp_path):
     """When a valid source_snapshot_id is present, the job overrides any
     source/sources the caller passed. The handler must not preflight-validate
@@ -2997,6 +3167,110 @@ def test_pipeline_page_init_review_readiness_state_ready_when_cache_exists(setup
         # the seed has masks but no embeddings, so the degraded banner should
         # still see "embeddings" as a quality gap.
         assert "embeddings" in data["review_readiness"]["enhancing_missing"]
+
+
+def test_pipeline_page_init_reports_partial_review_cache(setup):
+    """page-init tells the review UI when cached results cover only a subset."""
+    app, db_path = setup
+    p1, _p2 = _seed_workspace_with_masks(db_path)
+
+    import json as _json
+
+    from db import Database
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    db.close()
+    cache_path = os.path.join(
+        os.path.dirname(db_path), f"pipeline_results_ws{ws}.json"
+    )
+    with open(cache_path, "w") as f:
+        _json.dump({
+            "encounters": [],
+            "photos": [{"id": p1, "filename": "a.jpg", "label": "REVIEW"}],
+            "summary": {"total_photos": 1},
+        }, f)
+
+    with app.test_client() as c:
+        resp = c.get("/api/pipeline/page-init")
+        assert resp.status_code == 200
+        info = resp.get_json()["results_cache_info"]
+        assert info["workspace_photo_count"] == 2
+        assert info["cached_photo_count"] == 1
+        assert info["missing_photo_count"] == 1
+        assert info["is_partial"] is True
+        assert info["group_fingerprint_status"] == "untracked"
+
+
+def test_pipeline_regroup_live_view_scope_does_not_overwrite_cache(setup):
+    """Review-page scope changes can compute all-workspace results as a view."""
+    app, db_path = setup
+    p1, _p2 = _seed_workspace_with_masks(db_path)
+
+    import json as _json
+
+    from db import Database
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    db.close()
+    cache_path = os.path.join(
+        os.path.dirname(db_path), f"pipeline_results_ws{ws}.json"
+    )
+    original_cache = {
+        "encounters": [],
+        "photos": [{"id": p1, "filename": "a.jpg", "label": "REVIEW"}],
+        "summary": {"total_photos": 1},
+    }
+    with open(cache_path, "w") as f:
+        _json.dump(original_cache, f)
+
+    with app.test_client() as c:
+        resp = c.post("/api/pipeline/regroup-live", json={"save_cache": False})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["summary"]["total_photos"] == 2
+
+    with open(cache_path) as f:
+        assert _json.load(f) == original_cache
+
+
+def test_pipeline_regroup_live_default_persists_cache(setup):
+    """Latest-review-scope slider tunes (no photo_ids, no save_cache flag)
+    must persist to the saved cache so a reload restores the user's
+    latest review adjustments. This is the pre-scope-switcher default
+    behavior; the client's reviewScopePayload sends the same body shape
+    when scope == 'cache'."""
+    app, db_path = setup
+    p1, _p2 = _seed_workspace_with_masks(db_path)
+
+    import json as _json
+
+    from db import Database
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    db.close()
+    cache_path = os.path.join(
+        os.path.dirname(db_path), f"pipeline_results_ws{ws}.json"
+    )
+    original_cache = {
+        "encounters": [],
+        "photos": [{"id": p1, "filename": "a.jpg", "label": "REVIEW"}],
+        "summary": {"total_photos": 1},
+    }
+    with open(cache_path, "w") as f:
+        _json.dump(original_cache, f)
+
+    with app.test_client() as c:
+        resp = c.post("/api/pipeline/regroup-live", json={"config": {}})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["summary"]["total_photos"] == 2
+
+    with open(cache_path) as f:
+        saved = _json.load(f)
+    # The default request shape must have overwritten the partial cache
+    # with the fresh workspace-wide regroup result.
+    assert saved != original_cache
+    assert saved["summary"]["total_photos"] == 2
 
 
 def test_pipeline_page_init_state_ready_folds_blocking_gaps_into_enhancing(setup, tmp_path):

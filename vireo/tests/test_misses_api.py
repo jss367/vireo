@@ -99,6 +99,91 @@ def test_api_misses_filter_by_category(client, db_with_misses):
     assert len(data["photos"]) == 1
 
 
+def test_api_misses_filters_by_collection_and_browse_attributes(
+    client, db_with_misses,
+):
+    _, db, ids = db_with_misses
+    collection_id = db.add_collection(
+        "Review subset",
+        json.dumps([{
+            "field": "photo_ids",
+            "value": [ids["no_subject"], ids["clipped"]],
+        }]),
+    )
+    db.update_photo_rating(ids["no_subject"], 2)
+    db.update_photo_rating(ids["clipped"], 5)
+    db.set_color_label(ids["clipped"], "red")
+    keyword_id = db.add_keyword("keeper")
+    db.tag_photo(ids["clipped"], keyword_id)
+
+    r = client.get(
+        f"/api/misses?collection_id={collection_id}&rating_min=4"
+        "&color_label=red&keyword=keeper"
+    )
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data["no_subject"] == []
+    assert [p["id"] for p in data["clipped"]] == [ids["clipped"]]
+    assert data["oof"] == []
+
+
+def test_api_misses_reject_and_recompute_honor_collection_filter(
+    client, db_with_misses,
+):
+    _, db, ids = db_with_misses
+    # Put two photos in the same category, but only one in the filter scope.
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id=?", (ids["no_subject"],)
+    )
+    db.conn.commit()
+    collection_id = db.add_collection(
+        "Only clipped",
+        json.dumps([{"field": "photo_ids", "value": [ids["clipped"]]}]),
+    )
+
+    recompute = client.post(
+        "/api/misses/recompute",
+        data=json.dumps({"collection_id": collection_id}),
+        content_type="application/json",
+    )
+    assert recompute.status_code == 200
+    assert recompute.get_json()["updated"] == 1
+
+    # Re-seed the persisted category after recompute; this assertion exercises
+    # reject scoping independently of the classifier's fixture-derived result.
+    db.conn.execute(
+        "UPDATE photos SET miss_clipped=1 WHERE id IN (?, ?)",
+        (ids["no_subject"], ids["clipped"]),
+    )
+    db.conn.commit()
+
+    reject = client.post(
+        "/api/misses/reject",
+        data=json.dumps({
+            "category": "clipped",
+            "collection_id": collection_id,
+        }),
+        content_type="application/json",
+    )
+    assert reject.status_code == 200
+    assert reject.get_json()["rejected"] == 1
+    flags = {
+        row["id"]: row["flag"]
+        for row in db.conn.execute(
+            "SELECT id, flag FROM photos WHERE id IN (?, ?)",
+            (ids["no_subject"], ids["clipped"]),
+        )
+    }
+    assert flags[ids["clipped"]] == "rejected"
+    assert flags[ids["no_subject"]] != "rejected"
+
+
+def test_api_misses_rejects_unknown_collection(client):
+    r = client.get("/api/misses?collection_id=999999")
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "collection not found"
+
+
 def test_api_bulk_reject_sets_flag(client, db_with_misses):
     r = client.post(
         "/api/misses/reject",

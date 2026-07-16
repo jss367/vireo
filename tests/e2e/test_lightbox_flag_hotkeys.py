@@ -246,7 +246,11 @@ def test_lightbox_newer_failed_write_falls_back_to_older_success(live_server, pa
     page.route("**/api/batch/flag", handle_flag_write)
 
     page.keyboard.press("x")
-    deadline = time.time() + 3
+    # The flag write is dispatched asynchronously after the keypress; under CI
+    # CPU contention it can take well over 3s to reach the route handler, so use
+    # generous headroom before asserting it was held (the loop exits as soon as
+    # the request lands, so the ceiling only matters on the failure path).
+    deadline = time.time() + 10
     while "route" not in held and time.time() < deadline:
         time.sleep(0.05)
     assert "route" in held, "expected first flag write to be held"

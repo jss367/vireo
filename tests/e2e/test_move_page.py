@@ -5,6 +5,7 @@ from playwright.sync_api import expect
 
 
 def test_move_folder_button_shows_preflight_progress(live_server, page):
+    live_server["db"].update_folder_counts()
     url = live_server["url"]
     page.goto(f"{url}/move")
 
@@ -41,5 +42,38 @@ def test_move_folder_button_shows_preflight_progress(live_server, page):
         }),
     )
     expect(page.locator("#confirmModal")).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#confirmMessage")).to_contain_text(
+        "Confirm moving 3 photos from /photos/park to "
+        "/tmp/vireo-archive/park?"
+    )
     expect(btn).to_have_text("Move Folder")
     expect(btn).to_be_enabled()
+
+
+def test_move_folder_shows_source_while_choosing_destination(live_server, page):
+    live_server["db"].update_folder_counts()
+    url = live_server["url"]
+    page.goto(f"{url}/move")
+
+    page.locator("#quickFolderSelect").select_option(index=1)
+    page.get_by_role("button", name="Browse", exact=True).first.click()
+
+    expect(page.locator("#moveBrowserSource")).to_be_visible()
+    expect(page.locator("#moveBrowserSourcePath")).to_have_text("/photos/park")
+    expect(page.locator("#moveBrowserSourceCount")).to_have_text("(3 photos)")
+
+
+def test_move_folder_prints_full_move_before_submission(live_server, page):
+    live_server["db"].update_folder_counts()
+    url = live_server["url"]
+    page.goto(f"{url}/move")
+
+    page.locator("#quickFolderSelect").select_option(index=1)
+    page.locator("#quickDestInput").fill("/archive/2024-03-10")
+
+    summary = page.locator("#quickMoveSummary")
+    expect(summary).to_be_visible()
+    expect(summary).to_have_text(
+        "Confirm moving 3 photos from /photos/park to "
+        "/archive/2024-03-10/park?"
+    )

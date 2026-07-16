@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from db import Database, commit_with_retry
+from job_contract import progress_event
 from model_cache import get_default_cache
 from pipeline_locks import (
     acquire_photo_mask,
@@ -48,6 +49,9 @@ from render_source import (
 )
 from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
+)
+from render_source import (
+    working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
 )
 
 log = logging.getLogger(__name__)
@@ -85,9 +89,31 @@ class PipelineParams:
     source_snapshot_id: int | None = None
     destination: str | None = None
     local_processing: bool = False
+    # Remote (SSH) archive destination for local-processing runs: the id of a
+    # saved remote target (config remote_targets) plus a required relative
+    # subpath naming the archive folder under the target's base paths.
+    # Mutually exclusive with ``destination``; resolved via
+    # ``resolve_remote_archive``. The staged tree is rsynced over SSH to
+    # ``remote_path/subpath`` and the catalog is repointed at
+    # ``mount_path/subpath``, mirroring the Move page's remote folder moves.
+    remote_target_id: str | None = None
+    remote_subpath: str = ""
+    # Snapshot of the resolved remote target dict (from cfg.get_remote_target)
+    # captured at ENQUEUE time so a queued run archives to the destination the
+    # user saw when they clicked Start, not whatever the saved target got edited
+    # to before the pipeline slot opened. The API always populates this
+    # alongside ``remote_target_id``; when it is None, ``run_pipeline_job``
+    # falls back to re-reading the mutable target (mostly for direct-call
+    # tests). Mirrors how the move-folder endpoint builds its remote spec
+    # before enqueueing.
+    remote_target_snapshot: dict | None = None
     file_types: str = "both"
     folder_template: str = "%Y/%Y-%m-%d"
     skip_duplicates: bool = True
+    # Identify duplicates by content hash alone (reads every byte of every
+    # source file). Default False: metadata-first matching with a hash
+    # fallback — see import_dedup.
+    verify_by_hash: bool = False
     labels_file: str | None = None
     labels_files: list | None = None
     model_id: str | None = None
@@ -95,8 +121,33 @@ class PipelineParams:
     reclassify: bool = False
     skip_extract_masks: bool = False
     skip_regroup: bool = False
+    # Distinguishes the identify preset's species-only review from a
+    # generic ``skip_regroup=True`` run. Only set to ``"species"`` by
+    # ``process_strategies.identify`` — Advanced/Custom on the Process
+    # page and API clients sending ``skip_regroup: true`` without a
+    # strategy leave this ``None`` so regroup_stage skips cleanly instead
+    # of overwriting the workspace cache with all-REVIEW output.
+    review_mode: str | None = None
     skip_classify: bool = False
     skip_eye_keypoints: bool = False
+    # Per-run override for the config-gated eye-detect setting. Semantics
+    # match miss_enabled: None defers to the workspace-effective
+    # ``pipeline.eye_detect_enabled``, a bool wins over workspace config in
+    # both directions. Set to True by the Process page when the user
+    # explicitly checks the Eye Keypoints stage box — that box is a
+    # per-run opt-in that must override the (default-off) Settings value
+    # so preflight and scoring see the enabled state. Left None by
+    # strategy expansion (the saved-process flag expansion) so a
+    # ``full`` strategy chain from after-import respects the user's
+    # Settings default instead of silently forcing eye detection on.
+    eye_detect_override: bool | None = None
+    # Per-run override for the config-gated misses stage. None defers to the
+    # workspace-effective ``pipeline.miss_enabled`` (today's behavior); a
+    # bool wins over workspace config in BOTH directions, mirroring how the
+    # skip_* flags override workspace defaults. Process strategies
+    # (process_strategies.py) set this so e.g. cull_ready suppresses misses
+    # on a workspace that has them enabled.
+    miss_enabled: bool | None = None
     download_taxonomy: bool = True
     # None means "use the workspace-effective preview_max_size setting".
     # Explicit values are kept for API/back-compat and tests that need to pin
@@ -105,6 +156,68 @@ class PipelineParams:
     exclude_paths: set | None = None
     exclude_photo_ids: set | None = None
     recursive: bool = True
+
+
+def resolve_remote_archive(target, subpath):
+    """Resolve a saved remote target + subpath into the pipeline's
+    remote-archive context.
+
+    ``target`` is a validated dict from ``config.get_remote_target``.
+    ``subpath`` names the archive folder under BOTH base paths — it is
+    required (unlike the Move page, where the moved folder's own name
+    provides the landing leaf) because ``move_folder`` lands the staged
+    folder inside a parent keeping its name: the subpath's last segment is
+    the staging root's name, so the archive lands at exactly
+    ``remote_path/subpath`` over SSH while the catalog is repointed at
+    exactly ``mount_path/subpath``.
+
+    Raises ValueError with a user-facing message when the pieces can't form
+    a safe archive destination. Returns a dict:
+
+    * ``target`` — the target passed in.
+    * ``subpath`` — the sanitized relative subpath.
+    * ``parent_subpath`` — subpath minus its last segment ("" for a single
+      segment); feed this to ``build_remote_move_spec`` so the staged leaf
+      lands at the full subpath.
+    * ``ssh_final`` — NAS-side path the archive lands at.
+    * ``mount_final`` — local mount path the catalog points at afterward.
+    * ``display`` — ``user@host:ssh_final`` for messages/UI.
+    """
+    import posixpath
+
+    from move import rsync_dest_spec, sanitize_subpath
+
+    sub = sanitize_subpath(subpath)  # raises ValueError on absolute / '..'
+    if not sub:
+        raise ValueError(
+            "remote_subpath is required — it names the archive folder under "
+            "the remote target's base path (e.g. \"2026/kenya-trip\")."
+        )
+    mount_path = (target.get("mount_path") or "").strip()
+    if not mount_path:
+        raise ValueError(
+            "This remote target has no local mount path, so archived photos "
+            "couldn't stay in your library. Add a mount path under "
+            "Settings → Remote targets."
+        )
+    if not os.path.isabs(mount_path):
+        raise ValueError(
+            "This remote target's local mount path isn't absolute "
+            f"(\"{mount_path}\"). Archived photos would be repointed to a "
+            "path relative to the server's working directory and appear "
+            "missing. Set an absolute mount path under Settings → Remote "
+            "targets."
+        )
+    ssh_final = posixpath.join(target["remote_path"], sub)
+    mount_final = os.path.join(mount_path, *sub.split("/"))
+    return {
+        "target": target,
+        "subpath": sub,
+        "parent_subpath": posixpath.dirname(sub),
+        "ssh_final": ssh_final,
+        "mount_final": mount_final,
+        "display": rsync_dest_spec(target, ssh_final),
+    }
 
 
 def _should_abort(abort_event):
@@ -216,6 +329,47 @@ def _retry_thumbnail_with_companion(
         cache_dir,
         size=thumb_size,
         **recipe_kwargs,
+    )
+
+
+def _retry_thumbnail_with_working_copy(
+    thread_db, generate_thumbnail, photo, photo_id, raw_source_path,
+    cache_dir, thumb_size, recipe, vireo_dir,
+):
+    """Retry an edited RAW thumbnail from a near-full local JPEG copy."""
+    if not photo or not recipe or not vireo_dir:
+        return None
+    if os.path.splitext(raw_source_path or "")[1].lower() not in _RAW_EXTENSIONS:
+        return None
+    wc_path = _working_copy_path_if_satisfies(
+        photo, recipe, thumb_size, vireo_dir, thumbnail_tolerance=True,
+    )
+    if not wc_path or os.path.abspath(wc_path) == os.path.abspath(raw_source_path):
+        return None
+    log.info(
+        "Pipeline thumbnail RAW decode failed for photo %s; "
+        "falling back to near-full JPEG working copy",
+        photo_id,
+    )
+    file_mtime = _photo_value(photo, "file_mtime")
+    if file_mtime is not None:
+        with contextlib.suppress(Exception):
+            thread_db.conn.execute(
+                "UPDATE photos SET"
+                " working_copy_failed_at=datetime('now'),"
+                " working_copy_failed_mtime=?,"
+                " working_copy_failed_source='source'"
+                " WHERE id=?",
+                (file_mtime, photo_id),
+            )
+            commit_with_retry(thread_db.conn)
+    return generate_thumbnail(
+        photo_id,
+        wc_path,
+        cache_dir,
+        size=thumb_size,
+        recipe=recipe,
+        native_size=_recipe_source_dimensions(photo),
     )
 
 
@@ -467,13 +621,24 @@ def _progress_event(stages, stage_id, phase, **extra):
     eta_seconds, step_id). Per-stage counts still live in `stages[...]` and
     reach the UI via the `stages` snapshot, so step-level bars are unaffected."""
     current, total = _weighted_progress(stages)
-    data = {
-        "phase": phase,
-        "stage_id": stage_id,
-        "current": current,
-        "total": total,
-        "stages": {k: dict(v) for k, v in stages.items()},
-    }
+    data = progress_event(
+        phase,
+        current,
+        total,
+        stage_id=stage_id,
+        stages={k: dict(v) for k, v in stages.items()},
+        # JobRunner.push_event merges progress payloads into job["progress"]
+        # rather than replacing them, so a sub-phase (e.g. "Extracting metadata"
+        # with phase_current/phase_total set) would otherwise linger through
+        # every later stage that omits these keys and keep the /api/jobs
+        # poll — and thus the jobs page + navbar sub-progress bar — rendering
+        # a stale phase. Default the triple to None here so callers with no
+        # active sub-phase actively clear it; the update() below lets callers
+        # with a real sub-phase override.
+        phase_current=None,
+        phase_total=None,
+        phase_label=None,
+    )
     data.update(extra)
     return data
 
@@ -542,7 +707,8 @@ def _collapse_scan_roots(paths):
 
 
 def run_pipeline_job(job, runner, db_path, workspace_id, params,
-                     thumb_cache_dir=None):
+                     thumb_cache_dir=None,
+                     missing_originals_invalidator=None):
     """Execute streaming pipeline. Called by JobRunner in a background thread.
 
     Args:
@@ -556,6 +722,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             pipeline writes and invalidates the real cache even when
             ``--thumb-dir`` points outside ``dirname(db_path)/thumbnails``.
             Defaults to that convention for backward compatibility.
+        missing_originals_invalidator: optional zero-arg callable that
+            drops the Flask app's Missing Originals cache for this DB.
+            Called after every scanned root in the finally block, mirroring
+            api_job_scan / api_job_import_full so a pipeline scan that
+            touches disk doesn't leave GET /api/photos/missing serving a
+            pre-scan ghost list.
 
     Returns:
         dict with stage results, duration, and errors
@@ -563,6 +735,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     job["_start_time"] = time.time()
     abort = threading.Event()
     errors = job["errors"]  # shared list, append is thread-safe
+    if params.destination or params.local_processing or params.remote_target_id:
+        raise RuntimeError(
+            "Pipeline import/archive mode has been removed. Use the Import "
+            "page or /api/jobs/import-photos to copy photos into the archive, "
+            "then run Process on the imported workspace photos."
+        )
 
     # Effective thumbnail cache directory for every internal call below.
     # Falls back to the historical ``<db_dir>/thumbnails`` convention when
@@ -583,9 +761,38 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         else os.path.dirname(db_path)
     )
     final_destination = params.destination if params.local_processing else None
-    staging_parent = None
+    remote_archive = None
+    if params.local_processing and params.remote_target_id:
+        # Prefer the snapshot captured at enqueue time so a settings edit
+        # between click-Start and slot-open cannot redirect the archive to a
+        # different host/mount than the jobs panel is showing. The Settings
+        # fallback is a last resort for callers (mainly tests) that build
+        # PipelineParams by hand without pre-resolving the target.
+        target = params.remote_target_snapshot
+        if not target:
+            import config as _cfg_mod
+
+            target = _cfg_mod.get_remote_target(params.remote_target_id)
+        if not target:
+            raise RuntimeError(
+                f"Remote target '{params.remote_target_id}' not found — it "
+                "may have been removed from Settings after this job was "
+                "queued. Pick a saved remote target and retry."
+            )
+        try:
+            remote_archive = resolve_remote_archive(
+                target, params.remote_subpath,
+            )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        # Everything below that keys off final_destination locally — the
+        # in-flight destination reservation, the tracked-destination
+        # preflight, the staging-root name — cares about where the CATALOG
+        # will point after the archive, which for a remote destination is
+        # the target's local mount path, not the NAS-side path.
+        final_destination = remote_archive["mount_final"]
     archive_destination_reserved = False
-    if params.local_processing and params.destination:
+    if params.local_processing and final_destination:
         from local_processing import staging_root
 
         # Reserve the final destination across the whole process BEFORE any
@@ -603,9 +810,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             )
         archive_destination_reserved = True
 
-        staging_parent = os.path.join(effective_vireo_dir, "staging", job["id"])
+        # final_destination (not params.destination, which is None for a
+        # remote archive): the staging root's basename is the leaf the
+        # archive move lands at, and for remote that's the mount-path leaf —
+        # the same last-subpath-segment as the NAS side.
         params.destination = staging_root(
-            effective_vireo_dir, job["id"], params.destination,
+            effective_vireo_dir, job["id"], final_destination,
         )
 
     try:
@@ -765,6 +975,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         if not params.skip_regroup:
             step_defs.append({"id": "regroup", "label": "Group encounters"})
             step_defs.append({"id": "misses", "label": "Flag missed shots"})
+        elif not params.skip_classify:
+            step_defs.append({"id": "regroup", "label": "Prepare review"})
         if params.local_processing:
             step_defs.append({"id": "archive", "label": "Archive to destination"})
         runner.set_steps(job["id"], step_defs)
@@ -817,6 +1029,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             thread_db = None
             try:
                 import config as cfg
+                from scanner import ScanCancelled
                 from scanner import scan as do_scan
 
                 thread_db = Database(db_path)
@@ -842,10 +1055,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     runner.update_step(job["id"], "scan",
                                        current_file=os.path.basename(path))
 
-                def status_cb(message):
+                def status_cb(message, phase_current=None, phase_total=None, phase_label=None):
                     runner.update_step(job["id"], "scan", current_file=message)
+                    extra = {"current_file": message}
+                    if phase_current is not None or phase_total is not None:
+                        extra.update({
+                            "phase_current": phase_current,
+                            "phase_total": phase_total,
+                            "phase_label": phase_label,
+                        })
                     _emit_progress(
-                        runner, job["id"], stages, "scan", message,
+                        runner, job["id"], stages, "scan",
+                        phase_label or message, **extra,
                     )
 
                 def cancel_check():
@@ -942,6 +1163,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                             unreachable += 1
                             continue
+                        # Track the repair folder so the outer finally
+                        # invalidates the Missing Originals cache for it —
+                        # scanner.scan touches the folder on disk and can
+                        # revalidate a restored original that a ready
+                        # /api/photos/missing payload still lists as a
+                        # ghost. Matches the append pattern used by the
+                        # normal ingest/scan-in-place paths below.
+                        scanned_roots.append(folder_path)
                         try:
                             # restrict_files limits discovery to the known
                             # broken photos in this folder. Without it, new
@@ -963,7 +1192,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 cancel_check=cancel_check,
                             )
                         except (OSError, RuntimeError) as e:
-                            if str(e) == "scan cancelled" and (
+                            if isinstance(e, ScanCancelled) and (
                                 _should_abort(abort) or runner.is_cancelled(job["id"])
                             ):
                                 abort.set()
@@ -1016,7 +1245,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 if params.destination:
                     from pathlib import Path
 
+                    from import_dedup import CatalogIndex, DuplicateChecker
                     from ingest import ingest as do_ingest
+
+                    # Duplicate-oracle infrastructure shared by the
+                    # local-processing preflight and the ingest loop. The
+                    # catalog index is loaded once; every prediction pass
+                    # gets a FRESH checker over it (seen-state must not
+                    # leak between predictions or into the real ingest),
+                    # while the shared times cache keeps each source
+                    # file's EXIF header read to once per run.
+                    dedup_times_cache: dict = {}
+                    catalog_index = None
+                    if params.skip_duplicates:
+                        catalog_index = CatalogIndex.from_db(thread_db)
+
+                    def _fresh_checker():
+                        if catalog_index is None:
+                            return None
+                        return DuplicateChecker(
+                            catalog_index,
+                            verify_by_hash=params.verify_by_hash,
+                            times_cache=dedup_times_cache,
+                        )
 
                     if params.local_processing:
                         from local_processing import (
@@ -1054,6 +1305,44 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             scan_to_thumb.put(_SENTINEL)
 
                         try:
+                            if remote_archive is not None:
+                                import move as move_mod
+
+                                # Refuse BEFORE staging/processing hours of
+                                # work, in the same spirit as the local
+                                # archive-parent checks below: a missing GNU
+                                # rsync or an unreachable target would
+                                # otherwise only surface at the final archive
+                                # move, stranding processed results in
+                                # staging.
+                                rsync_bin = move_mod.resolve_rsync_bin(
+                                    effective_cfg.get("rsync_bin", "") or "",
+                                )
+                                if rsync_bin and not move_mod.is_gnu_rsync(
+                                    rsync_bin,
+                                ):
+                                    rsync_bin = ""
+                                if not rsync_bin:
+                                    _bail_storage(
+                                        "No usable GNU rsync was found for the "
+                                        "remote archive. Install GNU rsync for "
+                                        "your platform or set its executable "
+                                        "under Settings → Paths."
+                                    )
+                                    return
+                                conn = move_mod.test_remote_connection(
+                                    remote_archive["target"], rsync_bin,
+                                )
+                                if not conn.get("ok"):
+                                    _bail_storage(
+                                        "Remote archive target "
+                                        f"'{remote_archive['target']['name']}'"
+                                        f" ({remote_archive['display']}) "
+                                        "isn't usable: "
+                                        f"{conn.get('message') or 'connection test failed'}"
+                                    )
+                                    return
+
                             # A tracked archive destination (the import lands at
                             # or inside a folder Vireo already manages) is no
                             # longer a hard failure: the archive move opts into
@@ -1082,6 +1371,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 _path_equal_or_descends,
                                 _tracked_destination_overlap,
                             )
+                            # For a remote archive, final_destination is the
+                            # catalog-facing MOUNT path (see where
+                            # remote_archive is resolved) — the tracked check
+                            # applies there too, because a prior remote
+                            # archive to the same target leaves tracked rows
+                            # at the mount path and the archive move merges
+                            # into (or refuses around) those exactly like a
+                            # local destination.
                             preflight_tracked = _tracked_destination_overlap(
                                 thread_db, -1, final_destination,
                             )
@@ -1098,63 +1395,75 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 )
                                 return
 
-                            # Make sure the archive parent exists NOW. Otherwise
-                            # the pipeline would stage and process everything,
-                            # then fail at the final move_folder call when rsync
-                            # tries to write to a missing parent — leaving the
-                            # staged copy stranded under ~/.vireo/staging with no
-                            # archive at the final destination. Nested archive
-                            # targets like /mnt/nas/NewShoot/Photos are the
-                            # common case: the parent /mnt/nas/NewShoot may not
-                            # have been created yet by the user.
-                            archive_parent = os.path.dirname(
-                                os.path.normpath(final_destination),
-                            )
-                            # Use lexists so a broken/dangling symlink at
-                            # final_destination is caught here too. os.path
-                            # .exists returns False for a broken symlink, so
-                            # a stale link left by an unmounted or moved
-                            # archive root would slip through, let the
-                            # pipeline stage and process everything, and
-                            # only fail when move_folder/rsync tried to
-                            # create a directory at a path already occupied
-                            # by that symlink entry.
-                            if (
-                                os.path.lexists(final_destination)
-                                and not os.path.isdir(final_destination)
-                            ):
-                                _bail_storage(
-                                    f"Archive destination {final_destination} "
-                                    "already exists and is not a directory."
+                            if remote_archive is None:
+                                # Make sure the archive parent exists NOW. Otherwise
+                                # the pipeline would stage and process everything,
+                                # then fail at the final move_folder call when rsync
+                                # tries to write to a missing parent — leaving the
+                                # staged copy stranded under ~/.vireo/staging with no
+                                # archive at the final destination. Nested archive
+                                # targets like /mnt/nas/NewShoot/Photos are the
+                                # common case: the parent /mnt/nas/NewShoot may not
+                                # have been created yet by the user.
+                                #
+                                # All four checks in this branch are
+                                # local-filesystem-only. For a remote archive
+                                # the destination lives on the NAS: the SSH
+                                # connection test above already proved the
+                                # remote base is a writable directory, and
+                                # move_folder's remote path mkdir-p's the
+                                # subpath parents itself. The local mount
+                                # path deliberately isn't probed — it may
+                                # legitimately be unmounted while archiving
+                                # over SSH (that's the point of this mode).
+                                archive_parent = os.path.dirname(
+                                    os.path.normpath(final_destination),
                                 )
-                                return
-                            # Existing archive roots can be mounted volumes; new
-                            # archive leaves have to probe the existing parent.
-                            archive_space_path = (
-                                final_destination
-                                if os.path.exists(final_destination)
-                                else archive_parent
-                            )
-                            missing_mount_root = (
-                                _missing_archive_mount_root(final_destination)
-                                or _missing_archive_mount_root(archive_parent)
-                            )
-                            if missing_mount_root:
-                                _bail_storage(
-                                    f"Archive mount root {missing_mount_root} "
-                                    "is not available. Check that the "
-                                    "destination drive is mounted and writable."
+                                # Use lexists so a broken/dangling symlink at
+                                # final_destination is caught here too. os.path
+                                # .exists returns False for a broken symlink, so
+                                # a stale link left by an unmounted or moved
+                                # archive root would slip through, let the
+                                # pipeline stage and process everything, and
+                                # only fail when move_folder/rsync tried to
+                                # create a directory at a path already occupied
+                                # by that symlink entry.
+                                if (
+                                    os.path.lexists(final_destination)
+                                    and not os.path.isdir(final_destination)
+                                ):
+                                    _bail_storage(
+                                        f"Archive destination {final_destination} "
+                                        "already exists and is not a directory."
+                                    )
+                                    return
+                                # Existing archive roots can be mounted volumes; new
+                                # archive leaves have to probe the existing parent.
+                                archive_space_path = (
+                                    final_destination
+                                    if os.path.exists(final_destination)
+                                    else archive_parent
                                 )
-                                return
-                            try:
-                                os.makedirs(archive_parent, exist_ok=True)
-                            except OSError as exc:
-                                _bail_storage(
-                                    f"Archive parent {archive_parent} could "
-                                    f"not be created: {exc}. Check that the "
-                                    "destination drive is mounted and writable."
+                                missing_mount_root = (
+                                    _missing_archive_mount_root(final_destination)
+                                    or _missing_archive_mount_root(archive_parent)
                                 )
-                                return
+                                if missing_mount_root:
+                                    _bail_storage(
+                                        f"Archive mount root {missing_mount_root} "
+                                        "is not available. Check that the "
+                                        "destination drive is mounted and writable."
+                                    )
+                                    return
+                                try:
+                                    os.makedirs(archive_parent, exist_ok=True)
+                                except OSError as exc:
+                                    _bail_storage(
+                                        f"Archive parent {archive_parent} could "
+                                        f"not be created: {exc}. Check that the "
+                                        "destination drive is mounted and writable."
+                                    )
+                                    return
 
                             os.makedirs(params.destination, exist_ok=True)
                             selected_files = selected_source_files(
@@ -1164,22 +1473,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 exclude_paths=params.exclude_paths,
                             )
                             # When skip_duplicates is on, ingest() will skip
-                            # sources whose content hash is already in the
-                            # catalog before they ever reach staging. Pass
-                            # those known hashes to the conflict preflight so
-                            # a duplicate-source that happens to share an
-                            # archive path with an unrelated file does not
-                            # falsely abort the run — ingest will not copy
-                            # it, so it cannot conflict at archive time.
-                            catalog_hashes: set[str] | None = None
-                            if params.skip_duplicates:
-                                catalog_hashes = {
-                                    row["file_hash"]
-                                    for row in thread_db.conn.execute(
-                                        "SELECT file_hash FROM photos "
-                                        "WHERE file_hash IS NOT NULL"
-                                    )
-                                }
+                            # sources that duplicate cataloged photos before
+                            # they ever reach staging. Give the conflict
+                            # preflight a fresh instance of the same
+                            # duplicate oracle so a duplicate-source that
+                            # happens to share an archive path with an
+                            # unrelated file does not falsely abort the run
+                            # — ingest will not copy it, so it cannot
+                            # conflict at archive time.
 
                             from move import _case_insensitive_root
 
@@ -1283,20 +1584,34 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     )
                                 return indexed
 
-                            archive_report = archive_conflict_report(
-                                final_destination,
-                                selected_files,
-                                params.folder_template,
-                                known_hashes=catalog_hashes,
-                                indexed_paths=_indexed_archive_paths(
+                            if remote_archive is None:
+                                archive_report = archive_conflict_report(
                                     final_destination,
-                                ),
-                            )
-                            archive_conflicts = (
-                                archive_report["empty"]
-                                + archive_report["partial"]
-                                + archive_report["conflicts"]
-                            )
+                                    selected_files,
+                                    params.folder_template,
+                                    duplicate_checker=_fresh_checker(),
+                                    indexed_paths=_indexed_archive_paths(
+                                        final_destination,
+                                    ),
+                                )
+                                archive_conflicts = (
+                                    archive_report["empty"]
+                                    + archive_report["partial"]
+                                    + archive_report["conflicts"]
+                                )
+                            else:
+                                # The conflict report walks the destination
+                                # tree, which for a remote archive lives on
+                                # the NAS and isn't locally walkable. The
+                                # archive move itself runs the equivalent
+                                # guard over SSH before any file is copied —
+                                # move_folder's remote merge path probes with
+                                # ``rsync -an --existing --checksum`` and
+                                # refuses on any same-path file whose bytes
+                                # differ — so a conflict still cancels
+                                # cleanly, just at archive time instead of
+                                # here.
+                                archive_conflicts = []
                             if archive_conflicts:
                                 incomplete = (
                                     archive_report["empty"]
@@ -1358,7 +1673,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             if (
                                 params.skip_duplicates
                                 and selected_files
-                                and catalog_hashes is not None
+                                and catalog_index is not None
                             ):
                                 # Plan against the exact files ingest will
                                 # stage, not the full selection. This keeps
@@ -1366,30 +1681,115 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 # with skip_duplicates even when the unfiltered
                                 # plan appears to have enough space.
                                 planning_files = non_duplicate_files(
-                                    selected_files, catalog_hashes,
+                                    selected_files, _fresh_checker(),
                                 )
                             source_bytes = total_file_bytes(planning_files)
-                            # When a previous archive attempt left a partial
-                            # untracked directory at final_destination, the
-                            # retry uses move_folder(..., merge=True), which
-                            # rsyncs only the missing files. Credit the bytes
-                            # already published so the preflight doesn't
-                            # reject a retry whose remaining delta would fit.
-                            existing_bytes = existing_archive_bytes(
-                                final_destination,
-                                planning_files,
-                                params.folder_template,
-                            )
-                            plan = storage_plan(
-                                params.destination, source_bytes,
-                                archive_parent=archive_space_path,
-                                archive_existing_bytes=existing_bytes,
-                            )
+                            remote_summary_bits = []
+                            if remote_archive is None:
+                                # When a previous archive attempt left a partial
+                                # untracked directory at final_destination, the
+                                # retry uses move_folder(..., merge=True), which
+                                # rsyncs only the missing files. Credit the bytes
+                                # already published so the preflight doesn't
+                                # reject a retry whose remaining delta would fit.
+                                existing_bytes = existing_archive_bytes(
+                                    final_destination,
+                                    planning_files,
+                                    params.folder_template,
+                                )
+                                plan = storage_plan(
+                                    params.destination, source_bytes,
+                                    archive_parent=archive_space_path,
+                                    archive_existing_bytes=existing_bytes,
+                                )
+                            else:
+                                # Staging-only local plan (the archive volume
+                                # is the NAS, never the same device), then a
+                                # remote df probe for the archive side.
+                                # Probe failures degrade to "check skipped" —
+                                # logged and surfaced in the step summary and
+                                # result payload, never faked as numbers; the
+                                # archive move's own rsync failure is the
+                                # backstop if space actually runs out.
+                                from local_processing import (
+                                    RESERVED_FREE_BYTES,
+                                )
+                                from move import _remote_free_bytes
+                                plan = storage_plan(
+                                    params.destination, source_bytes,
+                                )
+                                target = remote_archive["target"]
+                                # No merge/resume credit for a remote archive:
+                                # the local resume-credit path (existing_archive_bytes)
+                                # compares each destination file's size+content
+                                # against the source, but a remote equivalent
+                                # would need a per-file walk over SSH. A
+                                # whole-tree `du` reports every byte at the
+                                # path — including unrelated files or stale
+                                # partials that rsync --ignore-existing will
+                                # still copy past — which could cancel out
+                                # source_bytes and let the preflight pass on
+                                # a nearly-full NAS. Budget the full source
+                                # here; a retry whose remaining delta would
+                                # actually fit but the full source wouldn't
+                                # is a rare batch-reject we take over the
+                                # false-positive that lets processing burn
+                                # hours before the transfer fails on space.
+                                archive_delta = source_bytes
+                                plan["archive_existing_bytes"] = 0
+                                plan["archive_required_bytes"] = archive_delta
+                                # df the configured base (just verified as an
+                                # existing writable dir by the connection
+                                # test) rather than the not-yet-created leaf.
+                                remote_free = _remote_free_bytes(
+                                    target, target["remote_path"],
+                                )
+                                plan["archive_free_bytes"] = remote_free
+                                if remote_free is None:
+                                    log.warning(
+                                        "Couldn't probe free space at %s; "
+                                        "skipping remote free-space check",
+                                        remote_archive["display"],
+                                    )
+                                    remote_summary_bits.append(
+                                        "remote free-space check skipped "
+                                        "(probe failed)"
+                                    )
+                                    plan["archive_usable_bytes"] = None
+                                else:
+                                    archive_usable = max(
+                                        0, remote_free - RESERVED_FREE_BYTES,
+                                    )
+                                    plan["archive_usable_bytes"] = archive_usable
+                                    plan["archive_enough"] = (
+                                        archive_delta <= archive_usable
+                                    )
+                                    plan["enough"] = (
+                                        plan["staging_enough"]
+                                        and plan["archive_enough"]
+                                    )
+                                    plan["batching_required"] = not plan["enough"]
+                                    remote_summary_bits.append(
+                                        f"{format_bytes(remote_free)} free at "
+                                        f"{target['name']}"
+                                    )
                             result["local_processing"] = {
                                 **plan,
                                 "staging_destination": params.destination,
                                 "final_destination": final_destination,
                             }
+                            if remote_archive is not None:
+                                target = remote_archive["target"]
+                                result["local_processing"]["remote"] = {
+                                    "target_id": target["id"],
+                                    "target_name": target["name"],
+                                    "host": target["host"],
+                                    "user": target["user"],
+                                    "ssh_destination": remote_archive["ssh_final"],
+                                    "free_space_checked": (
+                                        plan["archive_free_bytes"] is not None
+                                    ),
+                                }
                             if plan["batching_required"]:
                                 # Tell the user which volume came up short — the
                                 # destination running out of room reads as a
@@ -1397,16 +1797,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 # drive) than the staging volume running out
                                 # (free space on ~/.vireo or batch later).
                                 if not plan.get("archive_enough", True):
-                                    _bail_storage(
-                                        "Archive destination needs about "
-                                        f"{format_bytes(plan['archive_required_bytes'])}, "
-                                        "but only "
-                                        f"{format_bytes(plan['archive_usable_bytes'] or 0)} "
-                                        f"is free under {archive_parent} after "
-                                        "the free-space reserve. Free space at "
-                                        "the destination or pick a different "
-                                        "archive folder."
-                                    )
+                                    if remote_archive is not None:
+                                        _bail_storage(
+                                            "Remote archive needs about "
+                                            f"{format_bytes(plan['archive_required_bytes'])}, "
+                                            "but only "
+                                            f"{format_bytes(plan['archive_usable_bytes'] or 0)} "
+                                            "is free at "
+                                            f"{remote_archive['display']} after "
+                                            "the free-space reserve. Free space "
+                                            "on the remote volume or pick a "
+                                            "different target or subpath."
+                                        )
+                                    else:
+                                        _bail_storage(
+                                            "Archive destination needs about "
+                                            f"{format_bytes(plan['archive_required_bytes'])}, "
+                                            "but only "
+                                            f"{format_bytes(plan['archive_usable_bytes'] or 0)} "
+                                            f"is free under {archive_parent} after "
+                                            "the free-space reserve. Free space at "
+                                            "the destination or pick a different "
+                                            "archive folder."
+                                        )
                                 else:
                                     _bail_storage(
                                         "Local processing needs about "
@@ -1423,6 +1836,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 f"{format_bytes(plan['required_bytes'])} needed, "
                                 f"{format_bytes(plan['usable_bytes'])} available"
                             )
+                            if remote_summary_bits:
+                                summary += "; " + "; ".join(remote_summary_bits)
                             stages["storage"]["status"] = "completed"
                             runner.update_step(
                                 job["id"], "storage",
@@ -1465,7 +1880,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     runner.update_step(job["id"], "ingest", status="running")
                     _update_stages(runner, job["id"], stages)
 
-                    accumulated_hashes: set = set()
+                    # One shared checker across the whole source loop: files
+                    # copied by earlier iterations are recorded in it, so
+                    # later sources treat them as duplicates even before the
+                    # DB scan (this replaces the old accumulated-hashes
+                    # re-read of every copied file between sources).
+                    ingest_checker = _fresh_checker()
                     all_copied_paths: list = []
                     all_duplicate_folders: set = set()
                     total_copied = 0
@@ -1481,7 +1901,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 folder_template=params.folder_template,
                                 skip_duplicates=params.skip_duplicates,
                                 progress_callback=ingest_cb,
-                                extra_known_hashes=accumulated_hashes,
+                                duplicate_checker=ingest_checker,
                                 skip_paths=params.exclude_paths,
                                 recursive=params.recursive,
                             )
@@ -1492,15 +1912,6 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         total_copied += result_info.get("copied", 0)
                         total_skipped += result_info.get("skipped_duplicate", 0)
                         total_failed += result_info.get("failed", 0)
-                        # Collect hashes of files just copied so the next source
-                        # iteration treats them as known even before the DB scan.
-                        if params.skip_duplicates:
-                            import contextlib
-
-                            from scanner import compute_file_hash
-                            for path in result_info.get("copied_paths", []):
-                                with contextlib.suppress(OSError):
-                                    accumulated_hashes.add(compute_file_hash(path))
 
                     # In local-processing mode, ingest failures must fail the
                     # ingest stage so archive_stage's "any earlier stage failed"
@@ -1560,6 +1971,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         return
                     else:
                         stages["ingest"]["status"] = "completed"
+                        # Ingest is the only stage that ever reads the source
+                        # (SD card/etc.) — everything after this point works
+                        # from the copy. Record counts so the UI can tell the
+                        # user the card is safe to eject instead of leaving
+                        # them to guess. Only claim this when every discovered
+                        # file actually made it off the card: local_processing
+                        # aborts above on any failure, but plain copy mode
+                        # (local_processing=False) reaches this branch even
+                        # with total_failed > 0, and the card still holds
+                        # files that never got copied.
+                        if total_failed == 0:
+                            stages["ingest"]["copied"] = total_copied
+                            stages["ingest"]["skipped_duplicate"] = total_skipped
+                            result["stages"]["ingest"] = {
+                                "copied": total_copied,
+                                "skipped_duplicate": total_skipped,
+                            }
                         runner.update_step(
                             job["id"], "ingest", status="completed",
                             summary=summary,
@@ -1656,8 +2084,38 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             f"and Folders (or Removable/Network Volumes) and "
                             f"grant Vireo access."
                         )
+                    # Snapshot-scoped: hand the scanner the exact file set
+                    # captured at snapshot time so a file that landed in the
+                    # folder AFTER the snapshot doesn't get cataloged here.
+                    # Without this, the scan walks the whole folder, commits
+                    # a photos row for the late arrival, then the collection
+                    # stage filters it out of downstream work AND the finally
+                    # block invalidates the new-images cache — orphaning the
+                    # file (cataloged in DB, never classified, never
+                    # re-surfaced by a later banner probe). Skipping it at
+                    # scan time keeps it uncataloged so the next probe
+                    # rediscovers it.
+                    snapshot_files_set = (
+                        set(snapshot_paths) if snapshot_paths is not None else None
+                    )
                     for src_folder in sources:
                         scanned_roots.append(src_folder)
+                        snapshot_restrict_dirs = None
+                        snapshot_restrict_files = None
+                        if snapshot_files_set is not None:
+                            src_norm = os.path.normpath(src_folder)
+                            prefix = (
+                                src_norm if src_norm.endswith(os.sep)
+                                else src_norm + os.sep
+                            )
+                            files_under_src = [
+                                p for p in snapshot_paths
+                                if os.path.normpath(p).startswith(prefix)
+                            ]
+                            snapshot_restrict_files = set(files_under_src)
+                            snapshot_restrict_dirs = sorted(
+                                {os.path.dirname(p) for p in files_under_src}
+                            )
                         try:
                             do_scan(
                                 src_folder, thread_db,
@@ -1668,6 +2126,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 skip_paths=params.exclude_paths,
                                 status_callback=status_cb,
                                 recursive=params.recursive,
+                                restrict_dirs=snapshot_restrict_dirs,
+                                restrict_files=snapshot_restrict_files,
                                 vireo_dir=effective_vireo_dir,
                                 thumb_cache_dir=effective_thumb_cache_dir,
                                 permission_error_callback=_on_denied,
@@ -1695,7 +2155,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     runner.update_step(job["id"], "scan", status="completed",
                                        summary=scan_summary)
             except Exception as e:
-                if str(e) == "scan cancelled" and (
+                if isinstance(e, ScanCancelled) and (
                     _should_abort(abort) or runner.is_cancelled(job["id"])
                 ):
                     abort.set()
@@ -1725,6 +2185,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 "Failed to invalidate new-images cache for %s",
                                 scanned_root,
                             )
+                        # scanner.scan touches disk and may add or remove
+                        # photo rows; a ready Missing Originals payload
+                        # computed before the pipeline scan can now be
+                        # stale (e.g. user restored an original before
+                        # running Process). Standalone scan / import jobs
+                        # already invalidate here — mirror that for
+                        # pipeline scans so GET /api/photos/missing does
+                        # not keep serving the pre-scan photo list.
+                        if missing_originals_invalidator is not None:
+                            try:
+                                missing_originals_invalidator()
+                            except Exception:
+                                log.exception(
+                                    "Failed to invalidate missing-originals "
+                                    "cache for %s",
+                                    scanned_root,
+                                )
                 scan_to_thumb.put(_SENTINEL)
                 _update_stages(runner, job["id"], stages)
 
@@ -1745,11 +2222,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
             # Snapshot-scoped runs: resolve the captured file paths to photo IDs
             # now that the scanner has committed rows, and trim the collection
-            # to exactly that set. A late-arriving file (landed in the folder
-            # after the snapshot) was still scanned — we walk the whole folder —
-            # but must not be classified or scored. Any snapshot path that never
-            # resolved (file was moved/deleted between snapshot and pipeline
-            # run) is logged so an unexpectedly small collection is auditable.
+            # to exactly that set. The scan stage already restricted the walk
+            # to the snapshot's file set via ``restrict_dirs`` + ``restrict_files``
+            # so late arrivals aren't cataloged in the first place; this filter
+            # is a belt-and-suspenders trim in case a pre-existing (already
+            # cataloged) photo somehow ends up in ``collected_photo_ids``. Any
+            # snapshot path that never resolved (file was moved/deleted between
+            # snapshot and pipeline run) is logged so an unexpectedly small
+            # collection is auditable.
             if snapshot_paths is not None:
                 resolver_db = Database(db_path)
                 resolver_db.set_active_workspace(workspace_id)
@@ -1839,6 +2319,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 generated = 0
                 skipped = 0
                 failed = 0
+                failed_photos = []
+                failure_detail_limit = 100
+
+                def _record_failure(photo_id, photo_path, reason):
+                    if len(failed_photos) >= failure_detail_limit:
+                        return
+                    failed_photos.append({
+                        "id": photo_id,
+                        "filename": os.path.basename(photo_path or ""),
+                        "reason": reason,
+                    })
 
                 # Mark photos.thumb_path so the dashboard's coverage query
                 # (`thumb_path IS NOT NULL`) reflects each freshly-generated or
@@ -1898,7 +2389,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         folder_path=folders.get(detail_photo["folder_id"]),
                                     )
                                 ):
-                                    skipped += 1
+                                    failed += 1
+                                    _record_failure(
+                                        photo_id, photo_path,
+                                        "RAW decode previously failed and no "
+                                        "acceptable fallback is available",
+                                    )
+                                    stages["thumbnails"]["count"] = (
+                                        generated + skipped + failed
+                                    )
                                     continue
                         recipe_kwargs = {"recipe": recipe} if recipe else {}
                         if recipe:
@@ -1930,8 +2429,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 photo_id, photo_path, cache_dir, thumb_size,
                                 recipe, folders.get(detail_photo["folder_id"]),
                             )
+                        if (
+                            result_path is None
+                            and detail_photo is not None
+                            and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                        ):
+                            result_path = _retry_thumbnail_with_working_copy(
+                                thread_db, generate_thumbnail, detail_photo,
+                                photo_id, photo_path, cache_dir, thumb_size,
+                                recipe, effective_vireo_dir,
+                            )
                         if result_path is None:
                             failed += 1
+                            _record_failure(
+                                photo_id, photo_path,
+                                "No acceptable thumbnail render source",
+                            )
                         elif already_exists:
                             skipped += 1
                             pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
@@ -1940,9 +2453,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
                         if len(pending_thumb_paths) >= THUMB_PATH_BATCH:
                             _flush_thumb_paths()
-                    except Exception:
+                    except Exception as exc:
                         failed += 1
-                        log.debug("Thumbnail failed for photo %s", photo_id)
+                        _record_failure(photo_id, photo_path, str(exc))
+                        log.debug(
+                            "Thumbnail failed for photo %s", photo_id,
+                            exc_info=True,
+                        )
                     # Include failed in the progress counter so the dashboard
                     # reflects all work attempted, not just successes. Mixed
                     # success/failure must not hide behind a 0/N progress bar.
@@ -2005,7 +2522,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         folder_path=folders.get(detail_photo["folder_id"]),
                                     )
                                 ):
-                                    skipped += 1
+                                    failed += 1
+                                    _record_failure(
+                                        photo_id, photo_path,
+                                        "RAW decode previously failed and no "
+                                        "acceptable fallback is available",
+                                    )
+                                    stages["thumbnails"]["count"] = (
+                                        generated + skipped + failed
+                                    )
                                     continue
                             recipe_kwargs = {"recipe": recipe} if recipe else {}
                             if recipe:
@@ -2037,8 +2562,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     photo_id, photo_path, cache_dir, thumb_size,
                                     recipe, folder_path,
                                 )
+                            if (
+                                result_path is None
+                                and detail_photo is not None
+                                and os.path.splitext(photo_path)[1].lower() in _RAW_EXTENSIONS
+                            ):
+                                result_path = _retry_thumbnail_with_working_copy(
+                                    thread_db, generate_thumbnail, detail_photo,
+                                    photo_id, photo_path, cache_dir, thumb_size,
+                                    recipe, effective_vireo_dir,
+                                )
                             if result_path is None:
                                 failed += 1
+                                _record_failure(
+                                    photo_id, photo_path,
+                                    "No acceptable thumbnail render source",
+                                )
                             elif already_exists:
                                 skipped += 1
                                 pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
@@ -2047,9 +2586,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 pending_thumb_paths.append((f"{photo_id}.jpg", photo_id))
                             if len(pending_thumb_paths) >= THUMB_PATH_BATCH:
                                 _flush_thumb_paths()
-                        except Exception:
+                        except Exception as exc:
                             failed += 1
-                            log.debug("Thumbnail failed for photo %s", photo_id)
+                            _record_failure(photo_id, photo_path, str(exc))
+                            log.debug(
+                                "Thumbnail failed for photo %s", photo_id,
+                                exc_info=True,
+                            )
                         stages["thumbnails"]["count"] = generated + skipped + failed
                         stages["thumbnails"]["total"] = total
                         processed = generated + skipped + failed
@@ -2070,20 +2613,33 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 _flush_thumb_paths()
 
                 from thumbnails import format_summary as thumb_summary
-                thumb_result = {"generated": generated, "skipped": skipped, "failed": failed}
+                thumb_result = {
+                    "generated": generated,
+                    "skipped": skipped,
+                    "failed": failed,
+                }
+                if failed_photos:
+                    thumb_result["failed_photos"] = failed_photos
+                if failed > len(failed_photos):
+                    thumb_result["failed_photos_truncated"] = (
+                        failed - len(failed_photos)
+                    )
                 processed = generated + skipped + failed
-                # Mixed-outcome rollup: any failure flips status to 'failed'.
-                # The summary still shows both counts so partial success is visible,
-                # but status surfaces the problem on the job history list.
-                final_status = "failed" if failed > 0 else "completed"
-                stages["thumbnails"]["status"] = final_status
+                # Per-photo failures leave coverage gaps but do not invalidate
+                # thumbnails that were generated successfully. Keep the stage
+                # terminal and expose the affected photos as repair details;
+                # fatal setup/runtime exceptions still take the except path.
+                stages["thumbnails"]["status"] = "completed"
+                stages["thumbnails"]["error_count"] = failed
                 thumb_rollup = (
-                    f"[thumbnails] {failed} of {processed} thumbnails failed to generate"
+                    f"{failed} of {processed} thumbnails need attention"
                     if failed > 0 else None
                 )
                 if thumb_rollup:
-                    errors.append(thumb_rollup)
-                runner.update_step(job["id"], "thumbnails", status=final_status,
+                    result.setdefault("warnings", []).append(
+                        f"[thumbnails] {thumb_rollup}"
+                    )
+                runner.update_step(job["id"], "thumbnails", status="completed",
                                    summary=thumb_summary(thumb_result),
                                    error_count=failed,
                                    error=thumb_rollup,
@@ -2217,9 +2773,40 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 pass  # photo may have been deleted mid-pipeline
                             continue
                     if not os.path.exists(cache_path):
-                        canonical = _recipe_render_source(
-                            detail_photo, recipe, max_size, base_dir, folders,
-                        )
+                        folder_path = folders.get(detail_photo["folder_id"])
+                        raw_source_path = None
+                        if (
+                            not recipe
+                            and folder_path
+                            and os.path.splitext(detail_photo["filename"])[1].lower()
+                            in _RAW_EXTENSIONS
+                        ):
+                            # Mirror /photos/<id>/preview: an unedited RAW
+                            # must warm from the camera-rendered source,
+                            # not the highlight-preserving working copy.
+                            # Otherwise the pipeline preview stage writes
+                            # flatter/darker bytes into the tracked preview
+                            # cache and _serve_preview returns those cache
+                            # hits before its own RAW-source branch ever
+                            # runs, so the migration's one-time purge is
+                            # undone the first time this stage runs.
+                            candidate = os.path.join(
+                                folder_path, detail_photo["filename"],
+                            )
+                            if os.path.exists(candidate) and not _has_current_working_copy_failure(
+                                detail_photo,
+                                base_dir,
+                                trust_existing_working_copy=False,
+                                live_source_path=candidate,
+                                folder_path=folder_path,
+                            ):
+                                raw_source_path = candidate
+                        if raw_source_path:
+                            canonical = raw_source_path
+                        else:
+                            canonical = _recipe_render_source(
+                                detail_photo, recipe, max_size, base_dir, folders,
+                            )
                         if (
                             os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
                             and _has_current_working_copy_failure(
@@ -2336,10 +2923,15 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         canonical = companion_abs
                         if img:
                             if recipe:
+                                import local_masks
                                 img = apply_recipe_to_loaded_image(
                                     img, recipe, max_size=max_size,
                                     native_size=_recipe_source_dimensions(
                                         detail_photo
+                                    ),
+                                    local_mask=local_masks.load_snapshot(
+                                        effective_vireo_dir,
+                                        photo["id"], recipe,
                                     ),
                                 )
                             # Atomic write: with SLOT_CAP > 1 two pipelines
@@ -3097,6 +3689,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 total = len(photos)
 
                 total_predictions_stored = 0
+                total_full_image_fallbacks = 0
                 total_failed = 0
                 total_skipped_existing = 0
                 # Track unique photo IDs that failed in any model so the rollup
@@ -3112,6 +3705,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # (all detected photos) would incorrectly delete detections for
                 # photos that weren't reached if the job was aborted mid-classify.
                 first_model_photo_ids: set = set()
+                fresh_full_image_ids_by_photo: dict = {}
 
                 from datetime import datetime as dt
 
@@ -3262,6 +3856,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     raw_results: list = []
                     failed = 0
                     skipped_existing = 0
+                    full_image_fallbacks = 0
                     stages["classify"].setdefault("cached", 0)
                     stages["classify"].setdefault("seen", 0)
                     # Photos that iterated past the inner abort check IN THIS spec.
@@ -3357,16 +3952,17 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             # never completed (e.g. mid-batch exception, or the
                             # detect stage was skipped for an already-detected
                             # non-reclassify run — in which case the DB holds the
-                            # authoritative rows). Photos with no detections get
-                            # skipped entirely; pipeline classify is detection-
-                            # driven and won't synthesize full-image boxes.
+                            # authoritative rows). If MegaDetector produced no
+                            # real rows at all, synthesize a full-image anchor so
+                            # classifiers still get one attempt and future reruns
+                            # can hit classifier_runs for that attempt.
+                            full_image_fallback = False
                             if photo["id"] in cached_detections:
                                 # cached_detections from _detect_batch can include
                                 # full-image rows when an earlier pass synthesized
                                 # them (legacy db state); filter to match the
-                                # fallback-query branch below so primary_det never
-                                # lands on a full-image box. Pipeline classify is
-                                # detection-driven and won't classify full-image.
+                                # fallback-query branch below so primary_det only
+                                # lands on a real detector box.
                                 photo_dets = [
                                     d for d in cached_detections[photo["id"]]
                                     if d.get("detector_model") != "full-image"
@@ -3387,7 +3983,53 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 ]
                             primary_det = photo_dets[0] if photo_dets else None
                             if primary_det is None:
-                                continue
+                                # Distinguish "no eligible detection at the
+                                # workspace threshold" from "MegaDetector found
+                                # nothing at all." Weak raw detections keep the
+                                # existing behavior for now; true no-detection
+                                # photos get full-image classification.
+                                raw_real_dets = [
+                                    d for d in thread_db.get_detections(
+                                        photo["id"], min_conf=0,
+                                    )
+                                    if d["detector_model"] != "full-image"
+                                ]
+                                if raw_real_dets:
+                                    continue
+
+                                existing_full = thread_db.get_detections(
+                                    photo["id"],
+                                    detector_model="full-image",
+                                    min_conf=0,
+                                )
+                                if existing_full and not params.reclassify:
+                                    full_det_id = existing_full[0]["id"]
+                                else:
+                                    full_det_ids = thread_db.save_detections(
+                                        photo["id"],
+                                        [{
+                                            "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                                            "confidence": 0,
+                                            "category": "animal",
+                                        }],
+                                        detector_model="full-image",
+                                    )
+                                    full_det_id = full_det_ids[0]
+                                primary_det = {
+                                    "id": full_det_id,
+                                    "box_x": 0,
+                                    "box_y": 0,
+                                    "box_w": 1,
+                                    "box_h": 1,
+                                    "confidence": 0,
+                                    "category": "animal",
+                                    "detector_model": "full-image",
+                                }
+                                full_image_fallback = True
+                                full_image_fallbacks += 1
+                                fresh_full_image_ids_by_photo.setdefault(
+                                    photo["id"], set(),
+                                ).add(full_det_id)
 
                             # Classifier-run gate: skip work when this exact
                             # (detection, classifier_model, labels_fingerprint)
@@ -3452,7 +4094,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     # instead of stranding the detection.
 
                             img, folder_path, image_path = _prepare_image(
-                                photo, folders, primary_det,
+                                photo, folders,
+                                None if full_image_fallback else primary_det,
                             )
                             if img is None:
                                 failed += 1
@@ -3559,6 +4202,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
                     preds = group_result["predictions_stored"]
                     total_predictions_stored += preds
+                    total_full_image_fallbacks += full_image_fallbacks
                     total_failed += failed
                     total_skipped_existing += skipped_existing
                     models_succeeded += 1
@@ -3598,22 +4242,29 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         # whose boxes didn't change — the common reclassify case.
                         # Compare against the ids THIS run actually re-detected
                         # (detect_state["detections"] is the in-memory map
-                        # _detect_batch built); a photo that came back empty has
-                        # no entry, so its pre-run rows are all stale and get
-                        # purged (write_detection_batch([]) already cleared them at
-                        # the data layer — this is the belt-and-suspenders pass and
-                        # cross-model cleanup). A photo re-detected with the same
-                        # boxes has its ids in the fresh set, so they survive.
+                        # _detect_batch built). A no-detection photo may also
+                        # have a freshly used synthetic full-image anchor from
+                        # the fallback path; preserve that id so the purge does
+                        # not cascade-delete the new fallback prediction. Other
+                        # pre-run rows on empty photos are stale and get purged
+                        # (write_detection_batch([]) already cleared the
+                        # MegaDetector rows at the data layer — this is the
+                        # belt-and-suspenders pass and cross-model cleanup). A
+                        # photo re-detected with the same boxes has its ids in
+                        # the fresh set, so they survive.
                         fresh_by_photo = detect_state["detections"]
                         stale_ids = [
                             det_id
                             for photo_id, id_set in pre_ids.items()
                             if photo_id in purge_ids
                             for det_id in id_set
-                            if det_id not in {
-                                d["id"]
-                                for d in fresh_by_photo.get(photo_id, [])
-                            }
+                            if det_id not in (
+                                {
+                                    d["id"]
+                                    for d in fresh_by_photo.get(photo_id, [])
+                                }
+                                | fresh_full_image_ids_by_photo.get(photo_id, set())
+                            )
                         ]
                         if stale_ids:
                             getattr(
@@ -3632,6 +4283,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     parts = [f"{preds} predictions"]
                     if skipped_existing:
                         parts.append(f"{skipped_existing} cached")
+                    if full_image_fallbacks:
+                        parts.append(f"{full_image_fallbacks} full-image fallback")
                     if failed:
                         parts.append(f"{failed} failed")
                     runner.update_step(
@@ -3676,6 +4329,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     "detected": detect_state["total_detected"],
                     "failed": total_failed,
                     "already_classified": total_skipped_existing,
+                    "full_image_fallbacks": total_full_image_fallbacks,
                     "model_count": len(resolved_specs_local),
                     "models_succeeded": models_succeeded,
                     "models_skipped": len(skipped_model_names),
@@ -4286,7 +4940,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 thread_db = Database(db_path)
                 thread_db.set_active_workspace(workspace_id)
                 effective_cfg = thread_db.get_effective_config(cfg.load())
-                pipeline_cfg = effective_cfg.get("pipeline", {})
+                pipeline_cfg = dict(effective_cfg.get("pipeline", {}))
+
+                # Apply the per-run eye-detect override only when the caller
+                # sent an explicit signal. ``skip_eye_keypoints=False`` alone
+                # is not proof of opt-in: ``the "Full" saved process`` sets it
+                # to False as a base default, so an after-import ``full``
+                # chain would otherwise force ``eye_detect_enabled=True``
+                # against a workspace whose Settings default is False (the
+                # new default) — triggering SuperAnimal downloads and eye-
+                # based scoring by default. ``eye_detect_override`` is the
+                # explicit signal the Process page sends alongside its
+                # checkbox state; strategy expansion leaves it None, so a
+                # chained ``full`` run respects the user's Settings value.
+                if params.eye_detect_override is not None:
+                    pipeline_cfg["eye_detect_enabled"] = params.eye_detect_override
 
                 # Mirror the stage-level preflight so a no-op run doesn't pay the
                 # O(N) eligibility join cost or report a misleading
@@ -4481,7 +5149,120 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         def regroup_stage():
             """Run pipeline grouping + scoring + triage from cached features."""
-            if params.skip_regroup or abort.is_set() or not collection_id:
+            if params.skip_regroup:
+                # Only take the species-review save path when the caller
+                # explicitly asked for it (the identify preset sets
+                # ``review_mode="species"`` via process_strategies). A
+                # classify-only run without that opt-in — Advanced/Custom
+                # on the Process page, or an API client sending
+                # ``skip_regroup: true`` — must NOT overwrite
+                # ``pipeline_results_ws*.json`` with all-REVIEW species
+                # output, since that would silently reintroduce the
+                # culling-pipeline downgrade the reviewer flagged (the
+                # user just wanted to refresh classifications, not turn
+                # the workspace cache into a species-review cache).
+                do_species = (
+                    params.review_mode == "species"
+                    and not abort.is_set()
+                    and collection_id
+                    and not params.skip_classify
+                )
+                if not do_species:
+                    stages["regroup"]["status"] = "skipped"
+                    runner.update_step(job["id"], "regroup", status="completed",
+                                       summary="Skipped")
+                    # Emit a progress event so the SSE stream (and tests
+                    # asserting on the last progress payload) can see the
+                    # stage's terminal "skipped" state. Without this, a
+                    # downstream miss_stage that also short-circuits
+                    # leaves the last stages dict stuck at whatever the
+                    # detect/classify stage emitted last.
+                    _update_stages(runner, job["id"], stages)
+                    return
+                try:
+                    import config as cfg
+                    from pipeline import (
+                        load_photo_features,
+                        run_species_review_pipeline,
+                        save_results,
+                    )
+
+                    thread_db = Database(db_path)
+                    thread_db.set_active_workspace(workspace_id)
+
+                    effective_cfg = thread_db.get_effective_config(cfg.load())
+                    pipeline_cfg = effective_cfg.get("pipeline", {})
+
+                    photos = load_photo_features(
+                        thread_db,
+                        collection_id=collection_id,
+                        config=effective_cfg,
+                    )
+                    if params.exclude_photo_ids:
+                        photos = [
+                            p for p in photos
+                            if p["id"] not in params.exclude_photo_ids
+                        ]
+                    if not photos:
+                        result["stages"]["review"] = {
+                            "error": "No photos with pipeline features found.",
+                        }
+                    else:
+                        results = run_species_review_pipeline(
+                            photos,
+                            config=pipeline_cfg,
+                            emit_trace=True,
+                        )
+                        cache_dir = os.path.dirname(db_path)
+                        # Don't preserve miss_computed_at from any prior
+                        # full run. The identify strategy skips the miss
+                        # stage entirely, so the cache we're writing has
+                        # no misses of its own; carrying the old marker
+                        # forward would make Pipeline Review call
+                        # /api/misses?since=<old marker> and render miss
+                        # rows from the previous full run as if they were
+                        # produced by this identify pass.
+                        save_results(
+                            results,
+                            cache_dir,
+                            workspace_id,
+                            preserve_miss_marker=False,
+                        )
+                        # The species-only pipeline overwrites
+                        # pipeline_results_ws*.json with review-only output
+                        # (no burst/keep/reject scoring). If a prior full
+                        # regroup left a valid last_group_fingerprint stamped
+                        # on the workspace, pipeline_plan._group_plan would
+                        # match it against current settings and report
+                        # "done-prior" — silently letting an advanced Group
+                        # & Score run be skipped even though the cache no
+                        # longer contains any triage output. Invalidate the
+                        # stamp so a subsequent full run is correctly shown
+                        # as will-run.
+                        thread_db.set_workspace_group_state(
+                            workspace_id=workspace_id,
+                            fingerprint=None,
+                            when_ts=None,
+                        )
+                        result["stages"]["review"] = results.get("summary", {})
+
+                    stages["regroup"]["status"] = "completed"
+                    runner.update_step(
+                        job["id"], "regroup",
+                        status="completed",
+                        summary="Review results ready" if photos else "No photos to group",
+                    )
+                except Exception as e:
+                    errors.append(f"[review] Fatal: {e}")
+                    log.exception("Pipeline species-review stage failed")
+                    stages["regroup"]["status"] = "failed"
+                    runner.update_step(
+                        job["id"], "regroup", status="failed", error=str(e),
+                    )
+                _update_stages(runner, job["id"], stages)
+                return
+
+            if abort.is_set() or not collection_id:
                 stages["regroup"]["status"] = "skipped"
                 runner.update_step(job["id"], "regroup", status="completed",
                                    summary="Skipped")
@@ -4507,7 +5288,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 thread_db.set_active_workspace(workspace_id)
 
                 effective_cfg = thread_db.get_effective_config(cfg.load())
-                pipeline_cfg = effective_cfg.get("pipeline", {})
+                pipeline_cfg = dict(effective_cfg.get("pipeline", {}))
+
+                # Mirror the eye_keypoints_stage per-run override so scoring
+                # honors the same explicit intent. Without carrying the
+                # override into pipeline_cfg here, ``run_full_pipeline``
+                # reloads workspace config with ``eye_detect_enabled=False``
+                # (the new default) and ``score_encounter`` ignores the
+                # ``eye_tenengrad`` values the eye stage just wrote — so the
+                # visible checkbox would affect only the expensive keypoint
+                # pass, not the culling result the user actually sees.
+                # Gated on ``eye_detect_override`` (an explicit per-run
+                # signal), NOT on ``not skip_eye_keypoints``, because the
+                # latter is False by default in ``the "Full" saved process``
+                # too — using it would force eye scoring on for any chained
+                # ``full`` run regardless of workspace Settings.
+                if params.eye_detect_override is not None:
+                    pipeline_cfg["eye_detect_enabled"] = params.eye_detect_override
 
                 photos = load_photo_features(thread_db, collection_id=collection_id, config=effective_cfg)
                 if params.exclude_photo_ids:
@@ -4552,9 +5349,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             (workspace_id,),
                         ).fetchall()
                     }
+                    # A per-run eye override that differs from the
+                    # workspace's own effective ``eye_detect_enabled`` means
+                    # this run's KEEP/REJECT decisions came from scoring
+                    # settings the workspace's normal state wouldn't produce.
+                    # ``compute_group_fingerprint`` reads only encounter/burst
+                    # keys — not ``eye_detect_enabled`` — so stamping it here
+                    # would mark eye-scored (or eye-disabled) results as
+                    # settings-fresh for a later plan run against the
+                    # workspace's real settings. Treat that as a partial run
+                    # so ``pipeline_plan`` reports the cache as needing to
+                    # re-run instead of hiding the mismatch.
+                    workspace_eye_setting = bool(
+                        effective_cfg.get("pipeline", {}).get(
+                            "eye_detect_enabled", False,
+                        )
+                    )
+                    per_run_eye_override_differs = (
+                        params.eye_detect_override is not None
+                        and bool(params.eye_detect_override) != workspace_eye_setting
+                    )
                     covered_full_workspace = (
                         not params.exclude_photo_ids
                         and ws_photo_ids.issubset(collection_photo_ids)
+                        and not per_run_eye_override_differs
                     )
                     if covered_full_workspace:
                         thread_db.set_workspace_group_state(
@@ -4621,10 +5439,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                    summary="Skipped")
                 return
 
-            stages["misses"]["status"] = "running"
-            runner.update_step(job["id"], "misses", status="running")
-            _update_stages(runner, job["id"], stages)
-
+            # Hoisted from the try: block below so the miss_enabled guard can
+            # read effective config before the transient "running" status is
+            # written.
             try:
                 from datetime import UTC, datetime
 
@@ -4637,13 +5454,58 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                 effective_cfg = thread_db.get_effective_config(cfg.load())
                 pipeline_cfg = effective_cfg.get("pipeline", {})
+            except Exception as e:
+                # Mark the stage failed BEFORE returning. The transient
+                # "running" write is *below* this guard, so without stamping
+                # "failed" here the stage would stay "pending"; the pipeline
+                # finalizer treats absence-of-failed as success and would
+                # wrongly mark the whole job completed despite a fatal setup
+                # error (cfg.load, Database(...), or any import raising).
+                stages["misses"]["status"] = "failed"
+                runner.update_step(job["id"], "misses", status="failed",
+                                   error=str(e))
+                errors.append(f"[misses] Fatal: {e}")
+                log.exception("Pipeline miss-detection setup failed")
+                _update_stages(runner, job["id"], stages)
+                return
 
+            # Effective miss_enabled: per-run PipelineParams override wins
+            # over workspace config, mirroring how other skip_* flags
+            # override workspace defaults. Inject the effective value into
+            # pipeline_cfg *before* the guard so both branches — the
+            # short-circuit skip AND the fall-through to compute — see the
+            # same value: compute_misses_for_workspace reads
+            # pipeline_cfg["miss_enabled"] itself, so a strategy that
+            # enables misses on a workspace where they're disabled would
+            # otherwise get a silent 0 from compute.
+            if params.miss_enabled is not None:
+                pipeline_cfg = {**pipeline_cfg,
+                                "miss_enabled": params.miss_enabled}
+            miss_enabled = pipeline_cfg.get("miss_enabled", True)
+            if not miss_enabled:
+                # Do NOT fall through to compute_misses_for_workspace: it
+                # returns 0 when disabled and the completion path would then
+                # stamp "0 photos evaluated", which reads as "misses ran and
+                # found none" rather than "misses were disabled". Skipping
+                # here also leaves the miss_computed_at cache marker
+                # unstamped, which pipeline_review's "current-run misses"
+                # shortcut depends on.
+                stages["misses"]["status"] = "skipped"
+                runner.update_step(job["id"], "misses", status="completed",
+                                   summary="Skipped")
+                _update_stages(runner, job["id"], stages)
+                return
+
+            stages["misses"]["status"] = "running"
+            runner.update_step(job["id"], "misses", status="running")
+            _update_stages(runner, job["id"], stages)
+
+            try:
                 # Share one timestamp between the DB write and the saved
                 # pipeline-results cache so pipeline_review's "Review misses"
                 # shortcut can gate on actual recomputation in this run and
                 # scope /misses?since=... to exactly what was just written.
                 now_ts = datetime.now(UTC).isoformat(timespec="microseconds")
-                miss_enabled = pipeline_cfg.get("miss_enabled", True)
 
                 n = compute_misses_for_workspace(
                     thread_db,
@@ -4679,259 +5541,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             _update_stages(runner, job["id"], stages)
 
         def archive_stage():
-            """Move a local-processing staging folder to the final destination."""
-            if not params.local_processing:
-                return
+            """Retired import/archive path guard.
 
-            def _deindex_staging():
-                # scanner_stage may have already registered the staging folder
-                # and its photos' hashes before we got here. Without removing
-                # those rows a retry of the same source would hit ingest()'s
-                # known-hash skip and copy nothing — the user would then
-                # "successfully" archive an empty destination while the
-                # original files only ever existed in the abandoned staging
-                # tree. Leave the on-disk staging files in place so the user
-                # can still recover them.
-                #
-                # Cached thumbnails/previews/working copies for the staged
-                # photos also have to go: the FK cascade clears preview_cache
-                # rows but leaves the on-disk ``{photo_id}.jpg`` files. SQLite
-                # reuses freed rowids, so a retry that lands on one of the
-                # abandoned staging photo IDs would treat the stale cache file
-                # as a valid thumbnail and skip regenerating it.
-                try:
-                    from pipeline import _results_cache_path
-                    from preview_cache import (
-                        cleanup_cached_files_for_deleted_photos,
-                    )
-
-                    thread_db = Database(db_path)
-                    thread_db.set_active_workspace(workspace_id)
-                    folder = thread_db.conn.execute(
-                        "SELECT id FROM folders WHERE path = ?",
-                        (params.destination,),
-                    ).fetchone()
-                    if folder:
-                        result = thread_db.delete_folder(folder["id"])
-                        cleanup_cached_files_for_deleted_photos(
-                            effective_thumb_cache_dir,
-                            result.get("files", []),
-                        )
-                        thread_db.set_workspace_group_state(
-                            workspace_id=workspace_id,
-                            fingerprint=None,
-                            when_ts=None,
-                        )
-                        with contextlib.suppress(OSError):
-                            os.unlink(
-                                _results_cache_path(
-                                    os.path.dirname(db_path), workspace_id,
-                                )
-                            )
-                except Exception:
-                    log.exception(
-                        "Failed to deindex local staging folder on archive skip",
-                    )
-
-            if abort.is_set() or runner.is_cancelled(job["id"]):
-                # Fatal upstream stages (partial scan, thumbnail setup, model
-                # load, detect, classify) set abort and fall through to here
-                # without populating stages[*]["status"] == "failed", so the
-                # already_failed branch below would miss them. Deindex here too
-                # — otherwise the next retry of the same source would treat
-                # every file as a duplicate and publish an empty archive.
-                _deindex_staging()
-                stages["archive"]["status"] = "skipped"
-                runner.update_step(
-                    job["id"], "archive", status="completed", summary="Skipped",
+            Importing photos now runs through import_job.py and
+            /api/jobs/import-photos. The old local-processing archive stage
+            intentionally has no cleanup/deindex path left here: orphaned
+            staging folders are reconciled by staging_recovery.py before any
+            deletion is offered.
+            """
+            if params.local_processing or params.destination:
+                raise RuntimeError(
+                    "Pipeline import/archive mode has been removed. Use the "
+                    "Import page or /api/jobs/import-photos to copy photos "
+                    "into the archive."
                 )
-                _update_stages(runner, job["id"], stages)
-                return
-            if not final_destination:
-                stages["archive"]["status"] = "skipped"
-                runner.update_step(
-                    job["id"], "archive", status="completed", summary="Skipped",
-                )
-                _update_stages(runner, job["id"], stages)
-                return
-            # Don't publish partial results: previews, extract_masks,
-            # eye_keypoints, regroup, and miss can all fail without setting
-            # abort, and run_pipeline_job marks the whole job failed at the
-            # end whenever any stage status is "failed". If we ran the archive
-            # in between, the staged folder would have already moved to
-            # final_destination by the time that failure was raised — leaving
-            # the user with a published archive whose pipeline never finished.
-            # Skip instead so staging stays intact and the failure is visible.
-            already_failed = [
-                name for name, s in stages.items() if s.get("status") == "failed"
-            ]
-            if already_failed:
-                _deindex_staging()
-                stages["archive"]["status"] = "skipped"
-                runner.update_step(
-                    job["id"], "archive",
-                    status="completed",
-                    summary=f"Skipped ({already_failed[0]} failed)",
-                )
-                _update_stages(runner, job["id"], stages)
-                return
-
-            stages["archive"]["status"] = "running"
-            runner.update_step(job["id"], "archive", status="running")
-            _update_stages(runner, job["id"], stages)
-
-            try:
-                import config as cfg
-                from move import move_folder
-
-                thread_db = Database(db_path)
-                thread_db.set_active_workspace(workspace_id)
-                folder = thread_db.conn.execute(
-                    "SELECT id FROM folders WHERE path = ?", (params.destination,)
-                ).fetchone()
-                if not folder:
-                    raise RuntimeError(
-                        f"local staging folder was not indexed: {params.destination}"
-                    )
-
-                effective_cfg = thread_db.get_effective_config(cfg.load())
-                developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
-                archive_parent = os.path.dirname(os.path.normpath(final_destination))
-                total_files = {"value": 0}
-
-                def archive_cb(current, total, filename, phase=None):
-                    total_files["value"] = max(total_files["value"], total or 0)
-                    stages["archive"]["count"] = current
-                    stages["archive"]["total"] = total
-                    runner.update_step(
-                        job["id"], "archive",
-                        current_file=filename,
-                        progress={"current": current, "total": total},
-                    )
-                    _emit_progress(
-                        runner, job["id"], stages, "archive",
-                        phase or "Archiving photos",
-                        current_file=filename,
-                    )
-
-                # Atomically lock the job uncancellable BEFORE the move begins,
-                # but only if Stop is not already pending. move_folder is an
-                # uninterruptible commit step (copy -> verify -> repoint catalog
-                # -> delete originals); once it starts, a Stop press cannot be
-                # honored without leaving partial state. If Stop landed just
-                # before this transition, skip archive and let the outer runner
-                # record the job as cancelled.
-                if not runner.begin_uncancellable(job["id"]):
-                    _deindex_staging()
-                    stages["archive"]["status"] = "skipped"
-                    runner.update_step(
-                        job["id"], "archive",
-                        status="completed", summary="Skipped",
-                    )
-                    _update_stages(runner, job["id"], stages)
-                    return
-
-                move_result = move_folder(
-                    thread_db,
-                    folder["id"],
-                    archive_parent,
-                    progress_cb=archive_cb,
-                    developed_dir=developed_dir,
-                    merge=True,
-                    reject_tracked_ancestor=True,
-                    allow_tracked_merge=True,
-                )
-                if move_result.get("errors"):
-                    raise RuntimeError("; ".join(move_result["errors"]))
-
-                # Merge-into-existing-archive dropped some staged photo rows
-                # (identical filename already archived, or a phantom target
-                # row was replaced). SQLite reuses freed rowids, so any
-                # thumbnail / preview / working-copy / offline-cache file
-                # keyed off one of those ids would silently become a stale
-                # asset for whichever future photo lands on the same id.
-                # Mirror the archive-skip cleanup path so no orphaned cache
-                # files can survive the merge.
-                dropped_ids = move_result.get("dropped_photo_ids") or []
-                if dropped_ids:
-                    from preview_cache import (
-                        cleanup_cached_files_for_deleted_photos,
-                    )
-                    cleanup_cached_files_for_deleted_photos(
-                        effective_thumb_cache_dir,
-                        [{"photo_id": pid} for pid in dropped_ids],
-                    )
-
-                if staging_parent:
-                    with contextlib.suppress(OSError):
-                        os.rmdir(staging_parent)
-
-                # move_folder repointed the catalog at final_destination
-                # before deleting the source originals, so a
-                # ``cleanup_error`` means the archive IS committed — files
-                # are at the destination, but some leftovers remain in
-                # staging (locked file, permission issue, etc.). Report
-                # success with a warning rather than failure: the
-                # alternative ("failed" + "results remain in staging") tells
-                # the user their data is lost when it's actually safe at
-                # final_destination, and would also leave the freshly
-                # created tracked folder row in the catalog while we tried
-                # to deindex a staging row that move_folder_path already
-                # renamed away.
-                cleanup_error = move_result.get("cleanup_error")
-                stages["archive"]["status"] = "completed"
-                moved = move_result.get("moved", 0)
-                merge = move_result.get("merge")
-                if merge:
-                    base = move_result.get(
-                        "merged_into_existing", final_destination,
-                    )
-                    summary = (
-                        f"{merge['new_photos']} new photos archived into "
-                        f"existing archive {base} "
-                        f"({merge['new_folders']} new folders, "
-                        f"{merge['merged_folders']} merged into existing, "
-                        f"{merge['already_present']} already present)"
-                    )
-                else:
-                    summary = f"{moved} photos archived"
-                if cleanup_error:
-                    summary += f" (staging cleanup failed: {cleanup_error})"
-                runner.update_step(
-                    job["id"], "archive", status="completed", summary=summary,
-                )
-                result["archive"] = {
-                    "final_destination": final_destination,
-                    "moved": moved,
-                }
-                if merge:
-                    result["archive"]["merge"] = merge
-                if cleanup_error:
-                    result["archive"]["cleanup_error"] = cleanup_error
-            except Exception as e:
-                msg = (
-                    f"{e}. Processing results remain in local staging: "
-                    f"{params.destination}"
-                )
-                errors.append(f"[archive] Fatal: {msg}")
-                log.exception("Pipeline archive stage failed")
-                # move_folder doesn't repoint the catalog until it has
-                # verified every copied file, so a raise here means the
-                # folders/photos rows still point at the staging tree. If we
-                # leave them indexed, a retry of the same source sees the
-                # staging hashes via ingest()'s global duplicate check, skips
-                # the copy, and "successfully" publishes an empty archive
-                # while the original files remain only under ~/.vireo/staging.
-                # Deindex to match the archive-skip paths above; the on-disk
-                # staging files are left in place per the error message so
-                # the user can still recover them manually.
-                _deindex_staging()
-                stages["archive"]["status"] = "failed"
-                runner.update_step(
-                    job["id"], "archive", status="failed", error=msg,
-                )
-
-            _update_stages(runner, job["id"], stages)
+            return
 
         # --- Launch threads ---
 

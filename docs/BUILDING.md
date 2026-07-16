@@ -52,9 +52,17 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-This builds for macOS (ARM64 + x86_64), Windows, and Linux, then creates a draft GitHub Release with all installers attached. Review the draft and publish when ready.
+This builds for macOS ARM64, Windows x64, and Linux x64, then creates a
+public GitHub Release with all installers attached. The release job
+runs only when every platform build succeeds.
 
 To trigger manually without a tag, use the "Run workflow" button on the Actions tab.
+Manual runs without a tag produce unsigned internal Windows artifacts by
+default. Enable `sign_windows_candidate` to sign, verify, smoke-test, and retain
+a candidate for 30 days without creating a public release. Tagged Windows
+releases and signed candidates require the SignPath repository values
+documented in `.signpath/README.md`; missing or invalid Authenticode signatures
+block the build.
 
 ### Signed Mac build (notarized)
 
@@ -81,6 +89,7 @@ This builds the sidecar, signs it, builds the Tauri app, signs the .app bundle, 
 |----------|-----------|----------|
 | macOS | `.dmg` | `src-tauri/target/release/bundle/dmg/` |
 | macOS | `.app` | `src-tauri/target/release/bundle/macos/` |
+| Windows | `.exe` | `src-tauri/target/release/bundle/nsis/` |
 | Windows | `.msi` | `src-tauri/target/release/bundle/msi/` |
 | Linux | `.AppImage` | `src-tauri/target/release/bundle/appimage/` |
 | Linux | `.deb` | `src-tauri/target/release/bundle/deb/` |

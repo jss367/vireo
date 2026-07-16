@@ -406,6 +406,39 @@ def test_scan_cancel_check_aborts_before_metadata_extraction(tmp_path, monkeypat
     assert db.get_photos(per_page=100) == []
 
 
+def test_scan_reports_metadata_phase_progress(tmp_path, monkeypatch):
+    """ExifTool batch progress is surfaced as status callback metadata."""
+    import scanner
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    _create_test_images(root, {'': ['img1.jpg', 'img2.jpg', 'img3.jpg']})
+    db = Database(str(tmp_path / "test.db"))
+    status_events = []
+
+    def fake_extract_metadata(paths, progress_callback=None):
+        if progress_callback:
+            progress_callback(2, len(paths))
+            progress_callback(len(paths), len(paths))
+        return {}
+
+    def status_cb(message, **kwargs):
+        status_events.append((message, kwargs))
+
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract_metadata)
+
+    scanner.scan(root, db, status_callback=status_cb)
+
+    metadata_events = [
+        event for event in status_events
+        if event[1].get("phase_label") == "Extracting metadata"
+    ]
+    assert metadata_events[0][1]["phase_current"] == 0
+    assert metadata_events[0][1]["phase_total"] == 3
+    assert metadata_events[-1][1]["phase_current"] == 3
+    assert metadata_events[-1][1]["phase_total"] == 3
+
+
 def test_scan_non_recursive_only_finds_root_photos(tmp_path):
     """scan(recursive=False) only finds photos in the root folder, not subfolders."""
     from db import Database
@@ -629,6 +662,43 @@ def test_scan_imports_xmp_keywords(tmp_path):
     kw_names = {k['name'] for k in keywords}
     assert 'Northern cardinal' in kw_names
     assert 'Birds' in kw_names
+
+
+def test_scan_skips_empty_normalized_keywords(tmp_path):
+    """A sidecar with a lone quote must not abort the scan.
+
+    add_keyword() now raises ValueError when a name normalizes to `""`
+    (e.g. `"'"` or a bare smart quote). Without a caller-side filter, the
+    unhandled ValueError inside _import_keywords_for_photo would propagate
+    and take down the whole scanner run for one malformed <rdf:li>.
+    """
+    from db import Database
+    from scanner import scan
+    from xmp import write_sidecar
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    Image.new('RGB', (100, 100)).save(os.path.join(root, 'bird.jpg'))
+
+    write_sidecar(
+        os.path.join(root, 'bird.xmp'),
+        flat_keywords={"'", "Northern cardinal"},
+        hierarchical_keywords={"Birds|'|Northern cardinal", "Birds|Raptors"},
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    scan(root, db)
+
+    photos = db.get_photos()
+    assert len(photos) == 1
+    kw_names = {k['name'] for k in db.get_photo_keywords(photos[0]['id'])}
+    # The valid flat keyword lands; the lone-quote entry is skipped without
+    # raising. The empty-segment hierarchy is dropped entirely (chain
+    # broken), but the well-formed sibling still lands as a hierarchy.
+    assert 'Northern cardinal' in kw_names
+    tree_names = {k['name'] for k in db.get_keyword_tree()}
+    assert 'Raptors' in tree_names
+    assert 'Birds' in tree_names
 
 
 def test_scan_imports_hierarchical_keywords(tmp_path):
@@ -948,6 +1018,43 @@ def test_scan_pairs_raw_and_jpeg(tmp_path):
     assert photo["companion_path"] == "IMG_001.jpg"
 
 
+def test_rescan_changed_companion_invalidates_jpeg_thumbnail_variant(tmp_path):
+    """Re-pairing a changed companion drops its source-specific thumbnail
+    even when the replacement preserves filesystem mtime."""
+    from db import Database
+    from scanner import scan
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+    jpeg_path = img_dir / "IMG_001.jpg"
+    Image.new("RGB", (200, 100), color="green").save(jpeg_path)
+    (img_dir / "IMG_001.cr3").write_bytes(b"\x00" * 200)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db = Database(str(vireo_dir / "test.db"))
+    scan(
+        str(img_dir), db, vireo_dir=str(vireo_dir),
+        thumb_cache_dir=str(thumb_dir),
+    )
+    primary = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='IMG_001.cr3'",
+    ).fetchone()
+    variant = thumb_dir / f"{primary['id']}_jpeg.jpg"
+    variant.write_bytes(b"stale companion pixels")
+
+    original_mtime = jpeg_path.stat().st_mtime
+    Image.new("RGB", (200, 100), color="blue").save(jpeg_path)
+    os.utime(jpeg_path, (original_mtime, original_mtime))
+    scan(
+        str(img_dir), db, vireo_dir=str(vireo_dir),
+        thumb_cache_dir=str(thumb_dir),
+    )
+
+    assert not variant.exists()
+
+
 def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     """Importing raws after JPEGs matches them to existing photo records."""
     import os
@@ -1058,6 +1165,94 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     undone = db.undo_last_edit()
     assert undone is not None
     assert db.get_photo_edit_recipe(photo["id"]) is None
+
+
+def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
+    """A newly paired camera JPEG must replace a pre-pairing RAW rendition."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(img_dir), name="photos")
+    raw_id = db.add_photo(
+        folder_id=folder_id, filename="IMG_002.cr3", extension=".cr3",
+        file_size=2000, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=folder_id, filename="IMG_002.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+    )
+
+    originals_dir = tmp_path / "originals"
+    originals_dir.mkdir()
+    display_cache = originals_dir / f"{raw_id}.display.jpg"
+    display_cache.write_bytes(b"pre-pairing RAW display")
+
+    _pair_raw_jpeg_companions(db, vireo_dir=str(tmp_path))
+
+    photo = db.get_photo(raw_id)
+    assert photo["companion_path"] == "IMG_002.jpg"
+    assert not display_cache.exists()
+
+
+def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
+    """Pairing raw+JPEG must move edit-mask snapshot files to the primary id.
+
+    Snapshot lookup uses ``<photo_id>.<ref>.png``. Without renaming the
+    files when the recipe row's photo_id changes, ``load_snapshot`` misses
+    the file and every render silently disables the local pass.
+    """
+    from db import Database
+    from local_masks import edit_masks_dir, snapshot_path
+    from scanner import _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(img_dir), name="photos")
+    jpeg_id = db.add_photo(
+        folder_id=fid, filename="IMG_002.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+    )
+    raw_id = db.add_photo(
+        folder_id=fid, filename="IMG_002.cr3", extension=".cr3",
+        file_size=2000, file_mtime=1.0,
+    )
+
+    # Set a recipe on the JPEG (any recipe — this test is about the file
+    # rename, not recipe schema). The pairing code moves the row to the RAW.
+    db.set_photo_edit_recipe(jpeg_id, {"rotation": 90})
+
+    # Drop a snapshot file at <jpeg_id>.<ref>.png as if we'd called the
+    # snapshot endpoint on the JPEG before pairing.
+    ref = "abcdef012345"
+    os.makedirs(edit_masks_dir(str(tmp_path)), exist_ok=True)
+    src_snap = snapshot_path(str(tmp_path), jpeg_id, ref)
+    with open(src_snap, "wb") as f:
+        f.write(b"snapshot-bytes")
+    # Also leave a decoy file for a different photo_id so the transfer
+    # doesn't over-match.
+    decoy = os.path.join(edit_masks_dir(str(tmp_path)), f"99999.{ref}.png")
+    with open(decoy, "wb") as f:
+        f.write(b"decoy-bytes")
+
+    _pair_raw_jpeg_companions(db, vireo_dir=str(tmp_path))
+
+    photo = db.conn.execute(
+        "SELECT id, filename FROM photos"
+    ).fetchone()
+    assert photo["filename"] == "IMG_002.cr3"
+    primary_id = photo["id"]
+    assert primary_id == raw_id
+
+    # The companion's snapshot file must have moved to the primary id.
+    assert not os.path.exists(src_snap)
+    assert os.path.exists(snapshot_path(str(tmp_path), primary_id, ref))
+    # Decoy for an unrelated photo id must not be touched.
+    assert os.path.exists(decoy)
 
 
 def test_pairing_does_not_copy_rejected_flag_to_raw(tmp_path):
@@ -1520,7 +1715,7 @@ def test_scan_extracts_working_copy_for_raw(tmp_path, monkeypatch):
     nef_file.write_bytes(b"fake raw data")
 
     # Mock ExifTool to return empty metadata
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     # Mock extract_working_copy to actually create a file (simulates success)
     def fake_extract(source, output, max_size=4096, quality=92):
@@ -1559,7 +1754,7 @@ def test_scan_skips_working_copy_for_jpeg(tmp_path, monkeypatch):
     jpg_file = photo_dir / "IMG_001.jpg"
     Image.new("RGB", (3000, 2000)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     # Mock extract_working_copy -- should never be called for JPEGs
     calls = []
@@ -1602,7 +1797,7 @@ def test_scan_uses_raw_primary_for_raw_working_copy(tmp_path, monkeypatch):
     Image.new("RGB", (6000, 4000), color=(255, 0, 0)).save(str(jpg_file), "JPEG")
 
     # Mock ExifTool
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     # Track which source file extract_working_copy is called with
     sources_used = []
@@ -1659,7 +1854,7 @@ def test_scan_falls_back_to_companion_when_raw_extraction_fails(
     jpg_file = photo_dir / "IMG_002.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     sources_used = []
 
@@ -1728,7 +1923,7 @@ def test_scan_falls_back_when_raw_working_copy_short_edge_is_smaller(
     jpg_file = photo_dir / "IMG_004.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     sources_used = []
 
@@ -1782,7 +1977,7 @@ def test_scan_accepts_near_full_raw_working_copy(tmp_path, monkeypatch):
     jpg_file = photo_dir / "IMG_006.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 255, 0)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     sources_used = []
 
@@ -1854,7 +2049,7 @@ def test_scan_accepts_portrait_raw_working_copy_with_exif_orientation(
         },
     }
 
-    def fake_metadata(paths):
+    def fake_metadata(paths, restricted_tags=None, progress_callback=None):
         return {str(p): portrait_meta for p in paths}
 
     monkeypatch.setattr(scanner, "extract_metadata", fake_metadata)
@@ -1919,7 +2114,7 @@ def test_scan_marks_source_failure_when_raw_and_companion_both_fail(
     jpg_file = photo_dir / "IMG_003.jpg"
     Image.new("RGB", (6000, 4000), color=(0, 0, 255)).save(str(jpg_file), "JPEG")
 
-    monkeypatch.setattr(scanner, "extract_metadata", lambda paths: {})
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **_kwargs: {})
 
     def fake_extract(source, output, max_size=4096, quality=92):
         # Both RAW and companion fail (e.g. RAW unsupported + companion
@@ -2001,7 +2196,7 @@ def _setup_scanned_photo(tmp_path, pil_size=(640, 480)):
     db = Database(str(tmp_path / "test.db"))
     # Mock ExifTool so the first scan populates exif_data with real
     # dimensions, independent of whether exiftool is installed.
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {
             p: {"File": {"ImageWidth": pil_size[0], "ImageHeight": pil_size[1]},
                 "EXIF": {}, "Composite": {}}
@@ -2037,7 +2232,7 @@ def test_incremental_rescan_reextracts_when_timestamp_null(tmp_path, monkeypatch
     )
     db.conn.commit()
 
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
@@ -2069,7 +2264,7 @@ def test_incremental_rescan_reextracts_when_raw_dims_suspect(tmp_path, monkeypat
     )
     db.conn.commit()
 
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
@@ -2101,7 +2296,7 @@ def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch)
     db.conn.commit()
 
     called_with = []
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         called_with.append(list(paths))
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
@@ -2134,7 +2329,7 @@ def test_scan_restrict_files_ignores_files_not_in_list(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
 
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
@@ -2186,7 +2381,7 @@ def test_incremental_rescan_respects_exif_extracted_guard(tmp_path, monkeypatch)
     db.conn.commit()
 
     called_with = []
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         called_with.append(list(paths))
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
@@ -2623,6 +2818,10 @@ def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
     thumb_path = str(cache_dir / f"{photo_id}.jpg")
     generate_thumbnail(photo_id, img_path, str(cache_dir))
     assert os.path.exists(thumb_path)
+    raw_variant = cache_dir / f"{photo_id}_raw.jpg"
+    jpeg_variant = cache_dir / f"{photo_id}_jpeg.jpg"
+    raw_variant.write_bytes(b"stale raw thumbnail")
+    jpeg_variant.write_bytes(b"stale jpeg thumbnail")
 
     # Replace file content (same filename, different pixels → new hash + new mtime)
     time.sleep(0.05)
@@ -2646,6 +2845,8 @@ def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
         "Scanner must invalidate the cached thumbnail when file content changes; "
         "leaving it on disk is how thumbnail/full-image mismatches get baked in."
     )
+    assert not raw_variant.exists()
+    assert not jpeg_variant.exists()
 
 
 def test_rescan_clears_thumb_path_column_when_content_changes(tmp_path):
@@ -2725,6 +2926,10 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     # Seed a preview file + accounting row, as /photos/<id>/preview would.
     preview_file = preview_dir / f"{photo_id}_1920.jpg"
     Image.new("RGB", (1920, 1440), color=(255, 0, 0)).save(str(preview_file), "JPEG")
+    originals_dir = vireo_dir / "originals"
+    originals_dir.mkdir()
+    display_file = originals_dir / f"{photo_id}.display.jpg"
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(display_file, "JPEG")
     file_bytes = preview_file.stat().st_size
     db.preview_cache_insert(photo_id, 1920, file_bytes)
     assert db.preview_cache_total_bytes() == file_bytes
@@ -2735,6 +2940,7 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
 
     assert not preview_file.exists(), "preview file should be deleted"
+    assert not display_file.exists(), "RAW display cache should be deleted"
     assert db.preview_cache_get(photo_id, 1920) is None, (
         "preview_cache row must be deleted alongside the file; "
         "leaving it inflates preview_cache_total_bytes and triggers "
@@ -3446,10 +3652,18 @@ def test_restricted_scan_roots_subfolders_not_destination_base(tmp_path):
 
     root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
     linked_paths = {f["path"] for f in db.get_workspace_folders(ws_id)}
-    # The imported leaf is the user-facing root; the archive base is linked
-    # (for the folder hierarchy) but is NOT a root.
+    # The imported leaf is the user-facing root; the archive base is
+    # NOT linked to the workspace. Before PR #1107's line-1186 fix the
+    # base was linked as a non-root, which fired ``add_workspace_
+    # folder``'s subtree cascade and would pull every pre-existing
+    # cataloged descendant of the base into the workspace UI (unrelated
+    # archive subtrees from prior scans / other workspaces). Now the
+    # parent chain up to the scan root just exists in ``folders`` for
+    # ``parent_id`` integrity, and ``get_folder_tree`` walks up through
+    # the non-visible base via its recursive CTE so the imported leaf
+    # still renders as a top-level sidebar entry.
     assert root_paths == [imported]
-    assert base in linked_paths
+    assert base not in linked_paths
     # Ingestion stayed scoped to the restricted dir — the sibling shoot's
     # files were never pulled in.
     photo_paths = {

@@ -420,6 +420,30 @@ def test_run_full_pipeline(tmp_path):
     assert s["keep_count"] + s["review_count"] + s["reject_count"] == 6
 
 
+def test_run_species_review_pipeline_labels_all_review_without_scores(tmp_path):
+    """Identify-only results support review without pretending to cull."""
+    from pipeline import (
+        load_photo_features,
+        run_species_review_pipeline,
+        serialize_results,
+    )
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    photos = load_photo_features(db)
+
+    results = run_species_review_pipeline(photos)
+    serialized = serialize_results(results)
+
+    assert serialized["review_mode"] == "species"
+    assert serialized["summary"]["total_photos"] == 6
+    assert serialized["summary"]["review_count"] == 6
+    assert serialized["summary"]["keep_count"] == 0
+    assert serialized["summary"]["reject_count"] == 0
+    assert {p["label"] for p in serialized["photos"]} == {"REVIEW"}
+    assert all("quality_composite" not in p for p in serialized["photos"])
+    assert serialized["encounters"][0]["species_predictions"]
+
+
 # -- serialize_results + save/load --
 
 
@@ -854,7 +878,15 @@ def test_compute_review_readiness_no_masks(tmp_path):
 def test_compute_review_readiness_masks_present_no_eye(tmp_path):
     """Masks present for all photos, no eye keypoints →
     state='computable', 'eye_keypoints' in enhancing_missing."""
+    import config as cfg
     from pipeline import compute_review_readiness
+
+    # Eye readiness gaps are only surfaced when the workspace opts into
+    # eye detection (the default flipped off). Enable it explicitly so
+    # this pins the "computable but enhancing inputs missing" contract
+    # rather than the default-off suppression path.
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"pipeline": {"eye_detect_enabled": True}})
 
     # _setup_db_with_photos populates masks, embeddings, and predictions
     # for every photo but does NOT set eye_x — exactly the "computable
@@ -1190,7 +1222,15 @@ def test_compute_review_readiness_eye_target_includes_routable_above_gate(tmp_pa
     from pipeline import compute_review_readiness
 
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
-    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
+    # ``eye_detect_enabled`` gates whether the eye-keypoint gap surfaces
+    # in ``enhancing_missing``; the target count is orthogonal but the
+    # banner check below requires the feature to be turned on.
+    cfg.save({
+        "pipeline": {
+            "eye_classifier_conf_gate": 0.5,
+            "eye_detect_enabled": True,
+        }
+    })
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -1214,7 +1254,14 @@ def test_compute_review_readiness_eye_target_follows_gate_changes(tmp_path):
     from pipeline import compute_review_readiness
 
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
-    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
+    # Feature must be on for the ``enhancing_missing`` banner to appear
+    # at all; the gate/target checks are the point of this test.
+    cfg.save({
+        "pipeline": {
+            "eye_classifier_conf_gate": 0.5,
+            "eye_detect_enabled": True,
+        }
+    })
 
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder(str(tmp_path), name="photos")
@@ -1223,7 +1270,12 @@ def test_compute_review_readiness_eye_target_follows_gate_changes(tmp_path):
     out_strict = compute_review_readiness(db)
     assert out_strict["eye_keypoint_target_photos"] == 0
 
-    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.2}})
+    cfg.save({
+        "pipeline": {
+            "eye_classifier_conf_gate": 0.2,
+            "eye_detect_enabled": True,
+        }
+    })
     out_loose = compute_review_readiness(db)
     assert out_loose["eye_keypoint_target_photos"] == 1
     assert "eye_keypoints" in out_loose["enhancing_missing"]
@@ -1246,8 +1298,15 @@ def test_compute_review_readiness_eye_target_honors_workspace_pipeline_override(
 
     cfg.CONFIG_PATH = str(tmp_path / "config.json")
     # Global default gate stays at 0.5; only the active workspace lowers
-    # it, mirroring a user with a per-workspace looser threshold.
-    cfg.save({"pipeline": {"eye_classifier_conf_gate": 0.5}})
+    # it, mirroring a user with a per-workspace looser threshold. Enable
+    # eye detection at the global level so the ``enhancing_missing`` gap
+    # can surface (the default is off).
+    cfg.save({
+        "pipeline": {
+            "eye_classifier_conf_gate": 0.5,
+            "eye_detect_enabled": True,
+        }
+    })
 
     db = Database(str(tmp_path / "test.db"))
     ws_id = db.create_workspace(
@@ -1264,6 +1323,45 @@ def test_compute_review_readiness_eye_target_honors_workspace_pipeline_override(
     out = compute_review_readiness(db)
     assert out["eye_keypoint_target_photos"] == 1
     assert "eye_keypoints" in out["enhancing_missing"]
+
+
+def test_compute_review_readiness_suppresses_eye_gap_when_detection_disabled(tmp_path):
+    """When ``pipeline.eye_detect_enabled`` is False (the new default), the
+    readiness diagnostic must not flag ``eye_keypoints`` in
+    ``enhancing_missing`` even if eligible photos have no eye attempts.
+
+    Otherwise a default-off workspace's pipeline_review page reports the
+    result as "computed without eye keypoints — should re-run that stage"
+    for a stage the workspace has intentionally disabled, contradicting
+    the visible Settings state and the default Process flow (which
+    skips the stage). Regression for Codex thread PRRT_kwDORn8c-s6QOH4L.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline import compute_review_readiness
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({
+        "pipeline": {
+            "eye_classifier_conf_gate": 0.5,
+            "eye_detect_enabled": False,
+        }
+    })
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+    # An Aves photo above the confidence gate would count toward the eye
+    # target if the feature were on — it's the same shape that
+    # ``test_..._eye_target_includes_routable_above_gate`` uses to
+    # deliberately surface the banner.
+    _add_eligible_photo(db, fid, "bird.jpg", 0.9, taxonomy_class="Aves")
+
+    out = compute_review_readiness(db)
+    assert "eye_keypoints" not in out["enhancing_missing"], (
+        "eye_keypoints must not appear in enhancing_missing when the "
+        "workspace has eye detection disabled — otherwise the review "
+        "page warns about a stage the user chose not to run"
+    )
 
 
 def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
@@ -1300,6 +1398,39 @@ def test_save_results_preserves_miss_computed_at_across_reflow(tmp_path):
 
     loaded = load_results(cache_dir, workspace_id=1)
     assert loaded["miss_computed_at"] == "2026-04-22T12:00:00.000000+00:00"
+
+
+def test_save_results_preserve_miss_marker_false_drops_existing(tmp_path):
+    """When called with preserve_miss_marker=False, save_results must
+    drop any prior miss_computed_at marker instead of carrying it
+    forward. The identify/species-only pipeline uses this so Pipeline
+    Review doesn't render misses from an earlier full run as if this
+    pass produced them."""
+    from pipeline import (
+        load_photo_features,
+        load_results,
+        run_full_pipeline,
+        save_results,
+        save_results_raw,
+    )
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    photos = load_photo_features(db)
+    results = run_full_pipeline(photos)
+
+    cache_dir = str(tmp_path)
+    save_results(results, cache_dir, workspace_id=1)
+
+    raw = load_results(cache_dir, workspace_id=1)
+    raw["miss_computed_at"] = "2026-04-22T12:00:00.000000+00:00"
+    save_results_raw(raw, cache_dir, workspace_id=1)
+
+    fresh = run_full_pipeline(photos)
+    assert "miss_computed_at" not in fresh
+    save_results(fresh, cache_dir, workspace_id=1, preserve_miss_marker=False)
+
+    loaded = load_results(cache_dir, workspace_id=1)
+    assert "miss_computed_at" not in loaded
 
 
 def test_save_results_new_marker_overrides_existing(tmp_path):
@@ -1906,7 +2037,15 @@ def test_eye_keypoint_stage_preflight_enabled(tmp_path, monkeypatch):
     from pipeline import eye_keypoint_stage_preflight
 
     assert eye_keypoint_stage_preflight({"eye_detect_enabled": True}) is None
-    assert eye_keypoint_stage_preflight({}) is None
+
+
+def test_eye_keypoint_stage_preflight_missing_config_defaults_disabled(
+    tmp_path, monkeypatch
+):
+    """Missing eye_detect_enabled follows the global default: disabled."""
+    from pipeline import eye_keypoint_stage_preflight
+
+    assert eye_keypoint_stage_preflight({}) == "Disabled in config"
 
 
 def test_eye_keypoint_stage_writes_nothing_when_weights_absent(

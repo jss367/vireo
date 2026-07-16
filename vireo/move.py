@@ -13,6 +13,11 @@ import tempfile
 import threading
 import time
 
+try:
+    from .proc import no_window_kwargs
+except ImportError:
+    from proc import no_window_kwargs
+
 log = logging.getLogger(__name__)
 
 # How long the remote verification rsync (a --checksum dry-run over SSH) may
@@ -96,7 +101,7 @@ def sanitize_subpath(subpath):
     return "/".join(parts)
 
 
-def build_remote_move_spec(target, subpath, rsync_bin):
+def build_remote_move_spec(target, subpath, rsync_bin, ssh_bin=""):
     """Build the ``remote`` dict ``move_folder`` expects from a config target.
 
     ``target`` is a validated dict from ``config.get_remote_target`` (host,
@@ -119,6 +124,7 @@ def build_remote_move_spec(target, subpath, rsync_bin):
         "ssh_key": target.get("ssh_key", ""),
         "bwlimit_kbps": target.get("bwlimit_kbps", 0),
         "rsync_bin": rsync_bin,
+        "ssh_bin": resolve_ssh_bin(ssh_bin or target.get("ssh_bin", "")),
         "ssh_dest_base": ssh_base,
         "mount_dest_base": mount_base,
     }
@@ -269,6 +275,16 @@ def _platform_rsync_candidates():
     found = shutil.which("rsync")
     if found:
         cands.append(found)
+    if os.name == "nt":
+        for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432"):
+            base = os.environ.get(env_var)
+            if base:
+                cands.append(os.path.join(base, "cwRsync", "bin", "rsync.exe"))
+        system_drive = os.environ.get("SYSTEMDRIVE", "C:")
+        cands.extend([
+            os.path.join(system_drive + os.sep, "msys64", "usr", "bin", "rsync.exe"),
+            os.path.join(system_drive + os.sep, "cygwin64", "bin", "rsync.exe"),
+        ])
     cands.append("/usr/bin/rsync")
     return tuple(cands)
 
@@ -306,6 +322,22 @@ def resolve_rsync_bin(configured=""):
     return None
 
 
+def resolve_ssh_bin(configured=""):
+    """Resolve OpenSSH without requiring it to be on a GUI process's PATH."""
+    candidates = [configured, os.environ.get("VIREO_SSH_BIN"), shutil.which("ssh")]
+    if os.name == "nt":
+        system_root = os.environ.get("SYSTEMROOT", r"C:\Windows")
+        candidates.append(os.path.join(system_root, "System32", "OpenSSH", "ssh.exe"))
+    for candidate in candidates:
+        if candidate and _is_executable_file(os.path.abspath(candidate)):
+            return os.path.abspath(candidate)
+    return None
+
+
+def _ssh_command(remote):
+    return remote.get("ssh_bin") or resolve_ssh_bin() or "ssh"
+
+
 def is_gnu_rsync(rsync_bin):
     """True if ``rsync_bin`` looks like GNU rsync (not Apple openrsync).
 
@@ -315,7 +347,8 @@ def is_gnu_rsync(rsync_bin):
     """
     try:
         out = subprocess.run([rsync_bin, "--version"], capture_output=True,
-                             text=True, timeout=10).stdout.lower()
+                             text=True, timeout=10,
+                             **no_window_kwargs()).stdout.lower()
     except (OSError, subprocess.SubprocessError):
         return False
     return "openrsync" not in out and "rsync" in out
@@ -350,7 +383,7 @@ def _ssh_rsh_string(remote):
     ``shlex.join`` so a key path like ``/Users/me/My Keys/id_ed25519`` (or a
     port flag carrying any whitespace) survives the round-trip intact.
     """
-    return shlex.join(["ssh"] + ssh_base_args(remote))
+    return shlex.join([_ssh_command(remote)] + ssh_base_args(remote))
 
 
 def _ssh_target(remote):
@@ -404,10 +437,11 @@ def _remote_mkdir_p(remote, path):
     Returns ``(True, "")`` on success or ``(False, detail)`` where
     ``detail`` is a short message suitable for surfacing to the user.
     """
-    cmd = (["ssh"] + ssh_base_args(remote) + [_ssh_target(remote)]
+    cmd = ([_ssh_command(remote)] + ssh_base_args(remote) + [_ssh_target(remote)]
            + [f"mkdir -p {shlex.quote(path)}"])
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                           **no_window_kwargs())
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
     if r.returncode != 0:
@@ -433,10 +467,11 @@ def _remote_dir_exists(remote, path):
     couldn't complete the session — so any other return code (255 or
     otherwise unexpected) is bucketed with the OSError/SubprocessError path.
     """
-    cmd = (["ssh"] + ssh_base_args(remote)
+    cmd = ([_ssh_command(remote)] + ssh_base_args(remote)
            + [_ssh_target(remote), f"test -d {shlex.quote(path)}"])
     try:
-        rc = subprocess.run(cmd, capture_output=True, timeout=30).returncode
+        rc = subprocess.run(cmd, capture_output=True, timeout=30,
+                            **no_window_kwargs()).returncode
     except (OSError, subprocess.SubprocessError):
         return None
     if rc == 0:
@@ -444,6 +479,36 @@ def _remote_dir_exists(remote, path):
     if rc == 1:
         return False
     return None
+
+
+def _remote_free_bytes(remote, path):
+    """Free bytes on the remote filesystem holding ``path``, via ``df -Pk``
+    over SSH.
+
+    Returns None when the probe couldn't run or parse — callers must treat
+    that as "unknown, skip the check", never as 0 or "plenty", so a flaky
+    link can't fabricate an out-of-space refusal or wave through a full
+    volume. ``df -P`` (POSIX output format) pins the layout: one header
+    line, then one line per filesystem with available KiB in column 4 —
+    GNU, BusyBox, and Synology's df all honor it. ``path`` must exist on
+    the remote (probe the configured base, not a not-yet-created leaf).
+    """
+    cmd = ([_ssh_command(remote)] + ssh_base_args(remote) + [_ssh_target(remote)]
+           + [f"df -Pk {shlex.quote(path)}"])
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                           **no_window_kwargs())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    try:
+        return int(lines[-1].split()[3]) * 1024
+    except (IndexError, ValueError):
+        return None
 
 
 def remote_preflight(remote, dest_path, file_cap=1000):
@@ -457,11 +522,12 @@ def remote_preflight(remote, dest_path, file_cap=1000):
         ``find | head | wc -l`` so a huge tree can't hang the probe.
     """
     target = _ssh_target(remote)
-    base = ["ssh"] + ssh_base_args(remote) + [target]
+    base = [_ssh_command(remote)] + ssh_base_args(remote) + [target]
     q = shlex.quote(dest_path)
     probe = base + [f"if [ -d {q} ]; then echo EXISTS; else echo NOPE; fi"]
     try:
-        r = subprocess.run(probe, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(probe, capture_output=True, text=True, timeout=30,
+                           **no_window_kwargs())
     except (OSError, subprocess.SubprocessError) as exc:
         return (False, 0, False, False, str(exc))
     if r.returncode != 0:
@@ -472,7 +538,8 @@ def remote_preflight(remote, dest_path, file_cap=1000):
     cnt_cmd = base + [
         f"find {q} -type f 2>/dev/null | head -n {file_cap + 1} | wc -l"]
     try:
-        c = subprocess.run(cnt_cmd, capture_output=True, text=True, timeout=120)
+        c = subprocess.run(cnt_cmd, capture_output=True, text=True, timeout=120,
+                           **no_window_kwargs())
         n = int((c.stdout or "0").strip() or 0)
     except (OSError, subprocess.SubprocessError, ValueError):
         return (True, 0, False, True, None)
@@ -499,10 +566,10 @@ def test_remote_connection(remote, rsync_bin):
               "rsync_ok": bool(rsync_bin), "remote_rsync_ok": False,
               "message": ""}
     target = _ssh_target(remote)
-    base = ["ssh"] + ssh_base_args(remote) + [target]
+    base = [_ssh_command(remote)] + ssh_base_args(remote) + [target]
     try:
         r = subprocess.run(base + ["echo vireo_ok"], capture_output=True,
-                           text=True, timeout=20)
+                           text=True, timeout=20, **no_window_kwargs())
     except (OSError, subprocess.SubprocessError) as exc:
         result["message"] = f"SSH connection failed: {exc}"
         return result
@@ -516,7 +583,7 @@ def test_remote_connection(remote, rsync_bin):
     try:
         w = subprocess.run(
             base + [f"test -d {rp} && test -w {rp} && echo WRITABLE"],
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, timeout=20, **no_window_kwargs())
     except (OSError, subprocess.SubprocessError) as exc:
         result["message"] = f"SSH connection failed: {exc}"
         return result
@@ -530,8 +597,8 @@ def test_remote_connection(remote, rsync_bin):
     if not rsync_bin:
         result["message"] = (
             "SSH and the remote path are reachable, but no GNU rsync was "
-            "found for the transfer (macOS's built-in rsync can't do this). "
-            "Install GNU rsync or set its path under Settings → Paths.")
+            "found for the transfer. Install GNU rsync for your platform or "
+            "set its path under Settings → Paths.")
         return result
     # Probe the REMOTE rsync. `rsync --version` is cheap and side-effect-free;
     # any non-zero exit (or a missing binary, which the remote shell reports
@@ -542,7 +609,7 @@ def test_remote_connection(remote, rsync_bin):
     try:
         rr = subprocess.run(
             base + ["rsync --version 2>/dev/null | head -n 1"],
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, timeout=20, **no_window_kwargs())
     except (OSError, subprocess.SubprocessError) as exc:
         result["message"] = (
             f"SSH and the remote path are reachable, but couldn't probe the "
@@ -585,7 +652,8 @@ def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote):
            src_path + "/", rsync_target + "/"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=REMOTE_VERIFY_TIMEOUT)
+                              timeout=REMOTE_VERIFY_TIMEOUT,
+                              **no_window_kwargs())
     except subprocess.TimeoutExpired:
         return ("__ERROR__", f"verification timed out after "
                 f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
@@ -601,9 +669,77 @@ def _remote_verify_complete(rsync_bin, src_path, rsync_target, remote):
     return None
 
 
+def remote_verify_files(rsync_bin, src_specs, rsync_target, remote,
+                        dest_is_dir=True):
+    """Verify an explicit list of source FILES against a remote path.
+
+    The file-list counterpart to ``_remote_verify_complete`` (which compares
+    whole directories). The import job rsyncs a batch's card files flat by
+    basename into ``rsync_target/``; this runs ``rsync -an --checksum
+    <card files...> rsync_target/`` — a dry run that reports (via
+    ``--out-format=%n``) every listed file whose counterpart at the remote is
+    missing or differs by checksum. Because the sources are the actual CARD
+    files, this genuinely confirms the card's bytes landed intact on the NAS
+    (comparing the local SMB mount view against the NAS would be
+    near-tautological — same physical storage — and would never catch a
+    corrupt transfer). Basename-flat comparison lines up with how the
+    transfer landed the files.
+
+    ``dest_is_dir`` (default True) treats ``rsync_target`` as a directory
+    (``rsync_target/``), so each source lands under its own basename. Set it
+    False to verify a single source file against an explicit remote FILE path
+    (no trailing ``/``): the import job uses this to verify a collision-
+    renamed file (card ``DSC_0001.jpg`` landed at NAS ``DSC_0001_1.jpg``)
+    against its actual NAS name.
+
+    Returns:
+      * ``None`` — every listed source file is present at the remote with
+        matching content.
+      * ``(name, None)`` — first source file (rsync's ``%n`` relative name)
+        still absent/different at the remote.
+      * ``("__ERROR__", detail)`` — the verification rsync itself failed or
+        timed out; treated as a verification failure.
+
+    Bandwidth-cheap: the NAS checksums its own local disk and only hashes
+    cross the wire.
+    """
+    if not src_specs:
+        return None
+    # ``--copy-links`` matches the import-transfer rsync (``_run_remote_import
+    # _job`` passes it): the transfer sends the REFERENCED file bytes for a
+    # symlinked source, so the source-side hash here must be computed on the
+    # same referenced file (not the symlink itself). Without it, ``rsync
+    # -an`` (which includes ``-l``) sees a symlink at the source and a real
+    # file on the NAS, treats them as mismatched, and reports the just-
+    # transferred file as verification-failed. See PR #1113 review.
+    cmd = [rsync_bin, "-an", "--checksum", "--copy-links",
+           "--out-format=%n", "-e", _ssh_rsh_string(remote)]
+    cmd += list(src_specs)
+    cmd += [rsync_target + "/" if dest_is_dir else rsync_target]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=REMOTE_VERIFY_TIMEOUT,
+                              **no_window_kwargs())
+    except subprocess.TimeoutExpired:
+        return ("__ERROR__", f"verification timed out after "
+                f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
+    except OSError as exc:
+        return ("__ERROR__", str(exc))
+    if proc.returncode != 0:
+        return ("__ERROR__",
+                proc.stderr.strip() or f"rsync exit {proc.returncode}")
+    for line in proc.stdout.splitlines():
+        name = line.rstrip("\n")
+        if not name or name.endswith("/"):
+            continue  # directory entry, not a file needing transfer
+        return (name, None)
+    return None
+
+
 def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
                         progress_cb, rsync_bin="rsync", extra_args=None,
-                        stall_timeout=RSYNC_STALL_TIMEOUT):
+                        stall_timeout=RSYNC_STALL_TIMEOUT, src_specs=None,
+                        src_specs_dest_is_dir=True):
     """Run rsync, reporting each transferred file through progress_cb.
 
     rsync's ``--out-format=%n`` prints the relative name of every item it
@@ -617,6 +753,18 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
     (``-e ssh ...``, ``--partial``, ``--bwlimit``). ``rsync_flags`` is a list;
     empty strings are dropped so a fresh move can pass no extra flag.
 
+    By default the whole ``src_path`` directory is transferred (``src_path
+    + "/"``), the shape ``move_folder`` uses. ``src_specs`` overrides this
+    with an explicit list of source *file* paths — the import job's per-batch
+    remote copy passes the batch's card files (which land flat by basename
+    under ``dest_spec/``), so no local staging tree is materialized. When
+    ``src_specs`` is given, ``dest_spec`` is suffixed with ``/`` (files land
+    inside the destination directory) unless ``src_specs_dest_is_dir`` is
+    False — the import job's collision-rename path passes a single source
+    file and an explicit remote FILE path (e.g.
+    ``user@host:/dir/DSC_0001_1.jpg``) so the renamed file lands under the
+    chosen name rather than its own basename.
+
     Returns ``(returncode, stderr, timed_out)``. ``timed_out`` is True when
     rsync made no forward progress for ``stall_timeout`` seconds and was
     killed. This is a STALL watchdog rather than a total-runtime cap: a
@@ -625,14 +773,51 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
     rsync — which the job's cancel path can't reach, since it never sees the
     subprocess — still gets reaped. The clock resets on every transferred
     file and on stderr activity, so only true silence trips it.
+
+    stdout is attached to a pty, not a pipe, wherever the platform allows.
+    Apple's openrsync block-buffers stdout when it's a pipe, so its
+    ``--out-format`` lines arrive in one burst at process exit — the parent
+    sees total silence while a healthy transfer runs, and the watchdog kills
+    any copy slower than stall_timeout (a NAS archive of a large shoot can
+    never finish). On a pty both openrsync and GNU rsync line-buffer, so
+    per-file names stream as they transfer.
     """
     cmd = [rsync_bin, "-a", "--out-format=%n"]
     cmd += list(extra_args or [])
     cmd += [f for f in (rsync_flags or []) if f]
-    cmd += [src_path + "/", dest_spec + "/"]
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
+    if src_specs is not None:
+        cmd += list(src_specs)
+        cmd += [dest_spec + "/" if src_specs_dest_is_dir else dest_spec]
+    else:
+        cmd += [src_path + "/", dest_spec + "/"]
+    master_fd = slave_fd = None
+    if hasattr(os, "openpty"):
+        try:
+            master_fd, slave_fd = os.openpty()
+        except OSError:
+            master_fd = slave_fd = None
+    stdout_arg = subprocess.PIPE if slave_fd is None else slave_fd
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=stdout_arg, stderr=subprocess.PIPE, text=True,
+            **no_window_kwargs(),
+        )
+    except BaseException:
+        # Popen can raise after os.openpty() succeeded (bad rsync_bin,
+        # PermissionError, KeyboardInterrupt). Close both pty fds before
+        # re-raising so a failed invocation doesn't leak two fds each time.
+        for fd in (master_fd, slave_fd):
+            if fd is not None:
+                os.close(fd)
+        raise
+    stdout_stream = proc.stdout
+    if slave_fd is not None:
+        os.close(slave_fd)
+        if stdout_stream is None:
+            stdout_stream = os.fdopen(master_fd, "r", errors="replace")
+            master_fd = None  # closed via stdout_stream below
+    if master_fd is not None:
+        os.close(master_fd)
     state = {"timed_out": False}
     # Last time rsync showed any sign of life (process start counts, so the
     # silent file-list/scan phase before the first transfer isn't a stall).
@@ -678,18 +863,28 @@ def _run_rsync_streamed(src_path, dest_spec, rsync_flags, total_files,
 
     copied = 0
     try:
-        for line in proc.stdout:
-            name = line.rstrip("\n")
-            last_activity["t"] = time.monotonic()
-            if not name or name.endswith("/"):
-                continue  # directory entry, not a file
-            copied += 1
-            if progress_cb:
-                progress_cb(copied, total_files, os.path.basename(name),
-                            "Copying files")
+        try:
+            for line in stdout_stream:
+                # The pty's line discipline translates \n to \r\n (ONLCR),
+                # so strip \r too or every filename grows a trailing CR.
+                name = line.rstrip("\r\n")
+                last_activity["t"] = time.monotonic()
+                if not name or name.endswith("/"):
+                    continue  # directory entry, not a file
+                copied += 1
+                if progress_cb:
+                    progress_cb(copied, total_files, os.path.basename(name),
+                                "Copying files")
+        except OSError:
+            # Reading the pty master after the child exits raises EIO on
+            # Linux (macOS returns plain EOF) — both just mean end-of-output.
+            pass
         proc.wait()
     finally:
         done.set()
+        if stdout_stream is not None and stdout_stream is not proc.stdout:
+            with contextlib.suppress(OSError):
+                stdout_stream.close()
     stderr_thread.join()
     watchdog.join()
     return proc.returncode, "".join(stderr_chunks), state["timed_out"]
@@ -740,7 +935,8 @@ def _find_remote_content_conflict(rsync_bin, src_path, rsync_target, remote):
            src_path + "/", rsync_target + "/"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=REMOTE_VERIFY_TIMEOUT)
+                              timeout=REMOTE_VERIFY_TIMEOUT,
+                              **no_window_kwargs())
     except subprocess.TimeoutExpired:
         return ("__ERROR__", f"conflict check timed out after "
                 f"{REMOTE_VERIFY_TIMEOUT // 60} minutes")
@@ -1763,9 +1959,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
             remote_rsync = remote.get("rsync_bin")
             if not remote_rsync:
                 return {"moved": 0, "errors": [
-                    "No GNU rsync binary available for remote moves. macOS's "
-                    "built-in rsync can't do this — set the GNU rsync path "
-                    "in Settings."
+                    "No usable GNU rsync binary is available for remote moves. "
+                    "Install it or set the GNU rsync path in Settings."
                 ]}
             conflict = _find_remote_content_conflict(
                 remote_rsync, src_path, rsync_target, remote)
@@ -1844,9 +2039,8 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         rsync_bin = remote.get("rsync_bin")
         if not rsync_bin:
             return {"moved": 0, "errors": [
-                "No GNU rsync binary available for remote moves. macOS's "
-                "built-in rsync can't do this — set the GNU rsync path in "
-                "Settings."
+                "No usable GNU rsync binary is available for remote moves. "
+                "Install it or set the GNU rsync path in Settings."
             ]}
         extra_args = [
             "-e", _ssh_rsh_string(remote),

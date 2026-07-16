@@ -186,7 +186,7 @@ SCHEMA = {
     "browse_card_fields": {
         "type": "list_string",
         "items_enum": [
-            "filename", "rating", "flag", "sharpness", "species",
+            "filename", "location_status", "rating", "flag", "sharpness", "species",
             "dimensions", "file_size", "capture_date", "extension",
             "quality_score",
         ],
@@ -306,6 +306,13 @@ SCHEMA = {
                 "macOS ships openrsync, which can't do rsync-over-SSH. "
                 "Leave empty to auto-detect.",
     },
+    "ssh_bin": {
+        "type": "path",
+        "category": "Paths", "scope": "global",
+        "label": "OpenSSH client path (remote moves)",
+        "desc": "Optional path to ssh.exe for remote import, archive, and moves. "
+                "Leave empty to auto-detect Windows OpenSSH or PATH.",
+    },
 
     # --- Integrations -----------------------------------------------------
     "inat_token": {
@@ -363,6 +370,29 @@ SCHEMA = {
     },
 
     # --- Pipeline (scoring weights & rejection thresholds) ---------------
+    "pipeline.default_process_id": {
+        # Workspace-scoped pointer to a saved_processes row: the process the
+        # import→process chaining hook runs after import (read via
+        # db.get_effective_config(cfg.load())). None = "import only" (the
+        # DEFAULTS value); `nullable` lets a workspace override back to null
+        # and the settings UI renders that option.
+        #
+        # Stored/validated as an ``int`` so config_schema stays DB-agnostic:
+        # existence of the id is checked at the endpoint against the DB, not
+        # here. For DISPLAY, ``api_settings_schema`` swaps this entry to an
+        # ``enum`` and injects the live saved-process list as
+        # ``enum``/``enum_labels`` so the widget renders as a picker.
+        "type": "int",
+        "nullable": True,
+        "null_label": "Import only (no processing)",
+        "category": "Pipeline", "scope": "workspace",
+        "label": "Default process (after import)",
+        "desc": (
+            "Which saved process runs automatically after an import on this "
+            "workspace. Manage processes on the Process page; “Import only” "
+            "means no automatic processing."
+        ),
+    },
     "pipeline.w_focus": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
         "category": "Pipeline", "scope": "both",
@@ -794,11 +824,19 @@ def validate_value(key, raw):
 
     Returns the coerced value. Raises :class:`ValidationError` on any failure
     (unknown key, type mismatch, out-of-range, unknown enum value, etc.).
+
+    Fields with ``nullable: True`` accept ``None`` (and the empty string, as
+    the settings UI serializes a null <option> as ``value=""``) and return
+    ``None`` — used for enums where "unset" is a meaningful third state
+    distinct from any listed choice (e.g. ``pipeline.default_strategy`` where
+    null means "import only, no processing").
     """
     if key not in SCHEMA:
         raise ValidationError(f"unknown setting {key!r}")
     spec = SCHEMA[key]
     kind = spec["type"]
+    if spec.get("nullable") and (raw is None or raw == ""):
+        return None
     value = _coerce(raw, kind)
 
     if kind in ("int", "float"):

@@ -22,6 +22,7 @@ import logging
 import os
 import ssl
 import time
+import unicodedata
 import urllib.request
 import zipfile
 from datetime import date
@@ -261,8 +262,28 @@ class Taxonomy:
 
     @staticmethod
     def _normalize(name):
-        """Normalize a name for lookup: lowercase, strip hyphens and extra spaces."""
-        return name.lower().strip().replace("-", " ").replace("  ", " ")
+        """Normalize a name for lookup: lowercase, fold punctuation, collapse spaces."""
+        text = unicodedata.normalize("NFKC", name).casefold().strip()
+        text = text.translate(str.maketrans({
+            "’": "'",
+            "‘": "'",
+            "`": "'",
+            "´": "'",
+            "ʼ": "'",
+            "ʹ": "'",
+            "‛": "'",
+            "“": '"',
+            "”": '"',
+            "„": '"',
+            "‟": '"',
+            "‐": "-",
+            "‑": "-",
+            "‒": "-",
+            "–": "-",
+            "—": "-",
+            "―": "-",
+        }))
+        return " ".join(text.replace("-", " ").split())
 
     def lookup(self, name):
         """Look up a taxon by common name or scientific name.

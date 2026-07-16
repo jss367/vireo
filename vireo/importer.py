@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from catalog import read_catalog
+from keyword_normalization import keyword_match_key, normalize_keyword_display
 from xmp import write_sidecar
 
 log = logging.getLogger(__name__)
@@ -160,27 +161,58 @@ def execute_import(
             continue
 
         try:
-            # Import keywords into DB
+            # Import keywords into DB. Skip entries that normalize to `""`
+            # (a lone smart quote, whitespace) — add_keyword() rejects those
+            # after this PR, and the surrounding try/except would otherwise
+            # count the whole photo as failed rather than just dropping the
+            # malformed keyword.
             for kw_name in kw_data["flat_keywords"]:
+                if not keyword_match_key(kw_name):
+                    continue
                 kid = db.add_keyword(kw_name)
                 db.tag_photo(photo["id"], kid)
 
-            # Import hierarchical keywords
+            # Import hierarchical keywords. Skip an entry whose chain
+            # contains any segment that normalizes to `""` — the resulting
+            # `add_keyword()` call would raise and the whole hierarchical
+            # tree for this photo would be lost.
             for hier in kw_data["hierarchical_keywords"]:
                 parts = hier.split("|")
+                if any(not keyword_match_key(part) for part in parts):
+                    continue
                 parent_id = None
                 for part in parts:
                     kid = db.add_keyword(part, parent_id=parent_id)
                     parent_id = kid
                 db.tag_photo(photo["id"], parent_id)
 
-            # Write XMP if requested
+            # Write XMP if requested. Build normalized keyword sets so the
+            # sidecar matches what we stored/tagged in the DB above:
+            # entries that normalize to `""` are dropped (they were also
+            # skipped by add_keyword), and edge-quote variants are written
+            # in their clean form. Without this, the sidecar can carry a
+            # `‘apapane` <rdf:li> while the DB row is clean `apapane`, and
+            # a later XMP import/prune diff would tag the two as
+            # different keywords.
             if write_xmp and Path(file_path).exists():
+                xmp_flat = {
+                    normalize_keyword_display(kw)
+                    for kw in kw_data["flat_keywords"]
+                    if keyword_match_key(kw)
+                }
+                xmp_hier = set()
+                for hier in kw_data["hierarchical_keywords"]:
+                    parts = hier.split("|")
+                    if any(not keyword_match_key(part) for part in parts):
+                        continue
+                    xmp_hier.add(
+                        "|".join(normalize_keyword_display(part) for part in parts)
+                    )
                 xmp_path = str(Path(file_path).with_suffix(".xmp"))
                 write_sidecar(
                     xmp_path,
-                    flat_keywords=kw_data["flat_keywords"],
-                    hierarchical_keywords=kw_data["hierarchical_keywords"],
+                    flat_keywords=xmp_flat,
+                    hierarchical_keywords=xmp_hier,
                 )
 
             imported += 1

@@ -980,3 +980,47 @@ def test_test_remote_connection_probes_remote_rsync(monkeypatch):
     res = move_mod.test_remote_connection(remote, "/usr/bin/rsync")
     assert res["remote_rsync_ok"] is True
     assert res["ok"] is True
+
+
+# --------------------------------------------------------------------------
+# Remote df/du probes used by the pipeline's remote-archive storage preflight.
+# --------------------------------------------------------------------------
+
+class _FakeCompleted:
+    def __init__(self, rc=0, stdout="", stderr=""):
+        self.returncode = rc
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+_PROBE_REMOTE = {"host": "nas", "user": "me", "port": 22, "ssh_key": ""}
+
+
+def test_remote_free_bytes_parses_posix_df(monkeypatch):
+    df_out = (
+        "Filesystem     1024-blocks      Used Available Capacity Mounted on\n"
+        "/dev/vg1/lv        1000000    400000    600000      40% /volume1\n"
+    )
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: _FakeCompleted(0, df_out))
+    assert move_mod._remote_free_bytes(_PROBE_REMOTE, "/volume1/Photo") == \
+        600000 * 1024
+
+
+def test_remote_free_bytes_returns_none_on_failure(monkeypatch):
+    """Probe failures must read as 'unknown' (None), never as a number —
+    the caller skips the check instead of fabricating a verdict."""
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: _FakeCompleted(1, "", "df: not found"))
+    assert move_mod._remote_free_bytes(_PROBE_REMOTE, "/p") is None
+
+    monkeypatch.setattr(move_mod.subprocess, "run",
+                        lambda *a, **k: _FakeCompleted(0, "garbage\n"))
+    assert move_mod._remote_free_bytes(_PROBE_REMOTE, "/p") is None
+
+    def boom(*a, **k):
+        raise OSError("ssh: not found")
+    monkeypatch.setattr(move_mod.subprocess, "run", boom)
+    assert move_mod._remote_free_bytes(_PROBE_REMOTE, "/p") is None
+
+

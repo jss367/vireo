@@ -118,6 +118,78 @@ def test_workspace_root_materializes_existing_path_descendants(db):
     assert [p["filename"] for p in photos] == ["bird.jpg"]
 
 
+def test_existing_folder_is_reparented_when_surrounding_root_is_added(db):
+    """A standalone folder root should nest once its parent is known."""
+    ws_id = db._active_workspace_id
+    db.set_active_workspace(None)
+    usa_id = db.add_folder("/photos/USA", name="USA")
+    year_id = db.add_folder("/photos/USA/2026", name="2026")
+    date_id = db.add_folder(
+        "/photos/USA/2026/2026-01-19",
+        name="2026-01-19",
+        parent_id=year_id,
+    )
+    db.set_active_workspace(ws_id)
+
+    db.add_workspace_folder(ws_id, year_id)
+    db.add_workspace_folder(ws_id, usa_id)
+
+    # A later scan/import walks the full parent chain and now knows 2026's
+    # parent. Reusing the row must fill in the missing parent_id.
+    assert db.add_folder(
+        "/photos/USA/2026",
+        name="2026",
+        parent_id=usa_id,
+        workspace_root=False,
+    ) == year_id
+
+    tree = {f["id"]: f for f in db.get_folder_tree()}
+    roots = [f for f in tree.values() if f["parent_id"] is None]
+
+    assert [f["id"] for f in roots] == [usa_id]
+    assert tree[year_id]["parent_id"] == usa_id
+    assert tree[date_id]["parent_id"] == year_id
+
+
+def test_database_repairs_parentless_folder_rows_on_open(tmp_path):
+    """Existing databases with parentless path-children should self-heal."""
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    seed = Database(db_path)
+    ws_id = seed._active_workspace_id
+    seed.conn.executemany(
+        "INSERT INTO folders (id, path, name, parent_id) VALUES (?, ?, ?, ?)",
+        [
+            (101, "/photos/USA", "USA", None),
+            (102, "/photos/USA/2026", "2026", None),
+            (103, "/photos/USA/2026/2026-01-19", "2026-01-19", 102),
+        ],
+    )
+    seed.conn.executemany(
+        "INSERT INTO workspace_folders (workspace_id, folder_id, is_root) "
+        "VALUES (?, ?, ?)",
+        [
+            (ws_id, 101, 1),
+            (ws_id, 102, 0),
+            (ws_id, 103, 0),
+        ],
+    )
+    seed.conn.commit()
+    seed.close()
+
+    reopened = Database(db_path)
+    reopened.set_active_workspace(ws_id)
+    try:
+        tree = {f["id"]: f for f in reopened.get_folder_tree()}
+    finally:
+        reopened.close()
+
+    assert tree[101]["parent_id"] is None
+    assert tree[102]["parent_id"] == 101
+    assert tree[103]["parent_id"] == 102
+
+
 def test_workspace_root_hides_materialized_descendant_when_parent_has_photos(db):
     ws_id = db._active_workspace_id
     db.set_active_workspace(None)
@@ -912,6 +984,625 @@ def test_merge_duplicate_keywords_scoped_by_workspace(db):
     assert sparrows == 2
 
 
+def test_add_keyword_normalizes_stray_edge_quotes(db):
+    """New keywords should not preserve accidental leading/trailing quote marks."""
+    keyword_id = db.add_keyword("\u2018apapane'")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    assert db.add_keyword("apapane") == keyword_id
+
+
+def test_add_keyword_preserves_leading_okina(db):
+    """Modifier-letter okinas (U+02BB/U+02BC) are letters inside legitimate
+    species names like \u02bbApapane and must not be stripped."""
+    for name in ("\u02bbApapane", "\u02bcHawai\u02bbi", "\u02bbI\u02bbiwi"):
+        keyword_id = db.add_keyword(name)
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+        assert row["name"] == name, (
+            f"okina stripped from {name!r} -> {row['name']!r}"
+        )
+
+
+def test_add_keyword_normalizes_acute_accent_edge_variant(db):
+    """U+00B4 (ACUTE ACCENT) NFKC-decomposes to U+0020 U+0301, so unless it
+    is stripped before NFKC runs, ``´apapane`` normalizes to a
+    stranded leading combining acute (`́apapane`) that survives the
+    post-NFKC strip and creates a nearly-invisible distinct keyword."""
+    kid = db.add_keyword("´apapane")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    assert db.add_keyword("apapane") == kid
+
+
+def test_add_keyword_normalizes_acute_accent_with_leading_whitespace(db):
+    """When an imported/synced XMP keyword has whitespace before U+00B4
+    (e.g. `` ´apapane`` from an XMP element with pretty-printed text),
+    the pre-NFKC edge-quote strip must still see the acute. Otherwise
+    NFKC decomposes it to a leading combining mark U+0301 that survives
+    the later strip and produces a nearly-invisible variant."""
+    kid = db.add_keyword(" ´apapane")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    assert db.add_keyword("apapane") == kid
+
+
+def test_add_keyword_preserves_internal_acute_accent(db):
+    """U+00B4 should be stripped only at the edges, not inside a keyword."""
+    keyword_id = db.add_keyword("O\u00b4Brien")
+
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "O\u00b4Brien"
+
+
+def test_add_keyword_preserves_private_use_area_character(db):
+    """U+E000 is a valid Private Use Area code point that users may include
+    in a keyword. Prior implementations reserved it as an internal sentinel
+    for U+00B4 protection, which meant a lone U+E000 in the input round-tripped
+    as U+00B4 (data corruption)."""
+    keyword_id = db.add_keyword("a\ue000b")
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "a\ue000b"
+
+    # A lone U+E000 keyword should also survive intact (no accidental
+    # substitution to U+00B4 by the sentinel round-trip).
+    keyword_id = db.add_keyword("\ue000")
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (keyword_id,)
+    ).fetchone()
+    assert row["name"] == "\ue000"
+
+
+def test_merge_keyword_rewrites_pending_changes_to_dst_name(db):
+    """When keyword rename/dedupe collapses a legacy variant into the clean
+    spelling, any still-unsynced ``keyword_add``/``keyword_remove`` queued
+    under the source name must be rewritten to the destination name so the
+    next XMP sync writes/removes the canonical text instead of leaking the
+    stray-quote spelling back into the sidecar."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",))
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('apapane')")
+    db.conn.commit()
+    quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("\u2018apapane",)
+    ).fetchone()[0]
+    clean = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'apapane'"
+    ).fetchone()[0]
+    db.tag_photo(pid_a, quoted)
+    db.tag_photo(pid_b, clean)
+
+    # Queue an unsynced keyword_add under the legacy spelling. Simulates a
+    # tag applied before this normalization pass landed.
+    db.queue_change(pid_a, "keyword_add", "\u2018apapane")
+    # Also queue a duplicate under the destination name so we exercise the
+    # dedupe branch (the merge must drop the source row without producing
+    # two identical pending entries).
+    db.queue_change(pid_b, "keyword_add", "apapane")
+    db.queue_change(pid_b, "keyword_add", "\u2018apapane")
+
+    db.merge_duplicate_keywords()
+
+    add_values = sorted(
+        (row["photo_id"], row["value"]) for row in db.conn.execute(
+            """SELECT photo_id, value FROM pending_changes
+               WHERE change_type = 'keyword_add'"""
+        ).fetchall()
+    )
+    assert add_values == [(pid_a, "apapane"), (pid_b, "apapane")]
+
+
+def test_add_keyword_rejects_name_that_normalizes_to_empty(db):
+    """Input like `'` or `\"\"` is non-empty as raw text but normalizes to '',
+    which would otherwise insert an invisible keyword row."""
+    for empty in ("'", '"', "\u2018", "\u201c\u201d", "'\"'"):
+        try:
+            db.add_keyword(empty)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"expected ValueError for name={empty!r}, none raised"
+            )
+    # No rows should have been inserted from the failed attempts.
+    assert (
+        db.conn.execute("SELECT COUNT(*) FROM keywords WHERE name = ''").fetchone()[0]
+        == 0
+    )
+
+
+def test_merge_duplicate_keywords_normalizes_stray_edge_quotes(db):
+    """Cleanup should collapse existing edge-quote variants to a clean spelling."""
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("\u2018apapane",))
+    db.conn.execute("INSERT INTO keywords (name) VALUES ('apapane')")
+    db.conn.commit()
+    quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("\u2018apapane",)
+    ).fetchone()[0]
+    clean = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'apapane'"
+    ).fetchone()[0]
+    db.tag_photo(pid_a, quoted)
+    db.tag_photo(pid_b, clean)
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 1
+    rows = db.conn.execute(
+        "SELECT id, name FROM keywords WHERE name LIKE '%apapane'"
+    ).fetchall()
+    assert [(row["id"], row["name"]) for row in rows] == [(clean, "apapane")]
+    tagged = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id IN (?, ?)",
+            (pid_a, pid_b),
+        ).fetchall()
+    }
+    assert tagged == {clean}
+
+
+def test_merge_duplicate_keywords_retargets_species_curation_for_survivor_rename(db):
+    """When cleanup canonicalizes the surviving keyword row from a legacy
+    spelling to a clean one, ``species_highlights``, ``photo_preferences``,
+    and ``species_representatives`` rows keyed on the legacy string must
+    follow. Otherwise a highlighted or life-list representative photo under
+    the kept spelling silently drops out of the eligible/highlight queries
+    (which compare ``sh.species``/``sr.species`` exact against ``k.name``)
+    even though the tag itself was retained.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Legacy variant is the only surviving row (no clean sibling), so
+    # ``_normalize_keyword_row_name`` rewrites its ``name`` in place.
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("'apapane",))
+    db.conn.commit()
+    quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
+    ).fetchone()[0]
+    ascii_variant = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("'apapane",)
+    ).fetchone()[0]
+    db.tag_photo(pid_a, quoted)
+    db.tag_photo(pid_b, ascii_variant)
+
+    # Seed curation under the legacy spelling on both variants: a
+    # highlight rank, a life-list preference, and a global representative
+    # pick. The keep_id will end up being one of these rows and must
+    # carry its curation with it when the name is canonicalized.
+    db.conn.execute(
+        """INSERT INTO species_highlights
+              (workspace_id, species, photo_id, rank,
+               created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws, "‘apapane", pid_a),
+    )
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+              (workspace_id, purpose, species, photo_id,
+               created_at, updated_at)
+           VALUES (?, 'representative', ?, ?, datetime('now'), datetime('now'))""",
+        (ws, "‘apapane", pid_a),
+    )
+    db.conn.execute(
+        """INSERT INTO species_representatives
+              (species, photo_id, selected_order,
+               created_at, updated_at)
+           VALUES (?, ?, 1, datetime('now'), datetime('now'))""",
+        ("‘apapane", pid_a),
+    )
+    db.conn.commit()
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 1
+    # Surviving keyword row was canonicalized to the clean spelling.
+    remaining = db.conn.execute(
+        "SELECT name FROM keywords WHERE name LIKE '%apapane'"
+    ).fetchall()
+    assert [row["name"] for row in remaining] == ["apapane"]
+
+    # All three curation tables must now key the row on the clean
+    # spelling — no rows left under the legacy spelling, and each
+    # migrated entry preserved its photo association.
+    hl = db.conn.execute(
+        "SELECT species, photo_id FROM species_highlights"
+    ).fetchall()
+    assert [(row["species"], row["photo_id"]) for row in hl] == [
+        ("apapane", pid_a),
+    ]
+    pref = db.conn.execute(
+        "SELECT species, purpose, photo_id FROM photo_preferences"
+    ).fetchall()
+    assert [(row["species"], row["purpose"], row["photo_id"]) for row in pref] == [
+        ("apapane", "representative", pid_a),
+    ]
+    rep = db.conn.execute(
+        "SELECT species, photo_id FROM species_representatives"
+    ).fetchall()
+    assert [(row["species"], row["photo_id"]) for row in rep] == [
+        ("apapane", pid_a),
+    ]
+
+
+def test_merge_duplicate_keywords_retargets_species_curation_when_source_merges_into_clean_survivor(db):
+    """When the SURVIVOR is already clean (so ``_normalize_keyword_row_name``
+    no-ops) and a legacy source with its own species curation gets merged
+    into it, ``_merge_keyword_into`` must retarget ``species_highlights``,
+    ``photo_preferences``, and ``species_representatives`` from the source
+    spelling onto the survivor's spelling. Without this the tag itself
+    moves to the surviving row but the curation rows stay keyed to a
+    keyword name the DB no longer has -- the eligible highlight/life-list
+    queries compare ``sh.species``/``sr.species`` exact against
+    ``keywords.name``, so the user's curated picks drop out of the UI
+    even though the tag was retained.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_survivor = db.add_photo(folder_id=fid, filename="s.jpg", extension=".jpg",
+                                file_size=100, file_mtime=1.0)
+    pid_legacy = db.add_photo(folder_id=fid, filename="l.jpg", extension=".jpg",
+                              file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    # Survivor is already clean; a separate legacy taxonomy row will be
+    # merged into it. The pass sorts (is_dirty, id) so ``apapane`` wins as
+    # the keep row while ``‘apapane`` becomes the source of the merge.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("apapane",),
+    )
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES (?, 'taxonomy', 1)",
+        ("‘apapane",),
+    )
+    db.conn.commit()
+    survivor_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("apapane",)
+    ).fetchone()[0]
+    legacy_id = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
+    ).fetchone()[0]
+    db.tag_photo(pid_survivor, survivor_id)
+    db.tag_photo(pid_legacy, legacy_id)
+
+    # Curation keyed on the legacy source spelling for the photo tagged with
+    # the legacy row. After the merge the tag moves to ``survivor_id`` /
+    # ``apapane`` but the highlight/life-list queries only match rows whose
+    # species text equals the surviving ``keywords.name`` -- so without the
+    # retarget these rows silently drop out of the UI.
+    db.conn.execute(
+        """INSERT INTO species_highlights
+              (workspace_id, species, photo_id, rank,
+               created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws, "‘apapane", pid_legacy),
+    )
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+              (workspace_id, purpose, species, photo_id,
+               created_at, updated_at)
+           VALUES (?, 'life_list', ?, ?, datetime('now'), datetime('now'))""",
+        (ws, "‘apapane", pid_legacy),
+    )
+    db.conn.execute(
+        """INSERT INTO species_representatives
+              (species, photo_id, selected_order,
+               created_at, updated_at)
+           VALUES (?, ?, 1, datetime('now'), datetime('now'))""",
+        ("‘apapane", pid_legacy),
+    )
+    db.conn.commit()
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 1
+    # Survivor keeps its clean name; the legacy source row was deleted.
+    kw_rows = db.conn.execute(
+        "SELECT id, name FROM keywords WHERE name LIKE '%apapane' ORDER BY id"
+    ).fetchall()
+    assert [(row["id"], row["name"]) for row in kw_rows] == [
+        (survivor_id, "apapane"),
+    ]
+    # The legacy photo's species tag moved onto the surviving id. The photo
+    # also carries an auto-added Wildlife genre from tag_photo's
+    # auto-Wildlife trigger (only-species-on-photo path); check membership
+    # rather than equality so that unrelated tag isn't hard-coded.
+    tag_ids = {
+        row["keyword_id"]
+        for row in db.conn.execute(
+            "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
+            (pid_legacy,),
+        ).fetchall()
+    }
+    assert survivor_id in tag_ids
+    assert legacy_id not in tag_ids
+
+    # All three curation tables are now keyed on the surviving clean
+    # spelling. Nothing left under the legacy source spelling.
+    hl = db.conn.execute(
+        "SELECT species, photo_id FROM species_highlights"
+    ).fetchall()
+    assert [(row["species"], row["photo_id"]) for row in hl] == [
+        ("apapane", pid_legacy),
+    ]
+    pref = db.conn.execute(
+        "SELECT species, purpose, photo_id FROM photo_preferences"
+    ).fetchall()
+    assert [(row["species"], row["purpose"], row["photo_id"]) for row in pref] == [
+        ("apapane", "life_list", pid_legacy),
+    ]
+    rep = db.conn.execute(
+        "SELECT species, photo_id FROM species_representatives"
+    ).fetchall()
+    assert [(row["species"], row["photo_id"]) for row in rep] == [
+        ("apapane", pid_legacy),
+    ]
+
+
+def test_merge_duplicate_keywords_scopes_curation_to_tagged_pairs(db):
+    """When one workspace runs keyword cleanup, curation rows keyed on the
+    legacy spelling in a DIFFERENT workspace whose photos are not tagged with
+    the merged/canonicalized keyword must NOT be rewritten. A separate legacy
+    keyword row can carry the same species string across workspaces, and a
+    global rename by species text would silently retarget the second
+    workspace's highlights/preferences onto a canonical name it has no tag
+    for — the eligible highlight/preference queries JOIN back to
+    ``keywords.name`` exactly, so those rows would then drop out of the UI
+    even though the tag itself is still present.
+    """
+    # Workspace A owns folder A with the duplicate keyword rows to clean up.
+    ws_a = db.create_workspace("A")
+    fid_a = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws_a, fid_a)
+    pid_a = db.add_photo(folder_id=fid_a, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    # Workspace B owns a separate folder and has its own legacy keyword row
+    # that is NOT part of workspace A's cleanup scope.
+    ws_b = db.create_workspace("B")
+    fid_b = db.add_folder("/photos/b", name="b")
+    db.add_workspace_folder(ws_b, fid_b)
+    pid_b = db.add_photo(folder_id=fid_b, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+
+    # Two normalized-equal legacy rows in workspace A -- cleanup will merge
+    # them and canonicalize the survivor's spelling.
+    db.set_active_workspace(ws_a)
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("'apapane",))
+    db.conn.commit()
+    a_quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("‘apapane",)
+    ).fetchone()[0]
+    a_ascii = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("'apapane",)
+    ).fetchone()[0]
+    db.tag_photo(pid_a, a_quoted)
+    db.tag_photo(pid_a, a_ascii)
+
+    # A SEPARATE legacy keyword row that is only tagged in workspace B. Cleanup
+    # in A must not touch it -- keywords are global but B's photo is not
+    # tagged with either of A's duplicate rows, so curation and pending
+    # changes referencing this independent row must survive untouched.
+    db.conn.execute("INSERT INTO keywords (name) VALUES (?)", ("‘apapane",))
+    db.conn.commit()
+    b_quoted = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ? ORDER BY id DESC LIMIT 1",
+        ("‘apapane",),
+    ).fetchone()[0]
+    assert b_quoted not in (a_quoted, a_ascii)
+    db.tag_photo(pid_b, b_quoted)
+
+    # Seed curation in BOTH workspaces under the legacy spelling and a
+    # pending keyword_add in each workspace.
+    db.conn.execute(
+        """INSERT INTO species_highlights
+              (workspace_id, species, photo_id, rank,
+               created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws_a, "‘apapane", pid_a),
+    )
+    db.conn.execute(
+        """INSERT INTO species_highlights
+              (workspace_id, species, photo_id, rank,
+               created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws_b, "‘apapane", pid_b),
+    )
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+              (workspace_id, purpose, species, photo_id,
+               created_at, updated_at)
+           VALUES (?, 'life_list', ?, ?, datetime('now'), datetime('now'))""",
+        (ws_b, "‘apapane", pid_b),
+    )
+    # Seed the pending rows with raw INSERTs carrying the legacy quoted
+    # spelling: queue_change normalizes keyword values at write time on
+    # this branch, so it can no longer produce the pre-normalization state
+    # this test scopes the cleanup against.
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'keyword_add', ?, 'tok-a', ?)",
+        (pid_a, "‘apapane", ws_a),
+    )
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'keyword_add', ?, 'tok-b', ?)",
+        (pid_b, "‘apapane", ws_b),
+    )
+    db.conn.commit()
+
+    db.merge_duplicate_keywords()
+
+    # Workspace A's curation and pending change should be canonicalized.
+    a_hl = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE workspace_id = ?",
+        (ws_a,),
+    ).fetchone()
+    assert a_hl["species"] == "apapane"
+    a_pending = db.conn.execute(
+        """SELECT value FROM pending_changes
+           WHERE photo_id = ? AND change_type = 'keyword_add'""",
+        (pid_a,),
+    ).fetchone()
+    assert a_pending["value"] == "apapane"
+
+    # Workspace B's curation and pending change must NOT be rewritten -- its
+    # keyword row is a separate row not touched by A's cleanup, and the
+    # eligible-highlight/preferences queries join by species text to that
+    # row's stored name.
+    b_hl = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE workspace_id = ?",
+        (ws_b,),
+    ).fetchone()
+    assert b_hl["species"] == "‘apapane"
+    b_pref = db.conn.execute(
+        "SELECT species FROM photo_preferences WHERE workspace_id = ?",
+        (ws_b,),
+    ).fetchone()
+    assert b_pref["species"] == "‘apapane"
+    b_pending = db.conn.execute(
+        """SELECT value FROM pending_changes
+           WHERE photo_id = ? AND change_type = 'keyword_add'""",
+        (pid_b,),
+    ).fetchone()
+    assert b_pending["value"] == "‘apapane"
+
+
+def test_merge_duplicate_keywords_does_not_fold_distinct_non_ascii(db):
+    """``keyword_match_key`` must use ``str.lower()``, not ``str.casefold()``.
+
+    ``str.casefold()`` folds ``ß`` to ``ss``, so ``"Maße".casefold() ==
+    "Masse".casefold() == "masse"``. If cleanup grouped on that key, it
+    would silently retag and delete one of two distinct German keywords
+    even though ``add_keyword()`` and the table constraints treat them as
+    distinct — a data-loss regression. Using ``str.lower()`` (which
+    leaves ``ß`` alone, matching SQLite's ASCII ``COLLATE NOCASE``) keeps
+    them as separate keywords.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    masse_id = db.add_keyword("Masse")
+    masze_id = db.add_keyword("Maße")
+    assert masse_id != masze_id
+    db.tag_photo(pid_a, masse_id)
+    db.tag_photo(pid_b, masze_id)
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 0
+    remaining = {
+        row["id"]: row["name"] for row in db.conn.execute(
+            "SELECT id, name FROM keywords WHERE id IN (?, ?)",
+            (masse_id, masze_id),
+        ).fetchall()
+    }
+    assert remaining == {masse_id: "Masse", masze_id: "Maße"}
+    tagged = {
+        (row["photo_id"], row["keyword_id"])
+        for row in db.conn.execute(
+            "SELECT photo_id, keyword_id FROM photo_keywords "
+            "WHERE photo_id IN (?, ?)",
+            (pid_a, pid_b),
+        ).fetchall()
+    }
+    assert tagged == {(pid_a, masse_id), (pid_b, masze_id)}
+
+
+def test_merge_duplicate_keywords_does_not_fold_non_ascii_case_pairs(db):
+    """``keyword_match_key`` must ignore non-ASCII case pairs.
+
+    ``"Éclair".lower() == "éclair"`` in Python, but SQLite's
+    ``LOWER()``/``COLLATE NOCASE`` used by ``add_keyword()`` is
+    ASCII-only and treats them as distinct. If cleanup grouped on
+    ``str.lower()``, the merge path would silently retag and delete one
+    of two distinct keywords that ``add_keyword()`` kept separate.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos/a", name="a")
+    db.add_workspace_folder(ws, fid)
+    pid_a = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    pid_b = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                         file_size=100, file_mtime=1.0)
+    db.set_active_workspace(ws)
+
+    upper_id = db.add_keyword("Éclair")
+    lower_id = db.add_keyword("éclair")
+    assert upper_id != lower_id
+    db.tag_photo(pid_a, upper_id)
+    db.tag_photo(pid_b, lower_id)
+
+    merged = db.merge_duplicate_keywords()
+
+    assert merged == 0
+    remaining = {
+        row["id"]: row["name"] for row in db.conn.execute(
+            "SELECT id, name FROM keywords WHERE id IN (?, ?)",
+            (upper_id, lower_id),
+        ).fetchall()
+    }
+    assert remaining == {upper_id: "Éclair", lower_id: "éclair"}
+    tagged = {
+        (row["photo_id"], row["keyword_id"])
+        for row in db.conn.execute(
+            "SELECT photo_id, keyword_id FROM photo_keywords "
+            "WHERE photo_id IN (?, ?)",
+            (pid_a, pid_b),
+        ).fetchall()
+    }
+    assert tagged == {(pid_a, upper_id), (pid_b, lower_id)}
+
+
 def test_merge_duplicate_keywords_respects_parent_and_type(db):
     """Same-name keywords under different parents (Springfield, IL vs MO) or
     with different types are distinct by design and must NOT merge; only
@@ -950,6 +1641,50 @@ def test_merge_duplicate_keywords_respects_parent_and_type(db):
     assert db.conn.execute(
         "SELECT COUNT(*) FROM keywords WHERE LOWER(name) = 'macro'"
     ).fetchone()[0] == 2
+
+
+def test_merge_duplicate_keywords_preserves_species_bearing_general_homonym(db):
+    """A legacy species-bearing general and an ordinary general homonym
+    share name/parent/type but not semantics. Manual cleanup must not merge
+    them and spread the species flag to photos carrying the ordinary tag.
+    """
+    ws = db.create_workspace("A")
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(ws, fid)
+    pid_species = db.add_photo(
+        folder_id=fid, filename="species.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    pid_plain = db.add_photo(
+        folder_id=fid, filename="plain.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.set_active_workspace(ws)
+    species_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    plain_id = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'general', 0)"
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(pid_species, species_id)
+    db.tag_photo(pid_plain, plain_id)
+
+    assert db.merge_duplicate_keywords() == 0
+    rows = db.conn.execute(
+        "SELECT id, is_species FROM keywords WHERE id IN (?, ?) ORDER BY id",
+        (species_id, plain_id),
+    ).fetchall()
+    assert [(r["id"], r["is_species"]) for r in rows] == [
+        (species_id, 1),
+        (plain_id, 0),
+    ]
+    assert db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords WHERE photo_id = ?",
+        (pid_plain,),
+    ).fetchone()["keyword_id"] == plain_id
 
 
 def test_merge_duplicate_keywords_reparents_children(db):
@@ -1078,11 +1813,16 @@ def test_merge_duplicate_keywords_handles_stale_group_after_parent_merge(db):
     ).fetchall():
         db.tag_photo(pid, row[0])
 
-    # Species/location metadata carried only by the duplicate must fold
-    # into the survivor instead of being deleted with it. (Set after
-    # tagging so the auto-Wildlife rule doesn't muddy the tag assertions.)
+    # Keep every child in the same species-bearing slot; this test exercises
+    # stale recursive groups, not the distinct species/plain homonym boundary.
+    # Location metadata carried only by the duplicate must still fold into
+    # the survivor instead of being deleted with it. (Set after tagging so
+    # the auto-Wildlife rule doesn't muddy the tag assertions.)
     db.conn.execute(
-        "UPDATE keywords SET is_species = 1, latitude = -33.9, longitude = 18.4 "
+        "UPDATE keywords SET is_species = 1 WHERE LOWER(name) = 'heron'"
+    )
+    db.conn.execute(
+        "UPDATE keywords SET latitude = -33.9, longitude = 18.4 "
         "WHERE name = 'heron' AND parent_id = ?", (lower,))
     db.conn.commit()
 
@@ -1268,22 +2008,59 @@ def test_move_folders_moves_pending_changes(db_with_workspace):
 
 
 def test_move_folders_moves_photo_preferences(db_with_workspace):
-    """Representative Life List / Highlights choices follow moved photos."""
+    """Representative choices and ordered highlights follow moved photos."""
     db, ws1, folder_id, photo_id = db_with_workspace
     db.set_photo_preference("life_list", "Robin", photo_id)
     db.set_photo_preference("highlights", "Robin", photo_id)
+    db.add_species_highlight("Robin", photo_id)
 
     ws2 = db.create_workspace("Target")
     result = db.move_folders_to_workspace(ws1, ws2, [folder_id])
 
     assert result["photo_preferences_moved"] == 2
+    assert result["species_highlights_moved"] == 1
     db.set_active_workspace(ws2)
     assert db.get_photo_preferences("life_list") == {"Robin": photo_id}
     assert db.get_photo_preferences("highlights") == {"Robin": photo_id}
+    assert db.get_species_highlights() == {"Robin": {photo_id: 1}}
 
     db.set_active_workspace(ws1)
     assert db.get_photo_preferences("life_list") == {}
     assert db.get_photo_preferences("highlights") == {}
+    assert db.get_species_highlights() == {}
+
+
+def test_move_folders_reranks_species_highlights_on_collision(db):
+    """Moving highlights into a target that already has ranks for the same
+    species must append after the target's max rank so `ORDER BY rank`
+    keeps the target's curated order first."""
+    ws1 = db.create_workspace("Source")
+    ws2 = db.create_workspace("Target")
+
+    src_folder = db.add_folder("/src", name="src")
+    tgt_folder = db.add_folder("/tgt", name="tgt")
+    db.add_workspace_folder(ws1, src_folder)
+    db.add_workspace_folder(ws2, tgt_folder)
+
+    src_photo = db.add_photo(folder_id=src_folder, filename="src.jpg",
+                             extension=".jpg", file_size=100, file_mtime=1.0)
+    tgt_photo = db.add_photo(folder_id=tgt_folder, filename="tgt.jpg",
+                             extension=".jpg", file_size=100, file_mtime=2.0)
+
+    db.set_active_workspace(ws1)
+    db.add_species_highlight("Robin", src_photo)
+    db.set_active_workspace(ws2)
+    db.add_species_highlight("Robin", tgt_photo)
+
+    result = db.move_folders_to_workspace(ws1, ws2, [src_folder])
+    assert result["species_highlights_moved"] == 1
+
+    db.set_active_workspace(ws2)
+    # Both photos are in the Robin bucket, with distinct ranks; the target's
+    # original rank-1 stays first because moved rows append after it.
+    assert db.get_species_highlights("Robin") == {
+        "Robin": {tgt_photo: 1, src_photo: 2},
+    }
 
 
 def test_move_folders_collections_stay_behind(db_with_workspace):
@@ -2004,3 +2781,331 @@ def test_tabs_are_per_workspace(db):
     db.set_active_workspace(ws2)
     assert db.get_tabs() == DEFAULT_TABS
     assert "logs" not in db.get_tabs()
+
+
+# ---------------------------------------------------------------------------
+# per-workspace default process strategy (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def _a_process_id(client, name):
+    procs = client.get("/api/processes").get_json()
+    return next(p["id"] for p in procs if p["name"] == name)
+
+
+def _put_default_process(client, ws_id, value):
+    return client.put(
+        f"/api/workspaces/{ws_id}",
+        data=json.dumps(
+            {"config_overrides": {"pipeline": {"default_process_id": value}}}
+        ),
+        content_type="application/json",
+    )
+
+
+def test_workspace_default_process_saved_and_effective(client):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "Strat"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    pid = _a_process_id(client, "Cull-ready")
+    resp = _put_default_process(client, ws_id, pid)
+    assert resp.status_code == 200
+
+    import config as cfg
+    from db import Database
+
+    # Read through get_effective_config exactly like the pipeline does.
+    db_path = None
+    with client.application.app_context():
+        db_path = client.application.config["DB_PATH"]
+    db = Database(db_path)
+    db.set_active_workspace(ws_id)
+    effective = db.get_effective_config(cfg.load())
+    assert effective["pipeline"]["default_process_id"] == pid
+
+
+def test_workspace_default_process_null_means_import_only(client):
+    """None is the "no automatic processing after import" sentinel that the
+    chaining hook short-circuits on. Saving it must succeed — if this 400s,
+    the "import only" user flow is unreachable."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "StratNull"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_process(client, ws_id, None)
+    assert resp.status_code == 200
+
+    import config as cfg
+    from db import Database
+
+    db = Database(client.application.config["DB_PATH"])
+    db.set_active_workspace(ws_id)
+    effective = db.get_effective_config(cfg.load())
+    assert effective["pipeline"]["default_process_id"] is None
+
+
+def test_workspace_default_process_unknown_400(client):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "StratBad"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_process(client, ws_id, 999999)
+    assert resp.status_code == 400
+    assert "unknown process id" in resp.get_json()["error"]
+
+
+@pytest.mark.parametrize("bad", [True, "identify", ["1"], {"id": 1}])
+def test_workspace_default_process_non_int_400(client, bad):
+    """A JSON client sending a bool, string, list, or dict for
+    ``pipeline.default_process_id`` must get a 400 validation error, not a
+    500. (bool is a subclass of int and must be rejected explicitly.)"""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": f"StratBadType-{type(bad).__name__}"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+    resp = _put_default_process(client, ws_id, bad)
+    assert resp.status_code == 400
+    assert "integer" in resp.get_json()["error"]
+
+
+def test_config_default_process_id_default_is_none():
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "vireo"))
+    from config import DEFAULTS
+
+    assert DEFAULTS["pipeline"]["default_process_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Create-workspace config_overrides validation (mirror of PUT validation)
+#
+# Regression tripwires for a validation gap on POST /api/workspaces: the
+# create path used to pass ``body.get("config_overrides")`` straight into
+# db.create_workspace without checking pipeline.default_process_id, so a
+# client could seed a workspace with a dangling process id that PUT and
+# /api/jobs/pipeline would both reject — later feeding the chaining hook an
+# invalid id that only surfaces as a job failure.
+# ---------------------------------------------------------------------------
+
+
+def test_create_workspace_rejects_unknown_default_process(client):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratBadCreate",
+            "config_overrides": {"pipeline": {"default_process_id": 999999}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "unknown process id" in resp.get_json()["error"]
+
+
+@pytest.mark.parametrize("bad", [True, "identify", ["1"], {"id": 1}])
+def test_create_workspace_rejects_non_int_default_process(client, bad):
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": f"StratBadTypeCreate-{type(bad).__name__}",
+            "config_overrides": {"pipeline": {"default_process_id": bad}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "integer" in resp.get_json()["error"]
+
+
+def test_create_workspace_accepts_valid_default_process(client):
+    pid = _a_process_id(client, "Cull-ready")
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratCreateOK",
+            "config_overrides": {"pipeline": {"default_process_id": pid}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    ws_id = resp.get_json()["id"]
+
+    import config as cfg
+    from db import Database
+
+    db = Database(client.application.config["DB_PATH"])
+    db.set_active_workspace(ws_id)
+    effective = db.get_effective_config(cfg.load())
+    assert effective["pipeline"]["default_process_id"] == pid
+
+
+def test_create_workspace_accepts_null_default_process(client):
+    """Explicit null on create must round-trip — it is the "import only"
+    sentinel and mirrors the PUT path's null acceptance."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratCreateNull",
+            "config_overrides": {"pipeline": {"default_process_id": None}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+
+
+def test_create_workspace_rejects_non_object_config_overrides(client):
+    """``config_overrides`` must be a JSON object or null; anything else
+    would be persisted as-is and break the labels accessors."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "StratBadOverrides",
+            "config_overrides": "not-a-dict",
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert "config_overrides" in resp.get_json()["error"]
+
+
+# ---------------------------------------------------------------------------
+# Legacy ``pipeline.default_strategy`` translation on workspace overrides.
+#
+# An older client (or a payload restored from a pre-migration backup) may
+# still send the hardcoded strategy name. The workspace endpoints must
+# translate it to ``default_process_id`` up front — otherwise it falls
+# through as an inert non-schema key and the effective default_process_id
+# stays null, silently downgrading the workspace to import-only.
+# ---------------------------------------------------------------------------
+
+
+def _effective_pipeline(client, ws_id):
+    import config as cfg
+    from db import Database
+
+    db = Database(client.application.config["DB_PATH"])
+    db.set_active_workspace(ws_id)
+    return db.get_effective_config(cfg.load())["pipeline"]
+
+
+def test_put_workspace_translates_legacy_default_strategy(client):
+    """PUT with the legacy ``default_strategy: "identify"`` must land on the
+    matching seed's ``default_process_id`` in the effective config, not fall
+    through as an inert override."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "LegacyPut"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+
+    resp = client.put(
+        f"/api/workspaces/{ws_id}",
+        data=json.dumps(
+            {"config_overrides": {"pipeline": {"default_strategy": "identify"}}}
+        ),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+
+    expected_pid = _a_process_id(client, "Identify birds")
+    effective = _effective_pipeline(client, ws_id)
+    assert effective["default_process_id"] == expected_pid
+    assert "default_strategy" not in effective
+
+
+def test_put_workspace_unknown_legacy_strategy_maps_to_null(client):
+    """An unrecognized legacy name must translate to ``None`` (import only)
+    rather than falling through as an inert override that leaves
+    ``default_process_id`` null-by-omission on the workspace but subject to
+    the global default via effective-config merging."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "LegacyPutUnknown"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+
+    resp = client.put(
+        f"/api/workspaces/{ws_id}",
+        data=json.dumps(
+            {"config_overrides": {"pipeline": {"default_strategy": "not-a-strategy"}}}
+        ),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+
+    # Read the persisted override directly from the workspaces list — the
+    # per-workspace effective config would fall back to the global default
+    # if the workspace had NO override, so we need to see what was actually
+    # stored to distinguish "translated to explicit null" from "silently
+    # dropped".
+    ws = next(
+        w for w in client.get("/api/workspaces").get_json() if w["id"] == ws_id
+    )
+    raw_overrides = ws.get("config_overrides")
+    overrides = (
+        json.loads(raw_overrides) if isinstance(raw_overrides, str) else (raw_overrides or {})
+    )
+    pipeline = overrides.get("pipeline") or {}
+    assert "default_strategy" not in pipeline
+    assert pipeline.get("default_process_id") is None
+
+
+def test_put_workspace_both_keys_new_wins(client):
+    """If a caller sends both the legacy and the new key, the new one wins
+    and the legacy key is dropped so it can't resurface on a later read."""
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({"name": "LegacyPutBoth"}),
+        content_type="application/json",
+    )
+    ws_id = resp.get_json()["id"]
+
+    cull_ready = _a_process_id(client, "Cull-ready")
+    resp = client.put(
+        f"/api/workspaces/{ws_id}",
+        data=json.dumps({
+            "config_overrides": {
+                "pipeline": {
+                    # legacy names "identify" (would map to "Identify birds"),
+                    # but the explicit new key must take precedence.
+                    "default_strategy": "identify",
+                    "default_process_id": cull_ready,
+                }
+            }
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+
+    effective = _effective_pipeline(client, ws_id)
+    assert effective["default_process_id"] == cull_ready
+    assert "default_strategy" not in effective
+
+
+def test_create_workspace_translates_legacy_default_strategy(client):
+    """The create path shares the validator, so the same translation must
+    apply — otherwise a workspace can be spawned with an inert legacy key."""
+    expected_pid = _a_process_id(client, "Cull-ready")
+    resp = client.post(
+        "/api/workspaces",
+        data=json.dumps({
+            "name": "LegacyCreate",
+            "config_overrides": {"pipeline": {"default_strategy": "cull_ready"}},
+        }),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    ws_id = resp.get_json()["id"]
+
+    effective = _effective_pipeline(client, ws_id)
+    assert effective["default_process_id"] == expected_pid

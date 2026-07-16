@@ -8,7 +8,7 @@ def test_pipeline_page_loads_with_stages(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     stages = page.locator("[data-testid='stage-card']")
-    expect(stages).to_have_count(8)
+    expect(stages).to_have_count(7)
 
 
 def test_pipeline_start_button_disabled_without_folders(live_server, page):
@@ -18,44 +18,128 @@ def test_pipeline_start_button_disabled_without_folders(live_server, page):
     expect(btn).to_be_disabled()
 
 
-def test_pipeline_copy_toggle_shows_destination(live_server, page):
+def test_pipeline_has_no_destination_card(live_server, page):
+    """The Destination card left with the import/process split — Process
+    never copies files, so the page must not offer a destination or any
+    of the legacy copy controls."""
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    # Expand the Destination card first (collapsed by default)
-    page.click("#card-destination .stage-header")
-    dest = page.locator("[data-testid='destination-section']")
-    expect(dest).to_be_hidden()
-    page.check("[data-testid='copy-photos-toggle']")
-    expect(dest).to_be_visible()
+    expect(page.locator("#card-destination")).to_have_count(0)
+    for testid in (
+        "file-copying-section",
+        "copy-photos-toggle",
+        "destination-section",
+        "custom-template-input",
+        "preview-folders-btn",
+        "workspace-new",
+        "workspace-current",
+    ):
+        expect(page.locator(f"[data-testid='{testid}']")).to_have_count(0)
 
 
-def test_pipeline_copy_toggle_hides_destination(live_server, page):
+def test_pipeline_source_points_imports_to_import_page(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
-    dest = page.locator("[data-testid='destination-section']")
-    expect(dest).to_be_visible()
-    page.uncheck("[data-testid='copy-photos-toggle']")
-    expect(dest).to_be_hidden()
+    hint = page.locator("[data-testid='source-import-hint']")
+    expect(hint).to_contain_text("Adding new photos to your library happens on the")
+    expect(hint.locator("a[href='/import']")).to_contain_text("Import")
 
 
-def test_pipeline_collection_source_dims_import(live_server, page):
+def test_pipeline_has_no_source_browse_controls(live_server, page):
+    """Arbitrary-path sources left with the import/process split: the
+    Source card offers only workspace folders and collections, so the
+    Browse button, the type-a-path input, and the folder-browser modal
+    must all be gone."""
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    expect(page.locator("[data-testid='source-browse-btn']")).to_have_count(0)
+    expect(page.locator("#cfgSourceInput")).to_have_count(0)
+    expect(page.locator("#folderBrowserOverlay")).to_have_count(0)
+
+
+def test_pipeline_collection_source_dims_folders(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("[data-testid='source-collection']")
-    import_body = page.locator("#sourceImportBody")
-    expect(import_body).to_have_class(re.compile("dimmed"))
+    folders_body = page.locator("#sourceImportBody")
+    expect(folders_body).to_have_class(re.compile("dimmed"))
 
 
-def test_pipeline_import_source_dims_collection(live_server, page):
+def test_pipeline_folders_source_dims_collection(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("[data-testid='source-collection']")
     collection_body = page.locator("[data-testid='collection-section']")
     expect(collection_body).not_to_have_class(re.compile("dimmed"))
-    page.click("[data-testid='source-import']")
+    page.click("[data-testid='source-folders-option']")
     expect(collection_body).to_have_class(re.compile("dimmed"))
+
+
+def test_pipeline_folder_selection_posts_folder_ids(live_server, page):
+    """Switching back from collection mode and checking a workspace folder
+    must make Start POST `folder_ids` — not the previously selected
+    collection scope."""
+    url = live_server["url"]
+    page.route(
+        re.compile(r"/api/workspaces/\d+/folders$"),
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([
+                {
+                    "id": 42,
+                    "path": "/library",
+                    "parent_id": None,
+                    "photo_count": 5,
+                    "workspace_photo_count": 5,
+                },
+            ]),
+        ),
+    )
+    pipeline_payloads = []
+
+    def capture_pipeline(route):
+        pipeline_payloads.append(route.request.post_data_json)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "job-p2"}),
+        )
+
+    page.route("**/api/jobs/pipeline", capture_pipeline)
+
+    page.goto(f"{url}/pipeline")
+    page.click("[data-testid='source-collection']")
+    assert page.evaluate("_sourceMode") == "collection"
+
+    # Return to folders scope, then check a workspace folder.
+    page.click("[data-testid='source-folders-option']")
+    assert page.evaluate("_sourceMode") == "folders"
+    folder_cb = page.locator("#folderScopeList input[type='checkbox']").first
+    expect(folder_cb).to_be_visible()
+    folder_cb.check()
+
+    # Start posts folder_ids, not a collection scope.
+    page.uncheck("#enableClassify")
+    start_btn = page.locator("[data-testid='start-pipeline-btn']")
+    expect(start_btn).to_be_enabled()
+    start_btn.click()
+
+    for _ in range(50):
+        if pipeline_payloads:
+            break
+        page.wait_for_timeout(100)
+    assert pipeline_payloads, "expected /api/jobs/pipeline to be POSTed"
+    body = pipeline_payloads[0]
+    assert body.get("folder_ids") == [42], (
+        f"expected folder_ids=[42], got body={body!r}"
+    )
+    assert "collection_id" not in body, (
+        f"folders mode must not POST collection_id, got body={body!r}"
+    )
+    assert "sources" not in body, (
+        f"folders mode must not POST sources, got body={body!r}"
+    )
 
 
 def test_pipeline_source_card_expanded_by_default(live_server, page):
@@ -73,143 +157,6 @@ def test_pipeline_stage_cards_collapse_expand(live_server, page):
     expect(source_card).not_to_have_class(re.compile("expanded"))
     page.click("#card-source .stage-header")
     expect(source_card).to_have_class(re.compile("expanded"))
-
-
-def test_pipeline_folder_template_visible_when_copy_enabled(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
-    template = page.locator("#cfgFolderTemplate")
-    expect(template).to_be_visible()
-
-
-def test_pipeline_folder_template_hidden_when_copy_disabled(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    # Don't check the copy toggle
-    template = page.locator("#cfgFolderTemplate")
-    expect(template).to_be_hidden()
-
-
-def test_pipeline_custom_template_shown_on_select(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
-    custom_input = page.locator("[data-testid='custom-template-input']")
-    expect(custom_input).to_be_hidden()
-    page.select_option("#cfgFolderTemplate", "__custom__")
-    expect(custom_input).to_be_visible()
-
-
-def test_pipeline_preview_button_disabled_without_source_dest(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
-    btn = page.locator("[data-testid='preview-folders-btn']")
-    expect(btn).to_be_disabled()
-
-
-def _destination_preview_body(managed_archive):
-    """Minimal destination-preview payload the render path needs, with an
-    optional managed_archive block."""
-    return json.dumps({
-        "total_photos": 3,
-        "total_folders": 1,
-        "new_folders": 0,
-        "existing_folders": 1,
-        "folders": [
-            {"path": "2026/2026-06-30", "count": 3, "exists": True,
-             "full_path": "/arch/USA/2026/2026-06-30"},
-        ],
-        "managed_archive": managed_archive,
-    })
-
-
-def test_pipeline_managed_archive_callout_shown_for_existing_archive(live_server, page):
-    """When destination-preview flags a managed archive, the merge callout
-    renders with the archive path and photo count."""
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
-
-    page.route(
-        "**/api/import/destination-preview",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=_destination_preview_body(
-                {"path": "/arch/USA", "photo_count": 1234}
-            ),
-        ),
-    )
-    # Drive the preview directly (no on-disk sources needed — the render path
-    # only consumes the stubbed destination-preview response).
-    page.evaluate("previewDestinationFolders()")
-
-    callout = page.locator("[data-testid='managed-archive-callout']")
-    expect(callout).to_be_visible()
-    expect(callout).to_contain_text("existing Vireo archive")
-    expect(callout).to_contain_text("/arch/USA")
-    expect(callout).to_contain_text("1,234 photos")
-    expect(callout).to_contain_text("merged in")
-
-
-def test_pipeline_no_managed_archive_callout_for_fresh_destination(live_server, page):
-    """A fresh (untracked) destination shows no merge callout."""
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.click("#card-destination .stage-header")
-    page.check("[data-testid='copy-photos-toggle']")
-
-    page.route(
-        "**/api/import/destination-preview",
-        lambda route: route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=_destination_preview_body(None),
-        ),
-    )
-    page.evaluate("previewDestinationFolders()")
-
-    # Results render, but the callout stays hidden.
-    expect(page.locator("[data-testid='folder-preview-results']")).to_be_visible()
-    expect(page.locator("[data-testid='managed-archive-callout']")).to_be_hidden()
-
-
-def test_pipeline_duplicate_summary_reframed_when_merging(live_server, page):
-    """With a managed archive in play, the duplicate summary reads as an
-    archive merge (already-in-archive + new-will-be-merged), not the generic
-    'already imported' wording."""
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    # Managed-merge framing.
-    page.evaluate(
-        "window._managedArchive = {path: '/arch/USA', photo_count: 10};"
-        "updateDuplicateSummary({done: true, duplicate_count: 2, total: 5});"
-    )
-    dup = page.locator("#previewSummary .dup-status")
-    expect(dup).to_contain_text("already in your library")
-    expect(dup).to_contain_text("will be skipped")
-    expect(dup).to_contain_text("3 new")
-    expect(dup).to_contain_text("will be merged")
-
-
-def test_pipeline_duplicate_summary_generic_when_fresh(live_server, page):
-    """No managed archive -> today's exact 'already imported' wording."""
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    page.evaluate(
-        "window._managedArchive = null;"
-        "updateDuplicateSummary({done: true, duplicate_count: 2, total: 5});"
-    )
-    dup = page.locator("#previewSummary .dup-status")
-    expect(dup).to_contain_text("already imported")
-    expect(dup).not_to_contain_text("this archive")
 
 
 def test_pipeline_section_headers_visible(live_server, page):
@@ -235,63 +182,6 @@ def test_pipeline_status_pills_visible_for_processing_stages(live_server, page):
     expect(page.locator("#pillClassify")).to_contain_text("Already done")
     # Extract has no seeded masks → "Will run".
     expect(page.locator("#pillExtract")).to_contain_text("Will run")
-
-
-def test_pipeline_import_plan_waits_for_folder_preview_scope(live_server, page):
-    url = live_server["url"]
-    page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillClassify")).to_contain_text("Already done")
-
-    stale_plan_route = []
-
-    def hold_stale_plan(route):
-        stale_plan_route.append(route)
-
-    page.route("**/api/pipeline/plan", hold_stale_plan)
-    page.evaluate("setTimeout(refreshPipelinePlan, 0)")
-    for _ in range(50):
-        if stale_plan_route:
-            break
-        page.wait_for_timeout(100)
-    assert stale_plan_route
-
-    folder_preview_route = []
-    page.route("**/api/import/folder-preview", lambda route: folder_preview_route.append(route))
-    page.fill("#cfgSourceInput", "/Volumes/Photography/Raw Files/USA/2026/2026-05-30")
-    page.press("#cfgSourceInput", "Enter")
-    stale_plan_route[0].fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps({
-            "stages": {
-                "Previews": {"state": "done-prior", "summary": "stale"},
-                "Classify": {"state": "done-prior", "summary": "stale"},
-                "Extract": {"state": "done-prior", "summary": "stale"},
-                "EyeKeypoints": {"state": "done-prior", "summary": "stale"},
-                "Group": {"state": "done-prior", "summary": "stale"},
-            },
-            "scope": {"collection_id": None, "photo_count": None, "new_count": 0, "known_count": 0},
-        }),
-    )
-
-    expect(page.locator("[data-testid='pipeline-plan-summary'] .plan-loading")).to_be_visible()
-    expect(page.locator("#pillClassify")).not_to_contain_text("Already done")
-    for _ in range(50):
-        if folder_preview_route:
-            break
-        page.wait_for_timeout(100)
-    assert folder_preview_route
-    folder_preview_route[0].fulfill(
-        status=200,
-        content_type="application/json",
-        body=json.dumps({
-            "total_count": 0,
-            "total_size": 0,
-            "type_breakdown": {},
-            "duplicate_count": 0,
-            "files": [],
-        }),
-    )
 
 
 def test_pipeline_reclassify_flips_classify_pill_to_will_run(live_server, page):
@@ -437,24 +327,64 @@ def test_pipeline_failed_status_clears_running_pill(live_server, page):
     expect(page.locator("#pillClassify")).not_to_contain_text("Running")
 
 
-def test_pipeline_eye_keypoints_pill_will_run_by_default(live_server, page):
-    """SuperAnimal weights are auto-downloaded by pipeline_job on first run,
-    so the pill defaults to 'Will run' even on a fresh fixture with no
-    keypoint models on disk — the user is no longer expected to click a
-    Download button before starting the pipeline."""
+def test_pipeline_eye_keypoints_pill_will_skip_by_default(live_server, page):
+    """Eye-keypoint detection is opt-in, so a fresh fixture skips it.
+
+    Model readiness does not control this state: SuperAnimal weights are
+    downloaded automatically if the user explicitly enables the stage.
+    """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
+    # Wait for /api/pipeline/page-init to settle so the checkbox reflects
+    # cfg.eye_detect_enabled (not the HTML default), then wait for the
+    # initial /api/pipeline/plan. Without the page-init wait the checkbox
+    # could still flip during the assertions; without the plan wait the
+    # pill could read "Will skip" from the fallback (checkbox unchecked)
+    # even if the server-side plan has flipped Eye Keypoints back to
+    # opt-in-by-default — the very regression this test guards.
+    page.wait_for_function("() => window._pageInitPending === false")
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-skip' "
+        "&& !window._planRefreshPending"
+    )
+    expect(page.locator("#enableEyeKeypoints")).not_to_be_checked()
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
 
 
 def test_pipeline_eye_keypoints_toggle_off_marks_will_skip(live_server, page):
-    """Unchecking the Eye Keypoints enable checkbox flips its pill to
-    'Will skip' without affecting Group, which doesn't depend on it."""
+    """Explicitly enabling then disabling Eye Keypoints updates its pill.
+
+    Group remains runnable because it does not depend on eye keypoints.
+    """
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
-    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
+    # Wait for /api/pipeline/page-init to settle first. Its success handler
+    # assigns enableEyeKeypoints.checked from cfg.eye_detect_enabled; if it
+    # ran after page.check() below, it would silently overwrite the opt-in
+    # and the later "will-run" wait would time out.
+    page.wait_for_function("() => window._pageInitPending === false")
     page.click("#card-eyekeypoints .stage-header")
+    page.check("#enableEyeKeypoints")
+    # Wait for the debounced plan refresh to confirm 'will-run'. Reading
+    # only the pill would pass from the null-plan fallback in
+    # _stageStateFor, so a broken eye_detect_override wiring (plan comes
+    # back "will-skip" after opt-in) would be masked here.
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-run' "
+        "&& !window._planRefreshPending"
+    )
+    expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will run")
     page.uncheck("#enableEyeKeypoints")
+    page.wait_for_function(
+        "() => window._pipelinePlan && window._pipelinePlan.stages "
+        "&& window._pipelinePlan.stages.EyeKeypoints "
+        "&& window._pipelinePlan.stages.EyeKeypoints.state === 'will-skip' "
+        "&& !window._planRefreshPending"
+    )
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
     # Group does not depend on eye keypoints — it must still be runnable.
     expect(page.locator("#pillGroup")).not_to_contain_text("Will skip")

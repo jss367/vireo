@@ -120,3 +120,35 @@ body {
 .status-msg.ok { color: var(--accent); }
 .status-msg.warning { color: var(--warning); }
 .status-msg.error { color: var(--danger); }
+
+/* ---------- Search Options ---------- */
+.search-control {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+.search-control input[type=text],
+.search-control input[type=search] {
+  min-width: 0;
+  flex: 1;
+  border-radius: 4px 0 0 4px;
+}
+.search-option-btn {
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: 1px solid var(--border-secondary);
+  border-left: 0;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.search-option-btn:last-child { border-radius: 0 4px 4px 0; }
+.search-option-btn:hover { color: var(--text-primary); border-color: var(--accent); }
+.search-option-btn.active {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-tertiary));
+  color: var(--accent);
+  border-color: var(--accent);
+}

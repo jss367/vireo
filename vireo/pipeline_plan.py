@@ -21,11 +21,25 @@ log = logging.getLogger(__name__)
 @dataclass
 class PipelinePlanParams:
     collection_id: int | None = None
+    # Explicit photo-id scope. The Process page's folder scope resolves
+    # folder_ids to their workspace subtrees' photos at the API layer
+    # (mirroring /api/jobs/pipeline) and passes the ids here so every
+    # per-stage real-status query runs over exactly the photos a
+    # folder-scoped run would process — never whole-workspace proxies.
+    photo_ids: list | None = None
     exclude_photo_ids: list = field(default_factory=list)
     skip_classify: bool = False
     skip_extract_masks: bool = False
     skip_eye_keypoints: bool = False
     skip_regroup: bool = False
+    # Per-run override for the config-gated eye-detect setting. Mirrors
+    # ``PipelineParams.eye_detect_override``: None defers to the workspace-
+    # effective ``pipeline.eye_detect_enabled``; a bool wins in both
+    # directions. The Process page sends this alongside the Eye Keypoints
+    # checkbox state so the plan pill is honest — without it, an opt-in
+    # against a default-off workspace would still show
+    # "Will skip — Disabled in config" even though the actual job would run.
+    eye_detect_override: bool | None = None
     model_ids: list = field(default_factory=list)
     labels_files: list = field(default_factory=list)
     reclassify: bool = False
@@ -58,15 +72,58 @@ class PipelinePlanParams:
     # at plan time, since hashing thousands of files synchronously inside
     # a plan request would block the UI on every settings change.
     hash_duplicate_paths: list | None = None
+    # True when the import run stages files on local disk first (copy mode
+    # with the "Use local disk while processing" toggle on). This changes
+    # what the post-ingest scan walks — the local staging root instead of
+    # the real destination — which is why _import_without_new_files() is
+    # only safe to assert in this mode (see its docstring).
+    local_processing: bool = False
     # Optional API override for the preview tier. Normal pipeline runs leave
     # this unset so the previews substage uses the workspace-effective
     # preview_max_size setting. Explicit 0 means "serve originals"; the
     # previews substage no-ops.
     preview_max_size: int | None = None
+    # Distinguishes the identify preset's species-only review path from a
+    # generic ``skip_regroup=True`` run. When ``"species"`` the Group stage
+    # is NOT skipped — the run enters ``regroup_stage``'s species branch and
+    # writes species-review results to ``pipeline_results_ws*.json``. The
+    # plan must reflect that work honestly instead of the "Disabled" pill
+    # ``skip_regroup=True`` normally implies. Populated by
+    # /api/pipeline/plan from the ``strategy`` (or explicit ``review_mode``)
+    # in the request body — the same expansion ``/api/jobs/pipeline`` runs.
+    review_mode: str | None = None
 
 
 def _plural(n, s="s"):
     return s if n != 1 else ""
+
+
+def _classify_would_run_after_auto_skip(params):
+    """Mirror ``_apply_no_model_auto_skip`` (app.py) at plan time.
+
+    ``/api/jobs/pipeline`` flips ``skip_classify`` (and by the same rule
+    ``skip_regroup``) to True when the caller didn't already disable
+    classify AND no downloaded/active model is available. The plan must
+    apply the same degradation before promising downstream work — in
+    particular the identify preset's species-review branch of
+    ``_regroup_plan``, which returns ``will-run`` solely from
+    ``review_mode="species"`` and would otherwise advertise
+    "Will prepare species review" for a job that will only show the
+    no-model warning and skip regroup.
+
+    Returns True when classify would actually run at job time.
+    """
+    if params.skip_classify:
+        return False
+    from models import get_active_model, get_models
+
+    requested_ids = list(params.model_ids or [])
+    if requested_ids:
+        by_id = {m["id"]: m for m in get_models()}
+        return all(
+            by_id.get(mid, {}).get("downloaded") for mid in requested_ids
+        )
+    return get_active_model() is not None
 
 
 def _resolve_models(model_ids):
@@ -159,6 +216,37 @@ def _resolve_labels_for_models(models, labels_files, db):
     return out
 
 
+def _import_without_new_files(params, photo_ids, new_count):
+    """True when import mode is active but the run brings no per-photo work.
+
+    Every selected file is already imported (``new_count == 0``, typically
+    via the hash/metadata duplicate gate) and none of the known copies fall
+    into scope at the selected paths (``photo_ids`` empty — the copies live
+    at other, already-cataloged paths). The per-photo stages will all
+    execute over an empty set, so their "Will run" summaries must say the
+    run imports 0 new photos instead of implying work is coming.
+
+    Only asserted for local-processing imports. In plain copy mode the
+    claim isn't airtight: when ingest copies nothing (everything
+    deduplicated), the post-ingest scan runs with ``restrict=None`` over
+    the REAL destination tree, and ``scanner.scan`` fires the photo
+    callback for existing cataloged rows there — so downstream
+    workspace-scoped stages (classify/extract/regroup) can still find
+    real work among previously-unprocessed destination photos. With
+    local processing on, the post-ingest scan targets the local staging
+    root instead, which stays empty when every file deduplicates (ingest
+    creates the staging dir but copies nothing into it), so "nothing
+    to …" is genuinely true. Copy mode keeps the pre-existing
+    forward-looking summaries and lets Group see upstream will-run.
+    """
+    return (
+        params.local_processing
+        and params.source_paths is not None
+        and new_count == 0
+        and not photo_ids
+    )
+
+
 def _classify_plan(db, params, photo_ids, new_count=0):
     if params.skip_classify:
         return {
@@ -186,11 +274,13 @@ def _classify_plan(db, params, photo_ids, new_count=0):
     det_counts = db.count_primary_detections_in_scope(photo_ids)
     total_dets = det_counts["total_dets"]
     photos_with_dets = det_counts["photos_with_dets"]
+    full_image_fallbacks = db.count_full_image_fallback_photos(photo_ids)
+    classifiable_units = total_dets + full_image_fallbacks
 
     unblocked_count = sum(
         1 for m in models if not label_resolution[m["id"]].get("blocked")
     )
-    eligible = total_dets * unblocked_count
+    eligible = classifiable_units * unblocked_count
 
     # Every selected model is blocked on missing labels and can't run
     # label-free (Tree of Life). The classify stage cannot do any work for
@@ -218,7 +308,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         }
 
     stale_total = 0
-    if total_dets > 0 and not params.reclassify:
+    if classifiable_units > 0 and not params.reclassify:
         for m in models:
             info = label_resolution[m["id"]]
             if info.get("blocked"):
@@ -229,11 +319,16 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 labels_fingerprint=fp,
                 photo_ids=photo_ids,
             )
+            stale_total += db.count_full_image_classify_stale(
+                classifier_model=m["name"],
+                labels_fingerprint=fp,
+                photo_ids=photo_ids,
+            )
     # Reclassify is a user override, not a settings-change signal.
     fingerprint_outdated = stale_total > 0 and not params.reclassify
     fingerprint_reason = "label_set_changed" if fingerprint_outdated else None
 
-    if total_dets == 0:
+    if classifiable_units == 0:
         # Mixed shape with no detections cached yet: some selected models
         # can run (label-free, or have labels) and others are blocked on
         # missing labels. The earlier unblocked_count==0 guard doesn't fire
@@ -259,6 +354,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                     "blocked_models": blocked_now,
                     "total_dets": 0,
                     "photos_with_dets": 0,
+                    "full_image_fallbacks": 0,
                     "models": [m["name"] for m in models],
                     "pending": 0,
                     "eligible": 0,
@@ -268,10 +364,18 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                     "fingerprint_reason": fingerprint_reason,
                 },
             }
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
         if new_count > 0:
             summary = (
                 f"Will run — {new_count} new photo{_plural(new_count)} "
                 f"to detect & classify (MegaDetector runs first)"
+            )
+        elif import_no_new:
+            # All-duplicates import: MegaDetector will get 0 photos, so
+            # "will run first" would falsely promise detection work.
+            summary = (
+                "Will run — 0 new photos to import, nothing to "
+                "detect or classify"
             )
         else:
             summary = (
@@ -284,6 +388,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             "detail": {
                 "total_dets": 0,
                 "photos_with_dets": 0,
+                "full_image_fallbacks": 0,
                 "models": [m["name"] for m in models],
                 "pending": new_count,
                 "eligible": new_count,
@@ -291,6 +396,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "stale": stale_total,
                 "fingerprint_outdated": fingerprint_outdated,
                 "fingerprint_reason": fingerprint_reason,
+                "import_no_new": import_no_new,
             },
         }
 
@@ -304,9 +410,14 @@ def _classify_plan(db, params, photo_ids, new_count=0):
             continue
         fp = info["fingerprint"]
         if params.reclassify:
-            pending = total_dets
+            pending = classifiable_units
         else:
             pending = db.count_primary_classify_pending_pairs(
+                classifier_model=m["name"],
+                labels_fingerprint=fp,
+                photo_ids=photo_ids,
+            )
+            pending += db.count_full_image_classify_pending_pairs(
                 classifier_model=m["name"],
                 labels_fingerprint=fp,
                 photo_ids=photo_ids,
@@ -352,12 +463,13 @@ def _classify_plan(db, params, photo_ids, new_count=0):
                 "summary": (
                     f"Will run on {new_count} new "
                     f"photo{_plural(new_count)} "
-                    f"({total_dets} existing detection"
-                    f"{_plural(total_dets)} already classified)"
+                    f"({classifiable_units} existing target"
+                    f"{_plural(classifiable_units)} already classified)"
                 ),
                 "detail": {
                     "total_dets": total_dets,
                     "photos_with_dets": photos_with_dets,
+                    "full_image_fallbacks": full_image_fallbacks,
                     "models": [m["name"] for m in models],
                     "pending": new_count,
                     "eligible": eligible + new_count,
@@ -370,13 +482,14 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         return {
             "state": "done-prior",
             "summary": (
-                f"Already classified — {total_dets} "
-                f"detection{_plural(total_dets)} across "
+                f"Already classified — {classifiable_units} "
+                f"target{_plural(classifiable_units)} across "
                 f"{len(models)} model{_plural(len(models))}"
             ),
             "detail": {
                 "total_dets": total_dets,
                 "photos_with_dets": photos_with_dets,
+                "full_image_fallbacks": full_image_fallbacks,
                 "models": [m["name"] for m in models],
                 "pending": 0,
                 "eligible": eligible,
@@ -389,8 +502,8 @@ def _classify_plan(db, params, photo_ids, new_count=0):
     if params.reclassify:
         summary = (
             f"Re-classify — {pending_total} "
-            f"detection-model pair{_plural(pending_total)} "
-            f"({total_dets} detection{_plural(total_dets)} × "
+            f"target-model pair{_plural(pending_total)} "
+            f"({classifiable_units} target{_plural(classifiable_units)} × "
             f"{len(models)} model{_plural(len(models))})"
         )
     else:
@@ -420,6 +533,7 @@ def _classify_plan(db, params, photo_ids, new_count=0):
         "per_model": pending_per_model,
         "total_dets": total_dets,
         "photos_with_dets": photos_with_dets,
+        "full_image_fallbacks": full_image_fallbacks,
         "pending": pending_total + new_count,
         "eligible": eligible + new_count,
         "stale": stale_total,
@@ -466,14 +580,22 @@ def _extract_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
                     "stale": 0, "fingerprint_outdated": False,
                 },
             }
-        return {
-            "state": "will-run",
-            "summary": (
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
+        if import_no_new:
+            # All-duplicates import: classify has 0 photos to produce
+            # detections from, so nothing will ever become eligible here.
+            summary = "Will run — 0 new photos to import, nothing to extract"
+        else:
+            summary = (
                 "Will run after classify produces detections "
                 "(no eligible photos yet)"
-            ),
+            )
+        return {
+            "state": "will-run",
+            "summary": summary,
             "detail": {"eligible": 0, "pending": 0,
-                       "stale": 0, "fingerprint_outdated": False},
+                       "stale": 0, "fingerprint_outdated": False,
+                       "import_no_new": import_no_new},
         }
     if pending == 0 and stale == 0 and new_count == 0:
         return {
@@ -534,6 +656,16 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
         }
     from pipeline import eye_keypoint_stage_preflight
 
+    # Mirror ``pipeline_job``'s per-run override so the plan pill matches
+    # what the job would do: without this, a Process-page opt-in against
+    # a default-off workspace would still render "Will skip — Disabled in
+    # config" here even though the actual run would toggle the config on
+    # and execute the stage.
+    if params.eye_detect_override is not None:
+        pipeline_cfg = {
+            **pipeline_cfg,
+            "eye_detect_enabled": params.eye_detect_override,
+        }
     skip_reason = eye_keypoint_stage_preflight(pipeline_cfg)
     if skip_reason is not None:
         return {
@@ -563,17 +695,25 @@ def _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count=0):
                     "fingerprint_outdated": stale > 0,
                 },
             }
-        return {
-            "state": "will-run",
-            "summary": (
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
+        if import_no_new:
+            # All-duplicates import: upstream stages run over 0 photos, so
+            # no masks or predictions are coming for this stage to consume.
+            summary = "Will run — 0 new photos to import, nothing to process"
+        else:
+            summary = (
                 "Will run after upstream produces masks + species "
                 "predictions (no eligible photos yet)"
-            ),
+            )
+        return {
+            "state": "will-run",
+            "summary": summary,
             "detail": {
                 "eligible": 0,
                 "pending": 0,
                 "stale": stale,
                 "fingerprint_outdated": stale > 0,
+                "import_no_new": import_no_new,
             },
         }
     if pending == 0 and new_count == 0:
@@ -663,13 +803,26 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
 
     if eligible == 0 and new_count == 0:
         # Empty scope. The stages will run (the loop is just empty), but
-        # there's nothing to count. Be honest about that.
-        summary = (
-            "Will run — no photos in scope yet"
-            if not previews_skipped
-            else "Will run for thumbnails — no photos in scope (previews "
-                 "skipped: serves originals at full resolution)"
-        )
+        # there's nothing to count. Be honest about that — and when the
+        # emptiness comes from an all-duplicates import, say so outright:
+        # "no photos in scope yet" reads as "photos are coming", but this
+        # run will import 0 new photos.
+        import_no_new = _import_without_new_files(params, photo_ids, new_count)
+        if import_no_new:
+            summary = (
+                "Will run — 0 new photos to import, nothing to process"
+                if not previews_skipped
+                else "Will run for thumbnails — 0 new photos to import, "
+                     "nothing to process (previews skipped: serves "
+                     "originals at full resolution)"
+            )
+        else:
+            summary = (
+                "Will run — no photos in scope yet"
+                if not previews_skipped
+                else "Will run for thumbnails — no photos in scope (previews "
+                     "skipped: serves originals at full resolution)"
+            )
         return {
             "state": "will-run",
             "summary": summary,
@@ -681,6 +834,7 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
                 "preview_size": preview_size,
                 "previews_skipped": previews_skipped,
                 "new_photos": 0,
+                "import_no_new": import_no_new,
             },
         }
 
@@ -787,8 +941,39 @@ def _previews_plan(db, params, photo_ids, new_count, effective_cfg):
     }
 
 
-def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
+def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg,
+                  import_no_new=False):
     if params.skip_regroup:
+        # The identify preset sets ``skip_regroup=True`` but flags
+        # ``review_mode="species"``, and ``regroup_stage`` (pipeline_job.py)
+        # then runs the species-review pipeline and overwrites
+        # ``pipeline_results_ws*.json`` with review-only output. The stage is
+        # NOT actually skipped — reporting "Disabled" would lie about the
+        # work the next press performs (and would let the user think the
+        # existing full-Group cache survives, when in reality identify wipes
+        # ``last_group_fingerprint`` and rewrites the cache).
+        #
+        # But ``regroup_stage``'s species branch requires classify to
+        # produce/have produced species predictions, and
+        # ``/api/jobs/pipeline`` auto-flips ``skip_classify=True`` (and
+        # ``skip_regroup=True``) when no downloaded/active model is
+        # available. Without the same gate here, the plan promises
+        # "Will prepare species review" on installs with no model where
+        # the job will only surface the no-model warning and skip
+        # regroup — the exact transparency failure the review flagged.
+        if (
+            params.review_mode == "species"
+            and not params.skip_classify
+            and not import_no_new
+            and _classify_would_run_after_auto_skip(params)
+        ):
+            return {
+                "state": "will-run",
+                "summary": (
+                    "Will prepare species review — no grouping/scoring"
+                ),
+                "detail": {"review_mode": "species"},
+            }
         return {
             "state": "will-skip",
             "summary": "Disabled — stage will be skipped",
@@ -797,6 +982,23 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
         os.path.dirname(db_path), f"pipeline_results_ws{ws_id}.json",
     )
     cache_exists = os.path.exists(cache_path)
+    if import_no_new:
+        # All-duplicates local-processing import: ingest copies nothing into
+        # the staging root, the post-ingest scan collects 0 photos, so the
+        # job never creates a collection (collection_stage returns on
+        # `if not collected_photo_ids`) and regroup_stage skips on
+        # `not collection_id` (pipeline_job.py). The cache/fingerprint
+        # checks below would promise a Group run the job cannot perform —
+        # say the truth instead.
+        return {
+            "state": "will-skip",
+            "summary": "Will skip — 0 new photos to import, nothing to group",
+            "detail": {
+                "cache_exists": cache_exists,
+                "upstream_will_run": False,
+                "import_no_new": True,
+            },
+        }
     if upstream_will_run:
         return {
             "state": "will-run",
@@ -840,6 +1042,39 @@ def _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg):
                     "cache_exists": True,
                     "upstream_will_run": False,
                     "fingerprint_outdated": True,
+                },
+            }
+        # A per-run ``eye_detect_override`` that differs from the
+        # workspace's own effective ``eye_detect_enabled`` will cause
+        # regroup_stage to rescore with different eye behavior than the
+        # cached results. ``compute_group_fingerprint`` reads only
+        # encounter/burst keys — not ``eye_detect_enabled`` — so the
+        # fingerprint check above cannot see the mismatch. Without this
+        # signal, a default-off workspace with an existing default-off
+        # grouping cache would still show Group as ``done-prior`` after
+        # the Process-page Eye Keypoints checkbox toggles the override,
+        # even though the job would actually rescore with eye focus on.
+        # Mirror the freshness-stamp check in ``regroup_stage`` and
+        # surface will-run when the per-run intent disagrees with
+        # Settings.
+        workspace_eye_setting = bool(
+            (effective_cfg or {}).get("pipeline", {}).get(
+                "eye_detect_enabled", False,
+            )
+        )
+        if (
+            params.eye_detect_override is not None
+            and bool(params.eye_detect_override) != workspace_eye_setting
+        ):
+            return {
+                "state": "will-run",
+                "summary": (
+                    "Will re-group — eye focus setting differs for this run"
+                ),
+                "detail": {
+                    "cache_exists": True,
+                    "upstream_will_run": False,
+                    "eye_override_differs": True,
                 },
             }
         return {
@@ -1062,7 +1297,11 @@ def compute_plan(db, params, db_path):
     known_count = 0
     unlinked_folder_count = 0
     hash_dup_count = 0
-    if params.collection_id is not None:
+    if params.photo_ids is not None:
+        # Folder scope (Process page): ids were resolved from the folder
+        # subtrees at the API layer.
+        photo_ids = list(params.photo_ids)
+    elif params.collection_id is not None:
         from pipeline import _resolve_collection_photo_ids
         photo_ids = _resolve_collection_photo_ids(db, params.collection_id)
     elif params.source_paths is not None:
@@ -1132,10 +1371,21 @@ def compute_plan(db, params, db_path):
     extract = _extract_plan(db, params, photo_ids, pipeline_cfg, new_count)
     eye = _eye_keypoints_plan(db, params, photo_ids, pipeline_cfg, new_count)
     previews = _previews_plan(db, params, photo_ids, new_count, effective_cfg)
-    upstream_will_run = any(
-        s["state"] == "will-run" for s in (classify, extract, eye)
+    # An all-duplicates import leaves every upstream stage "will-run" over
+    # an empty photo set — that is not new work, and letting it force the
+    # Group stage into "upstream stages have new work to do" would be a
+    # false claim. It also means the job never builds a collection, so
+    # regroup_stage itself will skip — _regroup_plan reports "Will skip"
+    # instead of falling through to its cache/fingerprint check.
+    import_no_new = _import_without_new_files(params, photo_ids, new_count)
+    upstream_will_run = (
+        not import_no_new
+        and any(s["state"] == "will-run" for s in (classify, extract, eye))
     )
-    regroup = _regroup_plan(db, params, db_path, ws_id, upstream_will_run, effective_cfg)
+    regroup = _regroup_plan(
+        db, params, db_path, ws_id, upstream_will_run, effective_cfg,
+        import_no_new=import_no_new,
+    )
 
     stages = {
         "Previews": previews,

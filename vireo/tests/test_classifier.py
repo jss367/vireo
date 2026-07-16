@@ -228,7 +228,10 @@ class TestCustomLabelsMode:
 
         path = _make_test_image()
         try:
-            results = clf.classify(path)
+            # threshold=0.0 keeps this a shape check; the default 0.4 can filter
+            # everything out when the mocked ONNX sessions return random embeddings
+            # whose 3-way softmax happens to land near uniform (~1/3 each).
+            results = clf.classify(path, threshold=0.0)
             assert isinstance(results, list)
             assert len(results) > 0
             top = results[0]

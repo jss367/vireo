@@ -6,9 +6,16 @@ const base = import.meta.env.BASE_URL;
 const releaseUrl = (v: string) => `https://github.com/jss367/vireo/releases/download/v${v}`;
 
 // Per-platform versions — updated independently by CI when each platform builds
-const macosArm64Version = '0.13.0';
-const windowsVersion = '0.13.0';
-const linuxVersion = '0.13.0';
+const macosArm64Version = '0.24.1';
+const windowsVersion = '0.24.1';
+const linuxVersion = '0.24.1';
+
+// The Windows 11 public beta ships as the first SignPath-signed build.
+// Until the download link points at that signed build, the older Windows
+// installer (v0.18.0) is still what users get — don't advertise it as
+// the beta. Flip this to `true` in the same change that bumps
+// `windowsVersion` to the signed beta release.
+const windowsBetaAvailable = windowsVersion !== '0.18.0';
 ---
 
 <Base title="Download — Vireo" description="Download Vireo for macOS, Windows, or Linux. Free, open source, no account required.">
@@ -33,7 +40,7 @@ const linuxVersion = '0.13.0';
           label="Download for Windows"
           href={`${releaseUrl(windowsVersion)}/Vireo_${windowsVersion}_x64-setup.exe`}
           version={windowsVersion}
-          note="Not actively supported"
+          note={windowsBetaAvailable ? 'Windows 11 public beta' : undefined}
         />
         <DownloadButton
           platform="linux"
@@ -51,6 +58,11 @@ const linuxVersion = '0.13.0';
         <a href="https://github.com/jss367/vireo/releases" target="_blank" rel="noopener">
           View all releases on GitHub &rarr;
         </a>
+      </p>
+
+      <p class="download-hero__privacy">
+        We use cookie-free analytics to count aggregate website visits and GitHub download counts.
+        The Vireo app sends no usage telemetry. <a href={`${base}privacy/`}>Privacy details</a>.
       </p>
     </div>
   </section>
@@ -72,15 +84,25 @@ const linuxVersion = '0.13.0';
         <div class="sysreq__card">
           <h3>Windows</h3>
           <ul>
-            <li>Windows 10 (64-bit) or later</li>
+            <li>Windows 11 (64-bit)</li>
             <li>x86-64 processor</li>
             <li>4 GB RAM minimum</li>
             <li>2 GB disk space (more for larger AI models)</li>
+            <li>CPU inference is fully supported</li>
           </ul>
-          <p class="sysreq__note">
-            Windows is not actively supported at the moment. The installer is available but you may encounter issues.
-            <a href="https://github.com/jss367/vireo/issues/334" target="_blank" rel="noopener">Upvote this issue</a> if you'd like Windows support prioritized.
-          </p>
+          {windowsBetaAvailable ? (
+            <p class="sysreq__note">
+              Windows 11 support is in public beta. ExifTool is included. Darktable, Adobe DNG Converter,
+              and remote-transfer tools are optional and detected from your Windows installation.
+              <a href="https://github.com/jss367/vireo/blob/main/docs/WINDOWS_SUPPORT.md" target="_blank" rel="noopener">Read the Windows support guide</a>.
+            </p>
+          ) : (
+            <p class="sysreq__note">
+              Windows 11 support is preparing for public beta. The download above is the previous Windows build;
+              the signed public beta will appear here once released.
+              <a href="https://github.com/jss367/vireo/blob/main/docs/WINDOWS_SUPPORT.md" target="_blank" rel="noopener">Read the Windows support guide</a>.
+            </p>
+          )}
         </div>
         <div class="sysreq__card">
           <h3>Linux</h3>
@@ -111,15 +133,15 @@ const linuxVersion = '0.13.0';
         <div class="quickstart__step">
           <span class="quickstart__number">2</span>
           <div>
-            <h3>Add folders</h3>
-            <p>Point Vireo at one or more folders of wildlife photos. It reads your files in place — nothing is moved or copied.</p>
+            <h3>Import photos</h3>
+            <p>Open Import, choose Add in place, and select one or more folders. Your photos stay where they are.</p>
           </div>
         </div>
         <div class="quickstart__step">
           <span class="quickstart__number">3</span>
           <div>
-            <h3>Scan &amp; classify</h3>
-            <p>Vireo downloads the AI models on first use, then scans and classifies your photos locally.</p>
+            <h3>Choose processing</h3>
+            <p>Select an After import option and start the import. Vireo downloads any required AI models, then processes your photos locally.</p>
           </div>
         </div>
         <div class="quickstart__step">
@@ -194,6 +216,22 @@ const linuxVersion = '0.13.0';
   }
 
   .download-hero__releases a:hover {
+    color: var(--color-accent);
+  }
+
+  .download-hero__privacy {
+    max-width: 620px;
+    margin-top: var(--space-xl);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .download-hero__privacy a {
+    color: var(--color-text-muted);
+    text-decoration: underline;
+  }
+
+  .download-hero__privacy a:hover {
     color: var(--color-accent);
   }
 

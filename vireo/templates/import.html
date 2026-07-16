@@ -1,0 +1,2431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/png" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/vireo-base.css">
+<title>Vireo - Import</title>
+<style>
+body { display: flex; flex-direction: column; height: 100vh; }
+.content { flex: 1; overflow-y: auto; padding: 20px; }
+.import-wrap { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.card { background: var(--bg-secondary); border: 1px solid var(--border-primary); border-radius: 8px; padding: 16px; }
+.card h3 { margin: 0 0 10px 0; font-size: 14px; color: var(--text-primary); }
+.row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.row label { font-size: 12px; color: var(--text-secondary); }
+.row input[type=text], .row select {
+  background: var(--bg-tertiary); color: var(--text-primary);
+  border: 1px solid var(--border-secondary); border-radius: 4px;
+  padding: 6px 10px; font-size: 12px; outline: none; flex: 1; min-width: 220px;
+}
+.row input[type=text]:focus, .row select:focus { border-color: var(--accent); }
+.btn { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 4px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+.btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.source-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.source-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-primary); background: var(--bg-tertiary); border-radius: 4px; padding: 4px 8px; }
+.source-item button { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 14px; }
+.source-meta { color: var(--text-secondary); white-space: nowrap; }
+.hint { font-size: 11px; color: var(--text-secondary); }
+.section-divider { border-top: 1px solid var(--border-primary); margin-top: 12px; padding-top: 12px; }
+.option-stack { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 8px; }
+.option-stack label { font-size: 12px; color: var(--text-primary); }
+.extension-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 6px 10px; width: 100%; margin: 4px 0 8px;
+}
+.extension-grid label {
+  background: var(--bg-tertiary); border: 1px solid var(--border-secondary);
+  border-radius: 4px; padding: 5px 8px; color: var(--text-primary);
+}
+.remote-preview {
+  font-size: 11px; color: var(--text-secondary); overflow-wrap: anywhere;
+  margin-top: 4px; width: 100%;
+}
+.recent-destinations { margin: -2px 0 8px 0; }
+.recent-destinations-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+.recent-destination-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.recent-destination-list .btn { font-size: 11px; padding: 2px 8px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.input-fixed { max-width: 240px; flex: 0 1 240px; }
+.preview-summary { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
+.import-preview-grid { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; max-height: 520px; overflow-y: auto; }
+.import-preview-folder { display: flex; flex-direction: column; gap: 6px; }
+.import-preview-folder-header { font-size: 12px; font-weight: 600; color: var(--text-secondary); overflow-wrap: anywhere; }
+.import-preview-thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+.import-preview-thumb {
+  position: relative; min-width: 0; overflow: hidden; border-radius: 6px;
+  background: var(--bg-tertiary); border: 1px solid var(--border-primary);
+}
+.import-preview-thumb.duplicate { opacity: 0.55; }
+.import-preview-thumb-img { aspect-ratio: 1; background: var(--bg-primary); overflow: hidden; }
+.import-preview-thumb-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.import-preview-thumb.skeleton .import-preview-thumb-img::after {
+  content: ''; display: block; width: 100%; height: 100%;
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--border-primary) 50%, var(--bg-tertiary) 75%);
+  background-size: 200% 100%; animation: import-shimmer 1.5s infinite;
+}
+@keyframes import-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.import-preview-badge {
+  position: absolute; top: 6px; left: 6px; border-radius: 3px; padding: 2px 5px;
+  background: rgba(0,0,0,0.72); color: #fff; font-size: 9px; font-weight: 700;
+  letter-spacing: 0; text-transform: uppercase;
+}
+.import-preview-meta { padding: 6px; display: flex; flex-direction: column; gap: 2px; min-height: 54px; }
+.import-preview-name { font-size: 11px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.import-preview-dest { font-size: 10px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dest-structure {
+  width: 100%; margin: 4px 0 8px; padding: 10px;
+  background: var(--bg-tertiary); border: 1px solid var(--border-primary);
+  border-radius: 6px;
+}
+.dest-structure .structure-headline { font-size: 12px; color: var(--text-primary); font-weight: 600; }
+.managed-archive-callout {
+  font-size: 12px; color: var(--text-secondary); margin-top: 6px;
+  padding: 8px 10px; border-radius: 6px; overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.structure-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+.structure-table th {
+  padding: 3px 8px; border-bottom: 1px solid var(--border-primary);
+  color: var(--text-secondary); font-weight: 500; text-align: left;
+}
+.structure-table th.num { text-align: right; }
+.structure-table th.tag { text-align: right; }
+.structure-table td { padding: 5px 8px; border-bottom: 1px solid var(--border-primary); color: var(--text-primary); }
+.structure-table td.path { font-family: monospace; overflow-wrap: anywhere; }
+.structure-table td.num { text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.structure-table td.tag { text-align: right; white-space: nowrap; }
+.tag-new { color: var(--success, #2da44e); }
+.tag-existing { color: var(--text-secondary); }
+.progress-bar { height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; }
+.progress-bar > div { height: 100%; background: var(--accent); width: 0; transition: width 0.2s; }
+.folder-progress { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+.folder-progress td { padding: 3px 8px; border-bottom: 1px solid var(--border-primary); color: var(--text-primary); }
+.folder-progress td.num { text-align: right; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 12px; padding: 3px 10px; font-size: 12px; font-weight: 600; }
+.pill-ok { background: color-mix(in srgb, var(--success, #2da44e) 18%, transparent); color: var(--success, #2da44e); }
+.pill-bad { background: color-mix(in srgb, var(--danger, #cf222e) 18%, transparent); color: var(--danger, #cf222e); }
+.pill-warn { background: color-mix(in srgb, var(--warning, #bf8700) 18%, transparent); color: var(--warning, #9a6700); }
+.unsafe-list { margin: 6px 0 0 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }
+.result-links a { color: var(--accent); font-size: 12px; }
+#importError { color: var(--danger); font-size: 12px; margin-top: 6px; display: none; }
+.warn { font-size: 12px; color: var(--warning, #bf8700); margin-top: 6px; }
+.staging-items { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.staging-item { border: 1px solid var(--border-primary); border-radius: 6px; padding: 10px; background: var(--bg-tertiary); }
+.staging-title { font-size: 12px; color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+.staging-meta { font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
+.staging-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.staging-details { margin: 8px 0 0 0; padding-left: 18px; font-size: 11px; color: var(--text-secondary); max-height: 120px; overflow: auto; }
+.folder-browser-overlay {
+  display: none; position: fixed; inset: 0; z-index: 1001;
+  background: rgba(0, 0, 0, 0.45); align-items: center; justify-content: center;
+}
+.folder-browser-overlay.open { display: flex; }
+.folder-browser-panel {
+  width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 64px);
+  background: var(--bg-secondary); border: 1px solid var(--border-primary);
+  border-radius: 8px; box-shadow: 0 18px 60px rgba(0,0,0,0.35);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.folder-browser-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--border-primary);
+}
+.folder-browser-header h3 { margin: 0; }
+.folder-browser-close { background: none; border: none; color: var(--text-secondary); font-size: 22px; cursor: pointer; }
+.folder-browser-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.folder-browser-shortcuts { display: flex; gap: 8px; flex-wrap: wrap; }
+.folder-browser-path { font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.folder-browser-list {
+  height: 320px; overflow: auto; border: 1px solid var(--border-primary);
+  border-radius: 6px; background: var(--bg-tertiary);
+}
+.folder-browser-item {
+  padding: 8px 10px; font-size: 12px; color: var(--text-primary);
+  cursor: pointer; border-bottom: 1px solid color-mix(in srgb, var(--border-primary) 60%, transparent);
+  display: flex; align-items: center; gap: 8px;
+}
+.folder-browser-item:hover { background: var(--bg-hover, rgba(255,255,255,0.05)); }
+.folder-browser-item.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.folder-browser-item-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.folder-browser-count {
+  color: var(--text-secondary); font-size: 11px; font-variant-numeric: tabular-nums;
+  flex-shrink: 0; white-space: nowrap;
+}
+.folder-browser-empty { padding: 14px; font-size: 12px; color: var(--text-secondary); }
+.folder-browser-actions {
+  display: flex; gap: 8px; justify-content: flex-end;
+  padding: 12px 16px; border-top: 1px solid var(--border-primary);
+}
+.import-tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.import-tag-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 7px; border: 1px solid var(--border-primary);
+  border-radius: 999px; background: var(--bg-tertiary); font-size: 12px;
+}
+.import-tag-chip button {
+  border: 0; background: transparent; color: var(--text-secondary);
+  cursor: pointer; padding: 0; line-height: 1;
+}
+</style>
+</head>
+<body>
+{% include '_navbar.html' %}
+<div class="content">
+  <div class="import-wrap">
+
+    <div class="card" id="orphanedStagingCard" style="display:none;">
+      <h3>Recover old staging folders</h3>
+      <div class="hint">
+        Vireo found local staging folders from the retired import-through-process flow.
+        Cleanup is only enabled after every staged file is verified in the archive.
+      </div>
+      <div class="staging-items" id="orphanedStagingItems"></div>
+    </div>
+
+    <div class="card" id="sourceCard">
+      <h3>Import mode</h3>
+      <div class="row" style="margin-bottom:14px;">
+        <label><input type="radio" name="importMode" value="in_place" id="modeInPlace" checked onchange="updateImportMode()"> Add in place</label>
+        <label><input type="radio" name="importMode" value="copy" id="modeCopy" onchange="updateImportMode()"> Copy to archive</label>
+      </div>
+      <h3>Source</h3>
+      <div class="row">
+        <button class="btn btn-primary" id="btnBrowseSource" data-testid="import-source-browse-btn" onclick="browseForSource()">Browse...</button>
+        <input type="text" id="sourceInput" list="volumeDatalist"
+               placeholder="or type a card/folder path and press Enter"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();addSource();}">
+        <datalist id="volumeDatalist"></datalist>
+        <button class="btn" id="btnAddSource" onclick="addSource()">Add</button>
+      </div>
+      <div class="source-list" id="sourceList"></div>
+      <div class="row" style="margin-top:8px;">
+        <label><input type="checkbox" id="chkRecursive" checked onchange="refreshSourceCounts()"> Include subfolders</label>
+      </div>
+      <div id="fileTypesWrap" class="section-divider" style="display:none;">
+        <div class="row">
+          <label>File types</label>
+          <select id="fileTypePreset" class="input-fixed" onchange="updateFileTypeControls(); refreshSourceCounts();">
+            <option value="both" selected>RAW + JPEG</option>
+            <option value="raw">RAW only</option>
+            <option value="jpeg">JPEG only</option>
+            <option value="custom">Choose extensions</option>
+          </select>
+        </div>
+        <div id="customFileTypes" style="display:none;">
+          <div class="hint">Standard formats</div>
+          <div class="extension-grid">
+            <label><input type="checkbox" class="file-ext standard-ext" value=".jpg" checked onchange="refreshSourceCounts()"> JPG</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".jpeg" checked onchange="refreshSourceCounts()"> JPEG</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".png" checked onchange="refreshSourceCounts()"> PNG</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".tif" checked onchange="refreshSourceCounts()"> TIF</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".tiff" checked onchange="refreshSourceCounts()"> TIFF</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".bmp" checked onchange="refreshSourceCounts()"> BMP</label>
+            <label><input type="checkbox" class="file-ext standard-ext" value=".webp" checked onchange="refreshSourceCounts()"> WebP</label>
+          </div>
+          <div class="hint">RAW formats</div>
+          <div class="extension-grid">
+            <label><input type="checkbox" class="file-ext raw-ext" value=".nef" checked onchange="refreshSourceCounts()"> NEF</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".cr2" checked onchange="refreshSourceCounts()"> CR2</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".cr3" checked onchange="refreshSourceCounts()"> CR3</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".arw" checked onchange="refreshSourceCounts()"> ARW</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".raf" checked onchange="refreshSourceCounts()"> RAF</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".dng" checked onchange="refreshSourceCounts()"> DNG</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".rw2" checked onchange="refreshSourceCounts()"> RW2</label>
+            <label><input type="checkbox" class="file-ext raw-ext" value=".orf" checked onchange="refreshSourceCounts()"> ORF</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="workspaceCard">
+      <h3>Workspace</h3>
+      <div class="option-stack">
+        <label><input type="radio" name="workspaceMode" value="current" id="workspaceCurrent" checked onchange="updateWorkspaceMode()"> Current workspace <span class="hint" id="activeWorkspaceName"></span></label>
+        <label><input type="radio" name="workspaceMode" value="new" id="workspaceNew" onchange="updateWorkspaceMode()"> New workspace</label>
+      </div>
+      <div class="row" id="newWorkspaceRow" style="display:none;">
+        <label>Workspace name</label>
+        <input type="text" id="newWorkspaceName" class="input-fixed" placeholder="New workspace">
+      </div>
+    </div>
+
+    <div class="card" id="tagsCard">
+      <h3>Tags</h3>
+      <div class="row">
+        <input type="text" id="importTagInput" placeholder="Add a tag"
+               aria-label="Tag to add to imported photos"
+               onkeydown="handleImportTagKeydown(event)">
+        <button class="btn" type="button" id="btnAddImportTag"
+                onclick="addImportTagFromInput()">Add tag</button>
+      </div>
+      <div class="import-tag-list" id="importTagList"></div>
+      <div class="section-divider">
+        <label>
+          <input type="checkbox" id="chkLocationFromGps">
+          Add a location tag from each photo's GPS
+        </label>
+        <div class="hint" id="locationGpsHint">
+          Vireo resolves each GPS coordinate to a saved place. Photos without
+          GPS or a confident match remain untagged; existing locations are kept.
+        </div>
+      </div>
+      <div class="hint">Tags above are added to every photo included in this import.</div>
+    </div>
+
+    <div class="card" id="destCard">
+      <h3>Destination</h3>
+      <div class="row">
+        <label>Archive destination</label>
+        <select id="destMode" class="input-fixed" onchange="onImportDestModeChange()">
+          <option value="local" selected>Local path</option>
+        </select>
+      </div>
+      <div id="destLocalRows">
+      <div class="row">
+        <button class="btn btn-primary" id="btnBrowseDestination" data-testid="import-destination-browse-btn" onclick="browseForDestination()">Browse...</button>
+        <input type="text" id="destInput" list="recentDestinationOptions"
+               placeholder="Archive folder"
+               value="">
+        <datalist id="recentDestinationOptions"></datalist>
+      </div>
+      <div id="recentDestinations" class="recent-destinations" style="display:none;"
+           data-testid="recent-destinations">
+        <div class="recent-destinations-label">Recent destinations</div>
+        <div id="recentDestinationList" class="recent-destination-list"></div>
+      </div>
+      </div>
+      <div id="destRemoteRows" style="display:none;">
+        <div class="row">
+          <label>Remote subpath</label>
+          <input type="text" id="remoteSubpath" class="input-fixed" placeholder="2026/trip" oninput="updateRemoteDestPreview()">
+        </div>
+        <div class="remote-preview" id="remoteDestPreview"></div>
+      </div>
+      <div class="row">
+        <label for="folderTemplatePreset">Folder template</label>
+        <select id="folderTemplatePreset" class="input-fixed" onchange="updateFolderTemplateControls()">
+          <option value="%Y/%Y-%m-%d" selected>%Y/%Y-%m-%d — 2026/2026-07-12</option>
+          <option value="%Y/%m/%d">%Y/%m/%d — 2026/07/12</option>
+          <option value="%Y/%m">%Y/%m — 2026/07</option>
+          <option value="%Y">%Y — 2026</option>
+          <option value="%Y-%m-%d">%Y-%m-%d — 2026-07-12</option>
+          <option value="__custom__">Custom…</option>
+        </select>
+        <input type="text" id="folderTemplate" value="" placeholder="Enter a strftime format"
+               aria-label="Custom folder template" style="display:none;max-width:240px;flex:0 1 240px;">
+      </div>
+      <div id="destStructure" class="dest-structure" data-testid="resulting-folders" style="display:none;"></div>
+      <div class="section-divider">
+        <div class="option-stack">
+          <label><input type="checkbox" id="chkSkipDuplicates" checked> Skip duplicates</label>
+          <label><input type="radio" name="duplicateVerification" id="chkTrustLikelyDuplicates" checked> Trust likely duplicates</label>
+          <div class="hint">Fast — matches filename, byte size, and EXIF capture time to the second. Existing files are not read again.</div>
+          <label><input type="radio" name="duplicateVerification" id="chkVerifyByHash"> Verify duplicates byte-for-byte</label>
+          <div class="hint">Slower — reads the complete source and existing archive copy to confirm their contents are identical.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>After import</h3>
+      <div class="row">
+        <select id="afterImportSelect" style="max-width:280px;">
+          <option id="afterImportHiddenDefault" value="__hidden_default__" hidden disabled></option>
+          <option value="__none__">None — import only</option>
+          <!-- Saved processes are appended here by loadAfterImportProcesses(). -->
+        </select>
+      </div>
+      <div class="hint">Processing runs as its own job when the import finishes — a processing failure never touches imported photos.</div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <button class="btn" id="btnPreview" onclick="previewImport()">Preview import</button>
+        <button class="btn btn-primary" id="btnStart" onclick="startImport()">Start import</button>
+      </div>
+      <div class="preview-summary" id="previewSummary"></div>
+      <div id="importPreviewGrid" class="import-preview-grid" style="display:none;"></div>
+      <div id="importError"></div>
+    </div>
+
+    <div class="card" id="progressCard" style="display:none;">
+      <h3>Import progress</h3>
+      <div class="row"><span id="progressPhase" class="hint"></span></div>
+      <div class="progress-bar"><div id="progressFill"></div></div>
+      <table class="folder-progress" id="folderProgress"></table>
+    </div>
+
+    <div class="card" id="resultCard" style="display:none;">
+      <h3>Result</h3>
+      <div class="row">
+        <span class="pill" id="safeToFormatPill"></span>
+      </div>
+      <ul class="unsafe-list" id="unsafeList" style="display:none;"></ul>
+      <div id="resultSummary" class="hint" style="margin-top:6px;"></div>
+      <table class="folder-progress" id="resultFolders"></table>
+      <div id="chainInfo" class="hint" style="margin-top:8px;"></div>
+      <div id="taggingInfo" class="hint" style="margin-top:8px;"></div>
+      <div id="modelWarning" class="warn" style="display:none;"></div>
+      <div class="result-links" style="margin-top:8px;">
+        <a href="/browse">Open Browse</a> &nbsp;·&nbsp; <a href="/jobs">Open Jobs</a>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="folder-browser-overlay" id="importFolderBrowser" data-testid="import-folder-browser">
+  <div class="folder-browser-panel" role="dialog" aria-modal="true" aria-labelledby="folderBrowserTitle">
+    <div class="folder-browser-header">
+      <h3 id="folderBrowserTitle">Select Folder</h3>
+      <button class="folder-browser-close" type="button" onclick="closeImportFolderBrowser()">&times;</button>
+    </div>
+    <div class="folder-browser-body">
+      <div class="folder-browser-shortcuts">
+        <button class="btn" type="button" onclick="browseImportFolderTo(null)">Home</button>
+        <button class="btn" type="button" onclick="browseImportFolderTo('__pictures__')">Pictures</button>
+        <button class="btn" type="button" onclick="browseImportFolderTo('__volumes__')">Volumes</button>
+      </div>
+      <div class="folder-browser-path" id="folderBrowserPath"></div>
+      <div class="folder-browser-list" id="folderBrowserList"></div>
+      <div class="folder-browser-path" id="folderBrowserSelection"></div>
+    </div>
+    <div class="folder-browser-actions">
+      <button class="btn" type="button" onclick="closeImportFolderBrowser()">Cancel</button>
+      <button class="btn btn-primary" type="button" id="folderBrowserSelectBtn" onclick="selectImportBrowserFolder()">Select This Folder</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* Import page: adds folders in place or copies them to an archive, renders
+   live progress from the job's SSE stream, and only shows safe-to-format
+   messaging for verified archive-copy imports. */
+let sources = [];
+let activeJobId = null;
+let es = null;
+let stagingResultsByPath = {};
+let sourceCounts = {};
+let sourceCountRequestSeq = 0;
+let browserMode = 'source';
+let browserPath = '';
+let browserHomePath = '';
+let browserSeq = 0;
+let browserCountsAbort = null;
+let browserCountCache = {};
+let browserEscHandler = null;
+let browserSelectedPaths = [];
+let browserSelectAnchorPath = '';
+let activeImportMode = 'in_place';
+let importRemoteTargets = [];
+let importRsyncAvailable = false;
+let destStructureSeq = 0;
+// Monotonic sequence for the import preview / duplicate-check flow so a
+// slow older previewImport() response can't overwrite the summary text
+// or trigger a folder-structure render on top of a newer preview's
+// results. Incremented at the top of previewImport().
+let importPreviewSeq = 0;
+let importPreviewTimer = null;
+let importThumbSchedulerCancel = null;
+let importTags = [];
+
+function normalizedImportTag(name) {
+  return String(name || '').trim().replace(/\s+/g, ' ');
+}
+
+function renderImportTags() {
+  const list = document.getElementById('importTagList');
+  list.innerHTML = '';
+  importTags.forEach((name, index) => {
+    const chip = document.createElement('span');
+    chip.className = 'import-tag-chip';
+    const label = document.createElement('span');
+    label.textContent = name;
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.setAttribute('aria-label', 'Remove tag ' + name);
+    remove.textContent = '×';
+    remove.onclick = () => {
+      importTags.splice(index, 1);
+      renderImportTags();
+    };
+    chip.append(label, remove);
+    list.appendChild(chip);
+  });
+}
+
+function addImportTag(name) {
+  const clean = normalizedImportTag(name);
+  if (!clean) return false;
+  if (!importTags.some(tag => tag.toLocaleLowerCase() === clean.toLocaleLowerCase())) {
+    importTags.push(clean);
+    renderImportTags();
+  }
+  return true;
+}
+
+function addImportTagFromInput() {
+  const input = document.getElementById('importTagInput');
+  if (addImportTag(input.value)) input.value = '';
+}
+
+function handleImportTagKeydown(event) {
+  if (event.key !== 'Enter' && event.key !== ',') return;
+  event.preventDefault();
+  addImportTagFromInput();
+}
+
+function selectedImportMode() {
+  const checked = document.querySelector('input[name="importMode"]:checked');
+  return checked ? checked.value : 'in_place';
+}
+
+function updateImportMode() {
+  activeImportMode = selectedImportMode();
+  const copyMode = activeImportMode === 'copy';
+  document.getElementById('destCard').style.display = copyMode ? '' : 'none';
+  document.getElementById('fileTypesWrap').style.display = copyMode ? '' : 'none';
+  document.getElementById('btnPreview').textContent =
+    copyMode ? 'Check for duplicates' : 'Preview import';
+  document.getElementById('previewSummary').textContent = '';
+  hideDestStructure();
+  clearImportPreviewGrid();
+  showError('');
+  updateFileTypeControls();
+  updateWorkspaceMode();
+  onImportDestModeChange();
+  refreshSourceCounts();
+  scheduleImportPreview();
+}
+
+function selectedFileTypes() {
+  const preset = document.getElementById('fileTypePreset').value;
+  if (preset !== 'custom') return preset;
+  return Array.from(document.querySelectorAll('.file-ext:checked'))
+    .map(el => el.value);
+}
+
+function updateFileTypeControls() {
+  const preset = document.getElementById('fileTypePreset');
+  const custom = document.getElementById('customFileTypes');
+  if (!preset || !custom) return;
+  custom.style.display = preset.value === 'custom' ? '' : 'none';
+}
+
+function selectedFolderTemplate() {
+  const preset = document.getElementById('folderTemplatePreset');
+  if (preset.value !== '__custom__') return preset.value;
+  return (document.getElementById('folderTemplate').value || '').trim();
+}
+
+function updateFolderTemplateControls() {
+  const preset = document.getElementById('folderTemplatePreset');
+  const custom = document.getElementById('folderTemplate');
+  if (!preset || !custom) return;
+  custom.style.display = preset.value === '__custom__' ? '' : 'none';
+  if (preset.value === '__custom__') custom.focus();
+}
+
+function setFolderTemplate(template) {
+  const preset = document.getElementById('folderTemplatePreset');
+  const custom = document.getElementById('folderTemplate');
+  const commonOption = Array.from(preset.options)
+    .some((option) => option.value === template && option.value !== '__custom__');
+  preset.value = commonOption ? template : '__custom__';
+  custom.value = commonOption ? '' : template;
+  updateFolderTemplateControls();
+}
+
+function recentDestinationLabel(path) {
+  const trimmed = path.replace(/[\\/]+$/, '');
+  const parts = trimmed.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+function selectRecentDestination(path) {
+  const destination = document.getElementById('destInput');
+  destination.value = path;
+  // Match a manually entered destination so an already-rendered preview
+  // cannot remain visible for the previous folder.
+  destination.dispatchEvent(new Event('input', { bubbles: true }));
+  destination.focus();
+}
+
+function renderRecentDestinations(recents) {
+  const section = document.getElementById('recentDestinations');
+  const list = document.getElementById('recentDestinationList');
+  if (!section || !list) return;
+  list.replaceChildren();
+  recents.forEach((path) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn';
+    button.textContent = recentDestinationLabel(path);
+    button.title = path;
+    button.setAttribute('aria-label', 'Use ' + path);
+    button.addEventListener('click', () => selectRecentDestination(path));
+    list.appendChild(button);
+  });
+  section.style.display = recents.length ? '' : 'none';
+}
+
+function wireDestStructureInvalidation() {
+  [
+    'chkRecursive', 'fileTypePreset', 'destMode', 'remoteSubpath',
+    'chkSkipDuplicates', 'chkTrustLikelyDuplicates', 'chkVerifyByHash', 'destInput',
+    'folderTemplatePreset', 'folderTemplate',
+  ].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const onPreviewOptionChange = () => {
+      hideDestStructure();
+      scheduleImportPreview();
+    };
+    el.addEventListener('change', onPreviewOptionChange);
+    el.addEventListener('input', onPreviewOptionChange);
+  });
+  document.querySelectorAll('.file-ext').forEach((el) => {
+    el.addEventListener('change', () => {
+      hideDestStructure();
+      scheduleImportPreview();
+    });
+  });
+}
+
+function updateWorkspaceMode() {
+  const newMode = !!document.getElementById('workspaceNew')?.checked;
+  const row = document.getElementById('newWorkspaceRow');
+  if (row) row.style.display = newMode ? '' : 'none';
+  // Flipping between "current workspace" and "new workspace" changes
+  // which default (workspace-scoped vs global) the server will resolve
+  // after_import against, so the After Import display must resync.
+  updateAdvancedImportOptions();
+}
+
+function importRemoteTargetId() {
+  const el = document.getElementById('destMode');
+  const v = el ? el.value : 'local';
+  return v.indexOf('remote:') === 0 ? v.slice(7) : '';
+}
+
+function importRemoteTarget() {
+  const id = importRemoteTargetId();
+  if (!id) return null;
+  return importRemoteTargets.find(t => t.id === id) || null;
+}
+
+function normalizeRemoteSubpath(raw) {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return {value: '', error: ''};
+  const s = trimmed.replace(/\\/g, '/');
+  if (s.charAt(0) === '/' || /^[A-Za-z]:/.test(s)) {
+    return {value: '', error: 'Subpath must be relative.'};
+  }
+  const parts = [];
+  for (const seg of s.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') return {value: '', error: "Subpath may not contain '..'."};
+    parts.push(seg);
+  }
+  return {value: parts.join('/'), error: ''};
+}
+
+function importIsAbsolutePath(p) {
+  if (!p) return false;
+  return p.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+function rsyncDestSpec(user, host, path) {
+  const hostToken = host && host.indexOf(':') !== -1 ? '[' + host + ']' : host;
+  return user + '@' + hostToken + ':' + path;
+}
+
+function remotePreviewWarn(text) {
+  const d = document.createElement('div');
+  d.style.color = 'var(--warning,#bf8700)';
+  d.textContent = text;
+  return d;
+}
+
+function updateRemoteDestPreview() {
+  const el = document.getElementById('remoteDestPreview');
+  if (!el) return;
+  el.textContent = '';
+  const t = importRemoteTarget();
+  if (!t) return;
+  const subResult = normalizeRemoteSubpath(document.getElementById('remoteSubpath').value);
+  if (subResult.error) {
+    el.appendChild(remotePreviewWarn('Warning: ' + subResult.error));
+  } else if (!subResult.value) {
+    const hint = document.createElement('div');
+    hint.textContent = 'Name the archive folder under ' + t.remote_path + ', e.g. 2026/kenya-trip.';
+    el.appendChild(hint);
+  } else {
+    const line = document.createElement('div');
+    line.textContent = 'Archive over SSH to: ';
+    const span = document.createElement('span');
+    span.style.fontFamily = 'monospace';
+    span.textContent = rsyncDestSpec(
+      t.user, t.host, t.remote_path.replace(/\/+$/, '') + '/' + subResult.value);
+    line.appendChild(span);
+    el.appendChild(line);
+  }
+  if (!importRsyncAvailable) {
+    el.appendChild(remotePreviewWarn('Warning: no GNU rsync found. Install GNU rsync or set its path under Settings > Paths.'));
+  }
+  if (!t.mount_path) {
+    el.appendChild(remotePreviewWarn('Warning: this target needs a local mount path for cataloging. Add one under Settings > Remote targets.'));
+  } else if (!importIsAbsolutePath(t.mount_path)) {
+    el.appendChild(remotePreviewWarn('Warning: this target local mount path must be absolute.'));
+  }
+}
+
+function remoteArchiveSelectionReady() {
+  const t = importRemoteTarget();
+  if (!t || !importRsyncAvailable) return false;
+  if (!t.mount_path || !importIsAbsolutePath(t.mount_path)) return false;
+  const subResult = normalizeRemoteSubpath(document.getElementById('remoteSubpath').value);
+  return !subResult.error && !!subResult.value;
+}
+
+function onImportDestModeChange() {
+  const remoteId = importRemoteTargetId();
+  const localRows = document.getElementById('destLocalRows');
+  const remoteRows = document.getElementById('destRemoteRows');
+  if (localRows) localRows.style.display = remoteId ? 'none' : '';
+  if (remoteRows) remoteRows.style.display = remoteId ? '' : 'none';
+  updateRemoteDestPreview();
+}
+
+async function loadImportRemoteTargets() {
+  try {
+    const resp = await fetch('/api/remote-targets');
+    if (!resp.ok) throw new Error('remote targets unavailable');
+    const data = await resp.json();
+    importRemoteTargets = (data && data.targets) || [];
+    importRsyncAvailable = !!(data && data.rsync_available);
+  } catch (e) {
+    importRemoteTargets = [];
+    importRsyncAvailable = false;
+  }
+  const sel = document.getElementById('destMode');
+  if (!sel) return;
+  while (sel.options.length > 1) sel.remove(1);
+  importRemoteTargets.forEach((t) => {
+    const opt = document.createElement('option');
+    opt.value = 'remote:' + t.id;
+    opt.textContent = t.name + ' - ' + t.user + '@' + t.host + ' (SSH)';
+    sel.appendChild(opt);
+  });
+  onImportDestModeChange();
+}
+
+function importEscapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+
+function importEscapeAttr(s) {
+  return importEscapeHtml(s);
+}
+
+function renderSources() {
+  const list = document.getElementById('sourceList');
+  list.innerHTML = '';
+  sources.forEach((s, i) => {
+    const div = document.createElement('div');
+    div.className = 'source-item';
+    const span = document.createElement('span');
+    span.textContent = s;
+    span.style.flex = '1';
+    const meta = document.createElement('span');
+    meta.className = 'source-meta';
+    meta.textContent = sourceCounts[s] && sourceCounts[s].text
+      ? sourceCounts[s].text
+      : 'Counting photos...';
+    const btn = document.createElement('button');
+    btn.textContent = '×';
+    btn.title = 'Remove';
+    btn.onclick = () => {
+      sources.splice(i, 1);
+      delete sourceCounts[s];
+      hideDestStructure();
+      if (!sources.length) {
+        clearImportPreviewGrid();
+        document.getElementById('previewSummary').textContent = '';
+      }
+      renderSources();
+      scheduleImportPreview();
+    };
+    div.appendChild(span);
+    div.appendChild(meta);
+    div.appendChild(btn);
+    list.appendChild(div);
+  });
+}
+
+function selectedSourceCountOptions() {
+  const copyMode = selectedImportMode() === 'copy';
+  return {
+    file_types: copyMode ? selectedFileTypes() : 'both',
+    recursive: document.getElementById('chkRecursive').checked,
+  };
+}
+
+function sourceCountKey(path, options) {
+  return [
+    path,
+    options.file_types,
+    options.recursive ? 'recursive' : 'flat',
+  ].join('\n');
+}
+
+function formatPhotoCount(n) {
+  const count = Number(n || 0);
+  return count.toLocaleString() + ' photo' + (count === 1 ? '' : 's');
+}
+
+async function refreshSourceCount(path) {
+  if (!path) return;
+  const options = selectedSourceCountOptions();
+  const key = sourceCountKey(path, options);
+  const existing = sourceCounts[path];
+  if (existing && existing.key === key && existing.status === 'loaded') return;
+  const requestId = ++sourceCountRequestSeq;
+  sourceCounts[path] = {
+    key: key,
+    requestId: requestId,
+    status: 'loading',
+    text: 'Counting photos...',
+  };
+  renderSources();
+  try {
+    const resp = await fetch('/api/import/folder-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        folders: [path],
+        file_types: options.file_types,
+        recursive: options.recursive,
+        summary_only: true,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    const current = sourceCounts[path];
+    if (!sources.includes(path) || !current || current.requestId !== requestId) return;
+    sourceCounts[path] = {
+      key: key,
+      requestId: requestId,
+      status: resp.ok ? 'loaded' : 'error',
+      text: resp.ok ? formatPhotoCount(data.total_count) : 'Count unavailable',
+    };
+  } catch (e) {
+    const current = sourceCounts[path];
+    if (!sources.includes(path) || !current || current.requestId !== requestId) return;
+    sourceCounts[path] = {
+      key: key,
+      requestId: requestId,
+      status: 'error',
+      text: 'Count unavailable',
+    };
+  }
+  renderSources();
+}
+
+function refreshSourceCounts() {
+  sources.forEach(refreshSourceCount);
+}
+
+function addSourcePath(path) {
+  const v = (path || '').trim();
+  if (!v) return false;
+  if (!sources.includes(v)) {
+    sources.push(v);
+    hideDestStructure();
+    renderSources();
+    refreshSourceCount(v);
+    scheduleImportPreview();
+    return true;
+  }
+  return false;
+}
+
+function addSource() {
+  const input = document.getElementById('sourceInput');
+  const v = (input.value || '').trim();
+  if (!v) return;
+  addSourcePath(v);
+  input.value = '';
+}
+
+async function browseForSource() {
+  if (typeof pickDirectory === 'function') {
+    const seqBeforePicker = browserSeq;
+    const result = await pickDirectory('Select source folders', { multiple: true });
+    if (result) {
+      const paths = Array.isArray(result) ? result : [result];
+      paths.forEach(addSourcePath);
+      return;
+    }
+    if (typeof isTauri === 'function' && isTauri()) return;
+    if (browserSeq !== seqBeforePicker) {
+      openImportFolderBrowser('source', { skipInitialBrowse: true });
+      return;
+    }
+  }
+  openImportFolderBrowser('source');
+}
+
+async function browseForDestination() {
+  if (typeof pickDirectory === 'function') {
+    const seqBeforePicker = browserSeq;
+    const result = await pickDirectory('Select archive folder');
+    if (result) {
+      const path = Array.isArray(result) ? result[0] : result;
+      if (path) {
+        document.getElementById('destInput').value = path;
+        hideDestStructure();
+        scheduleImportPreview();
+      }
+      return;
+    }
+    if (typeof isTauri === 'function' && isTauri()) return;
+    if (browserSeq !== seqBeforePicker) {
+      openImportFolderBrowser('destination', { skipInitialBrowse: true });
+      return;
+    }
+  }
+  openImportFolderBrowser('destination');
+}
+
+function openImportFolderBrowser(mode, opts = {}) {
+  browserMode = mode === 'destination' ? 'destination' : 'source';
+  const overlay = document.getElementById('importFolderBrowser');
+  document.getElementById('folderBrowserTitle').textContent =
+    browserMode === 'source' ? 'Select Source Folders' : 'Select Destination Folder';
+  browserSelectedPaths = [];
+  browserSelectAnchorPath = '';
+  updateImportBrowserSelection();
+  overlay.classList.add('open');
+  overlay.onclick = (e) => {
+    if (e.target === overlay) closeImportFolderBrowser();
+  };
+  if (browserEscHandler) document.removeEventListener('keydown', browserEscHandler);
+  browserEscHandler = (e) => {
+    if (e.key === 'Escape') closeImportFolderBrowser();
+  };
+  document.addEventListener('keydown', browserEscHandler);
+  document.body.style.overflow = 'hidden';
+  const firstAction = overlay.querySelector('button');
+  if (firstAction) firstAction.focus();
+  const startPath = browserMode === 'destination'
+    ? (document.getElementById('destInput').value || '').trim()
+    : '';
+  if (!opts.skipInitialBrowse) browseImportFolderTo(startPath || null);
+}
+
+function closeImportFolderBrowser() {
+  document.getElementById('importFolderBrowser').classList.remove('open');
+  if (browserCountsAbort) {
+    browserCountsAbort.abort();
+    browserCountsAbort = null;
+  }
+  if (browserEscHandler) {
+    document.removeEventListener('keydown', browserEscHandler);
+    browserEscHandler = null;
+  }
+  document.body.style.overflow = '';
+}
+
+async function browseImportFolderTo(path) {
+  const seq = ++browserSeq;
+  if (browserCountsAbort) {
+    browserCountsAbort.abort();
+    browserCountsAbort = null;
+  }
+  // Clear stale selection while this async navigation is pending. Without
+  // this, clicking "Select This Folder" during a slow or failing fetch
+  // submits the previous folder instead of the one the user requested —
+  // both on modal open and mid-session navigation.
+  browserPath = '';
+  browserSelectedPaths = [];
+  browserSelectAnchorPath = '';
+  updateImportBrowserSelection();
+  const selectBtn = document.getElementById('folderBrowserSelectBtn');
+  if (selectBtn) selectBtn.disabled = true;
+  document.getElementById('folderBrowserPath').textContent = 'Loading…';
+  document.getElementById('folderBrowserList').innerHTML =
+    '<div class="folder-browser-empty">Loading…</div>';
+  let url = '/api/browse';
+  if (path === '__pictures__') {
+    if (!browserHomePath) {
+      try {
+        const homeResp = await fetch('/api/browse');
+        if (seq !== browserSeq || !homeResp.ok) return;
+        const home = await homeResp.json();
+        browserHomePath = home.path || '';
+      } catch (e) {
+        return;
+      }
+    }
+    url = '/api/browse?path=' + encodeURIComponent(browserHomePath + '/Pictures');
+  } else if (path === '__volumes__') {
+    if (navigator.userAgent.indexOf('Mac') < 0) {
+      try {
+        const resp = await fetch('/api/volumes');
+        if (seq !== browserSeq || !resp.ok) return;
+        const volumes = await resp.json();
+        browserPath = '';
+        renderImportFolderBrowser({ path: '', dirs: volumes || [] }, { syntheticRoot: true });
+      } catch (e) { /* ignore */ }
+      return;
+    }
+    url = '/api/browse?path=' + encodeURIComponent('/Volumes');
+  } else if (path) {
+    url = '/api/browse?path=' + encodeURIComponent(path);
+  }
+
+  try {
+    const resp = await fetch(url);
+    if (seq !== browserSeq) return;
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      showError(data.error || 'Could not open folder.');
+      return;
+    }
+    const data = await resp.json();
+    browserPath = data.path || '';
+    browserSelectedPaths = [];
+    browserSelectAnchorPath = '';
+    if (!path) browserHomePath = browserPath;
+    renderImportFolderBrowser(data);
+  } catch (e) {
+    showError(String(e.message || e));
+  }
+}
+
+function renderImportFolderBrowser(data, opts) {
+  document.getElementById('folderBrowserPath').textContent = data.path || 'Volumes';
+  const list = document.getElementById('folderBrowserList');
+  const dirs = data.dirs || [];
+  let html = '';
+  const syntheticRoot = opts && opts.syntheticRoot;
+  let parent = '';
+  if (data.path && data.path.indexOf('\\') !== -1) {
+    parent = data.path.replace(/[\\\/]?[^\\\/]+[\\\/]?$/, '') || data.path;
+    if (/^[A-Za-z]:$/.test(parent)) parent += '\\';
+  } else if (data.path) {
+    parent = data.path.substring(0, data.path.lastIndexOf('/')) || '/';
+  }
+  if (data.path && data.path !== '/' && parent && parent !== data.path) {
+    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(parent) + '" data-parent-link="1">' +
+      '<span class="folder-browser-item-name">&#128193; ..</span></div>';
+  }
+  dirs.forEach((d) => {
+    html += '<div class="folder-browser-item" data-browse-path="' + importEscapeAttr(d.path) + '" data-folder-path="' + importEscapeAttr(d.path) + '">' +
+      '<span class="folder-browser-item-name">&#128193; ' + importEscapeHtml(d.name || d.path) + '</span>' +
+      '<span class="folder-browser-count" data-count-path="' + importEscapeAttr(d.path) + '"></span></div>';
+  });
+  if (!html) {
+    html = '<div class="folder-browser-empty">' +
+      (syntheticRoot ? 'No volumes found.' : 'No subfolders.') + '</div>';
+  }
+  list.innerHTML = html;
+  list.onclick = (e) => {
+    const item = e.target.closest('.folder-browser-item[data-browse-path]');
+    if (!item) return;
+    if (item.getAttribute('data-parent-link') === '1' || browserMode === 'destination') {
+      browseImportFolderTo(item.getAttribute('data-browse-path'));
+      return;
+    }
+    selectImportBrowserListItem(item, e);
+  };
+  list.ondblclick = (e) => {
+    const item = e.target.closest('.folder-browser-item[data-browse-path]');
+    if (item && item.getAttribute('data-parent-link') !== '1') {
+      browseImportFolderTo(item.getAttribute('data-browse-path'));
+    }
+  };
+  updateImportBrowserSelection();
+  if (browserMode === 'source') refreshImportBrowserCounts(dirs, browserSeq);
+}
+
+function importBrowserCountKey(path, fileTypes) {
+  const normalized = Array.isArray(fileTypes)
+    ? fileTypes.slice().sort().join(',')
+    : String(fileTypes || 'both');
+  return path + '\n' + normalized;
+}
+
+function applyImportBrowserCount(path, count) {
+  if (!count) return;
+  document.querySelectorAll('#folderBrowserList .folder-browser-count').forEach((badge) => {
+    if (badge.getAttribute('data-count-path') === path) {
+      badge.textContent = formatPhotoCount(count);
+    }
+  });
+}
+
+async function refreshImportBrowserCounts(dirs, seq) {
+  if (!dirs.length || seq !== browserSeq) return;
+  const fileTypes = selectedSourceCountOptions().file_types;
+  const uncached = [];
+  dirs.forEach((dir) => {
+    const key = importBrowserCountKey(dir.path, fileTypes);
+    if (Object.prototype.hasOwnProperty.call(browserCountCache, key)) {
+      applyImportBrowserCount(dir.path, browserCountCache[key]);
+    } else {
+      uncached.push(dir.path);
+    }
+  });
+  if (!uncached.length) return;
+
+  browserCountsAbort = new AbortController();
+  try {
+    const resp = await fetch('/api/browse/photo-counts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: uncached, file_types: fileTypes }),
+      signal: browserCountsAbort.signal,
+    });
+    if (!resp.ok || seq !== browserSeq) return;
+    const data = await resp.json();
+    if (seq !== browserSeq) return;
+    const counts = data.counts || {};
+    Object.keys(counts).forEach((path) => {
+      browserCountCache[importBrowserCountKey(path, fileTypes)] = counts[path];
+      applyImportBrowserCount(path, counts[path]);
+    });
+  } catch (e) {
+    if (e.name !== 'AbortError') { /* Counts are helpful but non-blocking. */ }
+  } finally {
+    if (seq === browserSeq) browserCountsAbort = null;
+  }
+}
+
+function selectImportBrowserListItem(item, event) {
+  const path = item.getAttribute('data-folder-path') || item.getAttribute('data-browse-path');
+  if (!path) return;
+  const items = Array.from(document.querySelectorAll('#folderBrowserList .folder-browser-item[data-folder-path]'));
+  const shift = event && event.shiftKey;
+  const toggle = event && (event.metaKey || event.ctrlKey);
+
+  if (shift && browserSelectAnchorPath) {
+    let anchorIdx = items.findIndex((el) => el.getAttribute('data-folder-path') === browserSelectAnchorPath);
+    const clickIdx = items.findIndex((el) => el.getAttribute('data-folder-path') === path);
+    if (clickIdx === -1) return;
+    if (anchorIdx === -1) anchorIdx = clickIdx;
+    const lo = Math.min(anchorIdx, clickIdx);
+    const hi = Math.max(anchorIdx, clickIdx);
+    browserSelectedPaths = items.slice(lo, hi + 1).map((el) => el.getAttribute('data-folder-path'));
+  } else if (toggle) {
+    const idx = browserSelectedPaths.indexOf(path);
+    if (idx === -1) browserSelectedPaths.push(path);
+    else browserSelectedPaths.splice(idx, 1);
+    browserSelectAnchorPath = path;
+  } else {
+    browserSelectedPaths = [path];
+    browserSelectAnchorPath = path;
+  }
+  updateImportBrowserSelection();
+}
+
+function updateImportBrowserSelection() {
+  const selected = {};
+  browserSelectedPaths.forEach((path) => { selected[path] = true; });
+  document.querySelectorAll('#folderBrowserList .folder-browser-item[data-folder-path]').forEach((item) => {
+    item.classList.toggle('selected', !!selected[item.getAttribute('data-folder-path')]);
+  });
+
+  const selection = document.getElementById('folderBrowserSelection');
+  if (selection) {
+    if (browserMode === 'source' && browserSelectedPaths.length > 1) {
+      selection.textContent = browserSelectedPaths.length + ' folders selected';
+    } else if (browserMode === 'source' && browserSelectedPaths.length === 1) {
+      selection.textContent = browserSelectedPaths[0];
+    } else {
+      selection.textContent = '';
+    }
+  }
+
+  const selectBtn = document.getElementById('folderBrowserSelectBtn');
+  if (selectBtn) {
+    if (browserMode === 'source') {
+      selectBtn.textContent = browserSelectedPaths.length > 1
+        ? 'Add ' + browserSelectedPaths.length + ' Folders'
+        : 'Add This Folder';
+      // Volumes root renders with browserPath = '' but selectable drive rows.
+      // Enable submission whenever the user has picked at least one, so
+      // multi-select from the Volumes shortcut is reachable.
+      selectBtn.disabled = !browserPath && browserSelectedPaths.length === 0;
+    } else {
+      selectBtn.textContent = 'Select This Folder';
+      selectBtn.disabled = !browserPath;
+    }
+  }
+}
+
+function selectImportBrowserFolder() {
+  if (browserMode === 'destination') {
+    if (!browserPath) return;
+    document.getElementById('destInput').value = browserPath;
+    hideDestStructure();
+    scheduleImportPreview();
+  } else {
+    const paths = browserSelectedPaths.length
+      ? browserSelectedPaths
+      : (browserPath ? [browserPath] : []);
+    if (!paths.length) return;
+    paths.forEach(addSourcePath);
+  }
+  closeImportFolderBrowser();
+}
+
+// Populate the After Import dropdown from the saved-process library. Keeps
+// the two static options (hidden default + None) and appends one option per
+// saved process, value = its id.
+async function loadAfterImportProcesses() {
+  const sel = document.getElementById('afterImportSelect');
+  if (!sel) return;
+  try {
+    const resp = await fetch('/api/processes');
+    if (!resp.ok) return;
+    const procs = await resp.json();
+    Array.from(sel.querySelectorAll('option[data-process]')).forEach(
+      (o) => o.remove());
+    (procs || []).forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = String(p.id);
+      opt.textContent = p.name;
+      opt.dataset.process = '1';
+      sel.appendChild(opt);
+    });
+  } catch (e) { /* leave with just "None — import only" */ }
+}
+
+function selectedAfterImport() {
+  const v = document.getElementById('afterImportSelect').value;
+  // __hidden_default__ is a display-only placeholder — the request path
+  // omits after_import in that state, so callers never read this value.
+  if (v === '__none__' || v === '__hidden_default__') return null;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? null : n;
+}
+
+function retireHiddenDefaultOption(sel) {
+  const placeholder = document.getElementById('afterImportHiddenDefault');
+  if (!placeholder) return;
+  placeholder.hidden = true;
+  placeholder.disabled = true;
+  placeholder.textContent = '';
+  delete placeholder.dataset.maskedValue;
+  if (sel && sel.value === '__hidden_default__') sel.value = '__none__';
+}
+
+function afterImportOptionLabel(processId) {
+  const sel = document.getElementById('afterImportSelect');
+  const value = processId == null ? '__none__' : String(processId);
+  const fallback = processId == null ? 'None — import only' : String(processId);
+  if (!sel) return fallback;
+  const opt = Array.from(sel.options).find(
+    (o) => o.value === value && o.id !== 'afterImportHiddenDefault');
+  return opt ? (opt.textContent || '').trim() : fallback;
+}
+
+// Keep the After Import display honest about what a Start Import will do.
+// (Named for the advanced-mode listener it's still wired to; saved processes
+// no longer have an "advanced" tier, so there's nothing to hide/show — the
+// only remaining job is the new-workspace default placeholder.)
+function updateAdvancedImportOptions() {
+  const sel = document.getElementById('afterImportSelect');
+  if (!sel) return;
+  const placeholder = document.getElementById('afterImportHiddenDefault');
+  if (!placeholder) return;
+
+  // Once the user actively picks an option, that pick is authoritative
+  // and no placeholder mode should override it.
+  if (_afterImportUserTouched) {
+    retireHiddenDefaultOption(sel);
+    _afterImportHidingDefault = false;
+    return;
+  }
+
+  const newMode = !!document.getElementById('workspaceNew')?.checked;
+
+  // "New workspace" untouched: startImport() omits after_import so the
+  // server resolves it against the freshly-created workspace (which
+  // inherits the GLOBAL default, since a brand-new workspace has no
+  // overrides yet). The visible dropdown, prefilled from the currently-
+  // active workspace's default, would otherwise lie about what the
+  // server is going to do — show a placeholder that names the real target.
+  if (newMode && _afterImportConfigLoaded) {
+    const label = afterImportOptionLabel(_globalDefaultProcessId);
+    placeholder.textContent =
+      'New workspace default: ' + label + ' (applied to the new workspace)';
+    placeholder.dataset.maskedValue =
+      _globalDefaultProcessId == null ? '' : String(_globalDefaultProcessId);
+    placeholder.hidden = false;
+    placeholder.disabled = false;
+    _afterImportHidingDefault = true;
+    sel.value = '__hidden_default__';
+    return;
+  }
+
+  // Not new-workspace mode: track the workspace's own default (or the HTML
+  // fallback if config didn't load). Re-derive it every call so switching
+  // workspaceNew off restores the workspace default rather than sticking on
+  // whatever placeholder we were showing.
+  const wsDef = _afterImportConfigLoaded
+    ? (_workspaceDefaultProcessId == null
+        ? '__none__' : String(_workspaceDefaultProcessId))
+    : '__none__';
+  sel.value = wsDef;
+  if (sel.selectedIndex === -1) sel.value = '__none__';
+  retireHiddenDefaultOption(sel);
+  _afterImportHidingDefault = false;
+}
+
+window.addEventListener('advancedmodechange', updateAdvancedImportOptions);
+window.addEventListener('devmodechange', updateAdvancedImportOptions);
+
+// True once initImportPage() has resolved the workspace's after-import
+// default into the select. Until then, the select still shows its HTML
+// initial value (__none__), which selectedAfterImport() would surface as
+// an explicit null. Posting `after_import: null` tells the import
+// endpoint to run import-only and skip the workspace's
+// pipeline.default_process_id — the exact race the reviewer flagged.
+// Guarding the body key with this flag makes an unresolved default
+// fall back to the endpoint's "key omitted → apply workspace default"
+// branch, which is what the user actually expects.
+let _afterImportConfigLoaded = false;
+
+// True when updateAdvancedImportOptions() has visually reset the select
+// to __none__ solely because the workspace's stored default is an
+// advanced-only strategy (full / cull_ready) and advanced mode is off.
+// In that state the __none__ display is a UI artifact, not a user
+// choice, so startImport() must omit the after_import key and let the
+// server apply the workspace default rather than posting an explicit
+// null (which would run import-only). Cleared as soon as the user
+// actively changes the select.
+let _afterImportHidingDefault = false;
+
+// True once the user actively picks something in the After Import
+// dropdown. Until then the visible selection is whatever
+// initImportPage() prefilled from the CURRENTLY-active workspace's
+// default — which is the wrong basis for a new-workspace import, where
+// the server should apply the new workspace's (or global) default
+// instead. startImport() omits the after_import key for new-workspace
+// imports that this flag hasn't been set on, so the resolution happens
+// server-side after the workspace switch. An explicit user pick
+// (including "None — import only") flips this flag and gets forwarded
+// verbatim.
+let _afterImportUserTouched = false;
+
+// The unscoped global pipeline.default_process_id from /api/config, captured
+// during initImportPage. A brand-new workspace has no config_overrides yet,
+// so this is the strategy the server will apply when the new-workspace
+// import path omits `after_import`. Used to populate the honest "New
+// workspace default: X" placeholder so the visible dropdown selection
+// isn't misled by whatever was prefilled from the currently-active
+// workspace's (possibly-overridden) default.
+let _globalDefaultProcessId = null;
+
+// The effective pipeline.default_process_id for the CURRENTLY-active
+// workspace (global config merged with the workspace's overrides). Used
+// so updateAdvancedImportOptions() can re-derive the visible dropdown
+// selection when the user toggles "New workspace" off without touching
+// the dropdown — the underlying target reverts to the current workspace's
+// default rather than sticking on whatever placeholder was showing.
+let _workspaceDefaultProcessId = null;
+
+function showError(msg) {
+  const el = document.getElementById('importError');
+  el.textContent = msg;
+  el.style.display = msg ? 'block' : 'none';
+}
+
+function formatBytes(n) {
+  n = Number(n || 0);
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
+  return (i === 0 ? String(n) : n.toFixed(n >= 10 ? 1 : 2)) + ' ' + units[i];
+}
+
+async function pollJobResult(jobId) {
+  for (let i = 0; i < 180; i++) {
+    const resp = await fetch('/api/jobs/' + jobId);
+    if (resp.ok) {
+      const job = await resp.json();
+      if (job.status && job.status !== 'running' && job.status !== 'queued') {
+        if (job.status === 'failed') {
+          const msg = (job.errors && job.errors[0]) || 'job failed';
+          throw new Error(msg);
+        }
+        return job.result || {};
+      }
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  throw new Error('job did not finish in time');
+}
+
+async function loadOrphanedStaging() {
+  try {
+    const resp = await fetch('/api/import/orphaned-staging');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    renderOrphanedStaging(data.items || []);
+  } catch (e) {
+    // Recovery card is best-effort; import itself should remain usable.
+  }
+}
+
+function renderOrphanedStaging(items) {
+  const card = document.getElementById('orphanedStagingCard');
+  const box = document.getElementById('orphanedStagingItems');
+  box.innerHTML = '';
+  if (!items.length) {
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = '';
+  items.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'staging-item';
+    row.dataset.path = item.path;
+
+    const title = document.createElement('div');
+    title.className = 'staging-title';
+    title.textContent = item.name + ' · ' + item.source_root;
+    const meta = document.createElement('div');
+    meta.className = 'staging-meta';
+    meta.textContent = item.file_count + ' files · ' + formatBytes(item.bytes);
+
+    const actions = document.createElement('div');
+    actions.className = 'staging-actions';
+    const verify = document.createElement('button');
+    verify.className = 'btn';
+    verify.textContent = 'Verify before cleanup';
+    verify.onclick = () => verifyStaging(item.path, verify);
+    actions.appendChild(verify);
+
+    row.append(title, meta, actions);
+    box.appendChild(row);
+  });
+}
+
+function appendStagingDetail(row, result) {
+  const old = row.querySelector('.staging-details');
+  if (old) old.remove();
+  const bad = (result.details || []).filter(d => d.status !== 'verified');
+  if (!bad.length) return;
+  const list = document.createElement('ul');
+  list.className = 'staging-details';
+  bad.slice(0, 20).forEach((d) => {
+    const li = document.createElement('li');
+    li.textContent = d.rel_path + ' — ' + d.reason;
+    list.appendChild(li);
+  });
+  if (bad.length > 20) {
+    const li = document.createElement('li');
+    li.textContent = (bad.length - 20) + ' more files not shown';
+    list.appendChild(li);
+  }
+  row.appendChild(list);
+}
+
+function renderStagingVerification(result) {
+  stagingResultsByPath[result.path] = result;
+  const row = Array.from(document.querySelectorAll('.staging-item'))
+    .find(el => el.dataset.path === result.path);
+  if (!row) return;
+  const meta = row.querySelector('.staging-meta');
+  const parts = [
+    result.file_count + ' files',
+    formatBytes(result.bytes),
+    result.verified + ' verified',
+  ];
+  if (result.unaccounted) parts.push(result.unaccounted + ' not in archive');
+  if (result.unreachable) parts.push(result.unreachable + ' unreachable');
+  if (result.inferred_destination) parts.push('archive: ' + result.inferred_destination);
+  meta.textContent = parts.join(' · ');
+
+  const actions = row.querySelector('.staging-actions');
+  actions.innerHTML = '';
+  if (result.can_delete) {
+    const del = document.createElement('button');
+    del.className = 'btn btn-primary';
+    del.textContent = 'Delete verified staging copy';
+    del.onclick = () => deleteStaging(result.path, del);
+    actions.appendChild(del);
+  } else {
+    const use = document.createElement('button');
+    use.className = 'btn';
+    use.textContent = 'Use as import source';
+    use.onclick = () => useStagingAsImportSource(result);
+    actions.appendChild(use);
+    const again = document.createElement('button');
+    again.className = 'btn';
+    again.textContent = 'Verify again';
+    again.onclick = () => verifyStaging(result.path, again);
+    actions.appendChild(again);
+  }
+  appendStagingDetail(row, result);
+}
+
+async function verifyStaging(path, btn) {
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Verifying...';
+  try {
+    const resp = await fetch('/api/import/orphaned-staging/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'verification failed');
+    const result = await pollJobResult(data.job_id);
+    renderStagingVerification(result);
+  } catch (e) {
+    showError(String(e.message || e));
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
+}
+
+async function deleteStaging(path, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Re-verifying...';
+  try {
+    const resp = await fetch('/api/import/orphaned-staging', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'cleanup failed');
+    await loadOrphanedStaging();
+  } catch (e) {
+    showError(String(e.message || e));
+    btn.disabled = false;
+    btn.textContent = 'Delete verified staging copy';
+  }
+}
+
+function useStagingAsImportSource(result) {
+  sources = [result.source_root];
+  hideDestStructure();
+  renderSources();
+  refreshSourceCount(result.source_root);
+  // Staging recovery must copy the temporary staging tree into the archive.
+  // In-place would catalog paths that disappear once staging is cleaned,
+  // leaving missing-folder rows, so force Copy to archive here.
+  const copyRadio = document.getElementById('modeCopy');
+  if (copyRadio) {
+    copyRadio.checked = true;
+    updateImportMode();
+  }
+  if (result.inferred_destination) {
+    document.getElementById('destInput').value = result.inferred_destination;
+    hideDestStructure();
+  }
+  scheduleImportPreview();
+  document.getElementById('sourceCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function hideDestStructure() {
+  destStructureSeq += 1;
+  const el = document.getElementById('destStructure');
+  if (!el) return;
+  el.style.display = 'none';
+  el.innerHTML = '';
+}
+
+function clearScheduledImportPreview() {
+  if (importPreviewTimer) {
+    clearTimeout(importPreviewTimer);
+    importPreviewTimer = null;
+  }
+}
+
+function scheduleImportPreview() {
+  clearScheduledImportPreview();
+  showError('');
+  if (!sources.length) return;
+  importPreviewTimer = setTimeout(() => {
+    importPreviewTimer = null;
+    previewImport({ automatic: true });
+  }, 350);
+}
+
+function clearImportPreviewGrid() {
+  if (importThumbSchedulerCancel) {
+    importThumbSchedulerCancel();
+    importThumbSchedulerCancel = null;
+  }
+  const grid = document.getElementById('importPreviewGrid');
+  if (!grid) return;
+  grid.style.display = 'none';
+  grid.innerHTML = '';
+}
+
+function importDestinationMap(destinationFiles) {
+  const map = {};
+  (destinationFiles || []).forEach((f) => {
+    if (f && f.path) map[f.path] = f.folder || '.';
+  });
+  return map;
+}
+
+function renderImportPreviewGrid(files, duplicatePaths, destinationFiles) {
+  const grid = document.getElementById('importPreviewGrid');
+  if (!grid) return;
+  if (importThumbSchedulerCancel) {
+    importThumbSchedulerCancel();
+    importThumbSchedulerCancel = null;
+  }
+  grid.innerHTML = '';
+  const dupes = new Set(duplicatePaths || []);
+  const destMap = importDestinationMap(destinationFiles);
+  if (!files || !files.length) {
+    grid.style.display = 'none';
+    return;
+  }
+
+  const groups = {};
+  files.forEach((f) => {
+    const key = f.subfolder || 'Source';
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(f);
+  });
+
+  Object.keys(groups).sort().forEach((subfolder) => {
+    const groupEl = document.createElement('div');
+    groupEl.className = 'import-preview-folder';
+    const header = document.createElement('div');
+    header.className = 'import-preview-folder-header';
+    header.textContent = subfolder + ' (' + groups[subfolder].length + ')';
+    groupEl.appendChild(header);
+
+    const thumbsEl = document.createElement('div');
+    thumbsEl.className = 'import-preview-thumbs';
+    groups[subfolder].forEach((f) => {
+      const isDuplicate = dupes.has(f.path);
+      const card = document.createElement('div');
+      card.className = 'import-preview-thumb skeleton' + (isDuplicate ? ' duplicate' : '');
+      card.dataset.path = f.path || '';
+      if (f.thumb_url) card.dataset.thumbUrl = f.thumb_url;
+      card.title = f.path || f.filename || '';
+
+      const imgWrap = document.createElement('div');
+      imgWrap.className = 'import-preview-thumb-img';
+      const img = document.createElement('img');
+      img.alt = f.filename || '';
+      imgWrap.appendChild(img);
+      card.appendChild(imgWrap);
+
+      if (isDuplicate) {
+        const badge = document.createElement('div');
+        badge.className = 'import-preview-badge';
+        badge.textContent = 'Duplicate';
+        card.appendChild(badge);
+      }
+
+      const meta = document.createElement('div');
+      meta.className = 'import-preview-meta';
+      const name = document.createElement('div');
+      name.className = 'import-preview-name';
+      name.textContent = f.filename || f.path || '';
+      meta.appendChild(name);
+      const dest = document.createElement('div');
+      dest.className = 'import-preview-dest';
+      const folder = destMap[f.path];
+      dest.textContent = folder ? ('To: ' + (folder === '.' ? '(archive root)' : folder)) : (f.subfolder || '');
+      meta.appendChild(dest);
+      card.appendChild(meta);
+
+      thumbsEl.appendChild(card);
+    });
+    groupEl.appendChild(thumbsEl);
+    grid.appendChild(groupEl);
+  });
+  grid.style.display = '';
+  setupImportThumbnailScheduler();
+}
+
+function setupImportThumbnailScheduler() {
+  const grid = document.getElementById('importPreviewGrid');
+  if (!grid) return;
+  const pendingQueue = Array.from(grid.querySelectorAll('.import-preview-thumb.skeleton'));
+  const visibleSet = new Set();
+  let inFlight = 0;
+  let cancelled = false;
+  const concurrency = 4;
+  let observer = null;
+
+  importThumbSchedulerCancel = function() {
+    cancelled = true;
+    pendingQueue.length = 0;
+    if (observer) observer.disconnect();
+  };
+
+  function dispatch(el) {
+    const path = el.dataset.path;
+    const img = el.querySelector('img');
+    if (!img) return;
+    inFlight += 1;
+    const done = function() {
+      el.classList.remove('skeleton');
+      inFlight -= 1;
+      if (!cancelled) pump();
+    };
+    img.onload = done;
+    img.onerror = done;
+    img.src = el.dataset.thumbUrl || ('/api/import/folder-preview/thumbnail?path=' + encodeURIComponent(path));
+  }
+
+  function pump() {
+    while (inFlight < concurrency && pendingQueue.length > 0) {
+      let idx = 0;
+      for (let i = 0; i < pendingQueue.length; i += 1) {
+        if (visibleSet.has(pendingQueue[i])) { idx = i; break; }
+      }
+      dispatch(pendingQueue.splice(idx, 1)[0]);
+    }
+  }
+
+  if (!('IntersectionObserver' in window)) {
+    pump();
+    return;
+  }
+
+  observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) visibleSet.add(entry.target);
+      else visibleSet.delete(entry.target);
+    });
+    if (!cancelled) pump();
+  }, { root: grid, rootMargin: '200px' });
+  pendingQueue.forEach((thumb) => observer.observe(thumb));
+  setTimeout(() => { if (!cancelled) pump(); }, 0);
+}
+
+// Resolve the absolute local path files will be cataloged at, for the
+// destination-structure preview. Local mode: the destination field. Remote
+// (SSH) mode: the target's local mount path joined with the subpath — the
+// same path the import job catalogs at (mount_final). Returns '' when the
+// path isn't known/absolute yet, in which case the structure preview is
+// skipped (the duplicate summary still stands).
+function resolvedCopyDestination() {
+  if (importRemoteTargetId()) {
+    const t = importRemoteTarget();
+    if (!t || !t.mount_path || !importIsAbsolutePath(t.mount_path)) return '';
+    const sub = normalizeRemoteSubpath(document.getElementById('remoteSubpath').value);
+    if (sub.error) return '';
+    const base = t.mount_path.replace(/\/+$/, '');
+    return sub.value ? base + '/' + sub.value : base;
+  }
+  const local = (document.getElementById('destInput').value || '').trim();
+  return importIsAbsolutePath(local) ? local : '';
+}
+
+function destStructureSignature(destination, fileTypes, recursive, excludePaths) {
+  return JSON.stringify({
+    sources: sources.slice(),
+    destination: destination,
+    folder_template: selectedFolderTemplate(),
+    file_types: fileTypes,
+    recursive: recursive,
+    skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
+    verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
+    exclude_paths: (excludePaths || []).slice().sort(),
+  });
+}
+
+function importPreviewSignature() {
+  const copyMode = selectedImportMode() === 'copy';
+  return JSON.stringify({
+    sources: sources.slice(),
+    mode: copyMode ? 'copy' : 'in_place',
+    file_types: copyMode ? selectedFileTypes() : 'both',
+    recursive: document.getElementById('chkRecursive').checked,
+    skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
+    verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
+  });
+}
+
+function importPreviewSignatureChanged(signature) {
+  return signature !== importPreviewSignature();
+}
+
+// Preview the destination folder structure (new vs existing folders) and,
+// when the destination sits in a folder Vireo already manages, a callout
+// naming that archive and how many photos it already holds. Best-effort:
+// any failure leaves the destination unknown and simply shows nothing, so
+// the duplicate summary above is never clobbered. ``excludePaths`` are the
+// source files that will be skipped as duplicates — excluding them keeps the
+// new/existing folder counts matching the files that actually land.
+async function renderDestStructure(excludePaths) {
+  hideDestStructure();
+  const destination = resolvedCopyDestination();
+  if (!destination) return null;
+  const fileTypes = selectedFileTypes();
+  const recursive = document.getElementById('chkRecursive').checked;
+  const requestSeq = destStructureSeq;
+  const requestSignature = destStructureSignature(
+    destination, fileTypes, recursive, excludePaths);
+  let data;
+  try {
+    const resp = await fetch('/api/import/destination-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sources: sources,
+        destination: destination,
+        folder_template: selectedFolderTemplate(),
+        file_types: fileTypes,
+        recursive: recursive,
+        exclude_paths: excludePaths || [],
+      }),
+    });
+    if (!resp.ok) return null;
+    data = await resp.json();
+  } catch (e) {
+    return null;  // structure preview is optional; keep the summary intact
+  }
+  const el = document.getElementById('destStructure');
+  if (
+    requestSeq !== destStructureSeq ||
+    requestSignature !== destStructureSignature(
+      resolvedCopyDestination(), selectedFileTypes(),
+      document.getElementById('chkRecursive').checked, excludePaths)
+  ) {
+    return;
+  }
+  const folders = data.folders || [];
+  if (!folders.length && !data.managed_archive) return data;
+
+  const headline = document.createElement('div');
+  headline.className = 'structure-headline';
+  headline.textContent = 'Resulting folders: ' + data.total_photos +
+    ' file' + (data.total_photos === 1 ? '' : 's') + ' split into ' +
+    data.total_folders + ' folder' + (data.total_folders === 1 ? '' : 's') +
+    ' (' + data.new_folders + ' new, ' + data.existing_folders + ' existing)';
+  el.appendChild(headline);
+
+  if (data.managed_archive) {
+    const callout = document.createElement('div');
+    callout.className = 'managed-archive-callout';
+    const label = document.createElement('span');
+    label.textContent = 'Merging into a managed archive at ';
+    const path = document.createElement('span');
+    path.style.fontFamily = 'monospace';
+    path.textContent = data.managed_archive.path;
+    const tail = document.createElement('span');
+    tail.textContent = ' — ' + data.managed_archive.photo_count +
+      ' photo' + (data.managed_archive.photo_count === 1 ? '' : 's') +
+      ' already cataloged there.';
+    callout.append(label, path, tail);
+    el.appendChild(callout);
+  }
+
+  const table = document.createElement('table');
+  table.className = 'structure-table';
+  const header = document.createElement('tr');
+  const folderHeading = document.createElement('th');
+  folderHeading.scope = 'col';
+  folderHeading.textContent = 'Exact folder';
+  const countHeading = document.createElement('th');
+  countHeading.scope = 'col';
+  countHeading.className = 'num';
+  countHeading.textContent = 'Files';
+  const statusHeading = document.createElement('th');
+  statusHeading.scope = 'col';
+  statusHeading.className = 'tag';
+  statusHeading.textContent = 'Status';
+  header.append(folderHeading, countHeading, statusHeading);
+  table.appendChild(header);
+  folders.forEach((f) => {
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    name.className = 'path';
+    name.textContent = f.full_path || (f.path === '.' ? '(archive root)' : f.path);
+    const count = document.createElement('td');
+    count.className = 'num';
+    count.textContent = String(f.count);
+    const tag = document.createElement('td');
+    tag.className = 'tag ' + (f.exists ? 'tag-existing' : 'tag-new');
+    tag.textContent = f.exists ? 'existing' : 'new';
+    tr.append(name, count, tag);
+    table.appendChild(tr);
+  });
+  el.appendChild(table);
+  el.style.display = '';
+  return data;
+}
+
+async function previewImport(opts) {
+  clearScheduledImportPreview();
+  showError('');
+  hideDestStructure();
+  clearImportPreviewGrid();
+  importPreviewSeq += 1;
+  const requestSeq = importPreviewSeq;
+  const summary = document.getElementById('previewSummary');
+  if (!sources.length) {
+    summary.textContent = '';
+    showError('Add at least one source folder.');
+    return;
+  }
+  const copyMode = selectedImportMode() === 'copy';
+  const fileTypes = copyMode ? selectedFileTypes() : 'both';
+  if (copyMode && Array.isArray(fileTypes) && !fileTypes.length) {
+    summary.textContent = '';
+    showError('Choose at least one file extension.');
+    return;
+  }
+  const requestSignature = importPreviewSignature();
+  const btnPreview = document.getElementById('btnPreview');
+  if (btnPreview) btnPreview.disabled = true;
+  summary.textContent = 'Discovering files…';
+  try {
+    const resp = await fetch('/api/import/folder-preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        folders: sources,
+        file_types: fileTypes,
+        recursive: document.getElementById('chkRecursive').checked,
+      }),
+    });
+    if (!resp.ok) throw new Error((await resp.json()).error || 'preview failed');
+    const data = await resp.json();
+    // A newer previewImport() started while this response was in flight —
+    // it owns the summary and any structure preview now, so bail without
+    // touching either. Clearing summary here would erase the newer run's
+    // "Discovering files…" or completed results.
+    if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) {
+      return;
+    }
+    const files = data.files || [];
+    if (!files.length) {
+      summary.textContent = 'No importable files found.';
+      clearImportPreviewGrid();
+      return;
+    }
+    renderImportPreviewGrid(files, [], null);
+    if (!copyMode) {
+      summary.textContent = files.length + ' files found · originals will stay in place';
+      return;
+    }
+    if (!document.getElementById('chkSkipDuplicates').checked) {
+      summary.textContent = files.length + ' files found · duplicates will be copied';
+      // No dedup gate, so every discovered file lands — pass no exclusions
+      // so the folder-structure counts match the full copy set.
+      const destData = await renderDestStructure([]);
+      if (requestSeq !== importPreviewSeq) return;
+      if (importPreviewSignatureChanged(requestSignature)) return;
+      if (destData && destData.files) renderImportPreviewGrid(files, [], destData.files);
+      return;
+    }
+    summary.textContent = files.length + ' files found — checking for duplicates…';
+    // check-duplicates streams results; collect flagged paths as they arrive.
+    // Pass verify_by_hash so the preview and the import agree on which files
+    // are duplicates — otherwise a renamed/metadata-colliding file counted
+    // as "to copy" in the preview would be skipped by the hash-based import.
+    const dupResp = await fetch('/api/import/check-duplicates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        paths: files.map(f => f.path),
+        verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+      }),
+    });
+    if (!dupResp.ok) throw new Error('duplicate check failed');
+    const reader = dupResp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const duplicatePaths = [];
+    for (;;) {
+      const r = await reader.read();
+      if (r.done) break;
+      buffer += decoder.decode(r.value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+      for (const part of parts) {
+        const m = part.match(/^data: (.+)$/m);
+        if (!m) continue;
+        try {
+          const d = JSON.parse(m[1]);
+          if (d.duplicates) duplicatePaths.push(...d.duplicates);
+        } catch (e) { /* partial frame */ }
+      }
+    }
+    // Same guard as above for the duplicate-stream leg: a newer
+    // previewImport() may have started while the SSE was draining, and
+    // owns the summary now.
+    if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) {
+      return;
+    }
+    const dupCount = duplicatePaths.length;
+    summary.textContent = files.length + ' files found · ' + dupCount +
+      ' already in your library (will be skipped) · ' +
+      (files.length - dupCount) + ' to copy';
+    renderImportPreviewGrid(files, duplicatePaths, null);
+    // Skipped duplicates aren't copied, so exclude them from the
+    // folder-structure preview — the new/existing folder counts must
+    // reflect the files that will actually land in the archive.
+    const destData = await renderDestStructure(duplicatePaths);
+    if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) return;
+    if (destData && destData.files) renderImportPreviewGrid(files, duplicatePaths, destData.files);
+  } catch (e) {
+    // Don't let a stale run's error clobber a newer preview's summary
+    // or surface a stale error banner — the newer run owns the UI.
+    if (requestSeq !== importPreviewSeq) return;
+    if (importPreviewSignatureChanged(requestSignature)) return;
+    summary.textContent = '';
+    showError(String(e.message || e));
+  } finally {
+    if (requestSeq === importPreviewSeq && btnPreview) {
+      btnPreview.disabled = false;
+    }
+  }
+}
+
+function renderFolderTable(el, folders) {
+  el.innerHTML = '';
+  Object.keys(folders).sort().forEach((rel) => {
+    const c = folders[rel];
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    name.textContent = rel;
+    const copied = document.createElement('td');
+    copied.className = 'num';
+    copied.textContent = c.copied + ' copied';
+    const skipped = document.createElement('td');
+    skipped.className = 'num';
+    skipped.textContent = c.skipped_duplicate + ' duplicate';
+    const failed = document.createElement('td');
+    failed.className = 'num';
+    failed.textContent = c.failed ? (c.failed + ' failed') : '';
+    if (c.failed) failed.style.color = 'var(--danger)';
+    tr.append(name, copied, skipped, failed);
+    el.appendChild(tr);
+  });
+}
+
+async function startImport() {
+  showError('');
+  addImportTagFromInput();
+  if (!sources.length) { showError('Add at least one source folder.'); return; }
+  const copyMode = selectedImportMode() === 'copy';
+  const body = {
+    sources: sources,
+    recursive: document.getElementById('chkRecursive').checked,
+  };
+  if (importTags.length) body.tags = importTags.slice();
+  if (document.getElementById('chkLocationFromGps').checked) {
+    body.location_from_gps = true;
+  }
+  if (document.getElementById('workspaceNew').checked) {
+    const name = (document.getElementById('newWorkspaceName').value || '').trim();
+    if (!name) { showError('Name the new workspace.'); return; }
+    body.new_workspace_name = name;
+  }
+  if (copyMode) {
+    const fileTypes = selectedFileTypes();
+    if (Array.isArray(fileTypes) && !fileTypes.length) {
+      showError('Choose at least one file extension.');
+      return;
+    }
+    const remoteId = importRemoteTargetId();
+    if (remoteId) {
+      if (!remoteArchiveSelectionReady()) {
+        showError('Choose a usable remote target and relative subpath.');
+        return;
+      }
+      body.remote_target_id = remoteId;
+      body.remote_subpath = normalizeRemoteSubpath(
+        document.getElementById('remoteSubpath').value).value;
+    } else {
+      const destination = (document.getElementById('destInput').value || '').trim();
+      if (!destination) { showError('Choose a destination folder.'); return; }
+      body.destination = destination;
+    }
+    body.folder_template = selectedFolderTemplate();
+    body.file_types = fileTypes;
+    body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
+    body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
+    body.trust_likely_duplicates =
+      document.getElementById('chkTrustLikelyDuplicates').checked;
+  }
+  // For new-workspace imports where the user hasn't touched the After
+  // Import dropdown, the visible selection was prefilled from the
+  // currently-active workspace's default — posting it would make the
+  // server apply that old default instead of the new workspace's (or
+  // global) one. Omit the key so the server resolves it against the
+  // freshly-created workspace after the switch.
+  const newWorkspaceUntouched =
+    !!body.new_workspace_name && !_afterImportUserTouched;
+  if (
+    _afterImportConfigLoaded
+    && !_afterImportHidingDefault
+    && !newWorkspaceUntouched
+  ) {
+    body.after_import = selectedAfterImport();
+  }
+  document.getElementById('btnStart').disabled = true;
+  try {
+    const resp = await fetch(copyMode ? '/api/jobs/import-photos' : '/api/jobs/import-in-place', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'import failed to start');
+    if (data.workspace && data.workspace.name) {
+      const activeName = document.getElementById('activeWorkspaceName');
+      if (activeName) activeName.textContent = '(' + data.workspace.name + ')';
+    }
+    activeJobId = data.job_id;
+    document.getElementById('progressCard').style.display = '';
+    document.getElementById('resultCard').style.display = 'none';
+    watchJob(activeJobId);
+  } catch (e) {
+    showError(String(e.message || e));
+    document.getElementById('btnStart').disabled = false;
+  }
+}
+
+function watchJob(jobId) {
+  if (es) { es.close(); es = null; }
+  es = new EventSource('/api/jobs/' + jobId + '/stream');
+  es.addEventListener('progress', (evt) => {
+    try { renderProgress(JSON.parse(evt.data)); } catch (e) { /* ignore */ }
+  });
+  es.addEventListener('complete', () => { es.close(); es = null; finishJob(jobId); });
+  es.addEventListener('error', () => {
+    // Stream dropped (server restart, network) — fall back to polling the
+    // job once rather than pretending progress continues.
+    if (es) { es.close(); es = null; }
+    finishJob(jobId);
+  });
+}
+
+function renderProgress(data) {
+  document.getElementById('progressPhase').textContent =
+    (data.phase || '') + (data.current_file ? ' · ' + data.current_file : '');
+  const pct = data.total ? Math.round(100 * data.current / data.total) : 0;
+  document.getElementById('progressFill').style.width = pct + '%';
+  if (data.folders && Object.keys(data.folders).length) {
+    renderFolderTable(document.getElementById('folderProgress'), data.folders);
+  }
+}
+
+async function finishJob(jobId) {
+  let job = null;
+  for (let i = 0; i < 30; i++) {
+    const resp = await fetch('/api/jobs/' + jobId);
+    if (resp.ok) {
+      job = await resp.json();
+      if (job.status && job.status !== 'running' && job.status !== 'queued') break;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  document.getElementById('btnStart').disabled = false;
+  if (!job || !job.result) {
+    showError('Import ended but its result could not be loaded — check the Jobs page.');
+    return;
+  }
+  renderResult(job.result, job.status);
+}
+
+function renderResult(res, status) {
+  document.getElementById('resultCard').style.display = '';
+  const pill = document.getElementById('safeToFormatPill');
+  const unsafe = document.getElementById('unsafeList');
+  unsafe.innerHTML = '';
+  if (res.mode === 'in_place') {
+    pill.className = res.ok === false ? 'pill pill-bad' : 'pill pill-ok';
+    pill.textContent = res.ok === false
+      ? 'Import finished with errors'
+      : 'Imported in place — original files stayed where they are';
+    const errors = res.errors || [];
+    unsafe.style.display = errors.length ? '' : 'none';
+    errors.forEach((msg) => {
+      const li = document.createElement('li');
+      li.textContent = msg;
+      unsafe.appendChild(li);
+    });
+    document.getElementById('resultSummary').textContent =
+      (res.indexed || res.discovered || 0) + ' indexed' +
+      (res.failed ? ' · ' + res.failed + ' failed' : '') +
+      (status && status !== 'completed' ? ' · job ' + status : '');
+    document.getElementById('resultFolders').innerHTML = '';
+    renderChainInfo(res);
+    renderTaggingInfo(res);
+    renderModelWarning(res);
+    return;
+  }
+  if (res.safe_to_format) {
+    pill.className = 'pill pill-ok';
+    pill.textContent = 'Safe to format the card — every file is verified in the archive';
+    unsafe.style.display = 'none';
+  } else if (
+    res.unverified_duplicates_only
+    && (!status || status === 'completed')
+  ) {
+    pill.className = 'pill pill-warn';
+    pill.textContent = 'Import complete — keep the card until likely duplicates are verified';
+    const files = res.unsafe_files || [];
+    unsafe.style.display = '';
+    if (!files.length) {
+      const li = document.createElement('li');
+      li.textContent = res.unverified_duplicate +
+        ' likely duplicates matched by filename, byte size, and capture time, but were not compared byte-for-byte.';
+      unsafe.appendChild(li);
+    }
+    files.forEach((u) => {
+      const item = document.createElement('li');
+      item.textContent = u.path + ' — ' + u.reason;
+      unsafe.appendChild(item);
+    });
+  } else {
+    pill.className = 'pill pill-bad';
+    pill.textContent = 'Do NOT format the card yet';
+    const files = res.unsafe_files || [];
+    unsafe.style.display = files.length ? '' : 'none';
+    files.forEach((u) => {
+      const li = document.createElement('li');
+      li.textContent = u.path + ' — ' + u.reason;
+      unsafe.appendChild(li);
+    });
+    if (!files.length && res.cancelled) {
+      const li = document.createElement('li');
+      li.textContent = 'Import was cancelled before every file was verified.';
+      unsafe.style.display = '';
+      unsafe.appendChild(li);
+    }
+  }
+  document.getElementById('resultSummary').textContent =
+    res.discovered + ' discovered · ' + res.copied + ' copied · ' +
+    res.skipped_duplicate + ' duplicates skipped · ' + res.failed + ' failed' +
+    (status && status !== 'completed' ? ' · job ' + status : '');
+  renderFolderTable(document.getElementById('resultFolders'), res.folders || {});
+
+  renderChainInfo(res);
+  renderTaggingInfo(res);
+  renderModelWarning(res);
+}
+
+function renderTaggingInfo(res) {
+  const el = document.getElementById('taggingInfo');
+  const tagging = res.tagging;
+  if (!tagging) {
+    el.textContent = '';
+    return;
+  }
+  const parts = [];
+  if ((tagging.requested_tags || []).length) {
+    parts.push(
+      'Tags added to ' + (tagging.tagged_photos || 0) + ' photo' +
+      ((tagging.tagged_photos || 0) === 1 ? '' : 's')
+    );
+  }
+  if (tagging.location_requested) {
+    parts.push((tagging.locations_added || 0) + ' GPS location' +
+      ((tagging.locations_added || 0) === 1 ? '' : 's') + ' added');
+    if (tagging.locations_unresolved) {
+      parts.push(tagging.locations_unresolved + ' could not be resolved');
+    }
+    if (tagging.locations_skipped) {
+      parts.push(tagging.locations_skipped + ' already had a location');
+    }
+  }
+  if ((tagging.errors || []).length) {
+    parts.push(tagging.errors.join(' '));
+  }
+  if (tagging.skipped) parts.push('Tagging skipped: ' + tagging.skipped);
+  el.textContent = parts.join(' · ');
+}
+
+function renderChainInfo(res) {
+  const chain = document.getElementById('chainInfo');
+  if (res.process_job_id) {
+    chain.textContent = 'Processing started as its own job: ' + res.process_job_id;
+  } else if (res.after_import_skipped) {
+    chain.textContent = 'Processing not started: ' + res.after_import_skipped;
+  } else {
+    chain.textContent = '';
+  }
+}
+
+function renderModelWarning(res) {
+  const warn = document.getElementById('modelWarning');
+  if (res.model_warning) {
+    warn.textContent = res.model_warning;
+    warn.style.display = '';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+
+async function initImportPage() {
+  // Install destination-structure invalidation before the first await —
+  // the form controls it listens on are all static template markup, so
+  // they're already in the DOM. Wiring after the /api/volumes,
+  // /api/config, and /api/workspaces/active fetches would leave a gap
+  // where a user can render a preview and then edit the destination,
+  // template, or file-type controls without the rendered structure
+  // being invalidated.
+  wireDestStructureInvalidation();
+  // Native menu deep link: File > Import Folder... routes here as
+  // /import?mode=copy&pick=source so it lands in Copy-to-archive with the
+  // source picker open, while File > Import Photos... gets the page
+  // default (Add in place).
+  const menuParams = new URLSearchParams(window.location.search);
+  if (menuParams.get('mode') === 'copy') {
+    const copyRadio = document.getElementById('modeCopy');
+    if (copyRadio) copyRadio.checked = true;
+  }
+  // Volume suggestions for the source input.
+  try {
+    const resp = await fetch('/api/volumes');
+    if (resp.ok) {
+      const volumes = await resp.json();
+      const dl = document.getElementById('volumeDatalist');
+      (volumes || []).forEach((v) => {
+        const opt = document.createElement('option');
+        opt.value = v.path || v;
+        dl.appendChild(opt);
+      });
+    }
+  } catch (e) { /* suggestions only */ }
+  // Effective config = global config with the active workspace's
+  // config_overrides merged over it (templates are Jinja-free by
+  // convention, so the merge happens here, matching
+  // db.get_effective_config's pipeline/ingest sub-dict behavior).
+  let cfg = {};
+  let overrides = {};
+  let cfgOk = false;
+  let overridesOk = false;
+  try {
+    const resp = await fetch('/api/config');
+    if (resp.ok) { cfg = await resp.json(); cfgOk = true; }
+  } catch (e) { /* defaults below */ }
+  try {
+    const resp = await fetch('/api/workspaces/active');
+    if (resp.ok) {
+      const ws = await resp.json();
+      const activeName = document.getElementById('activeWorkspaceName');
+      if (activeName && ws.name) activeName.textContent = '(' + ws.name + ')';
+      const raw = ws.config_overrides;
+      overrides = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+      overridesOk = true;
+    }
+  } catch (e) { /* defaults below */ }
+  const ingestCfg = Object.assign(
+    {}, cfg.ingest || {}, (overrides || {}).ingest || {},
+  );
+  const pipelineCfg = Object.assign(
+    {}, cfg.pipeline || {}, (overrides || {}).pipeline || {},
+  );
+  const gpsCheckbox = document.getElementById('chkLocationFromGps');
+  const gpsHint = document.getElementById('locationGpsHint');
+  if (cfgOk && !String(cfg.google_maps_api_key || '').trim()) {
+    gpsCheckbox.disabled = true;
+    gpsHint.textContent =
+      'Add a Google Maps API key in Settings to resolve GPS coordinates into location tags.';
+  }
+
+  const recents = Array.isArray(ingestCfg.recent_destinations)
+    ? ingestCfg.recent_destinations.filter((destination) => typeof destination === 'string')
+    : [];
+  const dl = document.getElementById('recentDestinationOptions');
+  recents.forEach((d) => {
+    const opt = document.createElement('option');
+    opt.value = d;
+    dl.appendChild(opt);
+  });
+  renderRecentDestinations(recents);
+  if (typeof ingestCfg.folder_template === 'string') {
+    setFolderTemplate(ingestCfg.folder_template);
+  }
+
+  // Populate the dropdown from the saved-process library before resolving
+  // any default id into a selected option.
+  await loadAfterImportProcesses();
+
+  // Preselect the workspace's default process (null -> import only).
+  const sel = document.getElementById('afterImportSelect');
+  const def = pipelineCfg.default_process_id;
+  sel.value = (def != null) ? String(def) : '__none__';
+  if (sel.selectedIndex === -1) sel.value = '__none__';
+  // Capture the unscoped global default so the "New workspace default"
+  // placeholder can name the process the server will actually apply
+  // to a freshly-created workspace (which starts with no overrides).
+  _globalDefaultProcessId =
+    (cfg && cfg.pipeline && cfg.pipeline.default_process_id != null)
+      ? cfg.pipeline.default_process_id : null;
+  // Capture the effective (workspace-scoped) default so switching out of
+  // "New workspace" mode without touching the dropdown restores this
+  // value rather than sticking on the placeholder.
+  _workspaceDefaultProcessId = (def != null) ? def : null;
+  // updateAdvancedImportOptions() may flip _afterImportHidingDefault
+  // when the resolved default is an advanced-only strategy the current
+  // mode hides. Wire the change listener first so a user-driven change
+  // afterwards (advanced toggle keeps it, explicit dropdown pick clears
+  // it) is always tracked.
+  sel.addEventListener('change', () => {
+    _afterImportHidingDefault = false;
+    _afterImportUserTouched = true;
+    // Once the user actively picks a real option, the "Workspace
+    // default (hidden)" placeholder is no longer relevant — retire it
+    // so it doesn't clutter the dropdown on the next open.
+    if (sel.value !== '__hidden_default__') retireHiddenDefaultOption(sel);
+  });
+  _afterImportHidingDefault = false;
+  // Only mark the resolved default as trustworthy when BOTH config
+  // fetches actually succeeded. Otherwise the select value reflects the
+  // HTML placeholder rather than the workspace default, and startImport
+  // should omit the key so the server applies pipeline.default_process_id.
+  // Set this BEFORE the initial updateAdvancedImportOptions() call so
+  // that call can use _workspaceDefaultProcessId to derive the visible
+  // dropdown value.
+  _afterImportConfigLoaded = cfgOk && overridesOk;
+  updateAdvancedImportOptions();
+  loadImportRemoteTargets();
+  loadOrphanedStaging();
+  updateImportMode();
+  if (menuParams.get('pick') === 'source') {
+    // One-shot trigger: strip it from the URL so a manual reload doesn't
+    // reopen the picker, then open it (native dialog in Tauri, in-page
+    // folder browser otherwise).
+    menuParams.delete('pick');
+    const qs = menuParams.toString();
+    history.replaceState(
+      null, '', window.location.pathname + (qs ? '?' + qs : ''));
+    browseForSource();
+  }
+}
+initImportPage();
+</script>
+</body>
+</html>

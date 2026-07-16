@@ -24,6 +24,8 @@
     background: var(--bg-input); color: var(--text-primary);
     width: 220px;
   }
+  .kw-search-control { width: 280px; }
+  .kw-search-control .kw-search { width: auto; border-radius: 4px 0 0 4px; }
   .kw-search::placeholder { color: var(--text-dim); }
   .kw-search:focus { outline: none; border-color: var(--accent); }
 
@@ -177,7 +179,11 @@
 
     <!-- Toolbar -->
     <div class="kw-toolbar">
-      <input type="text" class="kw-search" id="kwSearch" placeholder="Search keywords...">
+      <div class="search-control kw-search-control">
+        <input type="text" class="kw-search" id="kwSearch" placeholder="Search keywords...">
+        <button id="kwSearchMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('kwSearch', 'match_case', render)" title="Match case">Aa</button>
+        <button id="kwSearchWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('kwSearch', 'whole_word', render)" title="Match whole word">ab</button>
+      </div>
       <button class="kw-filter-btn active" data-type="all">All</button>
       <button class="kw-filter-btn" data-type="general">General</button>
       <button class="kw-filter-btn" data-type="taxonomy">Taxonomy</button>
@@ -283,8 +289,8 @@
       list = list.filter(k => (k.type || 'general') === filterType);
     }
     if (searchTerm) {
-      const s = searchTerm.toLowerCase();
-      list = list.filter(k => k.name.toLowerCase().includes(s));
+      const options = VireoTextSearch.readOptions('kwSearch');
+      list = list.filter(k => VireoTextSearch.matchesFields(k.name, searchTerm, options));
     }
     return list;
   }
@@ -497,11 +503,20 @@
 
   async function updateType(kwId, newType) {
     try {
-      await fetch('/api/keywords/' + kwId, {
+      const resp = await fetch('/api/keywords/' + kwId, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({type: newType})
       });
+      // Retyping to a slot that already has a normalized-equal peer
+      // deletes this keyword row and merges it into the peer's id. Refetch
+      // instead of the local optimistic update, or allKeywords keeps a
+      // phantom entry pointing at a deleted id.
+      const data = await resp.json().catch(() => ({}));
+      if (data && data.merged) {
+        await loadKeywords();
+        return;
+      }
       const kw = allKeywords.find(k => k.id === kwId);
       if (kw) kw.type = newType;
       render();
@@ -553,11 +568,20 @@
 
   async function renameKeyword(kwId, newName) {
     try {
-      await fetch('/api/keywords/' + kwId, {
+      const resp = await fetch('/api/keywords/' + kwId, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: newName})
       });
+      // Renaming to a spelling that already belongs to a normalized-equal
+      // peer merges this row into the peer server-side. The requested id is
+      // deleted; refetch so allKeywords/parentMap drop the stale entry and
+      // pick up the peer's canonical name.
+      const data = await resp.json().catch(() => ({}));
+      if (data && data.merged) {
+        await loadKeywords();
+        return;
+      }
       const kw = allKeywords.find(k => k.id === kwId);
       if (kw) { kw.name = newName; parentMap[kw.id] = newName; }
     } catch(e) { console.error('Failed to rename', e); }
@@ -571,20 +595,32 @@
     const ids = Array.from(selectedIds);
     if (!ids.length) return;
 
+    let anyMerged = false;
     for (const id of ids) {
       try {
-        await fetch('/api/keywords/' + id, {
+        const resp = await fetch('/api/keywords/' + id, {
           method: 'PUT',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({type: newType})
         });
+        const data = await resp.json().catch(() => ({}));
+        if (data && data.merged) {
+          // Row was merged into a normalized-equal peer -- can't update in
+          // place, will refetch after the loop rather than 100+ round trips.
+          anyMerged = true;
+          continue;
+        }
         const kw = allKeywords.find(k => k.id === id);
         if (kw) kw.type = newType;
       } catch(e) { console.error('Failed to update', id, e); }
     }
     selectedIds.clear();
     document.getElementById('kwBulkType').value = '';
-    render();
+    if (anyMerged) {
+      await loadKeywords();
+    } else {
+      render();
+    }
   });
 
   // -- Bulk delete --

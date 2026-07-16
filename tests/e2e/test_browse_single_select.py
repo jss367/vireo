@@ -14,6 +14,86 @@ def disable_infinite_scroll(page):
     """)
 
 
+def test_large_library_uses_bounded_placeholder_runway(live_server, page):
+    """A large result set must not expose its unloaded tail as scroll space.
+
+    Browse only loads a contiguous prefix. Reserving the full dataset height
+    made an absolute-bottom jump crawl through every preceding page before a
+    real card could reach the viewport.
+    """
+    disable_infinite_scroll(page)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+
+    state = page.evaluate(
+        """() => {
+          totalPhotos = 50000;
+          allLoaded = false;
+          updateGridTail();
+          var container = document.getElementById('gridContainer');
+          container.scrollTop = container.scrollHeight;
+          updateScrollPosition();
+          return {
+            skeletons: document.querySelectorAll('#gridTail .skel-card').length,
+            spacers: document.querySelectorAll('#gridTail .grid-tail-spacer').length,
+            position: document.getElementById('filterSummary').textContent,
+          };
+        }"""
+    )
+
+    assert state["skeletons"] == 300
+    assert state["spacers"] == 0
+    assert state["position"].endswith(" of 50,000")
+    assert state["position"] != "≈50,000 of 50,000"
+
+    hydration = page.evaluate(
+        """async () => {
+          var originalSafeFetch = safeFetch;
+          var nextId = 100000;
+          var calls = 0;
+          safeFetch = function(url, options, fetchOptions) {
+            if (url.indexOf('/api/photos?') === 0) {
+              calls++;
+              var perPage = parseInt(new URL(url, location.origin).searchParams.get('per_page'), 10);
+              if (calls >= 10) return Promise.resolve({photos: [], total: totalPhotos});
+              var batch = [];
+              for (var i = 0; i < perPage; i++) {
+                batch.push({id: nextId++, filename: 'photo-' + nextId + '.jpg'});
+              }
+              return Promise.resolve({photos: batch, total: totalPhotos});
+            }
+            return originalSafeFetch(url, options, fetchOptions);
+          };
+          try {
+            // The test observer is intentionally non-native; opt into the
+            // scroll-driven path directly without enabling observer races.
+            infiniteScrollObserverIsNative = true;
+            infiniteScrollObserverDisconnected = false;
+            var container = document.getElementById('gridContainer');
+            container.scrollTop = container.scrollHeight;
+            ensureViewportHydrated();
+
+            var deadline = Date.now() + 3000;
+            while (Date.now() < deadline) {
+              var firstSkeleton = document.querySelector('#gridTail .skel-card');
+              var boundaryIsPastViewport = firstSkeleton &&
+                firstSkeleton.getBoundingClientRect().top -
+                  container.getBoundingClientRect().bottom > 3200;
+              if (calls > 0 && !loading && (boundaryIsPastViewport || allLoaded)) break;
+              await new Promise(function(resolve) { setTimeout(resolve, 20); });
+            }
+            return {calls: calls, loaded: photos.length, allLoaded: allLoaded};
+          } finally {
+            safeFetch = originalSafeFetch;
+          }
+        }"""
+    )
+
+    assert 1 <= hydration["calls"] < 10
+    assert hydration["loaded"] < 50000
+    assert not hydration["allLoaded"]
+
+
 def test_single_click_reveals_batch_bar(live_server, page):
     """Normal-click on one photo reveals the batch bar so Develop/Export/Delete
     are reachable with a single photo selected.
@@ -35,6 +115,144 @@ def test_single_click_reveals_batch_bar(live_server, page):
     expect(bar).to_be_visible()
     expect(page.locator("#batchCount")).to_have_text("1 selected")
     expect(page.locator("#developBtn")).to_be_visible()
+
+
+def test_prepare_full_resolution_uses_active_browse_selection(live_server, page):
+    submitted = []
+
+    def start_job(route):
+        submitted.append(json.loads(route.request.post_data or "{}"))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "prepare-ui-test", "total": 1}),
+        )
+
+    page.route("**/api/jobs/prepare-full-resolution", start_job)
+    page.route(
+        "**/api/jobs/prepare-ui-test/stream",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            body=(
+                "event: progress\n"
+                "data: {\"current\":1,\"total\":1,\"current_file\":\"hawk1.jpg\"}\n\n"
+                "event: complete\n"
+                "data: {\"status\":\"completed\",\"result\":{\"ready\":1,\"copied\":1,\"failed\":0}}\n\n"
+            ),
+        ),
+    )
+
+    page.goto(f"{live_server['url']}/browse")
+    first = page.locator(".grid-card").first
+    first.wait_for(state="visible")
+    selected_id = int(first.get_attribute("data-id"))
+    first.click()
+
+    button = page.locator("#prepareFullResolutionBtn")
+    expect(button).to_be_visible()
+    button.click()
+
+    page.wait_for_function(
+        "() => window._prepareFullResolutionJobId === null"
+    )
+    assert submitted == [{"photo_ids": [selected_id]}]
+    expect(button).to_be_enabled()
+    expect(button).to_have_text("Prepare Full Resolution")
+
+
+def test_prepare_full_resolution_surfaces_fatal_job_failure(live_server, page):
+    page.route(
+        "**/api/jobs/prepare-full-resolution",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "prepare-failed-test", "total": 1}),
+        ),
+    )
+    page.route(
+        "**/api/jobs/prepare-failed-test/stream",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            body=(
+                "event: complete\n"
+                "data: {\"status\":\"failed\",\"result\":null,"
+                "\"errors\":[\"database unavailable\"]}\n\n"
+            ),
+        ),
+    )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+    page.locator("#prepareFullResolutionBtn").click()
+
+    page.wait_for_function(
+        "() => window._prepareFullResolutionJobId === null"
+    )
+    expect(page.locator("#toastContainer > div").last).to_have_text(
+        "Full-resolution preparation failed: database unavailable"
+    )
+
+
+def test_prepare_full_resolution_summarizes_partial_failure(live_server, page):
+    page.route(
+        "**/api/jobs/prepare-full-resolution",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"job_id": "prepare-partial-test", "total": 3}),
+        ),
+    )
+    page.route(
+        "**/api/jobs/prepare-partial-test/stream",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/event-stream",
+            body=(
+                "event: complete\n"
+                "data: {\"status\":\"failed\",\"result\":{"
+                "\"ready\":2,\"copied\":2,\"failed\":1},"
+                "\"errors\":[\"one source was unavailable\"]}\n\n"
+            ),
+        ),
+    )
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+    page.locator("#prepareFullResolutionBtn").click()
+
+    page.wait_for_function(
+        "() => window._prepareFullResolutionJobId === null"
+    )
+    expect(page.locator("#toastContainer > div").last).to_have_text(
+        "Full-resolution preparation complete: 2 ready, 2 copied locally, "
+        "1 failed"
+    )
+
+
+def test_adjust_capture_time_lives_in_native_menu_not_batch_bar(live_server, page):
+    """Capture-time adjustment is useful, but too infrequent for the Browse
+    batch bar; it remains available through the native Photo menu command.
+    """
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.locator(".grid-card").first.click()
+
+    expect(page.locator("#batchBar")).to_be_visible()
+    assert page.locator("#batchBar button", has_text="Adjust Time").count() == 0
+
+    page.evaluate("window.handleNativeMenuCommand('photo_adjust_capture_time')")
+
+    modal = page.locator("#captureTimeModal.open")
+    expect(modal).to_be_visible()
+    expect(page.locator("#captureTimeTitle")).to_have_text(
+        "Adjust Capture Time for 1 photo"
+    )
 
 
 def test_closing_detail_hides_batch_bar(live_server, page):

@@ -12,17 +12,20 @@ from image_loader import (
     load_image,
 )
 from render_source import (
-    image_is_smaller_than_expected,
-    recipe_render_source,
+    photo_value as _photo_value,
 )
 from render_source import (
-    photo_value as _photo_value,
+    recipe_render_source,
+    thumbnail_source_dimensions_are_acceptable,
 )
 from render_source import (
     recipe_source_dimensions as _recipe_source_dimensions,
 )
 from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
+)
+from render_source import (
+    working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
 )
 
 log = logging.getLogger(__name__)
@@ -121,9 +124,50 @@ def _retry_thumbnail_with_companion(
     )
 
 
+def _retry_thumbnail_with_working_copy(
+    db, photo, source_path, cache_dir, size, quality, recipe, vireo_dir,
+):
+    if not photo or not recipe or not vireo_dir:
+        return None
+    if os.path.splitext(source_path or "")[1].lower() not in RAW_EXTENSIONS:
+        return None
+    wc_path = _working_copy_path_if_satisfies(
+        photo, recipe, size, vireo_dir, thumbnail_tolerance=True,
+    )
+    if not wc_path or os.path.abspath(wc_path) == os.path.abspath(source_path):
+        return None
+    photo_id = _photo_value(photo, "id")
+    log.info(
+        "Thumbnail RAW decode failed for photo %s; falling back to JPEG "
+        "working copy",
+        photo_id,
+    )
+    file_mtime = _photo_value(photo, "file_mtime")
+    if file_mtime is not None and photo_id is not None and hasattr(db, "conn"):
+        with contextlib.suppress(Exception):
+            db.conn.execute(
+                "UPDATE photos SET"
+                " working_copy_failed_at=datetime('now'),"
+                " working_copy_failed_mtime=?,"
+                " working_copy_failed_source='source'"
+                " WHERE id=?",
+                (file_mtime, photo_id),
+            )
+            db.conn.commit()
+    recipe_kwargs = {"recipe": recipe, "native_size": _recipe_source_dimensions(photo)}
+    return generate_thumbnail(
+        photo_id,
+        wc_path,
+        cache_dir,
+        size=size,
+        quality=quality,
+        **recipe_kwargs,
+    )
+
+
 def generate_thumbnail(
     photo_id, source_path, cache_dir, size=THUMB_SIZE, quality=85, recipe=None,
-    raw_decode=None, min_source_size=None, native_size=None,
+    raw_decode=None, min_source_size=None, native_size=None, cache_name=None,
 ):
     """Generate a JPEG thumbnail for a photo.
 
@@ -148,11 +192,15 @@ def generate_thumbnail(
             of the photo (see ``render_source.recipe_source_dimensions``),
             used to scale the recipe's detail pass (sharpen/NR kernels) to
             this render's resolution.
+        cache_name: optional cache filename. The default remains
+            ``{photo_id}.jpg``; paired-source views use a distinct filename
+            so switching between RAW and JPEG can never return pixels cached
+            for the other source.
 
     Returns:
         path to the thumbnail file, or None on failure
     """
-    thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+    thumb_path = os.path.join(cache_dir, cache_name or f"{photo_id}.jpg")
 
     if os.path.exists(thumb_path):
         return thumb_path
@@ -165,7 +213,9 @@ def generate_thumbnail(
         return None
     if min_source_size:
         expected_w, expected_h = min_source_size
-        if image_is_smaller_than_expected(img, expected_w, expected_h):
+        if not thumbnail_source_dimensions_are_acceptable(
+            img.size[0], img.size[1], expected_w, expected_h,
+        ):
             log.info(
                 "Thumbnail source for photo %s is undersized (%dx%d, "
                 "expected %dx%d): %s",
@@ -175,9 +225,16 @@ def generate_thumbnail(
             img.close()
             return None
     if recipe:
+        import local_masks
         from image_edits import apply_recipe_to_loaded_image
+        # cache_dir is <vireo_dir>/thumbnails, the same root derivation the
+        # app uses (dirname of THUMB_CACHE_DIR), so snapshots resolve here
+        # without threading vireo_dir through every caller.
         img = apply_recipe_to_loaded_image(
             img, recipe, max_size=size, native_size=native_size,
+            local_mask=local_masks.load_snapshot(
+                os.path.dirname(os.path.abspath(cache_dir)), photo_id, recipe,
+            ),
         )
 
     os.makedirs(cache_dir, exist_ok=True)
@@ -316,6 +373,21 @@ def generate_all(db, cache_dir, progress_callback=None, config=None, vireo_dir=N
                 thumb_quality,
                 recipe,
                 folders.get(source_photo["folder_id"]),
+            )
+        if (
+            result_path is None
+            and recipe
+            and os.path.splitext(source_path)[1].lower() in RAW_EXTENSIONS
+        ):
+            result_path = _retry_thumbnail_with_working_copy(
+                db,
+                source_photo,
+                source_path,
+                cache_dir,
+                thumb_size,
+                thumb_quality,
+                recipe,
+                vireo_dir,
             )
         if result_path is not None:
             generated += 1

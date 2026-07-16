@@ -1,16 +1,15 @@
 """Smart ingest: copy and organize photos from external source to destination."""
 
 import contextlib
+import errno
 import logging
 import os
 import posixpath
-import re
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from grouping import read_exif_timestamp
 from image_loader import (
     IMAGE_EXTENSIONS,
     RAW_EXTENSIONS,
@@ -19,7 +18,13 @@ from image_loader import (
     safe_iter_dir,
     safe_scan_walk,
 )
-from scanner import EMPTY_FILE_SHA256, compute_file_hash
+from import_dedup import (
+    CatalogIndex,
+    DuplicateChecker,
+    source_capture_timestamps,
+    stored_metadata_key,
+)
+from scanner import compute_file_hash
 
 log = logging.getLogger(__name__)
 
@@ -138,100 +143,27 @@ def build_destination_path(exif_timestamp, template="%Y/%Y-%m-%d"):
     return result
 
 
-_EXIFTOOL_DT_RE = re.compile(
-    r"(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})"
-)
+def _source_file_timestamps(files, capture_times=None):
+    """Resolve timestamps for date-folder planning.
 
-
-def _parse_metadata_timestamp(value):
-    if not value:
-        return None
-    match = _EXIFTOOL_DT_RE.search(str(value))
-    if not match:
-        return None
-    try:
-        return datetime(
-            int(match.group(1)),
-            int(match.group(2)),
-            int(match.group(3)),
-            int(match.group(4)),
-            int(match.group(5)),
-            int(match.group(6)),
-        )
-    except ValueError:
-        return None
-
-
-def _metadata_capture_timestamp(metadata):
-    for group_name in ("EXIF", "XMP", "QuickTime", "Composite"):
-        group = metadata.get(group_name)
-        if not isinstance(group, dict):
-            continue
-        for key in (
-            "DateTimeOriginal",
-            "CreateDate",
-            "DateTimeDigitized",
-            "SubSecDateTimeOriginal",
-            "MediaCreateDate",
-            "TrackCreateDate",
-        ):
-            dt = _parse_metadata_timestamp(group.get(key))
-            if dt is not None:
-                return dt
-    return None
-
-
-def _source_file_timestamps(files):
-    """Resolve capture timestamps for source files.
-
-    Use the existing lightweight EXIF reader first. For files it cannot parse,
-    ask ExifTool in batches via metadata.extract_metadata, then fall back to
-    file modification time. This keeps date-folder planning aligned with the
-    richer metadata path used elsewhere in Vireo without requiring ExifTool
-    for the common JPEG/RAW fast path.
+    EXIF capture time first (lightweight reader, then batched ExifTool —
+    see import_dedup.source_capture_timestamps), falling back to file
+    modification time. The mtime fallback is fine here because these
+    timestamps only pick destination folders; duplicate identity uses the
+    EXIF-only map directly. Pass ``capture_times`` (a str(path) -> datetime
+    map) to reuse already-resolved EXIF reads instead of re-reading.
     """
-    timestamps = {}
-    missing = []
+    if capture_times is not None:
+        timestamps = {f: capture_times.get(str(f)) for f in files}
+    else:
+        timestamps = source_capture_timestamps(files)
 
-    for source_file in files:
-        exif_dt = None
-        with contextlib.suppress(OSError, ValueError):
-            exif_dt = read_exif_timestamp(str(source_file))
+    for source_file, exif_dt in timestamps.items():
         if exif_dt is None:
-            missing.append(source_file)
-        else:
-            timestamps[source_file] = exif_dt
-
-    if missing:
-        try:
-            from metadata import extract_metadata
-
-            metadata_by_path = extract_metadata(
-                [str(path) for path in missing],
-                restricted_tags=[
-                    "-DateTimeOriginal",
-                    "-CreateDate",
-                    "-DateTimeDigitized",
-                    "-SubSecDateTimeOriginal",
-                    "-MediaCreateDate",
-                    "-TrackCreateDate",
-                ],
-            )
-        except Exception:
-            log.debug(
-                "Could not read ExifTool metadata for import timestamps",
-                exc_info=True,
-            )
-            metadata_by_path = {}
-
-        for source_file in missing:
-            metadata = metadata_by_path.get(str(source_file), {})
-            exif_dt = _metadata_capture_timestamp(metadata)
-            if exif_dt is None:
-                with contextlib.suppress(OSError, ValueError, OverflowError):
-                    exif_dt = datetime.fromtimestamp(source_file.stat().st_mtime)
-            timestamps[source_file] = exif_dt
-
+            with contextlib.suppress(OSError, ValueError, OverflowError):
+                timestamps[source_file] = datetime.fromtimestamp(
+                    source_file.stat().st_mtime
+                )
     return timestamps
 
 
@@ -255,11 +187,21 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
 
     timestamps = _source_file_timestamps(all_files)
     folder_counts = {}
+    file_destinations = []
     for source_file in all_files:
         rel_folder = build_destination_path(timestamps.get(source_file), folder_template)
         if not rel_folder:
             rel_folder = "."
         folder_counts[rel_folder] = folder_counts.get(rel_folder, 0) + 1
+        file_destinations.append({
+            "path": str(source_file),
+            "folder": rel_folder,
+            "full_folder": str(
+                Path(destination)
+                if rel_folder == "."
+                else Path(destination) / rel_folder
+            ),
+        })
 
     dest_path = Path(destination)
     folders = []
@@ -281,10 +223,13 @@ def preview_destination(sources, destination, folder_template="%Y/%Y-%m-%d",
         "total_folders": len(folders),
         "new_folders": new_count,
         "existing_folders": existing_count,
+        "files": file_destinations,
     }
 
 
-def discover_source_files(source_dir, file_types="both", recursive=True):
+def discover_source_files(
+    source_dir, file_types="both", recursive=True, onerror=None,
+):
     """Discover image files in source directory.
 
     Args:
@@ -292,6 +237,13 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         file_types: "raw", "jpeg", "both", or a list of extensions
             (e.g. [".jpg", ".nef"])
         recursive: if True (default), scan subfolders; if False, only scan root
+        onerror: optional callable ``onerror(OSError)`` invoked when the
+            underlying walk cannot enter or list a directory (permission
+            denied, TCC block, unreadable removable-media subtree, etc.).
+            Silently swallowing these hides sources from the enumeration
+            and lets ``safe_to_format`` go green over a card whose files
+            were never seen; the import job passes a collector that flips
+            the ledger unsafe.
 
     Returns:
         Sorted list of Path objects for matching files
@@ -306,8 +258,34 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
     # symlinks and stat's the target, so for a directly selected bundle
     # (or a symlink to one) the existence test alone is enough to trip TCC.
     if is_excluded_scan_path(source_path):
+        # Root is an excluded data-bundle. Legacy ingest() and the
+        # UI-preview callers silently drop these (they picked the wrong
+        # thing; no user contract to enumerate it). But when import_job
+        # passes an ``onerror`` collector it is holding safe_to_format
+        # against every enumeration being provably clean; a source root
+        # we refuse to walk is exactly the case where the pill would
+        # otherwise go green over a card whose files were never seen.
+        # Emit a synthetic OSError so the ledger records it as a
+        # discovery failure. See PR #1107 review (P1 line 927).
+        if onerror is not None:
+            onerror(PermissionError(
+                errno.EACCES,
+                "source is an excluded data bundle",
+                str(source_path),
+            ))
         return []
     if not source_path.is_dir():
+        # Root does not resolve to a directory: nonexistent, unmounted
+        # removable media, permission-denied on the root, or a plain
+        # file. Same reasoning as above — silent [] hides "we saw
+        # nothing" from safe_to_format. Emit a synthetic OSError for
+        # onerror callers so discover'd == 0 is treated as unsafe.
+        if onerror is not None:
+            onerror(FileNotFoundError(
+                errno.ENOENT,
+                "source is not an accessible directory",
+                str(source_path),
+            ))
         return []
 
     if isinstance(file_types, list):
@@ -334,7 +312,9 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         # previous Path.rglob path was likewise consumed lazily by
         # ``sorted()``.
         def _candidate_paths():
-            for dirpath, _dirnames, filenames in safe_scan_walk(str(source_path)):
+            for dirpath, _dirnames, filenames in safe_scan_walk(
+                str(source_path), onerror=onerror,
+            ):
                 for name in filenames:
                     yield Path(dirpath) / name
         candidates = _candidate_paths()
@@ -349,7 +329,7 @@ def discover_source_files(source_dir, file_types="both", recursive=True):
         # would have rejected it afterwards. ``safe_iter_dir`` is itself
         # a generator — pass it straight through to the filter so we
         # don't materialize the directory listing twice.
-        candidates = safe_iter_dir(str(source_path))
+        candidates = safe_iter_dir(str(source_path), onerror=onerror)
     return sorted(
         f
         for f in candidates
@@ -370,22 +350,36 @@ def ingest(
     extra_known_hashes=None,
     skip_paths=None,
     recursive=True,
+    verify_by_hash=False,
+    duplicate_checker=None,
 ):
     """Copy and organize photos from source to destination.
 
     Args:
         source_dir: path to source (e.g., /Volumes/SD_CARD)
         destination_dir: path to destination (e.g., /Volumes/NAS/Photos)
-        db: Database instance (used for duplicate hash lookup)
+        db: Database instance (used for duplicate identity lookup)
         file_types: "raw", "jpeg", or "both"
         folder_template: strftime format for destination subfolder
-        skip_duplicates: if True, skip files whose hash matches existing file
+        skip_duplicates: if True, skip files that duplicate a cataloged
+            photo. By default duplicates are identified by metadata —
+            (filename, size, EXIF capture time) — with a content-hash
+            fallback for files whose metadata is missing or placeholder;
+            see import_dedup for the exact rules and failure modes.
         progress_callback: optional callable(current, total, filename)
-        extra_known_hashes: optional set of hashes to treat as known in
-            addition to those already in the DB.  Pass a shared mutable set
-            when calling ingest() in a loop so that files copied by earlier
-            iterations are treated as duplicates by later ones even though
-            they have not been scanned into the DB yet.
+        extra_known_hashes: optional set of content hashes to treat as
+            known in addition to the catalog. Kept for callers that only
+            have hashes; note it disables the size shortcut on the hash
+            fallback. Prefer passing a shared ``duplicate_checker``.
+        verify_by_hash: if True, identify duplicates by content hash alone
+            (reads every byte of every source file — the historical exact
+            behavior).
+        duplicate_checker: optional import_dedup.DuplicateChecker to use
+            (and mutate) instead of building one from ``db``. Pass a shared
+            instance when calling ingest() in a loop so files copied by
+            earlier iterations are treated as duplicates by later ones even
+            though they have not been scanned into the DB yet. Its
+            ``verify_by_hash`` takes precedence over the argument above.
 
     Returns:
         dict with counts: copied, skipped_duplicate, failed, total
@@ -395,19 +389,22 @@ def ingest(
         files = [f for f in files if str(f) not in skip_paths]
     total = len(files)
 
-    # Load known hashes from database for duplicate detection and merge with
-    # any hashes accumulated by previous ingest() calls in the same session.
-    known_hashes = set()
-    known_hash_folders: dict[str, set[str]] = {}
+    # Duplicate oracle over the whole catalog. A source file matching any
+    # existing photo in the DB (even in another library root) is skipped
+    # so we don't silently duplicate bytes on disk. See import_dedup for
+    # the identity rules (metadata-first with hash fallback by default;
+    # hash-everything when verify_by_hash).
+    checker = None
+    dup_token_folders: dict[tuple, set[str]] = {}
     if skip_duplicates:
-        # Global hash set for dedup decisions. A source file matching any
-        # existing photo in the DB (even in another library root) is skipped
-        # so we don't silently duplicate bytes on disk.
-        rows = db.conn.execute(
-            "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
-        ).fetchall()
-        known_hashes = {r["file_hash"] for r in rows}
-        # Destination-scoped hash -> set-of-folder-paths map for populating
+        checker = duplicate_checker
+        if checker is None:
+            checker = DuplicateChecker(
+                CatalogIndex.from_db(db), verify_by_hash=verify_by_hash,
+            )
+        if extra_known_hashes:
+            checker.add_known_hashes(extra_known_hashes)
+        # Destination-scoped identity -> set-of-folder-paths map for populating
         # the caller's post-ingest scan restrict_dirs. The same hash can
         # legitimately appear in more than one destination subfolder (e.g.,
         # the user copied the same photo into multiple date folders), and
@@ -489,10 +486,11 @@ def ingest(
             dest_like_prefix_param = dest_like_prefix
         if dest_path_sql_stripped:
             folder_rows = db.conn.execute(
-                f"""SELECT p.file_hash, f.path AS folder_path
+                f"""SELECT p.file_hash, p.filename, p.file_size, p.timestamp,
+                          f.path AS folder_path
                    FROM photos p
                    JOIN folders f ON p.folder_id = f.id
-                   WHERE p.file_hash IS NOT NULL
+                   WHERE (p.file_hash IS NOT NULL OR p.timestamp IS NOT NULL)
                      AND f.status IN ('ok', 'partial')
                      AND (
                        {path_sql_expr} = ?
@@ -502,10 +500,11 @@ def ingest(
             ).fetchall()
         else:
             folder_rows = db.conn.execute(
-                """SELECT p.file_hash, f.path AS folder_path
+                """SELECT p.file_hash, p.filename, p.file_size, p.timestamp,
+                          f.path AS folder_path
                    FROM photos p
                    JOIN folders f ON p.folder_id = f.id
-                   WHERE p.file_hash IS NOT NULL
+                   WHERE (p.file_hash IS NOT NULL OR p.timestamp IS NOT NULL)
                      AND f.status IN ('ok', 'partial')"""
             ).fetchall()
         for r in folder_rows:
@@ -519,9 +518,20 @@ def ingest(
                 continue
             if not Path(folder_path).is_dir():
                 continue
-            known_hash_folders.setdefault(r["file_hash"], set()).add(folder_path)
-        if extra_known_hashes:
-            known_hashes |= extra_known_hashes
+            # Index the row under both identity forms — the checker may
+            # match a source either way, and each match token must map to
+            # the folders holding the original.
+            if r["file_hash"] is not None:
+                dup_token_folders.setdefault(
+                    ("hash", r["file_hash"]), set(),
+                ).add(folder_path)
+            row_key = stored_metadata_key(
+                r["filename"], r["file_size"], r["timestamp"],
+            )
+            if row_key is not None:
+                dup_token_folders.setdefault(
+                    ("key", row_key), set(),
+                ).add(folder_path)
 
     copied = 0
     skipped_duplicate = 0
@@ -530,73 +540,85 @@ def ingest(
     duplicate_folders: set[str] = set()
     emitted = 0
 
-    # Pass 1: hash each file and partition into duplicates vs. survivors.
-    # Timestamp resolution is deferred to Pass 2 so a duplicate-only
-    # re-import of a large card does not run the EXIF/ExifTool prepass on
-    # files we already have — the duplicate gate short-circuits first.
-    to_copy: list[tuple[Path, str]] = []
+    # Pass 1: partition into duplicates vs. survivors. The checker's EXIF
+    # prepass batches header reads across the whole card; only files with
+    # missing/placeholder metadata (and a plausible size twin) get their
+    # bytes read for the hash fallback — or every file when verify_by_hash.
+    if checker is not None:
+        checker.prepare(files)
+    to_copy: list[Path] = []
     for source_file in files:
+        if checker is not None:
+            try:
+                token = checker.match(source_file)
+            except Exception as e:
+                log.warning("Failed to ingest %s: %s", source_file, e)
+                failed += 1
+                emitted += 1
+                if progress_callback:
+                    progress_callback(emitted, total, source_file.name)
+                continue
+
+            if token is not None:
+                skipped_duplicate += 1
+                # Record every destination folder that holds a copy of
+                # this file, not just one. The pipeline uses this set
+                # verbatim as restrict_dirs, so if we only report one
+                # folder the others never get linked to the active
+                # workspace.
+                duplicate_folders.update(
+                    dup_token_folders.get(token, ())
+                )
+                emitted += 1
+                if progress_callback:
+                    progress_callback(emitted, total, source_file.name)
+                continue
+
+        to_copy.append(source_file)
+
+    # Pass 2: resolve folder-planning timestamps for survivors and copy.
+    # In the default metadata mode the checker already resolved every
+    # file's EXIF time for the duplicate gate — reuse those reads and only
+    # add the mtime fallback. In verify/no-skip modes, batch the
+    # EXIF/ExifTool prepass over just the survivors.
+    timestamps = _source_file_timestamps(
+        to_copy,
+        capture_times=(
+            {str(f): checker.capture_time(f) for f in to_copy}
+            if checker is not None and not checker.verify_by_hash
+            else None
+        ),
+    )
+
+    # Records the destination folder where each identity token actually
+    # landed during this batch. Populated only when pass 2 marks an
+    # identity as known (successful copy or exact-match destination
+    # collision) so an intra-batch duplicate can report the correct
+    # post-import scan folder.
+    batch_dest_folders: dict[tuple, str] = {}
+
+    for source_file in to_copy:
         try:
-            file_hash = compute_file_hash(str(source_file))
-            if file_hash == EMPTY_FILE_SHA256 and source_file.stat().st_size == 0:
-                file_hash = None
-        except Exception as e:
-            log.warning("Failed to ingest %s: %s", source_file, e)
-            failed += 1
-            emitted += 1
-            if progress_callback:
-                progress_callback(emitted, total, source_file.name)
-            continue
+            # Intra-batch dedup: a byte-identical sibling earlier in this
+            # batch already landed (or matched an existing destination
+            # file). Skip without re-copying. We intentionally defer the
+            # checker.record() mark to pass 2 success rather than
+            # recording it in pass 1 — if the primary's copy fails (e.g.
+            # the destination filename collides with a directory of the
+            # same name), the sibling still gets a chance to import the
+            # bytes.
+            if checker is not None:
+                token = checker.match(source_file)
+                if token is not None:
+                    skipped_duplicate += 1
+                    dest = batch_dest_folders.get(token)
+                    if dest is not None:
+                        duplicate_folders.add(dest)
+                    emitted += 1
+                    if progress_callback:
+                        progress_callback(emitted, total, source_file.name)
+                    continue
 
-        if skip_duplicates and file_hash is not None and file_hash in known_hashes:
-            skipped_duplicate += 1
-            # Record every destination folder that holds a copy of
-            # this file, not just one. The pipeline uses this set
-            # verbatim as restrict_dirs, so if we only report one
-            # folder the others never get linked to the active
-            # workspace.
-            duplicate_folders.update(
-                known_hash_folders.get(file_hash, ())
-            )
-            emitted += 1
-            if progress_callback:
-                progress_callback(emitted, total, source_file.name)
-            continue
-
-        to_copy.append((source_file, file_hash))
-
-    # Pass 2: resolve timestamps only for survivors and copy. Batching
-    # ExifTool across survivors keeps the fresh-card import fast for
-    # formats that lack lightweight EXIF (HEIC, video) without paying
-    # that cost for files the duplicate gate already rejected.
-    timestamps = _source_file_timestamps([s for s, _ in to_copy])
-
-    # Records the destination folder where each hash actually landed
-    # during this batch. Populated only when pass 2 marks a hash as
-    # known (successful copy or exact-match destination collision) so
-    # an intra-batch duplicate can report the correct post-import scan
-    # folder.
-    batch_dest_folders: dict[str, str] = {}
-
-    for source_file, file_hash in to_copy:
-        # Intra-batch dedup: a byte-identical sibling earlier in this
-        # batch already landed (or matched an existing destination
-        # file). Skip without re-copying. We intentionally defer this
-        # mark to pass 2 success rather than recording it in pass 1 —
-        # if the primary's copy fails (e.g. the destination filename
-        # collides with a directory of the same name), the sibling
-        # still gets a chance to import the bytes.
-        if skip_duplicates and file_hash is not None and file_hash in known_hashes:
-            skipped_duplicate += 1
-            dest = batch_dest_folders.get(file_hash)
-            if dest is not None:
-                duplicate_folders.add(dest)
-            emitted += 1
-            if progress_callback:
-                progress_callback(emitted, total, source_file.name)
-            continue
-
-        try:
             rel_folder = build_destination_path(
                 timestamps.get(source_file), folder_template
             )
@@ -607,42 +629,49 @@ def ingest(
 
             # Handle filename collision (different file, same name)
             if dest_file.exists():
+                src_size = source_file.stat().st_size
+                dest_size = dest_file.stat().st_size
                 # Zero-byte ↔ zero-byte at the same destination path IS
                 # the same file (every empty file is bit-identical to
-                # every other), but pass 1 cleared ``file_hash`` to
-                # ``None`` for zero-byte sources so EMPTY_FILE_SHA256
-                # doesn't carry duplicate identity. The hash-based
-                # exact-match branch below therefore can't recognise
-                # this collision, and a ``skip_duplicates`` retry of an
-                # interrupted card import would otherwise fall through
-                # to the numeric-suffix branch and start creating
-                # ``name_1.ext``, ``name_2.ext`` placeholder copies of
-                # the same empty file forever. ``known_hashes`` /
-                # ``batch_dest_folders`` are deliberately NOT updated —
-                # zero-byte files are kept out of the duplicate-identity
-                # index everywhere else, and this skip mirrors that.
-                src_is_empty = (
-                    file_hash is None
-                    and source_file.stat().st_size == 0
-                )
-                if src_is_empty and dest_file.stat().st_size == 0:
+                # every other), but zero-byte files carry no duplicate
+                # identity so the content-match branch below can't
+                # recognise this collision, and a ``skip_duplicates``
+                # retry of an interrupted card import would otherwise
+                # fall through to the numeric-suffix branch and start
+                # creating ``name_1.ext``, ``name_2.ext`` placeholder
+                # copies of the same empty file forever. The checker is
+                # deliberately NOT updated — zero-byte files are kept out
+                # of the duplicate-identity index everywhere else, and
+                # this skip mirrors that.
+                if src_size == 0 and dest_size == 0:
                     skipped_duplicate += 1
                     duplicate_folders.add(str(dest_folder))
                     emitted += 1
                     if progress_callback:
                         progress_callback(emitted, total, source_file.name)
                     continue
-                dest_hash = compute_file_hash(str(dest_file))
-                if file_hash is not None and file_hash == dest_hash:
-                    # Exact same file already there
-                    skipped_duplicate += 1
-                    known_hashes.add(file_hash)
-                    batch_dest_folders[file_hash] = str(dest_folder)
-                    duplicate_folders.add(str(dest_folder))
-                    emitted += 1
-                    if progress_callback:
-                        progress_callback(emitted, total, source_file.name)
-                    continue
+                # Same size could be the same bytes — settle it by exact
+                # content, never by metadata (a wrong skip here would
+                # silently drop a photo). Different size proves a
+                # different file with no reads at all.
+                if src_size == dest_size:
+                    src_hash = (
+                        checker.content_hash(source_file)
+                        if checker is not None
+                        else compute_file_hash(str(source_file))
+                    )
+                    dest_hash = compute_file_hash(str(dest_file))
+                    if src_hash is not None and src_hash == dest_hash:
+                        # Exact same file already there
+                        skipped_duplicate += 1
+                        if checker is not None:
+                            for token in checker.record(source_file):
+                                batch_dest_folders[token] = str(dest_folder)
+                        duplicate_folders.add(str(dest_folder))
+                        emitted += 1
+                        if progress_callback:
+                            progress_callback(emitted, total, source_file.name)
+                        continue
                 # Different file, same name — add numeric suffix
                 stem = dest_file.stem
                 suffix = dest_file.suffix
@@ -652,9 +681,9 @@ def ingest(
                     counter += 1
 
             shutil.copy2(str(source_file), str(dest_file))
-            if file_hash is not None:
-                known_hashes.add(file_hash)
-                batch_dest_folders[file_hash] = str(dest_folder)
+            if checker is not None:
+                for token in checker.record(source_file):
+                    batch_dest_folders[token] = str(dest_folder)
             copied_paths.append(str(dest_file))
             copied += 1
 

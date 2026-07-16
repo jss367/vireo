@@ -308,7 +308,7 @@ def test_focus_score_uses_eye_tenengrad_when_populated():
     b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=50000)
     enc = {"photos": [a, b]}
 
-    score_encounter(enc)
+    score_encounter(enc, config={"eye_detect_enabled": True})
 
     assert b["focus_score"] > a["focus_score"], (
         f"eye-based ranking should put sharp-eye photo ahead; "
@@ -324,7 +324,7 @@ def test_focus_score_falls_back_to_subject_tenengrad_when_eye_null():
     b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=None)
     enc = {"photos": [a, b]}
 
-    score_encounter(enc)
+    score_encounter(enc, config={"eye_detect_enabled": True})
 
     assert a["focus_score"] > b["focus_score"], (
         "without eye_tenengrad, score_encounter must rank on subject_tenengrad"
@@ -345,7 +345,7 @@ def test_focus_score_mixed_eye_and_body_ranks_within_their_group():
     d = _make_base_photo(subject_tenengrad=10000, eye_tenengrad=None)
     enc = {"photos": [a, b, c, d]}
 
-    score_encounter(enc)
+    score_encounter(enc, config={"eye_detect_enabled": True})
 
     assert b["focus_score"] > a["focus_score"]
     assert d["focus_score"] > c["focus_score"]
@@ -369,7 +369,7 @@ def test_body_only_focus_not_diluted_by_eye_capable_peers():
     body_lo = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=None)
     body_hi = _make_base_photo(subject_tenengrad=20000, eye_tenengrad=None)
     mixed_enc = {"photos": [eye_a, eye_b, body_lo, body_hi]}
-    score_encounter(mixed_enc)
+    score_encounter(mixed_enc, config={"eye_detect_enabled": True})
     mixed_body_lo = body_lo["focus_score"]
     mixed_body_hi = body_hi["focus_score"]
 
@@ -379,7 +379,7 @@ def test_body_only_focus_not_diluted_by_eye_capable_peers():
     ref_lo = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=None)
     ref_hi = _make_base_photo(subject_tenengrad=20000, eye_tenengrad=None)
     ref_enc = {"photos": [ref_lo, ref_hi]}
-    score_encounter(ref_enc)
+    score_encounter(ref_enc, config={"eye_detect_enabled": True})
 
     assert mixed_body_lo == ref_lo["focus_score"], (
         f"body-only low scorer should not be diluted by eye peers: "
@@ -403,7 +403,10 @@ def test_reject_eye_soft_fires_when_eye_present_and_below_threshold():
     )
     enc = {"photos": [soft_eye, sharp_eye]}
 
-    score_encounter(enc, config={"reject_eye_focus": 0.35})
+    score_encounter(
+        enc,
+        config={"eye_detect_enabled": True, "reject_eye_focus": 0.35},
+    )
 
     assert any("eye_soft" in r for r in soft_eye.get("reject_reasons", []))
     assert not any("eye_soft" in r for r in sharp_eye.get("reject_reasons", []))
@@ -441,6 +444,21 @@ def test_eye_detect_disabled_falls_back_to_body_focus():
     assert "eye_focus_score" not in b
 
 
+def test_eye_detect_missing_config_defaults_disabled():
+    """Missing eye_detect_enabled follows the global default: disabled."""
+    from scoring import score_encounter
+
+    a = _make_base_photo(subject_tenengrad=50000, eye_tenengrad=5000)
+    b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=50000)
+    enc = {"photos": [a, b]}
+
+    score_encounter(enc)
+
+    assert a["focus_score"] > b["focus_score"]
+    assert "eye_focus_score" not in a
+    assert "eye_focus_score" not in b
+
+
 def test_eye_detect_disabled_suppresses_eye_soft_reject():
     """Toggling eye detection off must also stop eye_soft from firing on
     photos that already have eye_tenengrad from prior runs.
@@ -459,4 +477,80 @@ def test_eye_detect_disabled_suppresses_eye_soft_reject():
 
     assert not any(
         "eye_soft" in r for r in soft_eye.get("reject_reasons", [])
+    )
+
+
+def test_score_encounter_honors_nested_pipeline_eye_detect_enabled():
+    """When callers pass a full effective config (with pipeline keys nested
+    under ``config['pipeline']``), score_encounter must honor the nested
+    ``eye_detect_enabled`` rather than silently reading it as absent.
+
+    ``_build_best_batch_response`` and the browse-selection batch review
+    path both hand ``run_selected_batch_review`` the top-level effective
+    config. Without this normalization, photos with a real ``eye_tenengrad``
+    would rank by body sharpness in those flows even in workspaces where
+    Settings has eye detection enabled.
+    """
+    from scoring import score_encounter
+
+    a = _make_base_photo(subject_tenengrad=50000, eye_tenengrad=5000)
+    b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=50000)
+    enc = {"photos": [a, b]}
+
+    # Nested shape, matching effective_cfg = db.get_effective_config(...)
+    score_encounter(enc, config={"pipeline": {"eye_detect_enabled": True}})
+
+    assert b["focus_score"] > a["focus_score"], (
+        f"nested pipeline eye_detect_enabled must reach scoring; got "
+        f"A={a['focus_score']} vs B={b['focus_score']}"
+    )
+
+
+def test_score_encounter_nested_pipeline_disables_eye_when_false():
+    """Symmetric to the nested-enabled test: a nested
+    ``pipeline.eye_detect_enabled=False`` must suppress eye-based ranking
+    even when top-level config keys are also present.
+    """
+    from scoring import score_encounter
+
+    a = _make_base_photo(subject_tenengrad=50000, eye_tenengrad=5000)
+    b = _make_base_photo(subject_tenengrad=5000, eye_tenengrad=50000)
+    enc = {"photos": [a, b]}
+
+    score_encounter(enc, config={"pipeline": {"eye_detect_enabled": False}})
+
+    assert a["focus_score"] > b["focus_score"]
+    assert "eye_focus_score" not in a
+    assert "eye_focus_score" not in b
+
+
+def test_score_encounter_nested_pipeline_reject_thresholds():
+    """A user-configured ``reject_eye_focus`` nested under ``pipeline``
+    must reach scoring the same way the flat shape does. Otherwise
+    the batch-review paths silently apply DEFAULTS on the reject rule
+    despite the workspace's tuning.
+    """
+    from scoring import score_encounter
+
+    soft_eye = _make_base_photo(
+        subject_tenengrad=50000, eye_tenengrad=1000,
+    )
+    enc = {"photos": [soft_eye]}
+
+    # Set threshold high so eye_focus_score (percentile rank in a single-
+    # photo cohort = 0.5) reliably falls below it — proves the value
+    # from the nested pipeline dict actually reached scoring.
+    score_encounter(
+        enc,
+        config={"pipeline": {
+            "eye_detect_enabled": True,
+            "reject_eye_focus": 0.75,
+        }},
+    )
+
+    assert any(
+        "eye_soft" in r for r in soft_eye.get("reject_reasons", [])
+    ), (
+        f"nested reject_eye_focus threshold must reach scoring; got "
+        f"reasons={soft_eye.get('reject_reasons')!r}"
     )

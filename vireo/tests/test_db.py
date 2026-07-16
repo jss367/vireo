@@ -715,6 +715,74 @@ def test_get_photos_keyword_multi_token(tmp_path):
     assert len(db.get_photo_ids(keyword='red bill')) == 2
 
 
+def test_get_photos_keyword_whole_word_excludes_embedded_token(tmp_path):
+    """Whole-word keyword search matches separators, not embedded substrings."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    western = db.add_photo(
+        folder_id=fid, filename='western-gull.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    common = db.add_photo(
+        folder_id=fid, filename='common-tern.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    file_only = db.add_photo(
+        folder_id=fid, filename='tern_001.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    eastern = db.add_photo(
+        folder_id=fid, filename='eastern-phoebe.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    db.tag_photo(western, db.add_keyword('Western Gull'))
+    db.tag_photo(common, db.add_keyword('Common Tern'))
+    db.tag_photo(eastern, db.add_keyword('Eastern Phoebe'))
+
+    assert {
+        r['filename'] for r in db.get_photos(keyword='tern')
+    } == {'western-gull.jpg', 'common-tern.jpg', 'tern_001.jpg', 'eastern-phoebe.jpg'}
+
+    whole_word = db.get_photos(keyword='tern', keyword_whole_word=True)
+    assert {r['filename'] for r in whole_word} == {'common-tern.jpg', 'tern_001.jpg'}
+    assert db.count_filtered_photos(keyword='tern', keyword_whole_word=True) == 2
+    assert set(db.get_photo_ids(keyword='tern', keyword_whole_word=True)) == {
+        common,
+        file_only,
+    }
+
+
+def test_get_photos_keyword_match_case(tmp_path):
+    """Match-case keyword search distinguishes otherwise identical tokens."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(
+        folder_id=fid, filename='Common-Tern.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=fid, filename='common-tern.jpg', extension='.jpg',
+        file_size=100, file_mtime=1.0,
+    )
+
+    assert {
+        r['filename'] for r in db.get_photos(keyword='Tern')
+    } == {'Common-Tern.jpg', 'common-tern.jpg'}
+    assert {
+        r['filename'] for r in db.get_photos(keyword='Tern', keyword_match_case=True)
+    } == {'Common-Tern.jpg'}
+    assert {
+        r['filename']
+        for r in db.get_photos(
+            keyword='Tern',
+            keyword_match_case=True,
+            keyword_whole_word=True,
+        )
+    } == {'Common-Tern.jpg'}
+
+
 def test_add_keyword_idempotent(tmp_path):
     """add_keyword returns existing id if keyword already exists."""
     from db import Database
@@ -841,6 +909,34 @@ def test_count_photos_for_rules_unsaved(tmp_path):
 
     # No saved collection row was created.
     assert len(db.get_collections()) == 0
+
+
+def test_smart_collection_can_select_photos_with_jpeg_companions(tmp_path):
+    """Paired JPEG availability is a first-class smart-collection rule even
+    though the pair remains one RAW-primary catalog record."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    paired = db.add_photo(
+        folder_id=fid, filename="paired.nef", extension=".nef",
+        file_size=100, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=fid, filename="raw-only.nef", extension=".nef",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='paired.jpg' WHERE id=?", (paired,),
+    )
+    db.conn.commit()
+
+    yes = [{"field": "has_jpeg_companion", "op": "equals", "value": 1}]
+    no = [{"field": "has_jpeg_companion", "op": "equals", "value": 0}]
+    assert db.count_photos_for_rules(yes) == 1
+    assert db.count_photos_for_rules(no) == 1
 
 
 def test_count_photos_for_rules_rejects_malformed_input(tmp_path):
@@ -1984,6 +2080,153 @@ def test_get_dashboard_stats_with_data(tmp_path):
     assert hours[8] == 1
 
 
+def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
+    """Dashboard, coverage, and Browse use the same intersected scope."""
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    park = db.add_folder("/photos/park", name="park")
+    yard = db.add_folder("/photos/yard", name="yard")
+    db.add_workspace_folder(ws_id, park)
+    db.add_workspace_folder(ws_id, yard)
+
+    march = db.add_photo(
+        folder_id=park, filename="march.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-03-10T08:00:00",
+    )
+    june_park = db.add_photo(
+        folder_id=park, filename="june-park.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
+    )
+    june_yard = db.add_photo(
+        folder_id=yard, filename="june-yard.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
+    )
+    collection_id = db.add_collection(
+        "June picks",
+        json.dumps([{"field": "photo_ids", "value": [march, june_park, june_yard]}]),
+    )
+
+    scope = {
+        "collection_id": collection_id,
+        "date_from": "2024-06-01",
+        "date_to": "2024-06-30",
+    }
+    stats = db.get_dashboard_stats(**scope)
+    assert stats["total_photos"] == 2
+    assert stats["folder_count"] == 2
+    assert stats["photos_by_month"] == [{"month": "2024-06", "count": 2}]
+    assert db.get_coverage_stats(**scope)["total"] == 2
+    assert {row["path"] for row in db.get_folder_coverage_stats(**scope)} == {
+        "/photos/park", "/photos/yard",
+    }
+
+    browse = db.get_photos(folder_id=yard, **scope)
+    assert [photo["id"] for photo in browse] == [june_yard]
+    assert db.get_photo_ids(folder_id=yard, **scope) == [june_yard]
+    assert db.count_filtered_photos(folder_id=yard, **scope) == 1
+
+
+def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
+    """Dashboard totals for a collection scope keep photos in offline folders.
+
+    The unscoped Dashboard intentionally counts photos in missing folders
+    (metadata-only aggregates like total_photos, photos_by_month, etc.).
+    Scoping by a collection whose rules match those photos must not
+    silently drop them via the collection subquery's folder-status filter.
+    """
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    ok_folder = db.add_folder("/photos/ok", name="ok")
+    gone_folder = db.add_folder("/photos/gone", name="gone")
+    db.add_workspace_folder(ws_id, ok_folder)
+    db.add_workspace_folder(ws_id, gone_folder)
+
+    visible = db.add_photo(
+        folder_id=ok_folder, filename="here.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
+    )
+    offline = db.add_photo(
+        folder_id=gone_folder, filename="offline.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
+    )
+    collection_id = db.add_collection(
+        "All photos",
+        json.dumps([{"field": "photo_ids", "value": [visible, offline]}]),
+    )
+
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (gone_folder,),
+    )
+    db.conn.commit()
+
+    stats = db.get_dashboard_stats(collection_id=collection_id)
+    assert stats["total_photos"] == 2, (
+        "Dashboard totals must count the offline photo when scoped by "
+        f"a collection that matches it; got {stats['total_photos']}"
+    )
+    assert stats["accessible_photos"] == 1
+    assert stats["missing_folder_count"] == 1
+    assert stats["attention"]["unclassified"] == 1
+    assert stats["attention"]["missing_location"] == 1
+    months = {row["month"]: row["count"] for row in stats["photos_by_month"]}
+    assert months.get("2024-06") == 2
+
+    # Coverage still restricts to accessible folders in its outer join, so
+    # the collection scope must not further shrink that count either.
+    assert db.get_coverage_stats(collection_id=collection_id)["total"] == 1
+
+    # Regression guard: Browse and pipeline callers must still filter out
+    # photos in offline folders even when the collection rules match them.
+    assert db.count_collection_photos(collection_id) == 1
+    assert [p["id"] for p in db.get_collection_photos(collection_id)] == [visible]
+
+
+def test_dashboard_attention_counts_actionable_gaps_in_scope(tmp_path):
+    """Needs Attention cards report preview, sync, location, and duplicate work."""
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {"timestamp": "2024-06-01T08:00:00", "file_hash": "same"},
+        {"timestamp": "2024-06-02T08:00:00", "file_hash": "same"},
+        {"timestamp": "2024-07-01T08:00:00", "file_hash": "other"},
+    ])
+    det_ids = db.save_detections(pids[0], [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+        "confidence": 0.9,
+        "category": "animal",
+    }], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "test")
+    db.preview_cache_insert(pids[0], 1920, 100)
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'rating', '4', 'token', ?)",
+        (pids[1], db._ws_id()),
+    )
+    db.conn.commit()
+
+    attention = db.get_dashboard_stats(
+        date_from="2024-06-01", date_to="2024-06-30",
+    )["attention"]
+    assert attention == {
+        "unclassified": 1,
+        "missing_location": 2,
+        "missing_previews": 1,
+        "preview_size": 1920,
+        "preview_enabled": True,
+        "pending_sync": 1,
+        "duplicate_groups": 1,
+    }
+
+
 # --- Cluster 2b: Coverage Stats ---
 
 def test_get_coverage_stats_empty_workspace(tmp_path):
@@ -2095,6 +2338,40 @@ def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
     assert by_path['/B']['total'] == 2
     assert by_path['/B']['thumbnail'] == 0
     assert by_path['/B']['phash'] == 0
+
+
+def test_folder_coverage_keeps_zero_match_folders_with_scopes(tmp_path):
+    """Photo filters keep in-scope folders visible while folder scope narrows rows."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    folder_a = db.add_folder("/A", name="A")
+    folder_b = db.add_folder("/B", name="B")
+    db.add_workspace_folder(ws_id, folder_a)
+    db.add_workspace_folder(ws_id, folder_b)
+    db.add_photo(
+        folder_id=folder_a, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-01-01T00:00:00",
+    )
+    db.add_photo(
+        folder_id=folder_b, filename="b.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-01-02T00:00:00",
+    )
+
+    no_matches = db.get_folder_coverage_stats(date_from="2024-02-01")
+    assert {row["path"]: row["total"] for row in no_matches} == {
+        "/A": 0,
+        "/B": 0,
+    }
+
+    folder_scoped = db.get_folder_coverage_stats(
+        folder_id=folder_a, date_from="2024-02-01",
+    )
+    assert [(row["path"], row["total"]) for row in folder_scoped] == [
+        ("/A", 0),
+    ]
 
 
 # --- Cluster 3: Prediction Management ---
@@ -3218,6 +3495,33 @@ def test_get_geolocated_photos_filters(tmp_path):
     assert results[0]['filename'] == 'b.jpg'
 
 
+def test_get_geolocated_photos_keyword_search_options(tmp_path):
+    """Map keyword filtering uses the shared whole-word and case options."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder('/photos', name='photos')
+    p1 = db.add_photo(folder_id=fid, filename='western.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='tern.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET latitude=1.0, longitude=2.0 WHERE id IN (?,?)", (p1, p2))
+    db.conn.commit()
+    db.tag_photo(p1, db.add_keyword('Western Tanager'))
+    db.tag_photo(p2, db.add_keyword('Common Tern'))
+
+    assert {
+        r['filename'] for r in db.get_geolocated_photos(keyword='tern')
+    } == {'western.jpg', 'tern.jpg'}
+    assert {
+        r['filename']
+        for r in db.get_geolocated_photos(keyword='tern', keyword_whole_word=True)
+    } == {'tern.jpg'}
+    assert {
+        r['filename']
+        for r in db.get_geolocated_photos(keyword='Tern', keyword_match_case=True)
+    } == {'tern.jpg'}
+
+
 def test_get_geolocated_photos_with_species(tmp_path):
     """get_geolocated_photos includes species from accepted predictions."""
     from db import Database
@@ -4026,6 +4330,43 @@ def test_migration_from_legacy_embedding_columns(tmp_path):
     assert rows[0]["embedding"] == b'\x01\x02\x03'
 
 
+def test_migration_adds_missing_miss_classifier_columns(tmp_path):
+    """DBs created before the miss-classifier columns existed must have
+    miss_no_subject/miss_clipped/miss_oof/miss_computed_at added on open —
+    otherwise PHOTO_COLS-based queries fail with 'no such column'."""
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                 file_size=1, file_mtime=1.0)
+
+    # Simulate a pre-miss-classifier DB by dropping the columns and
+    # closing. Reopening must trigger the ALTER TABLE fallback.
+    for col in ("miss_no_subject", "miss_clipped", "miss_oof",
+                "miss_computed_at"):
+        db.conn.execute(f"ALTER TABLE photos DROP COLUMN {col}")
+    db.conn.commit()
+    db.conn.close()
+
+    db2 = Database(db_path)
+    cols = {row[1] for row in db2.conn.execute("PRAGMA table_info(photos)")}
+    for expected in (
+        "miss_no_subject", "miss_clipped", "miss_oof", "miss_computed_at"
+    ):
+        assert expected in cols, f"migration failed to add {expected}"
+
+    # PHOTO_COLS-based queries must succeed against the migrated DB.
+    row = db2.conn.execute(
+        f"SELECT {Database.PHOTO_COLS} FROM photos"
+    ).fetchone()
+    assert row is not None
+    assert row["miss_no_subject"] is None
+    assert row["miss_clipped"] is None
+    assert row["miss_oof"] is None
+
+
 # -- Edit history --
 
 
@@ -4520,6 +4861,47 @@ def test_add_keyword_auto_detects_taxonomy_via_alt_common_name(tmp_path):
     assert row["taxon_id"] == 1
 
 
+def test_add_keyword_auto_detects_taxonomy_with_smart_apostrophe(tmp_path):
+    """Smart-apostrophe user text matches straight-apostrophe taxa names."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) "
+        "VALUES (1, 'Sayornis saya', ?, 'species')",
+        ("Say's Phoebe",),
+    )
+    db.conn.commit()
+
+    kid = db.add_keyword("Say’s phoebe")
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == 1
+
+
+def test_add_keyword_promotes_existing_general_smart_apostrophe_taxon(tmp_path):
+    """A legacy general row is promoted when auto-detect can now resolve it."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("Say’s phoebe")
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) "
+        "VALUES (1, 'Sayornis saya', ?, 'species')",
+        ("Say's Phoebe",),
+    )
+    db.conn.commit()
+
+    assert db.add_keyword("Say’s phoebe") == kid
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == 1
+
+
 def test_add_keyword_no_auto_detect_for_general(tmp_path):
     """add_keyword defaults to general when name doesn't match a taxon."""
     from db import Database
@@ -4955,6 +5337,47 @@ def test_accept_prediction_tags_photo(tmp_path):
     assert result["species"] == "Elk"
     kws = db.get_photo_keywords(pid)
     assert any(k["name"] == "Elk" for k in kws)
+
+
+def test_accept_prediction_queues_normalized_species(tmp_path):
+    """When the prediction's species carries stray edge quotes (e.g.
+    `‘apapane`), accept_prediction must tag the photo with the normalized
+    row AND queue the pending sidecar keyword_add / return the payload
+    using the stored (clean) spelling. Without this, the DB tag points to
+    `apapane` while pending changes and the response payload use
+    `‘apapane`, so a later delete queues the clean name, pending changes
+    stop cancelling, and XMP sync persists the stray-quote label."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="‘apapane",
+                      confidence=0.9, model="bioclip")
+    pred = db.get_predictions()[0]
+
+    result = db.accept_prediction(pred["id"])
+    # The stored keyword name is the normalized (clean) spelling.
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (result["keyword_id"],)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    # Response payload uses the stored spelling too.
+    assert result["species"] == "apapane"
+    # Pending keyword_add uses the clean spelling — a later remove of the
+    # stored keyword can then cancel the queued add.
+    pending = db.get_pending_changes()
+    add_values = [
+        c["value"] for c in pending if c["change_type"] == "keyword_add"
+    ]
+    assert "apapane" in add_values
+    assert "‘apapane" not in add_values
 
 
 def test_accept_prediction_commit_false_preserves_caller_transaction_on_error(
@@ -5971,6 +6394,53 @@ def test_get_missing_photos_does_not_stat_every_photo(tmp_path, monkeypatch):
         f"get_missing_photos called os.path.exists {exists_calls} times for "
         "1 missing photo; should be at most one stat per miss (no per-present-photo stats)"
     )
+
+
+def test_get_missing_photos_ignores_progress_callback_errors(tmp_path):
+    """Progress callback failures must not abort missing-original detection."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    fid = db.add_folder(str(folder), name="shoot")
+    db.add_photo(folder_id=fid, filename="gone.jpg", extension=".jpg",
+                 file_size=1, file_mtime=1.0)
+
+    def broken_progress(_payload):
+        raise RuntimeError("progress sink unavailable")
+
+    missing = db.get_missing_photos(progress_callback=broken_progress)
+
+    assert [row["filename"] for row in missing] == ["gone.jpg"]
+
+
+def test_get_missing_photos_reports_periodic_photo_progress(tmp_path):
+    """Large single-folder scans should emit progress before the final callback."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+
+    folder = tmp_path / "shoot"
+    folder.mkdir()
+    fid = db.add_folder(str(folder), name="shoot")
+    for i in range(401):
+        db.add_photo(folder_id=fid, filename=f"gone_{i:03d}.jpg",
+                     extension=".jpg", file_size=1, file_mtime=1.0)
+
+    events = []
+    missing = db.get_missing_photos(progress_callback=events.append)
+
+    assert len(missing) == 401
+    considered = [event["photos_considered"] for event in events]
+    assert 200 in considered
+    assert 400 in considered
+    assert considered[-1] == 401
 
 
 def test_get_missing_photos_handles_unicode_normalization(tmp_path):
@@ -8692,6 +9162,44 @@ def test_folder_under_rule_matches_backslash_paths(tmp_path, monkeypatch):
     assert db.count_photos_for_rules(under_sib) == 1
 
 
+def test_folder_legacy_is_op_resolves_like_under(tmp_path, monkeypatch):
+    """Folder collections saved with the pre-'under' vocabulary use op 'is'
+    (and 'is not'). Those legacy ops must resolve as aliases for
+    'under'/'not_under' instead of raising 'unsupported field/op', which
+    previously 500'd the whole /api/collections list and blanked every
+    collection dropdown."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    f_2023 = db.add_folder("/photos/2023", name="2023")
+    f_sub = db.add_folder("/photos/2023/trip", name="trip", parent_id=f_2023)
+    f_sib = db.add_folder("/photos/2023-trip", name="2023-trip")
+    for fid, name in [(f_2023, "a"), (f_sub, "b"), (f_sib, "c")]:
+        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+                     file_size=100, file_mtime=1.0)
+
+    legacy_is = [{"field": "folder", "op": "is", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_is) == 2  # folder + descendant
+
+    legacy_is_not = [{"field": "folder", "op": "is not", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_is_not) == 1  # only the sibling
+
+    # 'equals' is the third legacy alias; it also resolves like 'under'
+    # (the folder plus its descendants), matching how the rule behaved
+    # when the older UI wrote it.
+    legacy_equals = [{"field": "folder", "op": "equals", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_equals) == 2
+
+    # count_collection_photos (used by /api/collections) must not raise.
+    import json
+    cid = db.add_collection("Legacy Folder", json.dumps(legacy_is))
+    assert db.count_collection_photos(cid) == 2
+
+
 def test_check_filename_collisions(db):
     """check_filename_collisions detects conflicts at destination folder."""
     fid1 = db.add_folder("/src", name="src")
@@ -8750,6 +9258,9 @@ def test_get_highlights_candidates(tmp_path):
     assert scores == sorted(scores, reverse=True)
     # Each result should have species field (may be None for unclassified)
     assert all("species" in dict(r) for r in results)
+    assert all("folder_name" in dict(r) for r in results)
+    assert all("folder_path" in dict(r) for r in results)
+    assert all("keyword_names" in dict(r) for r in results)
 
 
 def test_get_highlights_candidates_includes_descendants(tmp_path):
@@ -8834,6 +9345,28 @@ def test_get_highlights_candidates_workspace_wide(tmp_path):
     results = db.get_highlights_candidates(folder_id=None, min_quality=0.0)
     filenames = {r["filename"] for r in results}
     assert filenames == {"day1.jpg", "day2.jpg"}
+
+
+def test_get_highlights_candidates_photo_id_restricts_query(tmp_path):
+    """photo_id filter returns only that photo's row, ignoring workspace peers."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    f = db.add_folder('/shoot', name='shoot')
+    p1 = db.add_photo(folder_id=f, filename='a.jpg', extension='.jpg',
+                      file_size=100, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=f, filename='b.jpg', extension='.jpg',
+                      file_size=100, file_mtime=2.0)
+    db.conn.execute("UPDATE photos SET quality_score = 0.8 WHERE id IN (?, ?)",
+                    (p1, p2))
+    db.conn.commit()
+
+    only = db.get_highlights_candidates(folder_id=None, min_quality=0.0,
+                                        photo_id=p1)
+    assert [r["id"] for r in only] == [p1]
+
+    # Non-existent id yields no rows without erroring.
+    assert db.get_highlights_candidates(folder_id=None, min_quality=0.0,
+                                        photo_id=999999) == []
 
 
 def test_get_highlights_candidates_workspace_wide_isolates_workspaces(tmp_path):
@@ -9819,6 +10352,57 @@ def test_miss_columns_present(tmp_path):
     }
 
 
+def test_migration_adds_miss_columns_to_existing_photos_table(tmp_path):
+    from db import Database
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    folder_id = db.add_folder("/photos", name="photos")
+    db.add_photo(
+        folder_id=folder_id,
+        filename="legacy.jpg",
+        extension=".jpg",
+        file_size=100,
+        file_mtime=1.0,
+    )
+
+    missing_cols = {
+        "miss_no_subject", "miss_clipped", "miss_oof", "miss_computed_at",
+    }
+    rows = db.conn.execute("PRAGMA table_info(photos)").fetchall()
+    keep = [row for row in rows if row["name"] not in missing_cols]
+    definitions = []
+    for row in keep:
+        definition = f'"{row["name"]}" {row["type"]}'
+        if row["pk"]:
+            definition += " PRIMARY KEY"
+        if row["notnull"]:
+            definition += " NOT NULL"
+        if row["dflt_value"] is not None:
+            definition += f' DEFAULT {row["dflt_value"]}'
+        definitions.append(definition)
+    column_list = ", ".join(f'"{row["name"]}"' for row in keep)
+
+    db.conn.execute("ALTER TABLE photos RENAME TO photos_current")
+    db.conn.execute(f"CREATE TABLE photos ({', '.join(definitions)})")
+    db.conn.execute(
+        f"INSERT INTO photos ({column_list}) SELECT {column_list} FROM photos_current"
+    )
+    db.conn.execute("DROP TABLE photos_current")
+    db.conn.commit()
+    db.conn.close()
+
+    db2 = Database(db_path)
+    cols = {row["name"] for row in db2.conn.execute("PRAGMA table_info(photos)")}
+    assert missing_cols.issubset(cols)
+
+    photos = db2.get_photos()
+    assert len(photos) == 1
+    assert photos[0]["miss_no_subject"] is None
+    assert photos[0]["miss_clipped"] is None
+    assert photos[0]["miss_oof"] is None
+
+
 def test_list_misses_returns_flagged_photos_only(tmp_path):
     from db import Database
     db = Database(str(tmp_path / "m.db"))
@@ -10237,6 +10821,18 @@ def test_create_and_get_new_images_snapshot(tmp_path):
     assert snap["file_count"] == 2
     assert snap["workspace_id"] == ws_id
     assert sorted(snap["file_paths"]) == sorted(paths)
+
+
+def test_create_new_images_snapshot_file_count_matches_unique_paths(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    paths = ["/tmp/a/IMG_001.JPG", "/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
+
+    snap_id = db.create_new_images_snapshot(paths)
+    snap = db.get_new_images_snapshot(snap_id)
+
+    assert snap["file_count"] == 2
+    assert snap["file_paths"] == ["/tmp/a/IMG_001.JPG", "/tmp/b/IMG_002.JPG"]
 
 
 def test_get_snapshot_from_different_workspace_returns_none(tmp_path):
@@ -12966,6 +13562,737 @@ def test_update_keyword_idempotent_name_update_does_not_auto_retype(tmp_path):
     assert row["taxon_id"] is None
 
 
+def test_update_keyword_rename_normalizes_edge_quotes(tmp_path):
+    """Rename must apply the same normalization as add_keyword so a
+    request like `‘apapane` stores `apapane`. Without this the PUT path
+    bypasses the duplicate-prevention contract enforced on insert."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        kid = db.add_keyword("apapane")
+        db.update_keyword(kid, name="‘apapane")
+
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "apapane"
+    finally:
+        db.close()
+
+
+def test_update_keyword_rename_rejects_empty_after_normalization(tmp_path):
+    """A rename whose normalized value is empty (quote-only input) must
+    raise ValueError, mirroring add_keyword. Otherwise the PUT path
+    would store an invisible/invalid keyword row."""
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        kid = db.add_keyword("Real Keyword")
+
+        with pytest.raises(ValueError):
+            db.update_keyword(kid, name="'")
+        with pytest.raises(ValueError):
+            db.update_keyword(kid, name="“”")
+
+        # Original name still in place.
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "Real Keyword"
+    finally:
+        db.close()
+
+
+def test_update_keyword_rename_preserves_okina(tmp_path):
+    """Legitimate leading okina (U+02BB) must survive rename normalization
+    the same way it does through add_keyword — species names such as
+    'ʻApapane' are the point of that carve-out."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        kid = db.add_keyword("Placeholder")
+        db.update_keyword(kid, name="ʻApapane")
+
+        row = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        assert row["name"] == "ʻApapane"
+    finally:
+        db.close()
+
+
+def test_update_keyword_same_name_retype_merges_into_peer(tmp_path):
+    """A PUT that normalizes the name back to the current stored value but
+    changes the type (e.g. `{name: "‘apapane", type: "taxonomy"}` on a
+    general `apapane` row) must run the same peer/collision check that a
+    real rename does. Otherwise the UPDATE silently produces two
+    taxonomy rows that normalize to the same key at the same slot,
+    because UNIQUE(name, parent_id) doesn't constrain NULL parents.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Top-level taxonomy `apapane` already exists.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # A separate top-level general `apapane` row also exists.
+        general_id = db.add_keyword("apapane", kw_type="general")
+        assert general_id != taxonomy_id
+
+        # PUT-style retype whose name normalizes back to the current stored
+        # value (`‘apapane` → `apapane`) but whose type moves to
+        # 'taxonomy'. Must merge into the existing taxonomy peer rather
+        # than promoting the general row and leaving two taxonomy rows.
+        effective_id = db.update_keyword(
+            general_id, name="‘apapane", type="taxonomy"
+        )
+        assert effective_id == taxonomy_id
+
+        # Exactly one top-level taxonomy `apapane` row must remain.
+        # Stored names are always normalized, so a plain name comparison
+        # is exact.
+        rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE name = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in rows] == [taxonomy_id]
+        # The old general row must be gone (merged away).
+        gone = db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert gone is None
+    finally:
+        db.close()
+
+
+def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
+    """A type-only PUT (no `name` kwarg) must still run the same-slot peer
+    check. Otherwise, changing a general `apapane` row's type to
+    `taxonomy` via the Browse/Keywords type dropdown while a taxonomy
+    `apapane` peer already exists at the same (NULL) parent leaves two
+    same-name taxonomy rows at the top level (UNIQUE(name, parent_id)
+    treats NULL parents as distinct), so later calls bind to either id at
+    random.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Clean top-level taxonomy row (stored rows are always normalized).
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 1, 'taxonomy')",
+            ("apapane",),
+        )
+        taxonomy_id = cur.lastrowid
+        # General peer at the same slot.
+        general_id = db.add_keyword("apapane", kw_type="general")
+        assert general_id != taxonomy_id
+
+        # Type-only PUT: the dropdown changes just the type, no name.
+        effective_id = db.update_keyword(general_id, type="taxonomy")
+        assert effective_id == taxonomy_id
+
+        # Exactly one top-level taxonomy row must remain for the name, and
+        # it must be the pre-existing taxonomy row.
+        rows = db.conn.execute(
+            "SELECT id FROM keywords "
+            "WHERE name = 'apapane' COLLATE NOCASE "
+            "AND parent_id IS NULL AND type = 'taxonomy'"
+        ).fetchall()
+        assert [r["id"] for r in rows] == [taxonomy_id]
+        # The old general row must be gone (merged away).
+        gone = db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone()
+        assert gone is None
+    finally:
+        db.close()
+
+
+def test_update_keyword_retype_to_nontaxonomy_does_not_leak_is_species(tmp_path):
+    """Retyping a taxonomy row to a non-taxonomy type that already has a
+    same-name peer must not copy is_species=1 (or the taxon link) onto the
+    surviving peer. Otherwise species queries — `is_species = 1 OR type =
+    'taxonomy'` — would keep matching photos tagged with the survivor
+    (e.g. an ``individual`` row), silently mis-tagging every photo already
+    on it. Guards `_merge_keyword_into`'s destination-side flag propagation.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        # Simulate a real folder + photos so tag rows are well-formed.
+        fid = db.add_folder("/photos", name="photos")
+        pid_src = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_dst = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        # Taxonomy `Robin` (species=1) at the top level.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+            "VALUES (?, NULL, 1, 'taxonomy', NULL)",
+            ("Robin",),
+        )
+        taxonomy_id = cur.lastrowid
+        db.tag_photo(pid_src, taxonomy_id)
+
+        # Existing individual `Robin` peer at the same slot, is_species=0.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 0, 'individual')",
+            ("Robin",),
+        )
+        individual_id = cur.lastrowid
+        db.tag_photo(pid_dst, individual_id)
+
+        # Retype the taxonomy row to 'individual'. update_keyword must merge
+        # into the individual peer and return its id.
+        effective_id = db.update_keyword(taxonomy_id, type="individual")
+        assert effective_id == individual_id
+
+        # The taxonomy row is gone.
+        assert db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (taxonomy_id,)
+        ).fetchone() is None
+
+        # Critically: the surviving individual row must NOT have inherited
+        # is_species=1 or a taxon_id from the taxonomy source.
+        survivor = db.conn.execute(
+            "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+            (individual_id,),
+        ).fetchone()
+        assert survivor["type"] == "individual"
+        assert survivor["is_species"] == 0, (
+            "is_species must not leak into a non-taxonomy destination"
+        )
+        assert survivor["taxon_id"] is None, (
+            "taxon_id must not leak into a non-taxonomy destination"
+        )
+
+        # Photos from both sides are retained on the survivor.
+        tagged = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (individual_id,),
+            ).fetchall()
+        }
+        assert tagged == {pid_src, pid_dst}
+    finally:
+        db.close()
+
+
+def test_update_keyword_retype_legacy_general_is_species_does_not_leak(tmp_path):
+    """Legacy `type='general', is_species=1` rows upgraded from pre-invariant
+    databases still count as species-bearing to the rest of the app
+    (`is_species = 1 OR type = 'taxonomy'`). Retyping such a row into an
+    existing individual/general peer must not stamp is_species=1 or a taxon
+    link onto the non-taxonomy survivor. Extends
+    ``test_update_keyword_retype_to_nontaxonomy_does_not_leak_is_species``
+    to cover the general-source variant flagged by Codex.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        fid = db.add_folder("/photos", name="photos")
+        pid_src = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_dst = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        # Legacy general row with is_species=1 and a taxon link — the shape
+        # upgraded DBs can carry before mark_species_keywords retypes them.
+        cur = db.conn.execute(
+            "INSERT INTO taxa (name, rank) VALUES (?, ?)",
+            ("Turdus migratorius", "species"),
+        )
+        taxon_row_id = cur.lastrowid
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+            "VALUES (?, NULL, 1, 'general', ?)",
+            ("Robin", taxon_row_id),
+        )
+        general_id = cur.lastrowid
+        db.tag_photo(pid_src, general_id)
+
+        # Existing individual `Robin` peer at the same slot, no species flag.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type) "
+            "VALUES (?, NULL, 0, 'individual')",
+            ("Robin",),
+        )
+        individual_id = cur.lastrowid
+        db.tag_photo(pid_dst, individual_id)
+
+        # Retype the legacy general row to 'individual'. update_keyword must
+        # merge into the individual peer.
+        effective_id = db.update_keyword(general_id, type="individual")
+        assert effective_id == individual_id
+
+        assert db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (general_id,)
+        ).fetchone() is None
+
+        # Critically: is_species and taxon_id must NOT leak onto the
+        # non-taxonomy survivor even though the source was type='general'
+        # (not 'taxonomy').
+        survivor = db.conn.execute(
+            "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+            (individual_id,),
+        ).fetchone()
+        assert survivor["type"] == "individual"
+        assert survivor["is_species"] == 0, (
+            "legacy is_species=1 general source must not stamp survivor"
+        )
+        assert survivor["taxon_id"] is None
+
+        tagged = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (individual_id,),
+            ).fetchall()
+        }
+        assert tagged == {pid_src, pid_dst}
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_retargets_edit_history(tmp_path):
+    """When _merge_keyword_into deletes the source keyword row, any
+    edit_history entry referring to it as a keyword id must be retargeted
+    onto the survivor. Otherwise undo of a recent keyword_add / _remove /
+    prediction_accept / species_replace looks up the deleted id, finds
+    nothing, and marks the entry undone without reversing the tag — the
+    photo keeps the survivor's tag with no way to undo it. Covers the
+    Codex finding on the one-shot normalization migration.
+    """
+    import json as _json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_replace = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        # Survivor and about-to-be-merged source of the same type.
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        # Both photos are tagged with merge_id so undo has something to hit.
+        db.tag_photo(pid, merge_id)
+        db.tag_photo(pid_replace, merge_id)
+
+        # 1) A bare-id keyword_add edit whose new_value points at merge_id.
+        eid_add = db.record_edit(
+            "keyword_add", "Added keyword", str(merge_id),
+            [{"photo_id": pid, "old_value": "", "new_value": str(merge_id)}],
+        )
+        # 2) A keyword_remove edit whose item.old_value carries the bare id.
+        db.tag_photo(pid, merge_id)  # ensure tagged before recording remove
+        eid_remove = db.record_edit(
+            "keyword_remove", "Removed keyword", str(merge_id),
+            [{"photo_id": pid, "old_value": str(merge_id), "new_value": ""}],
+        )
+        # 3) A species_replace edit with JSON metadata carrying keyword_id +
+        #    keyword_ids that reference merge_id.
+        payload = _json.dumps(
+            {"keyword_id": merge_id, "keyword_ids": [merge_id]},
+            sort_keys=True,
+        )
+        eid_replace = db.record_edit(
+            "species_replace", "Replaced species", str(merge_id),
+            [{
+                "photo_id": pid_replace,
+                "old_value": payload,
+                "new_value": str(merge_id),
+            }],
+        )
+
+        # Merge merge_id into keep_id (mirrors the migration's convergence
+        # loop, and update_keyword's retype-into-peer path).
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        # edit_history.new_value retargeted for all three action types.
+        for eid in (eid_add, eid_remove, eid_replace):
+            row = db.conn.execute(
+                "SELECT new_value FROM edit_history WHERE id = ?", (eid,)
+            ).fetchone()
+            assert row["new_value"] == str(keep_id), (
+                f"edit_history #{eid}.new_value not retargeted"
+            )
+
+        # Bare-id item columns retargeted.
+        add_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_add,),
+        ).fetchone()
+        assert add_item["new_value"] == str(keep_id)
+
+        remove_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_remove,),
+        ).fetchone()
+        assert remove_item["old_value"] == str(keep_id)
+
+        # JSON payload rewritten in place.
+        replace_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_replace,),
+        ).fetchone()
+        assert replace_item["new_value"] == str(keep_id)
+        parsed = _json.loads(replace_item["old_value"])
+        assert parsed["keyword_id"] == keep_id
+        assert parsed["keyword_ids"] == [keep_id]
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_dedupes_keyword_ids_after_retarget(tmp_path):
+    """A species_replace payload whose keyword_ids list already contains
+    the destination id must not end up with a duplicate after retarget.
+    Otherwise undo would re-tag the survivor twice for the same keyword id.
+    """
+    import json as _json
+
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid, merge_id)
+
+        payload = _json.dumps(
+            {"keyword_id": merge_id, "keyword_ids": [keep_id, merge_id]},
+            sort_keys=True,
+        )
+        eid = db.record_edit(
+            "species_replace", "Replaced species", str(merge_id),
+            [{
+                "photo_id": pid,
+                "old_value": payload,
+                "new_value": str(merge_id),
+            }],
+        )
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        replace_item = db.conn.execute(
+            "SELECT old_value FROM edit_history_items WHERE edit_id = ?",
+            (eid,),
+        ).fetchone()
+        parsed = _json.loads(replace_item["old_value"])
+        assert parsed["keyword_ids"] == [keep_id], (
+            "duplicate destination id after retarget"
+        )
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_preserves_prediction_accept_old_value(tmp_path):
+    """`_merge_keyword_into`'s bare-string rewrite of
+    edit_history_items.old_value must skip prediction_accept entries.
+    api_accept_prediction records item.old_value = str(prediction_id),
+    and _edit_prediction_id falls back to that raw value. If the merged
+    keyword id happens to equal a stored prediction id, a blanket rewrite
+    would silently retarget undo/redo onto a different prediction.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        keep_id = db.add_keyword("Sparrow", kw_type="general")
+        merge_id = db.add_keyword("sparrow variant", kw_type="general")
+
+        # Contrive a prediction_accept edit whose item.old_value (the
+        # prediction id per api_accept_prediction) numerically equals the
+        # keyword row about to be merged — the exact collision the
+        # CodeRabbit finding calls out. The prediction row itself is not
+        # required for the rewrite pass; the retarget operates purely on
+        # edit_history_items.
+        prediction_id = merge_id
+        eid = db.record_edit(
+            "prediction_accept", "Accepted prediction", str(merge_id),
+            [{
+                "photo_id": pid,
+                "old_value": str(prediction_id),
+                "new_value": str(merge_id),
+            }],
+        )
+
+        db.tag_photo(pid, merge_id)
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid,),
+        ).fetchone()
+        # new_value (keyword id) IS retargeted onto the survivor.
+        assert item["new_value"] == str(keep_id)
+        # old_value is the prediction id — MUST stay unchanged even
+        # though it numerically equals src_id.
+        assert item["old_value"] == str(merge_id), (
+            "prediction_accept.old_value (prediction id) was incorrectly "
+            "rewritten as if it were a keyword id"
+        )
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
+    """When a `keyword_add(src_id)` edit references a photo that already
+    carried dst_id at merge time, retargeting the edit onto dst_id would
+    let a later undo call untag_photo(dst_id) and strip the user's
+    survivor tag — which was never part of that add. `_merge_keyword_into`
+    must drop such items so undo iterates only over the items whose photos
+    did NOT pre-existingly hold the survivor. Covers the Codex finding on
+    the retargeting pass.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+
+        # pid_had_both already carries the survivor before the add.
+        db.tag_photo(pid_had_both, keep_id)
+        # Both photos then get tagged with the variant that will be merged.
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # A batch keyword_add edit records the variant tag on both photos.
+        eid = db.record_edit(
+            "keyword_add", "Added variant to 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": "",
+                 "new_value": str(merge_id)},
+                {"photo_id": pid_only_src, "old_value": "",
+                 "new_value": str(merge_id)},
+            ],
+            is_batch=True,
+        )
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        # The item for pid_had_both must be gone — retargeting it would
+        # let undo strip the survivor tag that pre-existed.
+        remaining = db.conn.execute(
+            "SELECT photo_id, new_value FROM edit_history_items "
+            "WHERE edit_id = ? ORDER BY photo_id", (eid,),
+        ).fetchall()
+        remaining_pids = [r["photo_id"] for r in remaining]
+        assert pid_had_both not in remaining_pids, (
+            "keyword_add item for a photo that pre-existingly held the "
+            "survivor tag should be dropped, not retargeted"
+        )
+        assert pid_only_src in remaining_pids
+        # Surviving item is retargeted onto the survivor id.
+        [only_src_item] = [r for r in remaining if r["photo_id"] == pid_only_src]
+        assert only_src_item["new_value"] == str(keep_id)
+
+        # End-to-end: undo the edit and confirm the pre-existing survivor
+        # tag on pid_had_both is preserved.
+        db.undo_last_edit()
+        keep_tags_had_both = {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }
+        assert keep_id in keep_tags_had_both, (
+            "undo removed the pre-existing survivor tag from pid_had_both"
+        )
+        # And pid_only_src, whose add was legitimately retargeted, no
+        # longer carries the survivor tag after undo.
+        keep_tags_only_src = {
+            r["id"] for r in db.get_photo_keywords(pid_only_src)
+        }
+        assert keep_id not in keep_tags_only_src
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_preserves_preexisting_survivor_for_keyword_remove(tmp_path):
+    """A `keyword_remove(src_id)` edit retargeted onto dst_id must not let
+    redo strip a pre-existing survivor tag. undo of keyword_remove tags on
+    entry.new_value (INSERT OR IGNORE — no-op if dst pre-existed), but
+    redo calls untag_photo(pid, entry.new_value); if entry.new_value was
+    retargeted to dst_id and pid already carried dst_id, redo removes
+    the user's survivor tag.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid_had_both, keep_id)
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # Record a keyword_remove edit for the variant on both photos.
+        # keyword_remove convention: item.old_value = str(kid), new_value = ''.
+        eid = db.record_edit(
+            "keyword_remove", "Removed variant from 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": str(merge_id),
+                 "new_value": ""},
+                {"photo_id": pid_only_src, "old_value": str(merge_id),
+                 "new_value": ""},
+            ],
+            is_batch=True,
+        )
+        # Simulate the untag the original edit performed.
+        db.untag_photo(pid_had_both, merge_id)
+        db.untag_photo(pid_only_src, merge_id)
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        remaining_pids = [
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (eid,),
+            ).fetchall()
+        ]
+        assert pid_had_both not in remaining_pids, (
+            "keyword_remove item for a photo that pre-existingly held the "
+            "survivor tag should be dropped so redo does not remove it"
+        )
+        assert pid_only_src in remaining_pids
+
+        # Undo (tags with entry.new_value=dst_id; no-op for pid_had_both
+        # because survivor was already there).
+        db.undo_last_edit()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }
+        # Redo (would untag survivor from pid_had_both without the fix).
+        db.redo_last_undo()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }, "redo of keyword_remove stripped the pre-existing survivor tag"
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept(tmp_path):
+    """A `prediction_accept(src_id)` edit retargeted onto dst_id must not
+    let undo strip a pre-existing survivor tag. prediction_accept shares
+    the keyword_add branch in _apply_undo — the untag_photo call would
+    remove the survivor. The migration drops such items; prediction-
+    status restoration for those specific items is intentionally
+    sacrificed to preserve the user's tag (see _merge_keyword_into).
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid_had_both, keep_id)
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # prediction_accept convention:
+        # entry.new_value = str(kid), item.old_value = str(pred_id),
+        # item.new_value = str(kid).
+        eid = db.record_edit(
+            "prediction_accept", "Accepted prediction for 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": "42",
+                 "new_value": str(merge_id)},
+                {"photo_id": pid_only_src, "old_value": "43",
+                 "new_value": str(merge_id)},
+            ],
+            is_batch=True,
+        )
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        remaining_pids = [
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (eid,),
+            ).fetchall()
+        ]
+        assert pid_had_both not in remaining_pids, (
+            "prediction_accept item for a photo that pre-existingly held "
+            "the survivor tag should be dropped so undo does not untag it"
+        )
+        assert pid_only_src in remaining_pids
+
+        db.undo_last_edit()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }, "undo of prediction_accept stripped the pre-existing survivor tag"
+    finally:
+        db.close()
+
+
 def test_add_photo_retries_on_database_is_locked(tmp_path):
     """The INSERT inside add_photo must retry transient 'database is locked'.
 
@@ -13139,21 +14466,21 @@ def test_count_classifier_runs_excludes_full_image_and_below_threshold(tmp_path)
 def test_all_nav_ids_covers_every_page():
     from db import ALL_NAV_IDS
     expected = {
+        "import",
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
         "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
-        "dashboard", "audit", "move", "compare",
-        "zoom_test", "settings", "workspace", "lightroom", "shortcuts",
+        "dashboard", "storage", "audit", "move", "compare",
+        "settings", "workspace", "shortcuts",
         "keywords", "duplicates", "logs",
     }
     assert expected == ALL_NAV_IDS
 
 
-def test_default_tabs_is_the_curated_nine():
+def test_default_tabs_are_direct_navigation():
     from db import DEFAULT_TABS
     assert DEFAULT_TABS == [
-        "browse", "pipeline", "pipeline_review",
-        "review", "cull", "jobs",
-        "highlights", "misses", "settings",
+        "import", "browse", "pipeline", "pipeline_review",
+        "review", "cull", "jobs", "highlights", "misses", "storage", "settings",
     ]
 
 
@@ -14614,3 +15941,373 @@ def test_workspace_active_labels_survive_non_dict_overrides(tmp_path):
         # Setter must replace the junk rather than crash on item assignment.
         db.set_workspace_active_labels(["birds.txt"])
         assert db.get_workspace_active_labels() == ["birds.txt"]
+
+
+def test_edit_presets_crud_strips_geometry(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    assert db.list_edit_presets() == []
+
+    preset = db.save_edit_preset(
+        "High-ISO forest",
+        {
+            "rotation": 90,
+            "crop": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "adjustments": {"exposure": 0.5, "noise_reduction": 40},
+        },
+    )
+    assert preset["name"] == "High-ISO forest"
+    assert preset["recipe"] == {
+        "version": 1,
+        "adjustments": {"exposure": 0.5, "noise_reduction": 40.0},
+    }
+
+    listed = db.list_edit_presets()
+    assert len(listed) == 1
+    assert listed[0]["id"] == preset["id"]
+    assert listed[0]["recipe"]["adjustments"]["noise_reduction"] == 40.0
+
+
+def test_edit_preset_upserts_by_trimmed_name(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    first = db.save_edit_preset("Backlit  ", {"adjustments": {"exposure": 1}})
+    second = db.save_edit_preset(
+        " Backlit", {"adjustments": {"shadows": 30}}
+    )
+
+    assert first["name"] == "Backlit"
+    assert second["id"] == first["id"]
+    listed = db.list_edit_presets()
+    assert len(listed) == 1
+    assert listed[0]["recipe"]["adjustments"] == {"shadows": 30.0}
+
+
+def test_edit_presets_list_sorted_by_name(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    for name in ("zebra dusk", "Backlit", "high-ISO forest"):
+        db.save_edit_preset(name, {"adjustments": {"contrast": 10}})
+
+    names = [p["name"] for p in db.list_edit_presets()]
+    assert names == sorted(names, key=str.casefold)
+
+
+def test_edit_preset_rejects_empty_or_geometry_only(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    with pytest.raises(ValueError):
+        db.save_edit_preset("Nothing", {})
+    with pytest.raises(ValueError):
+        db.save_edit_preset("Geometry only", {"rotation": 90})
+    with pytest.raises(ValueError):
+        db.save_edit_preset("Zeroed", {"adjustments": {"exposure": 0}})
+    assert db.list_edit_presets() == []
+
+
+def test_edit_preset_rejects_blank_or_overlong_name(tmp_path):
+    import pytest
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+
+    with pytest.raises(ValueError):
+        db.save_edit_preset("   ", {"adjustments": {"exposure": 1}})
+    with pytest.raises(ValueError):
+        db.save_edit_preset("x" * 200, {"adjustments": {"exposure": 1}})
+
+
+def test_delete_edit_preset(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    preset = db.save_edit_preset("Doomed", {"adjustments": {"exposure": 1}})
+
+    assert db.delete_edit_preset(preset["id"]) is True
+    assert db.delete_edit_preset(preset["id"]) is False
+    assert db.list_edit_presets() == []
+
+
+def test_import_tab_in_nav_registries(tmp_path):
+    """import/process split PR 3 + import-page-routing PR: the Import
+    tab must be in every server registry, and must be the leftmost/
+    first pinned page in DEFAULT_TABS since Import is now the natural
+    starting workflow for new workspaces."""
+    from db import ALL_NAV_IDS, DEFAULT_TABS, Database
+
+    assert "import" in ALL_NAV_IDS
+    assert DEFAULT_TABS[0] == "import", DEFAULT_TABS
+
+    db = Database(str(tmp_path / "t.db"))
+    db.set_tabs(["import", "browse"])
+    assert db.get_tabs()[:2] == ["import", "browse"]
+
+
+def test_existing_workspaces_gain_import_tab(tmp_path):
+    """A pre-split workspace tabs row gets Import inserted leftmost on init."""
+    import json as json_mod
+
+    from db import Database
+
+    db_path = str(tmp_path / "m.db")
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    old = ["browse", "pipeline", "review"]
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json_mod.dumps(old), ws),
+    )
+    # A real pre-split DB was written by a version that never set
+    # PRAGMA user_version, so it reads back as 0. The fresh Database
+    # above already bumped it to 4; reset it so the second init runs
+    # every guarded tabs migration from scratch.
+    db.conn.execute("PRAGMA user_version = 0")
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    tabs = db2.get_tabs()
+    assert "import" in tabs
+    assert tabs[0] == "import"
+
+
+def test_import_tab_migration_not_reapplied_after_unpin(tmp_path):
+    """Once the import-tab migration has run, a subsequent unpin must
+    stay unpinned — the migration is guarded by PRAGMA user_version so
+    every ``Database`` re-open doesn't silently re-add ``import``.
+    """
+    import json as json_mod
+
+    from db import Database
+
+    db_path = str(tmp_path / "m.db")
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    # User unpins ``import`` after the migration has already run.
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json_mod.dumps(["browse", "pipeline", "review"]), ws),
+    )
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    assert "import" not in db2.get_tabs()
+
+
+def test_existing_workspaces_gain_storage_tab(tmp_path):
+    """Existing saved tabs get Storage once so moved cache controls stay visible."""
+    import json as json_mod
+
+    from db import Database
+
+    db_path = str(tmp_path / "m.db")
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    old = ["browse", "pipeline", "review", "settings"]
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json_mod.dumps(old), ws),
+    )
+    db.conn.execute("PRAGMA user_version = 1")
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    tabs = db2.get_tabs()
+    assert "storage" in tabs
+    assert tabs.index("storage") == tabs.index("settings") - 1
+
+
+def test_storage_tab_migration_not_reapplied_after_unpin(tmp_path):
+    """Once the storage-tab migration has run, a later unpin stays unpinned."""
+    import json as json_mod
+
+    from db import Database
+
+    db_path = str(tmp_path / "m.db")
+    db = Database(db_path)
+    ws = db._active_workspace_id
+    db.conn.execute(
+        "UPDATE workspaces SET tabs = ? WHERE id = ?",
+        (json_mod.dumps(["browse", "pipeline", "review", "settings"]), ws),
+    )
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(db_path)
+    db2.set_active_workspace(ws)
+    assert "storage" not in db2.get_tabs()
+
+
+# ---------------------------------------------------------------------------
+# Life list explorer (taxonomic completeness) — shared taxa seeding helper
+# ---------------------------------------------------------------------------
+
+def _seed_bird_taxonomy(db):
+    """Insert a tiny Aves subtree: class Aves > 2 orders > families > genera > species.
+    Returns dict of name -> taxa id."""
+    rows = [
+        # (inat_id, name, common_name, rank, parent_name, kingdom)
+        (3,     "Aves",           "Birds",         "class",   None,             "Animalia"),
+        (7251,  "Passeriformes",  "Perching Birds","order",   "Aves",           "Animalia"),
+        (67566, "Passerellidae",  "New World Sparrows","family","Passeriformes", "Animalia"),
+        (9100,  "Melospiza",      None,            "genus",   "Passerellidae",  "Animalia"),
+        (9101,  "Melospiza melodia","Song Sparrow","species", "Melospiza",      "Animalia"),
+        (9102,  "Melospiza georgiana","Swamp Sparrow","species","Melospiza",    "Animalia"),
+        (9200,  "Zonotrichia",    None,            "genus",   "Passerellidae",  "Animalia"),
+        (9201,  "Zonotrichia albicollis","White-throated Sparrow","species","Zonotrichia","Animalia"),
+        (4000,  "Anseriformes",   "Waterfowl",     "order",   "Aves",           "Animalia"),
+        (4100,  "Anatidae",       "Ducks",         "family",  "Anseriformes",   "Animalia"),
+        (4200,  "Anas",           None,            "genus",   "Anatidae",       "Animalia"),
+        (4201,  "Anas platyrhynchos","Mallard",    "species", "Anas",           "Animalia"),
+    ]
+    ids = {}
+    for inat_id, name, common, rank, parent, kingdom in rows:
+        parent_id = ids.get(parent)
+        cur = db.conn.execute(
+            "INSERT INTO taxa (inat_id, name, common_name, rank, parent_id, kingdom)"
+            " VALUES (?,?,?,?,?,?)",
+            (inat_id, name, common, rank, parent_id, kingdom),
+        )
+        ids[name] = cur.lastrowid
+    db.conn.commit()
+    return ids
+
+
+def test_get_default_explorer_root_finds_aves(db):
+    assert db.get_explorer_root() is None  # no taxonomy yet
+    ids = _seed_bird_taxonomy(db)
+    root = db.get_explorer_root()
+    assert root["id"] == ids["Aves"]
+    assert root["name"] == "Aves"
+    assert root["rank"] == "class"
+
+
+def test_life_list_taxon_ids_scope(db):
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p1 = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                      file_size=1, file_mtime=1.0, timestamp='2024-01-01T00:00:00')
+    p2 = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                      file_size=1, file_mtime=2.0, timestamp='2024-01-02T00:00:00')
+    # Matched species keyword (linked to Song Sparrow taxon)
+    k1 = db.add_keyword('Song Sparrow')
+    db.tag_photo(p1, k1)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k1))
+    db.conn.commit()
+    # Unmatched species keyword (is_species but no taxon_id)
+    k2 = db.add_keyword('Mystery Warbler')
+    db.tag_photo(p2, k2)
+    db.conn.execute("UPDATE keywords SET is_species=1 WHERE id=?", (k2,))
+    db.conn.commit()
+
+    found = db.get_life_list_taxon_ids()
+    assert found == {ids['Melospiza melodia']}
+    unmatched = db.get_life_list_unmatched_species()
+    assert 'Mystery Warbler' in unmatched
+
+
+def test_life_list_taxon_ids_excludes_non_species_matches(db):
+    # A taxonomy tag that resolves to a genus (or any rank above species) must
+    # NOT show up as a "found" taxon — the explorer only counts at species rank
+    # and would otherwise silently drop the match. It should surface in the
+    # unmatched list instead so the "not counted" honesty footnote is accurate.
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    # Tag with a keyword that links to the Melospiza *genus*, not a species.
+    k = db.add_keyword('Melospiza sp.')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza'], k))
+    db.conn.commit()
+
+    assert db.get_life_list_taxon_ids() == set()
+    unmatched = db.get_life_list_unmatched_species()
+    assert 'Melospiza sp.' in unmatched
+
+
+def test_life_list_taxon_ids_excludes_rejected(db):
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=1, file_mtime=1.0)
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+    db.update_photo_flag(p, 'rejected')
+    assert db.get_life_list_taxon_ids() == set()
+
+
+def test_get_taxon_subtree(db):
+    ids = _seed_bird_taxonomy(db)
+    rows = db.get_taxon_subtree(ids['Aves'])
+    by_name = {r['name']: r for r in rows}
+    assert by_name['Aves']['rank'] == 'class'
+    assert by_name['Melospiza melodia']['rank'] == 'species'
+    # parent linkage preserved
+    assert by_name['Passeriformes']['parent_id'] == ids['Aves']
+    assert by_name['Melospiza']['parent_id'] == ids['Passerellidae']
+    # subtree of a genus is just its species + itself
+    sub = {r['name'] for r in db.get_taxon_subtree(ids['Melospiza'])}
+    assert sub == {'Melospiza', 'Melospiza melodia', 'Melospiza georgiana'}
+
+
+def test_get_classes_for_taxa(db):
+    ids = _seed_bird_taxonomy(db)
+    classes = db.get_classes_for_taxa({ids['Melospiza melodia']})
+    assert [c['name'] for c in classes] == ['Aves']
+    assert db.get_classes_for_taxa(set()) == []
+
+
+def test_get_classes_for_taxa_chunks_large_id_lists(db):
+    """`/api/life-list/explorer` passes the whole life-list `found` set, which can
+    exceed SQLite's bound-parameter limit — the query must chunk and merge."""
+    from vireo.db import _SQLITE_PARAM_CHUNK_SIZE
+    ids = _seed_bird_taxonomy(db)
+    # A pile of non-existent taxon ids (well above the chunk size) plus one real
+    # species id. A single un-chunked IN () would exceed SQLite's parameter cap;
+    # the chunked implementation must still find Aves via the real id.
+    n_fillers = _SQLITE_PARAM_CHUNK_SIZE * 3 + 25
+    seed = {10_000_000 + i for i in range(n_fillers)}
+    seed.add(ids['Melospiza melodia'])
+    classes = db.get_classes_for_taxa(seed)
+    assert [c['name'] for c in classes] == ['Aves']
+
+
+def test_best_photo_by_taxon(db):
+    ids = _seed_bird_taxonomy(db)
+    ws = db.ensure_default_workspace()
+    db.set_active_workspace(ws)
+    fid = db.add_folder('/p', name='p')
+    p1 = db.add_photo(folder_id=fid, filename='low.jpg', extension='.jpg',
+                      file_size=1, file_mtime=1.0)
+    p2 = db.add_photo(folder_id=fid, filename='high.jpg', extension='.jpg',
+                      file_size=1, file_mtime=2.0)
+    # No update_photo_quality_score helper in db.py; set the column directly.
+    db.conn.execute("UPDATE photos SET quality_score=? WHERE id=?", (0.2, p1))
+    db.conn.execute("UPDATE photos SET quality_score=? WHERE id=?", (0.9, p2))
+    db.conn.commit()
+    k = db.add_keyword('Song Sparrow')
+    db.tag_photo(p1, k)
+    db.tag_photo(p2, k)
+    db.conn.execute("UPDATE keywords SET is_species=1, taxon_id=? WHERE id=?",
+                    (ids['Melospiza melodia'], k))
+    db.conn.commit()
+    best = db.get_life_list_best_photo_by_taxon([ids['Melospiza melodia']])
+    assert best[ids['Melospiza melodia']]['filename'] == 'high.jpg'

@@ -30,9 +30,15 @@
     <div class="section-title">Folders</div>
     <div id="wsFoldersContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
     <div style="margin-top:12px;border-top:1px solid var(--border-primary);padding-top:12px;">
-      <a href="/pipeline" class="btn btn-secondary" style="text-decoration:none;display:inline-block;">+ Add Folder</a>
-      <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Opens the Process page to add and scan a folder</div>
+      <a href="/import" class="btn btn-secondary" style="text-decoration:none;display:inline-block;">+ Import Photos</a>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Add folders in place or copy photos into an archive</div>
     </div>
+  </div>
+
+  <!-- Work Locally -->
+  <div class="section">
+    <div class="section-title">Work Locally</div>
+    <div id="localWorkspaceContent"><span style="color:var(--text-ghost);font-size:13px;">Loading...</span></div>
   </div>
 
   <!-- Subject Types -->
@@ -93,11 +99,24 @@
   </div>
 </div>
 
+<!-- Shared local-folder bulk actions -->
+<div class="modal-overlay" id="localFoldersModal">
+  <div class="modal">
+    <h3 style="margin:0 0 8px 0;font-size:16px;">Finish Local Work</h3>
+    <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-bottom:14px;">
+      Choose which local folders to act on. Shared folders affect every linked workspace.
+    </div>
+    <div id="localFoldersModalItems"></div>
+    <div class="modal-actions" style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="modal-btn modal-btn-primary" id="syncSelectedLocalFolders">Sync Selected Back</button>
+      <button class="modal-btn" id="discardSelectedLocalFolders" style="color:var(--danger);">Discard Selected</button>
+      <button class="modal-btn" id="closeLocalFoldersModal">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/vireo-work-locally.js"></script>
 <script>
-loadWsFolders();
-loadHistory();
-loadWorkspaces();
-loadSubjectTypes();
 
 /* ---------- Subject Types ---------- */
 async function loadSubjectTypes() {
@@ -158,13 +177,32 @@ async function loadWsFolders() {
       var html = '';
       ws.folders.forEach(function(f) {
         _wsFoldersById[f.id] = f;
+        var local = window.vireoLocalFolders ? window.vireoLocalFolders.statusFor(f.id) : null;
+        var displayPath = local && local.display_path ? local.display_path : f.path;
         html += '<div class="setting-row">';
         html += '<label style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;">';
         html += '<input type="checkbox" class="folder-move-cb" value="' + f.id + '" onchange="updateMoveBtn()" style="accent-color:var(--accent);">';
-        html += '<span style="flex:1;min-width:0;font-family:monospace;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeAttr(f.path) + '">' + escapeHtml(f.path) + '</span>';
+        html += '<span style="flex:1;min-width:0;font-family:monospace;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeAttr(displayPath) + '">' + escapeHtml(displayPath) + '</span>';
         var n = f.workspace_photo_count || 0;
         html += '<span style="flex-shrink:0;color:var(--text-faint);font-size:12px;">' + n.toLocaleString() + ' photo' + (n === 1 ? '' : 's') + '</span>';
         html += '</label>';
+        if (local) {
+          if (local.state === 'remote') {
+            html += '<button onclick="vireoLocalFolders.stage(' + f.id + ')" class="btn btn-secondary" style="padding:4px 9px;font-size:11px;">Work Locally</button>';
+          } else if (local.state === 'staging') {
+            html += '<span style="font-size:11px;color:var(--warning);">Copying...</span>';
+          } else if (local.state === 'recovery' && local.recovery_kind !== 'sync') {
+            html += '<span style="font-size:11px;color:var(--warning);">Local copy needs cleanup</span>';
+            html += '<button onclick="vireoLocalFolders.discard(' + f.id + ')" class="btn btn-secondary" style="padding:4px 9px;font-size:11px;color:var(--danger);">Clean Up</button>';
+          } else {
+            var sharedCount = (local.workspace_ids || []).length;
+            html += '<span style="font-size:10px;color:var(--accent);background:rgba(36,229,202,0.1);padding:2px 7px;border-radius:3px;" title="' +
+              (sharedCount > 1 ? 'Shared by ' + sharedCount + ' workspaces' : 'Using managed local storage') + '">Local' +
+              (sharedCount > 1 ? ' · ' + sharedCount + ' workspaces' : '') + '</span>';
+            html += '<button onclick="vireoLocalFolders.sync(' + f.id + ')" class="btn btn-secondary" style="padding:4px 9px;font-size:11px;">Sync Back</button>';
+            html += '<button onclick="vireoLocalFolders.discard(' + f.id + ')" class="btn btn-secondary" style="padding:4px 9px;font-size:11px;color:var(--danger);">Discard</button>';
+          }
+        }
         html += '<button onclick="removeFolderFromWs(' + ws.id + ', ' + f.id + ')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:16px;" title="Remove from workspace">&times;</button>';
         html += '</div>';
       });
@@ -404,6 +442,11 @@ async function doMoveFolders() {
     errEl.style.display = 'block';
   }
 }
+
+loadWsFolders();
+loadHistory();
+loadWorkspaces();
+loadSubjectTypes();
 
 </script>
 </body>

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vireo"
-version = "0.13.0"
+version = "0.24.1"
 description = "AI-powered wildlife photo organizer"
 requires-python = ">=3.11"
 dependencies = [
@@ -21,6 +21,7 @@ dependencies = [
     "exifread>=3.0",
     "send2trash>=1.8.0",
     "tokenizers>=0.21.0",
+    "waitress>=3.0.2",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +51,7 @@ dev = [
     "pytest>=9.0",
     "pytest-cov>=6.0",
     "pytest-playwright>=0.7",
+    "pytest-rerunfailures>=15.0",
     "pytest-timeout>=2.3",
     "pytest-xdist>=3.6",
     "ruff>=0.11",

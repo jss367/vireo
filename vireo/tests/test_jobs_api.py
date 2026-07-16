@@ -2,6 +2,7 @@ import json
 import os
 import time
 
+import pytest
 from PIL import Image
 from wait import wait_for_job_via_client, wait_for_job_via_runner
 
@@ -502,6 +503,7 @@ def test_pipeline_job_rejects_macos_other_app_bundle(app_and_db, tmp_path):
         assert "macos" in resp.get_json()["error"].lower()
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_job_rejects_relative_destination(app_and_db, tmp_path):
     """Pipeline endpoint should reject relative destination paths."""
     app, _ = app_and_db
@@ -634,6 +636,8 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
     """Install-exiftool endpoint should exist and return JSON."""
     import shutil
     import subprocess
+    import sys
+    monkeypatch.setattr(sys, "platform", "darwin")
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/local/bin/brew" if cmd == "brew" else (None if cmd == "exiftool" else original_which(cmd)))
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0, "stderr": ""})())
@@ -648,6 +652,8 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
 def test_install_exiftool_fails_without_brew(app_and_db, monkeypatch):
     """Install endpoint should fail gracefully when brew is not available."""
     import shutil
+    import sys
+    monkeypatch.setattr(sys, "platform", "darwin")
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: None if cmd in ("brew", "exiftool") else original_which(cmd))
     app, _ = app_and_db
@@ -680,6 +686,37 @@ def test_pipeline_job_with_collection_returns_job_id(app_and_db):
         data = resp.get_json()
         assert "job_id" in data
         assert data["job_id"].startswith("pipeline-")
+
+
+def test_pipeline_job_config_includes_collection_name(app_and_db, monkeypatch):
+    """Collection-scoped jobs carry the collection name for the Jobs page."""
+    import json
+
+    import pipeline_job
+    from db import Database
+
+    app, _ = app_and_db
+    db = Database(app.config["DB_PATH"])
+    db.set_active_workspace(db._active_workspace_id)
+    col_id = db.add_collection("Costa Rica selects", json.dumps([]))
+
+    def fake_run(job, runner, db_path, workspace_id, params, thumb_cache_dir=None,
+                 **_kwargs):
+        return {"ok": True}
+
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", fake_run)
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "skip_classify": True,
+            "skip_extract_masks": True,
+            "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["collection_id"] == col_id
+        assert cfg["collection_name"] == "Costa Rica selects"
 
 
 def test_pipeline_auto_skips_classify_when_no_model(app_and_db):
@@ -940,6 +977,7 @@ def test_job_export_invalid_max_size(app_and_db, tmp_path):
     assert "max_size must be a positive integer" in resp.get_json()["error"]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_pipeline_ingest_saves_recent_destination(app_and_db, tmp_path, monkeypatch):
     """Starting a pipeline with a destination saves it to recent_destinations in config."""
     import config as cfg
@@ -965,6 +1003,7 @@ def test_pipeline_ingest_saves_recent_destination(app_and_db, tmp_path, monkeypa
     assert config["ingest"]["recent_destinations"] == [str(dst)]
 
 
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
 def test_recent_destinations_deduplicates_and_limits(app_and_db, tmp_path, monkeypatch):
     """Recent destinations deduplicates and limits to 5 entries."""
     import config as cfg
@@ -1361,7 +1400,7 @@ def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, 
 
     # Mock ExifTool so the test doesn't depend on the binary.
     import scanner
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
@@ -1434,7 +1473,7 @@ def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, m
     db.conn.commit()
 
     import scanner
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
@@ -1558,7 +1597,7 @@ def test_pipeline_repair_does_not_double_process_thumbnails(
     db.conn.commit()
 
     import scanner
-    def fake_extract(paths, restricted_tags=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
@@ -2179,3 +2218,2104 @@ def test_cancel_queued_endpoint_leaves_other_workspaces_alone(app_and_db):
         # Cancel the surviving queued job so the test fixture's
         # teardown isn't waiting on a pipeline that will never run.
         runner.cancel_job(queued_b)
+
+
+# ---------------------------------------------------------------------------
+# Remote (SSH) archive destination for /api/jobs/pipeline — request
+# validation. These must all reject BEFORE any job starts, so no SSH/rsync
+# seams need faking here; end-to-end runs live in test_pipeline_job.py.
+# ---------------------------------------------------------------------------
+
+def _save_remote_target(monkeypatch, tmp_path, **overrides):
+    """Save one valid remote target into the test-isolated config and make
+    the POST-time GNU-rsync resolution succeed without touching the host."""
+    import config as cfg
+    import move as move_mod
+
+    entry = {
+        "id": "nas1", "name": "NAS", "host": "nas", "user": "me",
+        "remote_path": "/volume1/Photography",
+        "mount_path": str(tmp_path / "mount"),
+    }
+    entry.update(overrides)
+    cfg.save({"remote_targets": [entry]})
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": "/usr/bin/rsync",
+    )
+    # resolve_rsync_bin returns any executable path an operator explicitly
+    # configured, so the import/pipeline route additionally verifies the
+    # candidate is GNU rsync (Apple openrsync can't drive SSH). Stub the
+    # check so happy-path tests don't depend on a real GNU rsync being
+    # installed in the CI environment.
+    monkeypatch.setattr(move_mod, "is_gnu_rsync", lambda _rb: True)
+    # The remote-archive preflight also probes for an OpenSSH client
+    # (added for Windows). Stub so happy-path tests don't require ssh
+    # in the CI environment.
+    monkeypatch.setattr(
+        move_mod, "resolve_ssh_bin", lambda configured="": "/usr/bin/ssh",
+    )
+    return entry
+
+
+def _remote_pipeline_body(src, **overrides):
+    body = {
+        "sources": [str(src)],
+        "remote_target_id": "nas1",
+        "remote_subpath": "2026/trip",
+        "local_processing": True,
+        "skip_classify": True,
+        "skip_extract_masks": True,
+        "skip_regroup": True,
+    }
+    body.update(overrides)
+    return body
+
+
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
+def test_pipeline_remote_archive_rejects_both_destinations(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(
+        src, destination=str(tmp_path / "archive"),
+    ))
+    assert resp.status_code == 400
+    assert "mutually exclusive" in resp.get_json()["error"]
+
+
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
+def test_pipeline_remote_archive_unknown_target_404(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(
+        src, remote_target_id="nope",
+    ))
+    assert resp.status_code == 404
+    assert "not found" in resp.get_json()["error"].lower()
+
+
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
+def test_pipeline_remote_archive_requires_local_processing(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(
+        src, local_processing=False,
+    ))
+    assert resp.status_code == 400
+    assert "local_processing" in resp.get_json()["error"]
+
+
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
+def test_pipeline_remote_archive_requires_subpath(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """No subpath means no archive-folder name: move_folder lands the staged
+    folder inside a parent keeping its name, and the subpath's last segment
+    IS that name. An empty subpath must 400, not silently merge the import
+    into the target's base directory."""
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(
+        src, remote_subpath="",
+    ))
+    assert resp.status_code == 400
+    assert "remote_subpath" in resp.get_json()["error"]
+
+
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
+def test_pipeline_remote_archive_rejects_traversal_subpath(
+    app_and_db, tmp_path, monkeypatch,
+):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    for bad in ("../escape", "/absolute/path"):
+        resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(
+            src, remote_subpath=bad,
+        ))
+        assert resp.status_code == 400, bad
+
+
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
+def test_pipeline_remote_archive_requires_mount_path(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A target with no local mount path can't keep archived photos in the
+    library (the catalog is repointed at the mount path after the move) —
+    mirror the move-folder endpoint's refusal."""
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path, mount_path="")
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(src))
+    assert resp.status_code == 400
+    assert "mount path" in resp.get_json()["error"]
+
+
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
+def test_pipeline_remote_archive_requires_gnu_rsync(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import move as move_mod
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": None,
+    )
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(src))
+    assert resp.status_code == 400
+    assert "rsync" in resp.get_json()["error"].lower()
+
+
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
+def test_pipeline_local_processing_requires_destination_or_remote(
+    app_and_db, tmp_path,
+):
+    app, _ = app_and_db
+    src = tmp_path / "card"
+    src.mkdir()
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json={
+        "sources": [str(src)],
+        "local_processing": True,
+        "skip_classify": True,
+        "skip_extract_masks": True,
+        "skip_regroup": True,
+    })
+    assert resp.status_code == 400
+    err = resp.get_json()["error"]
+    assert "destination" in err and "remote target" in err
+
+
+@pytest.mark.skip(reason="retired pipeline import/archive destination path")
+def test_pipeline_remote_archive_snapshots_target_at_enqueue(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The endpoint must capture the resolved remote target onto
+    ``PipelineParams.remote_target_snapshot`` at Start-click time. Otherwise a
+    queued pipeline that runs after a settings edit would archive to a
+    different host/mount than the jobs panel is showing — the point of the
+    move-folder endpoint's build-spec-before-enqueue pattern."""
+    import pipeline_job
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    src = tmp_path / "card"
+    src.mkdir()
+
+    captured = {}
+
+    def fake_run(job, runner, db_path, workspace_id, params,
+                 thumb_cache_dir=None, **_kwargs):
+        captured["params"] = params
+        return {}
+
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", fake_run)
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/pipeline", json=_remote_pipeline_body(src))
+    assert resp.status_code == 200, resp.get_json()
+
+    from wait import wait_for_job_via_runner
+    wait_for_job_via_runner(app._job_runner, resp.get_json()["job_id"])
+
+    params = captured.get("params")
+    assert params is not None, "fake run_pipeline_job was never invoked"
+    snap = params.remote_target_snapshot
+    assert snap is not None, (
+        "PipelineParams must carry a snapshot of the resolved target so the "
+        "queued run archives to what the user picked, not to whatever the "
+        "saved target got edited to before the slot opened"
+    )
+    assert snap["id"] == "nas1"
+    assert snap["host"] == "nas"
+    assert snap["user"] == "me"
+    assert snap["remote_path"] == "/volume1/Photography"
+    assert snap["mount_path"] == str(tmp_path / "mount")
+
+
+# ---------------------------------------------------------------------------
+# strategy param on /api/jobs/pipeline (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def _make_collection(app):
+    import json as json_mod
+
+    from db import Database
+
+    db = Database(app.config["DB_PATH"])
+    db.set_active_workspace(db._active_workspace_id)
+    return db.add_collection("Strategy test", json_mod.dumps([]))
+
+
+def _job_config(client, job_id):
+    resp = client.get(f"/api/jobs/{job_id}")
+    assert resp.status_code == 200
+    return resp.get_json()["config"]
+
+
+def _fake_active_model(monkeypatch):
+    """Keep the route's no-model auto-skip from firing so process flags
+    survive to the job config unmangled."""
+    import models
+
+    monkeypatch.setattr(models, "get_active_model", lambda: {"id": "fake"})
+
+
+def _process_id(db, name):
+    return next(p["id"] for p in db.get_saved_processes() if p["name"] == name)
+
+
+def test_pipeline_process_id_expands_flags(app_and_db):
+    app, db = app_and_db
+    pid = _process_id(db, "Quick look")
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": pid,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["process_id"] == pid
+        assert cfg["skip_classify"] is True
+        assert cfg["skip_extract_masks"] is True
+        assert cfg["skip_regroup"] is True
+
+
+def test_pipeline_identify_process_keeps_classify_only(app_and_db, monkeypatch):
+    app, db = app_and_db
+    pid = _process_id(db, "Identify birds")
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": pid,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["process_id"] == pid
+        assert cfg["skip_classify"] is False
+        assert cfg["skip_extract_masks"] is True
+        assert cfg["skip_regroup"] is True
+        assert cfg["miss_enabled"] is False
+        # Only Identify birds opts into the species-only save path — the flag
+        # that gates regroup_stage's ``run_species_review_pipeline`` call.
+        # Without it, a Custom body posting ``skip_regroup: true`` would
+        # incorrectly land there too.
+        assert cfg["review_mode"] == "species"
+
+
+def test_pipeline_cull_ready_pins_miss_enabled_false(app_and_db, monkeypatch):
+    # Quick look alone can't prove miss_enabled reached PipelineParams:
+    # it also sets skip_classify=True, and the misses stage is downstream
+    # of classify, so an implementation that never wires the process's
+    # miss_enabled through to params would still produce a run without
+    # misses (by dint of skip_classify) and this test would go green.
+    # Cull-ready has skip_classify=False + miss_enabled=False, so the
+    # only way misses can be suppressed is if the process's miss_enabled
+    # actually reaches PipelineParams — that's the property pinned here.
+    app, db = app_and_db
+    pid = _process_id(db, "Cull-ready")
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": pid,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["process_id"] == pid
+        assert cfg["miss_enabled"] is False
+        assert cfg["skip_classify"] is False  # Cull-ready keeps classify on
+
+
+def test_pipeline_full_process_opts_into_eye_detection(app_and_db, monkeypatch):
+    # A saved process with Eye Keypoints on (the "Full" seed:
+    # skip_eye_keypoints=False) run by id must set eye_detect_override=True, so
+    # the eye stage runs instead of deferring to the workspace's
+    # eye_detect_enabled default (False) and silently skipping — mirroring what
+    # checking the Eye Keypoints box on the Process page does.
+    app, db = app_and_db
+    pid = _process_id(db, "Full")
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": pid,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["eye_detect_override"] is True
+
+
+def test_pipeline_eyes_off_process_leaves_eye_override_none(app_and_db, monkeypatch):
+    # A process with Eye Keypoints off (Identify birds) must NOT force the eye
+    # override — nothing to opt into, and the workspace default still governs.
+    app, db = app_and_db
+    pid = _process_id(db, "Identify birds")
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": pid,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["eye_detect_override"] is None
+
+
+def test_pipeline_unknown_process_id_404(app_and_db):
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": 999999,
+        })
+        assert resp.status_code == 404
+        assert "unknown process id" in resp.get_json()["error"]
+
+
+def test_pipeline_null_process_id_400(app_and_db):
+    # The "no process" case is expressed by NOT calling /api/jobs/pipeline.
+    # A present-but-null process_id must 400 so the server never silently
+    # falls through to default processing when a caller thought they were
+    # opting out. Distinct from "unknown process id" — null is a shape error.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": None,
+        })
+        assert resp.status_code == 400
+        assert "process_id" in resp.get_json()["error"]
+
+
+def test_pipeline_non_int_process_id_400(app_and_db):
+    # A string process_id is a shape error too.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": "quick_look",
+        })
+        assert resp.status_code == 400
+
+
+def test_pipeline_omitted_process_id_uses_body_params(app_and_db):
+    # No `process_id` key at all -> the route builds PipelineParams from the
+    # body as usual. Distinguishing "omitted" from "null" is exactly why the
+    # route must check key presence, not truthiness.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={"collection_id": col_id})
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg.get("process_id") is None
+
+
+def test_pipeline_legacy_strategy_field_rejected(app_and_db):
+    # The previous /api/jobs/pipeline shape accepted a "strategy" name
+    # ("quick_look", "identify", "full", "cull_ready") and expanded it to
+    # stage flags. That vocabulary was replaced by saved-process ids; a
+    # caller still sending the old field must get a 400 instead of the
+    # request silently falling through to a default full-pipeline run
+    # (reclassifying/regrouping the whole collection unasked).
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "strategy": "quick_look",
+        })
+        assert resp.status_code == 400
+        assert "strategy" in resp.get_json()["error"]
+
+
+def test_pipeline_explicit_flags_beat_process(app_and_db, monkeypatch):
+    # A caller may pin one flag on top of a process; explicit wins. The
+    # fake model keeps the no-model auto-skip from flipping the same flags
+    # and masking a broken merge order.
+    app, db = app_and_db
+    pid = _process_id(db, "Full")
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "process_id": pid, "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["skip_regroup"] is True
+        assert cfg["skip_classify"] is False
+        # Full's ``review_mode`` is None. Pinning ``skip_regroup=True`` on
+        # top of it must NOT bleed the identify preset's species-only
+        # save path in — the regroup stage should skip cleanly instead of
+        # overwriting the workspace cache with all-REVIEW output.
+        assert cfg.get("review_mode") is None
+
+
+def test_pipeline_skip_regroup_without_strategy_has_no_review_mode(
+    app_and_db, monkeypatch,
+):
+    # No strategy at all + ``skip_regroup: true`` — the exact shape the
+    # reviewer flagged: an API client refreshing classifications without
+    # touching grouping. The species-only cache write must not fire, so
+    # ``review_mode`` must be None in the resulting job config.
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    _fake_active_model(monkeypatch)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["skip_regroup"] is True
+        assert cfg.get("review_mode") is None
+
+
+# ---------------------------------------------------------------------------
+# folder-scoped process runs (import/process split PR 1)
+# ---------------------------------------------------------------------------
+
+
+def _folder_id_by_path(db, path):
+    row = db.conn.execute(
+        "SELECT id FROM folders WHERE path = ?", (path,)
+    ).fetchone()
+    assert row is not None, f"fixture folder missing: {path}"
+    return row["id"]
+
+
+def _collection_photo_ids(db, collection_id):
+    return sorted(
+        p["id"] for p in db.get_collection_photos(collection_id, per_page=999999)
+    )
+
+
+def _photo_ids_in_folders(db, folder_ids):
+    marks = ",".join("?" for _ in folder_ids)
+    rows = db.conn.execute(
+        f"SELECT id FROM photos WHERE folder_id IN ({marks})", folder_ids,
+    ).fetchall()
+    return sorted(r["id"] for r in rows)
+
+
+def test_pipeline_folder_ids_creates_adhoc_collection(app_and_db):
+    """A leaf folder scope becomes an ad-hoc collection of exactly that
+    folder's photos, and the run proceeds as a collection run."""
+    app, db = app_and_db
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [child_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg["collection_id"], cfg
+        assert _collection_photo_ids(db, cfg["collection_id"]) == \
+            _photo_ids_in_folders(db, [child_id])
+
+
+def test_pipeline_folder_ids_includes_descendants(app_and_db):
+    """Scoping to a workspace root must include photos in child folders —
+    the rest of the app treats a folder scope as its subtree (see
+    Database.get_folder_subtree_ids). A flat folder_id IN (...) over the
+    raw request would miss the bulk of a dated archive tree."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = _collection_photo_ids(db, cfg["collection_id"])
+        assert got == _photo_ids_in_folders(db, [root_id, child_id])
+        # Regression tripwire: the child's photos are the recursive part.
+        assert set(_photo_ids_in_folders(db, [child_id])) <= set(got)
+
+
+def test_pipeline_folder_ids_unlinked_folder_404(app_and_db):
+    """A folder not linked to the active workspace must 404, mirroring the
+    rescan guard — otherwise a stale UI could pollute this workspace with
+    another workspace's scan output."""
+    app, db = app_and_db
+    original_ws = db._active_workspace_id
+    other_ws = db.create_workspace("Other")
+    db.set_active_workspace(other_ws)
+    foreign_id = db.add_folder("/photos/elsewhere", name="elsewhere")
+    db.set_active_workspace(original_ws)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [foreign_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
+        })
+        assert resp.status_code == 404
+
+
+def test_pipeline_folder_ids_rejects_non_int(app_and_db):
+    """Malformed ids must 400 before touching SQLite, mirroring the
+    source_snapshot_id validation."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": ["../etc"], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
+        })
+        assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "bad_fid",
+    [
+        1 << 63,          # one past SQLite's signed 64-bit max
+        -(1 << 63) - 1,   # one below SQLite's signed 64-bit min
+        1 << 128,         # obviously out of range
+    ],
+)
+def test_pipeline_folder_ids_rejects_out_of_range_integer(app_and_db, bad_fid):
+    """A JSON-safe integer outside SQLite's signed 64-bit range must be
+    rejected with 400 before it reaches sqlite3 parameter binding.
+    Without the range guard, the workspace-linked lookup binds ``bad_fid``
+    directly and raises ``OverflowError``, which escapes as an opaque 500."""
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [bad_fid], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "folder_ids" in resp.get_json()["error"]
+
+
+def test_pipeline_folder_ids_includes_legacy_null_parent_descendants(app_and_db):
+    """A workspace root's ad-hoc collection must include descendant folders
+    whose ``parent_id`` is NULL even though their paths sit under the root.
+    Older databases carry such rows; ``get_folder_subtree_ids`` alone walks
+    ``folders.parent_id`` and drops them, so processing a workspace root
+    would silently skip legacy descendant photos the rest of the app still
+    treats as part of that folder subtree. Every other subtree consumer
+    (folder deletion, rescan, missing-originals) already reads through
+    ``_folder_subtree_ids_by_path`` — this route must too."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    # Insert a descendant folder whose path is under the root but whose
+    # parent_id is NULL — simulating a legacy row from a pre-parent_id
+    # backfill build. Link it to the active workspace so the route's
+    # workspace-safety filter can find it.
+    legacy_id = db.add_folder("/photos/2024/Legacy", name="Legacy")
+    db.conn.execute(
+        "UPDATE folders SET parent_id = NULL WHERE id = ?", (legacy_id,),
+    )
+    db.conn.commit()
+    db.add_workspace_folder(db._active_workspace_id, legacy_id, is_root=False)
+    legacy_photo = db.add_photo(
+        folder_id=legacy_id, filename="legacy.jpg", extension=".jpg",
+        file_size=42, file_mtime=42.0,
+    )
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = _collection_photo_ids(db, cfg["collection_id"])
+        assert legacy_photo in got, (
+            "legacy NULL-parent_id descendant was omitted from the "
+            "ad-hoc collection — path-prefix fallback missing"
+        )
+
+
+def test_pipeline_folder_ids_honors_exclude_paths(app_and_db):
+    """A folder-scoped run with ``exclude_paths`` must drop the deselected
+    photos from the ad-hoc collection itself. Once ``params.collection_id``
+    is set, ``run_pipeline_job`` takes the collection path and its
+    ``_filter_excluded`` helper only checks ``exclude_photo_ids``, so an
+    excluded path would otherwise still be thumbnailed, classified, and
+    regrouped. Filter at the materialization boundary so the collection
+    reflects exactly the photos the user asked to process."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    # Photos in the fixture are keyed on folder + filename; the effective
+    # "path" for exclude_paths matching is os.path.join(folder.path, filename)
+    # — same shape scanner/ingest use for their skip_paths sets.
+    excluded_root_file = os.path.join("/photos/2024", "bird1.jpg")
+    excluded_child_file = os.path.join(
+        "/photos/2024/January", "bird2.jpg",
+    )
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
+            "exclude_paths": [excluded_root_file, excluded_child_file],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = set(_collection_photo_ids(db, cfg["collection_id"]))
+        subtree = set(_photo_ids_in_folders(db, [root_id, child_id]))
+        # Only the non-excluded photo (bird3 in the root) remains.
+        remaining = {
+            r["id"] for r in db.conn.execute(
+                "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+                (root_id, "bird3.jpg"),
+            )
+        }
+        assert got == remaining
+        assert got < subtree, "exclusion produced no reduction — filter no-op"
+
+
+def test_pipeline_folder_ids_honors_exclude_photo_ids(app_and_db):
+    """The ad-hoc collection also drops photos in ``exclude_photo_ids`` so
+    its membership matches what the user selected — even though
+    ``_filter_excluded`` would drop them again downstream."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    child_id = _folder_id_by_path(db, "/photos/2024/January")
+    all_ids = _photo_ids_in_folders(db, [root_id, child_id])
+    excluded = all_ids[0]
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
+            "exclude_photo_ids": [excluded],
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = set(_collection_photo_ids(db, cfg["collection_id"]))
+        assert excluded not in got
+        assert got == set(all_ids) - {excluded}
+
+
+def test_pipeline_folder_ids_with_collection_id_400(app_and_db):
+    """Two scopes in one request is ambiguous — reject rather than pick."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "collection_id": col_id,
+        })
+        assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"source": "/tmp/foo"},
+        {"sources": ["/tmp/foo", "/tmp/bar"]},
+        {"source_snapshot_id": 999},
+    ],
+)
+def test_pipeline_folder_ids_with_other_scope_400(app_and_db, extra):
+    """Reject folder_ids combined with *any* other scope — not just
+    collection_id. Otherwise run_pipeline_job silently ignores the source
+    (because collection_id skips scanning) or clears the folder-derived
+    collection_id when a snapshot is present, and the job processes a
+    different scope than the request implied. Also verifies no stray
+    ad-hoc collection was inserted before the rejection: the check must
+    fire before ``add_collection`` runs."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400
+        assert "folder_ids cannot be combined with" in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+# os.path.abspath keeps the path shape on POSIX ("/abs/dest") but rewrites
+# it to a drive-anchored form on Windows ("C:\abs\dest"), so os.path.isabs
+# passes on both platforms and validation falls through to the later checks
+# each parametrized case is meant to exercise.
+_ABS_DEST = os.path.abspath("/abs/dest")
+
+
+@pytest.mark.parametrize(
+    "extra,fragment",
+    [
+        # Any destination is rejected outright for folder scope — the
+        # scope check fires before the absolute-path guard, because
+        # collection scope skips ingest and a copy destination would never
+        # be written. Both a relative and an absolute path trip this.
+        (
+            {"destination": "relative/path", "local_processing": False},
+            "import/archive fields are no longer accepted",
+        ),
+        (
+            {"destination": _ABS_DEST, "local_processing": False},
+            "import/archive fields are no longer accepted",
+        ),
+        # local_processing + destination + folder scope: same reject —
+        # destination check runs before the local_processing scope check.
+        (
+            {"local_processing": True, "destination": _ABS_DEST},
+            "import/archive fields are no longer accepted",
+        ),
+        # local_processing + folder scope without destination: this
+        # trips the "requires a destination or a remote target" guard
+        # (which fires before the local_processing + scope check).
+        (
+            {"local_processing": True},
+            "import/archive fields are no longer accepted",
+        ),
+        # Non-boolean miss_enabled — the type-check must fire BEFORE
+        # ``db.add_collection`` runs. Previously the check sat after
+        # materialization, so a rejected request like
+        # ``{"folder_ids": [...], "miss_enabled": "false"}`` left a stray
+        # "Process …" row behind.
+        (
+            {"miss_enabled": "false"},
+            "miss_enabled",
+        ),
+    ],
+)
+def test_pipeline_folder_ids_leaves_no_stray_collection_on_400(
+    app_and_db, extra, fragment,
+):
+    """A rejected folder-scope request must not leave a "Process …"
+    collection sitting in the workspace. The ad-hoc insert has to happen
+    after every other request check has passed, otherwise the workspace
+    accumulates junk every time the caller trips a later validation."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        assert fragment in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+def test_pipeline_folder_ids_rejects_plain_destination(app_and_db):
+    """Regression for the Codex review on commit 459e092: a folder-scoped
+    request with ``destination`` and ``local_processing=False`` was
+    previously accepted, materializing the ad-hoc collection and queuing a
+    job whose ingest step could never run (``collection_id`` sets
+    ``skip_scan``). Reject at request time so the user gets a clean 400
+    instead of a queued-but-broken run."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id],
+            "destination": _ABS_DEST,
+            "local_processing": False,
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "import/archive fields" in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+def test_pipeline_collection_id_rejects_plain_destination(app_and_db):
+    """Same reasoning as the folder-scope regression above, applied to
+    the equivalent ``collection_id + destination`` case: any collection
+    scope sets ``skip_scan`` in run_pipeline_job, so the ingest block
+    that would copy to ``destination`` never runs."""
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id,
+            "destination": _ABS_DEST,
+            "local_processing": False,
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "import/archive fields" in resp.get_json()["error"]
+
+
+def test_pipeline_folder_ids_chunks_wide_subtree(app_and_db, monkeypatch):
+    """A folder root that expands into thousands of descendant folder ids
+    must not overflow SQLite's per-statement bound-variable cap
+    (SQLITE_MAX_VARIABLE_NUMBER = 999 on legacy builds). Force the chunk
+    size down and verify a subtree several times its width still resolves
+    correctly — a single unchunked ``folder_id IN (?,...,?)`` would raise
+    OperationalError before the job was queued and surface as a 500."""
+    import db as db_module
+
+    monkeypatch.setattr(db_module, "_SQLITE_PARAM_CHUNK_SIZE", 3)
+
+    app, db = app_and_db
+    parent = db.add_folder("/photos/wide", name="wide")
+    photo_ids = []
+    for i in range(10):
+        sub = db.add_folder(
+            f"/photos/wide/sub{i}", name=f"sub{i}", parent_id=parent,
+        )
+        pid = db.add_photo(
+            folder_id=sub, filename=f"p{i}.jpg", extension=".jpg",
+            file_size=100 + i, file_mtime=100.0 + i,
+        )
+        photo_ids.append(pid)
+    db.add_workspace_folder(db._active_workspace_id, parent)
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [parent], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        got = _collection_photo_ids(db, cfg["collection_id"])
+        assert set(photo_ids) <= set(got)
+
+
+def test_pipeline_folder_ids_persisted_in_job_config(app_and_db):
+    """job_config records the caller's original folder_ids alongside the
+    derived ad-hoc collection_id. Without this the Jobs page can show only
+    the derived collection, not the folder subtree the user selected —
+    reconstructing the selection from the collection is impossible once the
+    ad-hoc collection is renamed or deleted."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True,
+        })
+        assert resp.status_code == 200
+        cfg = _job_config(client, resp.get_json()["job_id"])
+        assert cfg.get("folder_ids") == [root_id]
+        # Sanity: the derived collection_id is still there so consumers can
+        # keep using the collection-scoped code path.
+        assert cfg.get("collection_id")
+
+
+@pytest.mark.parametrize("bad", ["false", "true", 0, 1, "yes", [], {}])
+def test_pipeline_miss_enabled_rejects_non_bool(app_and_db, bad):
+    """miss_enabled is tri-state (None / True / False) — a truthy non-bool
+    like the string ``"false"`` would flow through pipeline_job's
+    ``params.miss_enabled is not None`` guard, then be treated as truthy in
+    ``not miss_enabled``, silently turning misses ON when the caller wanted
+    them OFF. Type-check at enqueue so the caller sees a clean 400."""
+    app, _ = app_and_db
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "collection_id": col_id, "miss_enabled": bad,
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert "miss_enabled" in resp.get_json()["error"]
+
+
+def test_pipeline_miss_enabled_accepts_bools(app_and_db, monkeypatch):
+    """The complement of the reject test — real bools survive to job_config
+    so a strategy override or a caller explicit toggle can actually take."""
+    app, _ = app_and_db
+    _fake_active_model(monkeypatch)
+    col_id = _make_collection(app)
+    with app.test_client() as client:
+        for value in (True, False):
+            resp = client.post("/api/jobs/pipeline", json={
+                "collection_id": col_id, "miss_enabled": value,
+            })
+            assert resp.status_code == 200, resp.get_json()
+            cfg = _job_config(client, resp.get_json()["job_id"])
+            assert cfg["miss_enabled"] is value
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"exclude_paths": None},
+        {"exclude_paths": "not-a-list"},
+        {"exclude_photo_ids": None},
+        {"exclude_photo_ids": {"id": 3}},
+    ],
+)
+def test_pipeline_folder_ids_bad_list_field_leaves_no_stray_collection(
+    app_and_db, extra,
+):
+    """Regression for the Codex review on commit 5dc5a9f: a folder-scoped
+    request with ``"exclude_paths": null`` (or any non-list value) passed
+    every up-front validation, materialized the ad-hoc collection, then
+    exploded at ``set(body.get("exclude_paths", []))`` inside the
+    PipelineParams constructor. The 500 left a stray "Process …" row
+    behind and never queued a job. Reject at request time and confirm
+    the workspace's collection count is unchanged."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        # Error message names the offending field so the caller can fix it.
+        offending = next(iter(extra))
+        assert offending in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"exclude_paths": [{}]},
+        {"exclude_paths": [["nested"]]},
+        {"exclude_paths": [None]},
+        {"exclude_paths": [42]},
+        {"exclude_photo_ids": [{}]},
+        {"exclude_photo_ids": ["not-int"]},
+        {"exclude_photo_ids": [None]},
+        {"exclude_photo_ids": [True]},
+    ],
+)
+def test_pipeline_folder_ids_bad_list_entry_leaves_no_stray_collection(
+    app_and_db, extra,
+):
+    """Regression for the Codex review on commit bffdabd: the outer
+    list-type check let a payload like ``{"exclude_paths": [{}]}`` slip
+    past, whereupon ``set(body.get(...))`` inside PipelineParams raised
+    ``TypeError: unhashable type`` — a 500 that left a stray "Process …"
+    collection with no queued job. Reject non-string exclude_paths
+    entries and non-int (or bool) exclude_photo_ids entries at the
+    request boundary and confirm no collection was created."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        offending = next(iter(extra))
+        assert offending in resp.get_json()["error"]
+        # Error message points at "entries" so the caller can distinguish
+        # this from the outer-list-type reject in the sibling regression.
+        assert "entries" in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"model_id": []},
+        {"model_id": 5},
+        {"model_id": {"id": "x"}},
+        {"model_ids": 5},
+        {"model_ids": "megadetector-v6"},
+        {"model_ids": [5]},
+        {"model_ids": [None]},
+        {"model_ids": [{"id": "x"}]},
+    ],
+)
+def test_pipeline_folder_ids_bad_model_selection_leaves_no_stray_collection(
+    app_and_db, extra,
+):
+    """Regression for the Codex review on commit f08b72e: a folder-scoped
+    request with a malformed ``model_id``/``model_ids`` (e.g. ``model_ids: 5``)
+    passed every up-front validation, materialized the ad-hoc collection,
+    and then blew up inside the auto-skip-classify block
+    (``list(params.model_ids or [])`` on a non-list). The 500 left a stray
+    "Process …" row behind. Reject at request time and confirm the
+    workspace's collection count is unchanged."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    before = len(db.get_collections())
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/pipeline",
+            json={"folder_ids": [root_id], **extra},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        offending = next(iter(extra))
+        assert offending in resp.get_json()["error"]
+    assert len(db.get_collections()) == before
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"source": ""},
+        {"sources": []},
+        {"source": "", "sources": []},
+    ],
+)
+def test_pipeline_folder_ids_treats_empty_sources_as_omitted(
+    app_and_db, extra,
+):
+    """A generic pipeline form can emit ``source: ""`` / ``sources: []``
+    as its unfilled defaults. The rest of this endpoint treats those as
+    omitted (see the ``if sources:`` / ``elif source:`` dispatch and the
+    required-scope truthiness check), so the folder-scope conflict guard
+    must too — otherwise every folder-scoped request from such a form
+    would falsely 400 without the client having to delete unused keys."""
+    app, db = app_and_db
+    root_id = _folder_id_by_path(db, "/photos/2024")
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={
+            "folder_ids": [root_id], "skip_classify": True, "skip_extract_masks": True, "skip_eye_keypoints": True, "skip_regroup": True, **extra,
+        })
+        assert resp.status_code == 200, resp.get_json()
+
+
+# --- POST /api/jobs/import-photos (import job) ---------------------------
+
+def _import_card(tmp_path, names=("DSC_0001.jpg",)):
+    card = tmp_path / "import-card"
+    card.mkdir(exist_ok=True)
+    for name in names:
+        Image.new("RGB", (16, 16), "red").save(str(card / name))
+    return str(card)
+
+
+def test_lightroom_import_route_not_shadowed(app_and_db):
+    """POST /api/jobs/import (Lightroom catalogs) keeps its contract —
+    the photo import route is a NEW endpoint, not a rename."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import", json={})
+    assert resp.status_code == 400
+    assert "catalogs" in resp.get_json()["error"]
+
+
+def test_import_photos_happy_path(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    dest = str(tmp_path / "archive")
+
+    cull_ready_id = next(
+        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Cull-ready")
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": dest,
+        "after_import": cull_ready_id,
+        "trust_likely_duplicates": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    assert job_id.startswith("import-")
+
+    config = _job_config(client, job_id)
+    assert config["sources"] == [card]
+    assert config["destination"] == dest
+    assert config["folder_template"] == "%Y/%Y-%m-%d"
+    assert config["after_import"] == cull_ready_id
+    assert config["trust_likely_duplicates"] is True
+
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["discovered"] == 1
+    assert result["copied"] == 1
+    assert result["safe_to_format"] is True
+
+
+def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(
+        os.path.join(card, "DSC_0002.jpg")
+    )
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Kenya trip", "Portfolio", "kenya trip"],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    config = _job_config(client, job_id)
+    assert config["tags"] == ["Kenya trip", "Portfolio"]
+
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["tagging"]["tagged_photos"] == 2
+    assert result["tagging"]["errors"] == []
+    for photo_id in result["photo_ids"]:
+        names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+        assert {"Kenya trip", "Portfolio"} <= names
+
+
+def test_import_tag_reuses_keyword_repaired_from_legacy_peer(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    clean_id = db.add_keyword("Import Legacy", kw_type="general")
+    legacy_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES (?, 'general')",
+        ("‘Import Legacy",),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(photo_id, legacy_id)
+    # Simulate the supported upgrade sequence. The normalization repair runs
+    # before requests and merges the legacy spelling into the canonical row;
+    # runtime import code can then rely on the stored-name invariant instead
+    # of repeating normalized peer scans at every call site.
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = 'keyword_names_normalized'"
+    )
+    db.conn.commit()
+    db.normalize_keyword_data()
+
+    def imported_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": True,
+            "cancelled": False,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 1,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": True,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    monkeypatch.setattr(import_job, "run_import_job", imported_result)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Import Legacy"],
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["tagging"]["tagged_photos"] == 0
+    linked = db.conn.execute(
+        "SELECT keyword_id FROM photo_keywords "
+        "WHERE photo_id = ? AND keyword_id IN (?, ?)",
+        (photo_id, clean_id, legacy_id),
+    ).fetchall()
+    assert [row["keyword_id"] for row in linked] == [clean_id]
+
+
+def test_duplicate_only_import_does_not_tag_existing_photos(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    destination = str(tmp_path / "archive")
+
+    first = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": destination, "after_import": None,
+    })
+    wait_for_job_via_client(client, first.get_json()["job_id"])
+
+    second = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": destination,
+        "after_import": None,
+        "tags": ["Do not add to duplicates"],
+    })
+    job = wait_for_job_via_client(client, second.get_json()["job_id"])
+    result = job["result"]
+    assert result["photo_ids"] == []
+    assert result["tagging"]["skipped"] == "no new photos"
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = ?",
+        ("Do not add to duplicates",),
+    ).fetchone() is None
+
+
+def test_cancelled_import_does_not_apply_requested_tags(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+
+    app, db = app_and_db
+    client = app.test_client()
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+
+    def cancelled_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": False,
+            "cancelled": True,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 0,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": False,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    monkeypatch.setattr(import_job, "run_import_job", cancelled_result)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["Must not be added"],
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    # The synthetic worker returns a cancelled result without setting the
+    # runner's cancellation flag, so JobRunner records this fixture as failed;
+    # the production cancellation path sets both. The behavior under test is
+    # that the result marker alone suppresses all post-import mutations.
+    assert job["status"] == "failed", job
+    assert job["result"]["tagging"]["skipped"] == "import cancelled"
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE name = ?", ("Must not be added",),
+    ).fetchone() is None
+
+
+def test_import_gps_tagging_stops_when_cancelled_during_resolution(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import import_job
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    runner = app._job_runner
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    db.clear_photo_location(photo_id)
+
+    def imported_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": True,
+            "cancelled": False,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 1,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": True,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    original_get = Database.get_photos_by_ids
+
+    def cancel_during_resolution(self, photo_ids):
+        running_ids = [
+            job_id for job_id, job in runner._jobs.items()
+            if job["type"] == "import" and job["status"] == "running"
+        ]
+        assert len(running_ids) == 1
+        assert runner.cancel_job(running_ids[0]) is True
+        return original_get(self, photo_ids)
+
+    monkeypatch.setattr(import_job, "run_import_job", imported_result)
+    monkeypatch.setattr(Database, "get_photos_by_ids", cancel_during_resolution)
+    quick_look_id = _process_id(db, "Quick look")
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": quick_look_id,
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "cancelled", job
+    assert job["result"]["cancelled"] is True
+    assert job["result"]["tagging"]["skipped"] == "import cancelled"
+    assert job["result"]["after_import_skipped"] == "import cancelled"
+    assert "process_job_id" not in job["result"]
+    assert db.get_assigned_photo_location(photo_id) is None
+
+
+@pytest.mark.parametrize("field,value,error", [
+    ("tags", "Trip", "tags must be a list"),
+    ("tags", ["Trip", 4], "only strings"),
+    ("tags", ["   "], "must not be empty"),
+    ("location_from_gps", "yes", "must be a boolean"),
+])
+def test_import_tag_options_are_validated_before_starting_job(
+    app_and_db, tmp_path, field, value, error,
+):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        field: value,
+    })
+    assert resp.status_code == 400
+    assert error in resp.get_json()["error"]
+
+
+def test_import_can_add_structured_locations_from_each_photos_gps(
+    app_and_db, tmp_path, monkeypatch,
+):
+    from db import Database
+
+    app, db = app_and_db
+    client = app.test_client()
+    original_get = Database.get_photos_by_ids
+    details = {
+        "place_id": "import-gps-place",
+        "name": "Central Park",
+        "lat": 40.785091,
+        "lng": -73.968285,
+        "types": ["park"],
+        "address_components": [
+            {"name": "New York", "types": ["locality"]},
+            {"name": "New York", "types": ["administrative_area_level_1"]},
+            {"name": "United States", "types": ["country"]},
+        ],
+    }
+
+    def photos_with_gps(self, photo_ids):
+        rows = original_get(self, photo_ids)
+        enriched = {}
+        for photo_id, row in rows.items():
+            photo = dict(row)
+            photo["latitude"] = details["lat"]
+            photo["longitude"] = details["lng"]
+            enriched[photo_id] = photo
+        self.reverse_geocode_cache_put(
+            details["lat"], details["lng"], details["place_id"],
+            json.dumps(details),
+        )
+        return enriched
+
+    monkeypatch.setattr(Database, "get_photos_by_ids", photos_with_gps)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "location_from_gps": True,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["tagging"]["locations_added"] == 1
+    photo_id = result["photo_ids"][0]
+    location = db.get_assigned_photo_location(photo_id)
+    assert location["keyword_location_name"] == "Central Park"
+
+
+def test_import_in_place_no_destination_required(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [card],
+        "after_import": None,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+
+    config = _job_config(client, job_id)
+    assert config["sources"] == [card]
+    assert config["destination"] is None
+    assert config["mode"] == "in_place"
+    assert config["after_import"] is None
+
+    job = wait_for_job_via_client(client, job_id)
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["mode"] == "in_place"
+    assert result["indexed"] == 1
+    assert result["ok"] is True
+    assert result["after_import_skipped"] == "import-only"
+    assert result["collection_name"].startswith("Import ")
+    photos = db.get_collection_photos(
+        result["collection_id"], per_page=999999,
+    )
+    assert [p["id"] for p in photos] == result["photo_ids"]
+
+
+def test_import_in_place_can_target_new_workspace(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [_import_card(tmp_path)],
+        "after_import": None,
+        "new_workspace_name": "Card Import",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["workspace"]["name"] == "Card Import"
+
+    config = _job_config(client, data["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["created_workspace"]["name"] == "Card Import"
+    active = client.get("/api/workspaces/active").get_json()
+    assert active["id"] == config["workspace_id"]
+
+
+def test_import_photos_null_after_import_is_import_only(app_and_db, tmp_path):
+    """after_import: null means import-only (the chaining hook short-circuits)
+    — same nullable vocabulary as pipeline.default_process_id."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["after_import"] is None
+
+
+def test_import_photos_can_target_new_workspace(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "new_workspace_name": "Archive Import",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    assert data["workspace"]["name"] == "Archive Import"
+
+    config = _job_config(client, data["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["created_workspace"]["name"] == "Archive Import"
+    active = client.get("/api/workspaces/active").get_json()
+    assert active["id"] == config["workspace_id"]
+
+
+def test_import_photos_invalid_after_import_type_400(app_and_db, tmp_path):
+    """A non-int after_import fails at enqueue, not at completion — failing
+    the chain hours later is the old pipeline's mistake."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": "yolo",
+    })
+    assert resp.status_code == 400
+    assert "process id" in resp.get_json()["error"]
+
+
+def test_import_photos_unknown_after_import_id_400(app_and_db, tmp_path):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": 999999,
+    })
+    assert resp.status_code == 400
+    assert "unknown process id" in resp.get_json()["error"]
+
+
+def test_import_photos_after_import_defaults_from_workspace(
+        app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    ws_id = db._active_workspace_id
+    pid = next(p["id"] for p in db.get_saved_processes()
+               if p["name"] == "Cull-ready")
+    db.update_workspace(ws_id, config_overrides={
+        "pipeline": {"default_process_id": pid},
+    })
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["after_import"] == pid
+
+
+def test_import_photos_new_workspace_ignores_old_default_process(
+        app_and_db, tmp_path):
+    """Regression: an omitted after_import must resolve against the TARGET
+    workspace's effective config, not the caller's previously-active one.
+    Otherwise a stale pipeline.default_process_id override on the old
+    workspace silently chains onto a fresh-workspace import."""
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+    pid = db.get_saved_processes()[0]["id"]
+    db.update_workspace(old_ws, config_overrides={
+        "pipeline": {"default_process_id": pid},
+    })
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "new_workspace_name": "Fresh Archive",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["after_import"] is None
+
+
+def test_import_in_place_new_workspace_ignores_old_default_process(
+        app_and_db, tmp_path):
+    """Same regression as above, exercised through the in-place endpoint —
+    both routes call _prepare_import_workspace so both had the bug."""
+    app, db = app_and_db
+    client = app.test_client()
+    old_ws = db._active_workspace_id
+    pid = db.get_saved_processes()[0]["id"]
+    db.update_workspace(old_ws, config_overrides={
+        "pipeline": {"default_process_id": pid},
+    })
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [_import_card(tmp_path)],
+        "new_workspace_name": "Fresh In-Place",
+    })
+    assert resp.status_code == 200, resp.get_json()
+    config = _job_config(client, resp.get_json()["job_id"])
+    assert config["workspace_id"] != old_ws
+    assert config["after_import"] is None
+
+
+def test_import_photos_validation_400s(app_and_db, tmp_path):
+    app, _ = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    dest = str(tmp_path / "archive")
+
+    # Missing sources.
+    resp = client.post("/api/jobs/import-photos", json={"destination": dest})
+    assert resp.status_code == 400
+    # Missing destination.
+    resp = client.post("/api/jobs/import-photos", json={"sources": [card]})
+    assert resp.status_code == 400
+    # Relative destination.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": "relative/archive",
+    })
+    assert resp.status_code == 400
+    # Nonexistent source directory.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [str(tmp_path / "nope")], "destination": dest,
+    })
+    assert resp.status_code == 400
+    # macOS app-managed library as source (pre-stat rejection).
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [str(bundle)], "destination": dest,
+    })
+    assert resp.status_code == 400
+    assert "macos" in resp.get_json()["error"].lower()
+    # Unsafe folder template.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "folder_template": "../escape",
+    })
+    assert resp.status_code == 400
+
+
+def test_import_photos_rejects_destination_inside_source(app_and_db, tmp_path):
+    """Destinations equal to or nested under any source path are rejected
+    at enqueue. Otherwise the importer copies card files into the same
+    tree it's importing, ``safe_to_format`` still flips green once
+    ``copied + skipped_duplicate == discovered``, and formatting the card
+    erases the supposed archive copy — silent data loss.
+    """
+    app, _ = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+
+    # Destination equal to source.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": card,
+    })
+    assert resp.status_code == 400
+    assert "inside a source" in resp.get_json()["error"]
+
+    # Destination nested under source.
+    nested = os.path.join(card, "archive")
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": nested,
+    })
+    assert resp.status_code == 400
+    assert "inside a source" in resp.get_json()["error"]
+
+    # A symlink that resolves back inside the source must also be
+    # rejected — otherwise the rule is trivially bypassed.
+    symlinked_dest = tmp_path / "symlinked-archive"
+    try:
+        os.symlink(card, str(symlinked_dest))
+    except (OSError, NotImplementedError):
+        # Windows filesystems without symlink support: skip that leg.
+        pass
+    else:
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [card], "destination": str(symlinked_dest),
+        })
+        assert resp.status_code == 400
+        assert "inside a source" in resp.get_json()["error"]
+
+    # A sibling destination NOT nested under the source is fine.
+    sibling = str(tmp_path / "archive")
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": sibling,
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_import_photos_inconclusive_case_probe_rejects_case_collision(
+    app_and_db, tmp_path,
+):
+    """When the case-sensitivity probe of a source cannot determine the
+    filesystem's semantics (no alpha-containing entry to swap — an SD
+    card whose root holds only numeric ``100``/``200``-style Nikon
+    subdirectories), the containment check must fall back to case-fold.
+
+    Otherwise, on a case-insensitive card mounted at ``/mnt/Card`` a
+    destination like ``/mnt/card/archive`` differs only in case and
+    resolves to the same directory as the source, but a case-sensitive
+    string comparison accepts it — and ``safe_to_format`` later goes
+    green even though formatting the card would erase the archive
+    copy. See PR #1107 review.
+    """
+    import sys as _sys
+
+    if _sys.platform in ("darwin", "win32"):
+        pytest.skip(
+            "Linux-only probe fallback: darwin/win32 skip the probe "
+            "entirely and always case-fold."
+        )
+
+    app, _ = app_and_db
+    client = app.test_client()
+
+    # Source has only numeric-named entries: the probe has no alpha
+    # character to case-swap, so it must return True (assume
+    # case-insensitive) — the stricter fallback.
+    source = tmp_path / "Card-BAR"
+    source.mkdir()
+    (source / "100").mkdir()
+    (source / "200").mkdir()
+
+    # Destination differs from the source parent only in case. On a
+    # real case-insensitive card these resolve to the same directory;
+    # the guard must reject the destination even though the CI
+    # filesystem (ext4) treats them as distinct.
+    dest = str(tmp_path / "card-bar" / "archive")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [str(source)], "destination": dest,
+    })
+    assert resp.status_code == 400
+    assert "inside a source" in resp.get_json()["error"]
+
+
+# --- POST /api/jobs/import-photos remote (SSH) archive target ------------
+#
+# Mirror the pipeline route's remote-target guards: accept a saved
+# remote_target_id + remote_subpath, reject the bad shapes.
+
+def _remote_import_body(card, **overrides):
+    body = {
+        "sources": [card],
+        "remote_target_id": "nas1",
+        "remote_subpath": "2026/trip",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_import_photos_remote_happy_path(app_and_db, tmp_path, monkeypatch):
+    """A valid remote target + subpath enqueues an import job whose config
+    records the target and subpath and whose destination is the resolved
+    mount path (mount_path/subpath)."""
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+
+    resp = client.post(
+        "/api/jobs/import-photos", json=_remote_import_body(card))
+    assert resp.status_code == 200, resp.get_json()
+    job_id = resp.get_json()["job_id"]
+    assert job_id.startswith("import-")
+
+    config = _job_config(client, job_id)
+    assert config["remote_target_id"] == "nas1"
+    assert config["remote_subpath"] == "2026/trip"
+    # Destination recorded as the resolved local mount path.
+    expected_dest = os.path.join(str(tmp_path / "mount"), "2026", "trip")
+    assert config["destination"] == expected_dest
+
+
+def test_import_photos_remote_and_destination_mutually_exclusive(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post("/api/jobs/import-photos", json=_remote_import_body(
+        card, destination=str(tmp_path / "archive"),
+    ))
+    assert resp.status_code == 400
+    assert "mutually exclusive" in resp.get_json()["error"]
+
+
+def test_import_photos_remote_unknown_target_404(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post("/api/jobs/import-photos", json=_remote_import_body(
+        card, remote_target_id="nope",
+    ))
+    assert resp.status_code == 404
+    assert "not found" in resp.get_json()["error"].lower()
+
+
+def test_import_photos_remote_requires_subpath(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post("/api/jobs/import-photos", json=_remote_import_body(
+        card, remote_subpath="",
+    ))
+    assert resp.status_code == 400
+    assert "remote_subpath" in resp.get_json()["error"]
+
+
+def test_import_photos_remote_subpath_requires_target(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "remote_subpath": "2026/trip",
+    })
+    assert resp.status_code == 400
+    assert "remote_subpath requires remote_target_id" in \
+        resp.get_json()["error"]
+
+
+def test_import_photos_remote_rejects_traversal_subpath(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    for bad in ("../escape", "/absolute/path"):
+        resp = client.post(
+            "/api/jobs/import-photos",
+            json=_remote_import_body(card, remote_subpath=bad),
+        )
+        assert resp.status_code == 400, bad
+
+
+def test_import_photos_remote_requires_mount_path(
+        app_and_db, tmp_path, monkeypatch):
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path, mount_path="")
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post(
+        "/api/jobs/import-photos", json=_remote_import_body(card))
+    assert resp.status_code == 400
+    assert "mount path" in resp.get_json()["error"]
+
+
+def test_import_photos_remote_requires_gnu_rsync(
+        app_and_db, tmp_path, monkeypatch):
+    import move as move_mod
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": None)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post(
+        "/api/jobs/import-photos", json=_remote_import_body(card))
+    assert resp.status_code == 400
+    assert "rsync" in resp.get_json()["error"].lower()
+
+
+def test_import_photos_remote_rejects_openrsync_before_enqueue(
+        app_and_db, tmp_path, monkeypatch):
+    """resolve_rsync_bin returns any executable file, so a user who
+    explicitly sets Settings→Paths to macOS's /usr/bin/rsync (Apple
+    openrsync) passes the presence check even though openrsync can't
+    drive rsync-over-SSH. The route must additionally consult
+    is_gnu_rsync and fail fast at enqueue instead of starting a job that
+    dies mid-transfer. See PR #1113 review."""
+    import move as move_mod
+    app, _ = app_and_db
+    _save_remote_target(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin",
+        lambda configured="": "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "is_gnu_rsync", lambda p: False)
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    resp = client.post(
+        "/api/jobs/import-photos", json=_remote_import_body(card))
+    assert resp.status_code == 400
+    assert "rsync" in resp.get_json()["error"].lower()
+
+
+# --- after-import chaining (import/process split PR 3) ---
+
+
+def _chain_card(tmp_path, n=2, name="chain-card"):
+    import datetime as _dt
+
+    card = tmp_path / name
+    card.mkdir(exist_ok=True)
+    for i in range(n):
+        p = card / f"DSC_{i:04d}.jpg"
+        Image.new("RGB", (16, 16), "red").save(str(p))
+        ts = _dt.datetime(2026, 7, 3, 10, i).timestamp()
+        os.utime(str(p), (ts, ts))
+    return card
+
+
+def _post_import(client, card, archive, after_import="omit"):
+    body = {"sources": [str(card)], "destination": str(archive)}
+    if after_import != "omit":
+        body["after_import"] = after_import
+    resp = client.post("/api/jobs/import-photos", json=body)
+    assert resp.status_code == 200, resp.get_json()
+    return resp.get_json()["job_id"]
+
+
+def test_import_chains_process_job(app_and_db, tmp_path):
+    """A successful import with after_import set enqueues a process job
+    scoped to exactly the imported photos, and links the two in history."""
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        quick_look_id = next(
+            pr["id"] for pr in db.get_saved_processes()
+            if pr["name"] == "Quick look")
+        job_id = _post_import(client, card, tmp_path / "arch", quick_look_id)
+        job = wait_for_job_via_client(client, job_id)
+        res = job["result"]
+        assert res.get("process_job_id"), res
+        assert "after_import_skipped" not in res
+
+        pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
+        assert pj["config"]["process_id"] == quick_look_id
+        assert pj["config"].get("chained_from") == job_id
+        col_id = pj["config"]["collection_id"]
+        assert res["collection_id"] == col_id
+        assert res["collection_name"].startswith("Import ")
+        photos = db.get_collection_photos(col_id, per_page=999999)
+        assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
+
+
+def test_import_only_choice_skips_chaining(app_and_db, tmp_path):
+    """Import-only still records the exact import as a Browse collection."""
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "arch", None)
+        job = wait_for_job_via_client(client, job_id)
+        res = job["result"]
+        assert res.get("after_import_skipped") == "import-only"
+        assert "process_job_id" not in res
+        assert res["collection_name"].startswith("Import ")
+        photos = db.get_collection_photos(
+            res["collection_id"], per_page=999999,
+        )
+        assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
+
+
+def test_failed_import_does_not_chain(app_and_db, tmp_path):
+    """A green processing run must not hide a failed import (rollup
+    convention): any failed file suppresses chaining."""
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Quick look")
+    card = _chain_card(tmp_path)
+    unreadable = card / "DSC_9999.jpg"
+    Image.new("RGB", (16, 16), "blue").save(str(unreadable))
+    os.chmod(str(unreadable), 0)
+    try:
+        with app.test_client() as client:
+            job_id = _post_import(
+                client, card, tmp_path / "arch", quick_look_id,
+            )
+            job = wait_for_job_via_client(client, job_id)
+            res = job["result"]
+            assert res["failed"] >= 1
+            assert res.get("after_import_skipped") == "import failed"
+            assert "process_job_id" not in res
+            assert "collection_id" not in res
+    finally:
+        os.chmod(str(unreadable), 0o644)
+
+
+def test_cancelled_import_does_not_create_collection(
+        app_and_db, tmp_path, monkeypatch):
+    """Partial photo ids from a cancelled run must not look like a complete
+    import collection in Browse."""
+    import import_job
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    existing_photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    def cancelled_result(*args, **kwargs):
+        return {
+            "ok": False,
+            "cancelled": True,
+            "photo_ids": [existing_photo_id],
+            "copied": 1,
+            "failed": 0,
+        }
+
+    monkeypatch.setattr(import_job, "run_import_job", cancelled_result)
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Quick look")
+    card = _chain_card(tmp_path, n=1)
+    with app.test_client() as client:
+        job_id = _post_import(
+            client, card, tmp_path / "arch", quick_look_id,
+        )
+        result = wait_for_job_via_client(client, job_id)["result"]
+
+    assert result["after_import_skipped"] == "import failed"
+    assert "collection_id" not in result
+    assert "process_job_id" not in result
+
+
+def test_duplicates_only_import_skips_chaining(app_and_db, tmp_path):
+    """Re-importing an already-archived card chains to 'no new photos',
+    not an empty process run."""
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    quick_look_id = next(
+        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Quick look")
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        first = _post_import(client, card, tmp_path / "arch", None)
+        wait_for_job_via_client(client, first)
+        second = _post_import(client, card, tmp_path / "arch", quick_look_id)
+        job = wait_for_job_via_client(client, second)
+        res = job["result"]
+        assert res["skipped_duplicate"] == 2
+        assert res.get("after_import_skipped") == "no new photos"
+        assert "process_job_id" not in res
+        assert "collection_id" not in res
+
+
+def test_chained_run_surfaces_model_warning(app_and_db, tmp_path):
+    """cull_ready needs a classifier; with none downloaded the chained run
+    still enqueues (auto-skipped) and the import result carries the same
+    model_warning the manual pipeline route surfaces."""
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    cull_ready_id = next(
+        pr["id"] for pr in db.get_saved_processes() if pr["name"] == "Cull-ready")
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "arch", cull_ready_id)
+        job = wait_for_job_via_client(client, job_id)
+        res = job["result"]
+        assert res.get("process_job_id"), res
+        assert "model_warning" in res
+        pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
+        assert pj["config"]["skip_classify"] is True  # auto-skip applied
+
+
+def test_chained_process_snapshot_survives_mid_import_edit(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A saved process edited AFTER the user submits the import must not
+    change the chained run — the enqueue point captures the flag snapshot.
+
+    An archive-copy import from a full card can take many minutes; if the
+    resolve happens only when the chain hook fires, a settings edit in
+    that window would silently swap in different toggles than the user
+    accepted at the click. This test flips skip_regroup on the chosen
+    process between submit and the chained job's config read, then asserts
+    the chained run reflects the ORIGINAL flags.
+
+    The fake active model keeps the no-model auto-skip from touching
+    skip_classify (which would otherwise mask an unrelated flag flip),
+    so skip_regroup (which the auto-skip never touches) cleanly proves
+    the snapshot survived.
+    """
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    # Snapshot the "Full" seed and then flip skip_regroup=True after the
+    # import request returns. Any live-resolve would show skip_regroup=True
+    # in the chained job config; the enqueue-time snapshot keeps it False.
+    full_id = next(pr["id"] for pr in db.get_saved_processes()
+                   if pr["name"] == "Full")
+    original = db.get_saved_process(full_id)
+    assert original["skip_regroup"] is False, original
+
+    _fake_active_model(monkeypatch)
+    card = _chain_card(tmp_path)
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "arch", full_id)
+        # Mutate the saved process BEFORE the chain hook fires. The import
+        # still runs to completion, so this is the exact window the fix
+        # closes: the chain hook fires from the import-job thread after
+        # ingest, and without the snapshot it would call resolve_process
+        # against this mutated row.
+        db.update_saved_process(full_id, skip_regroup=True)
+
+        job = wait_for_job_via_client(client, job_id)
+        res = job["result"]
+        assert res.get("process_job_id"), res
+
+        pj = client.get(f"/api/jobs/{res['process_job_id']}").get_json()
+        # The chained run should reflect the snapshot at enqueue time
+        # (skip_regroup=False), not the post-submit edit.
+        assert pj["config"]["skip_regroup"] is False, pj["config"]
+        # And the process_id link is still preserved for provenance.
+        assert pj["config"]["process_id"] == full_id

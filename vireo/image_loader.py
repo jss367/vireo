@@ -34,8 +34,13 @@ RAW_EXTENSIONS = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp", ".webp"}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
 RAW_DECODE_JPEG_FIRST = "jpeg_first"
+RAW_DECODE_CAMERA_RENDERED = "camera_rendered"
 RAW_DECODE_PRESERVE_HIGHLIGHTS = "preserve_highlights"
-_RAW_DECODE_MODES = {RAW_DECODE_JPEG_FIRST, RAW_DECODE_PRESERVE_HIGHLIGHTS}
+_RAW_DECODE_MODES = {
+    RAW_DECODE_JPEG_FIRST,
+    RAW_DECODE_CAMERA_RENDERED,
+    RAW_DECODE_PRESERVE_HIGHLIGHTS,
+}
 
 # macOS "package" directories that hold OTHER apps' managed data. Walking
 # into them triggers Sequoia's "<app> would like to access data from other
@@ -260,8 +265,12 @@ def safe_iter_dir(top, onerror=None):
             onerror(exc)
         return
     skipped = []
+    seen = set()
     with scandir_it:
         for entry in scandir_it:
+            if entry.name in seen:
+                continue
+            seen.add(entry.name)
             if is_excluded_scan_dir(entry.name):
                 skipped.append(entry.name)
                 continue
@@ -311,9 +320,13 @@ def safe_scan_walk(top, onerror=None):
     dirs = []
     nondirs = []
     skipped = []
+    seen = set()
     with scandir_it:
         for entry in scandir_it:
             name = entry.name
+            if name in seen:
+                continue
+            seen.add(name)
             # Name-based exclusion catches direct bundle entries
             # (``Photos Library.photoslibrary``) without any stat.
             if is_excluded_scan_dir(name):
@@ -363,8 +376,8 @@ def load_image(file_path, max_size=1024, raw_decode=RAW_DECODE_JPEG_FIRST):
     Args:
         file_path: Path to the image file
         max_size: Maximum dimension (longest side). None or 0 for full resolution.
-        raw_decode: RAW_DECODE_JPEG_FIRST (default) or
-            RAW_DECODE_PRESERVE_HIGHLIGHTS.
+        raw_decode: RAW_DECODE_JPEG_FIRST (default),
+            RAW_DECODE_CAMERA_RENDERED, or RAW_DECODE_PRESERVE_HIGHLIGHTS.
 
     Returns:
         PIL.Image.Image or None
@@ -508,7 +521,13 @@ def load_working_image(photo, vireo_dir, max_size=1024, folders=None):
     return load_image(source_path, max_size)
 
 
-def extract_working_copy(source_path, output_path, max_size=4096, quality=92):
+def extract_working_copy(
+    source_path,
+    output_path,
+    max_size=4096,
+    quality=92,
+    raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS,
+):
     """Extract a JPEG working copy from an image file.
 
     Args:
@@ -516,6 +535,9 @@ def extract_working_copy(source_path, output_path, max_size=4096, quality=92):
         output_path: where to save the working copy JPEG
         max_size: max dimension (longest side). 0 or None for full resolution.
         quality: JPEG quality (1-95)
+        raw_decode: RAW decode strategy. Working copies default to the
+            highlight-preserving edit source; display renditions can request
+            RAW_DECODE_CAMERA_RENDERED without changing that edit source.
 
     Returns:
         True on success, False on failure
@@ -524,7 +546,7 @@ def extract_working_copy(source_path, output_path, max_size=4096, quality=92):
         img = load_image(
             source_path,
             max_size=max_size or None,
-            raw_decode=RAW_DECODE_PRESERVE_HIGHLIGHTS,
+            raw_decode=raw_decode,
         )
         if img is None:
             return False
@@ -546,6 +568,10 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
       3. If postprocess raises (e.g. libraw 0.22 can't decode Nikon HE*/TicoRAW),
          fall back to the embedded JPEG even if smaller than max_size.
 
+    Camera-rendered:
+      1. Use a near-full embedded JPEG for full-resolution display requests.
+      2. Otherwise follow the JPEG-first demosaic/fallback behavior.
+
     Preserve-highlights:
       1. Demosaic the RAW with auto-bright disabled and highlight blending on.
       2. Fall back to the embedded JPEG only if libraw cannot decode the RAW.
@@ -555,14 +581,38 @@ def _load_raw(path, max_size, raw_decode=RAW_DECODE_JPEG_FIRST):
     with rawpy.imread(str(path)) as raw:
         embedded = _extract_embedded_jpeg(raw)
 
-        # JPEG-first: if the embedded preview is large enough for the request,
-        # use it and skip the slower RAW decode entirely.
-        if (
-            raw_decode == RAW_DECODE_JPEG_FIRST
-            and embedded is not None
+        # JPEG-first browsing uses the embedded preview when it covers the
+        # requested size. Full-resolution camera-rendered browsing also accepts
+        # a preview whose two axes are within 1% of the active sensor area; many
+        # cameras omit a narrow border (for example 8256x5504 vs 8288x5520).
+        # That JPEG is the rendition used by thumbnails and fit-to-window views,
+        # so retaining it at 1:1 prevents a visible tone jump.
+        sensor_dims = sorted((raw.sizes.width, raw.sizes.height), reverse=True)
+        embedded_dims = sorted(embedded.size, reverse=True) if embedded else None
+        embedded_is_near_full = bool(
+            embedded_dims
+            and sensor_dims[0]
+            and sensor_dims[1]
+            and embedded_dims[0] >= sensor_dims[0] * 0.99
+            and embedded_dims[1] >= sensor_dims[1] * 0.99
+        )
+        embedded_covers_request = bool(
+            embedded is not None
             and max_size
             and max_size > 0
             and max(embedded.size) >= max_size
+        )
+        if (
+            raw_decode in (RAW_DECODE_JPEG_FIRST, RAW_DECODE_CAMERA_RENDERED)
+            and embedded is not None
+            and (
+                embedded_covers_request
+                or (
+                    raw_decode == RAW_DECODE_CAMERA_RENDERED
+                    and not max_size
+                    and embedded_is_near_full
+                )
+            )
         ):
             return embedded
 

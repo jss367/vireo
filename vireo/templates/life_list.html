@@ -13,12 +13,22 @@
   .control-group label { font-size:13px; color:var(--text-secondary); white-space:nowrap; }
   .control-group input[type=search], .control-group select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
   .control-group input[type=search] { width:180px; }
-  .publish-btn { margin-left:auto; border:1px solid var(--accent); background:transparent; color:var(--accent); border-radius:4px; padding:5px 10px; font-size:12px; cursor:pointer; }
+  .control-group .numbering-toggle { display:flex; align-items:center; gap:6px; color:var(--text-primary); cursor:pointer; }
+  .control-group .numbering-toggle input { margin:0; }
+  .control-group .search-control { width:240px; }
+  .control-group .search-control input[type=search] { width:auto; border-radius:4px 0 0 4px; }
+  .lifelist-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
+  .publish-btn { border:1px solid var(--accent); background:transparent; color:var(--accent); border-radius:4px; padding:5px 10px; font-size:12px; cursor:pointer; }
   .publish-btn:hover { background:rgba(99, 179, 237, 0.08); }
   .publish-path-row { display:flex; gap:8px; align-items:center; }
   .publish-path-row .modal-input { flex:1; }
   .publish-option { display:flex; gap:8px; align-items:flex-start; margin-top:12px; font-size:13px; color:var(--text-secondary); }
   .publish-status { min-height:16px; margin-top:10px; font-size:12px; color:var(--text-secondary); }
+  .export-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  @media (max-width: 640px) {
+    .lifelist-actions { margin-left:0; width:100%; justify-content:flex-end; }
+    .export-grid { grid-template-columns:1fr; }
+  }
 
   .lifelist-meta { padding:8px 24px; font-size:12px; color:var(--text-secondary); }
 
@@ -34,20 +44,107 @@
   .species-meta { font-size:12px; color:var(--text-secondary); margin-top:6px; }
   .species-locations { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
   .loc-chip { padding:1px 7px; border-radius:999px; background:var(--bg-tertiary); color:var(--text-secondary); font-size:11px; white-space:nowrap; }
+  .lifelist-load-more { margin-top:9px; border:1px solid var(--border-secondary); background:var(--bg-tertiary); color:var(--text-primary); border-radius:4px; padding:5px 9px; font-size:12px; cursor:pointer; }
+  .lifelist-load-more:hover { border-color:var(--accent); }
+  .lifelist-load-more:disabled { opacity:.65; cursor:default; }
 
   .lifelist-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
   .lifelist-empty a { color:var(--accent); }
   /* .lifelist-lb-panel styles now live in _navbar.html — the "Add to Life
      List" lightbox panel is shared across every page's lightbox. */
+
+  /* --- List / Explorer tabs (pattern adapted from audit.html, renamed ll-*) --- */
+  .ll-tabs { display:flex; gap:0; padding:0 24px; background:var(--bg-secondary); border-bottom:1px solid var(--border-primary); }
+  .ll-tab { padding:12px 20px; cursor:pointer; font-size:13px; color:var(--text-muted); border-bottom:2px solid transparent; transition:color 0.15s, border-color 0.15s; user-select:none; }
+  .ll-tab:hover { color:var(--text-primary); }
+  .ll-tab.active { color:var(--text-primary); border-bottom-color:var(--accent); }
+  .ll-tabpanel { display:none; }
+  .ll-tabpanel.active { display:block; }
+
+  /* --- Explorer --- */
+  .ll-exp { padding:16px 24px; }
+  .ll-exp-cta { max-width:520px; margin:60px auto; text-align:center; color:var(--text-secondary); }
+  .ll-exp-cta h2 { font-size:18px; color:var(--text-primary); margin-bottom:10px; }
+  .ll-exp-cta p { font-size:13px; line-height:1.5; margin-bottom:18px; }
+  .ll-exp-empty { text-align:center; padding:60px 24px; color:var(--text-secondary); font-size:14px; }
+  .ll-exp-controls { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+  .ll-exp-controls label { font-size:13px; color:var(--text-secondary); }
+  .ll-exp-controls select { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
+
+  .ll-unmatched { font-size:12px; color:var(--text-muted); margin-bottom:14px; }
+  .ll-unmatched details { margin-top:4px; }
+  .ll-unmatched summary { cursor:pointer; color:var(--text-secondary); }
+  .ll-unmatched ul { margin:6px 0 0 16px; padding:0; columns:2; font-size:12px; }
+
+  .ll-summary { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+  .ll-sumchip { padding:6px 12px; border-radius:8px; background:var(--bg-secondary); border:1px solid var(--border-primary); font-size:13px; color:var(--text-secondary); font-variant-numeric:tabular-nums; }
+  .ll-sumchip b { color:var(--text-primary); font-weight:600; }
+
+  .ll-crumbs { display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin-bottom:16px; font-size:13px; }
+  .ll-crumb { color:var(--accent); cursor:pointer; }
+  .ll-crumb:hover { text-decoration:underline; }
+  .ll-crumb.current { color:var(--text-primary); cursor:default; }
+  .ll-crumb.current:hover { text-decoration:none; }
+  .ll-crumb-sep { color:var(--text-dim); }
+
+  .ll-cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr)); gap:16px; }
+  .ll-card { display:flex; gap:12px; align-items:center; padding:12px 14px; border-radius:8px; background:var(--bg-secondary); border:1px solid var(--border-primary); cursor:pointer; }
+  .ll-card:hover { border-color:var(--accent); }
+  .ll-card.empty { opacity:.55; }
+  .ll-card-body { min-width:0; }
+  .ll-card-name { font-size:15px; font-weight:600; color:var(--text-primary); }
+  .ll-card-sci { font-size:12px; font-style:italic; color:var(--text-secondary); margin-top:1px; }
+  .ll-card-sub { font-size:12px; color:var(--text-secondary); margin-top:6px; font-variant-numeric:tabular-nums; }
+  .ll-ring { flex:0 0 auto; }
+  .ll-ring text { font-size:13px; font-weight:600; fill:var(--text-primary); font-variant-numeric:tabular-nums; }
+
+  .ll-leaf-head { display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:14px; }
+  .ll-leaf-head h3 { font-size:16px; color:var(--text-primary); margin:0; font-variant-numeric:tabular-nums; }
+  .ll-leaf-head label { font-size:13px; color:var(--text-secondary); display:flex; align-items:center; gap:6px; }
+  .ll-leaf-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); gap:14px; }
+  .ll-sp { border-radius:8px; overflow:hidden; background:var(--bg-secondary); border:1px solid var(--border-primary); }
+  .ll-sp.missing { opacity:.6; }
+  .ll-sp img, .ll-sp .ll-sp-ph { width:100%; aspect-ratio:3/2; object-fit:cover; display:block; background:var(--bg-tertiary); }
+  .ll-sp-info { padding:8px 10px 10px; }
+  .ll-sp-name { font-size:14px; font-weight:600; color:var(--text-primary); }
+  .ll-sp-common { font-size:12px; color:var(--text-secondary); margin-top:1px; }
+  .ll-sp-chip { display:inline-block; margin-top:6px; padding:1px 8px; border-radius:999px; font-size:11px; }
+  .ll-sp-chip.seen { background:var(--accent); color:var(--accent-text); }
+  .ll-sp-chip.notyet { background:var(--bg-tertiary); color:var(--text-muted); }
+
+  /* Sunburst completeness overview (Task 13) */
+  .ll-sunburst { display:flex; justify-content:center; margin:4px 0 20px; }
+  .ll-sb-svg { display:block; }
+  .ll-sb-svg .ll-sb-arc { cursor:pointer; stroke:var(--bg-primary); stroke-width:1; }
+  .ll-sb-svg .ll-sb-arc:hover { stroke:var(--accent); stroke-width:1.5; }
+  .ll-sb-svg .ll-sb-center { cursor:pointer; fill:var(--bg-tertiary); stroke:var(--bg-primary); stroke-width:1; }
+  .ll-sb-svg .ll-sb-center:hover { fill:var(--bg-input); }
+  .ll-sb-svg .ll-sb-center-label { fill:var(--text-primary); font-size:12px; font-weight:600; pointer-events:none; font-variant-numeric:tabular-nums; text-anchor:middle; dominant-baseline:central; }
+  .ll-sb-tooltip { position:fixed; z-index:9999; pointer-events:none; background:var(--bg-panel); color:var(--text-primary);
+    border:1px solid var(--border-secondary); border-radius:6px; padding:6px 9px; font-size:12px; line-height:1.4;
+    max-width:260px; box-shadow:0 4px 14px rgba(0,0,0,.35); display:none; font-variant-numeric:tabular-nums; }
+  .ll-sb-tooltip b { color:var(--text-primary); }
+  .ll-sb-tooltip .ll-sb-tt-sci { color:var(--text-secondary); font-style:italic; }
 </style>
 </head>
 <body>
 {% include '_navbar.html' %}
 
+<div class="ll-tabs">
+  <div class="ll-tab active" data-tab="list" onclick="llSwitchTab('list')">List</div>
+  <div class="ll-tab" data-tab="explorer" onclick="llSwitchTab('explorer')">Explorer</div>
+</div>
+
+<div class="ll-tabpanel active" id="tab-list">
+
 <div class="lifelist-controls" id="controlsBar">
   <div class="control-group">
     <label for="speciesSearch">Species</label>
-    <input type="search" id="speciesSearch" placeholder="Cardinal">
+    <div class="search-control">
+      <input type="search" id="speciesSearch" placeholder="Cardinal">
+      <button id="lifeSpeciesMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('lifeSpecies', 'match_case', debounceRender)" title="Match case">Aa</button>
+      <button id="lifeSpeciesWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="VireoTextSearch.toggle('lifeSpecies', 'whole_word', debounceRender)" title="Match whole word">ab</button>
+    </div>
   </div>
   <div class="control-group">
     <label for="sortSelect">Sort</label>
@@ -58,10 +155,60 @@
       <option value="most-photos">Most photos</option>
     </select>
   </div>
-  <button class="publish-btn" onclick="openPublishModal()">Publish Site</button>
+  <div class="control-group" title="When enabled, number the visible cards in their current displayed order. Disable it to keep each species' original chronological lifer number.">
+    <label for="renumberView">Life List numbering</label>
+    <label class="numbering-toggle" for="renumberView">
+      <input type="checkbox" id="renumberView">
+      <span>Renumber for each view</span>
+    </label>
+  </div>
+  <div class="lifelist-actions">
+    <button class="publish-btn" onclick="openExportModal()">Export...</button>
+    <button class="publish-btn" onclick="openPublishModal()">Publish Site</button>
+  </div>
 </div>
 
 <div class="lifelist-meta" id="meta"></div>
+
+<div class="modal-overlay" id="exportModal" onclick="if(event.target===this)closeExportModal()">
+  <div class="modal">
+    <h3>Export Life List</h3>
+    <div class="export-grid">
+      <div>
+        <label class="modal-label" for="exportFormat">Format</label>
+        <select id="exportFormat" class="modal-input" onchange="updateExportControls()">
+          <option value="json">JSON data</option>
+          <option value="csv">CSV spreadsheet</option>
+          <option value="txt">Text list</option>
+          <option value="files">Filename list</option>
+        </select>
+      </div>
+      <div id="exportDetailWrap">
+        <label class="modal-label" for="exportDetail">Rows</label>
+        <select id="exportDetail" class="modal-input" onchange="updateExportControls()">
+          <option value="species">Species summary</option>
+          <option value="photos">Photo rows</option>
+        </select>
+      </div>
+      <div id="exportPhotosWrap">
+        <label class="modal-label" for="exportPhotos">Photos</label>
+        <select id="exportPhotos" class="modal-input">
+          <option value="best">Representative photo per species</option>
+          <option value="all">All listed photos</option>
+        </select>
+      </div>
+      <label class="publish-option" style="margin-top:22px;">
+        <input id="exportLocations" type="checkbox">
+        <span>Include location keywords.</span>
+      </label>
+    </div>
+    <div class="publish-status" id="exportStatus"></div>
+    <div class="modal-actions">
+      <button id="exportSubmitBtn" class="modal-btn modal-btn-primary" onclick="downloadLifeListExport()">Export</button>
+      <button class="modal-btn modal-btn-cancel" onclick="closeExportModal()">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <div class="modal-overlay" id="publishModal">
   <div class="modal">
@@ -105,9 +252,34 @@
      photos while browsing.</p>
 </div>
 
+</div><!-- /#tab-list -->
+
+<div class="ll-tabpanel" id="tab-explorer"></div>
+
 <script>
 var currentData = null;
 var debounceTimer = null;
+var LIFE_LIST_SORT_STORAGE_KEY = 'vireo.lifeList.sort';
+var LIFE_LIST_RENUMBER_STORAGE_KEY = 'vireo.lifeList.renumber';
+var LIFE_LIST_SORTS = ['newest', 'life-order', 'alpha', 'most-photos'];
+var LIFE_LIST_PAGE_SIZE = 100;
+var lifeListLightboxSpecies = null;
+var lifeListLoadPromises = {};
+
+function restoreLifeListViewPreferences() {
+  try {
+    var savedSort = window.localStorage.getItem(LIFE_LIST_SORT_STORAGE_KEY);
+    if (LIFE_LIST_SORTS.indexOf(savedSort) !== -1) {
+      document.getElementById('sortSelect').value = savedSort;
+    }
+    document.getElementById('renumberView').checked =
+      window.localStorage.getItem(LIFE_LIST_RENUMBER_STORAGE_KEY) === '1';
+  } catch (e) {}
+}
+
+function saveLifeListViewPreference(key, value) {
+  try { window.localStorage.setItem(key, value); } catch (e) {}
+}
 
 // All dynamic values rendered into card HTML pass through escapeAttr —
 // same escaping convention as highlights.html.
@@ -163,7 +335,7 @@ function photoThumbnailUrl(photo) {
     : '/thumbnails/' + photo.id + '.jpg';
 }
 
-function renderCard(entry) {
+function renderCard(entry, displayNumber) {
   var best = entry.best;
   var thumb = best ? photoThumbnailUrl(best) : '';
   var sci = entry.scientific_name && entry.scientific_name !== entry.species
@@ -179,17 +351,71 @@ function renderCard(entry) {
   }).join('');
   var extraLocs = (entry.locations || []).length - 3;
   if (extraLocs > 0) locations += '<span class="loc-chip">+' + extraLocs + ' more</span>';
+  var remaining = Math.max(0, entry.photo_count - (entry.photos || []).length);
+  var loadMore = entry.has_more
+    ? '<button type="button" class="lifelist-load-more" data-load-more-species="'
+      + escapeAttr(entry.species) + '"' + (entry.loading_more ? ' disabled' : '') + '>'
+      + (entry.loading_more
+        ? 'Loading photos…'
+        : 'Load ' + Math.min(LIFE_LIST_PAGE_SIZE, remaining) + ' more photo'
+          + (Math.min(LIFE_LIST_PAGE_SIZE, remaining) === 1 ? '' : 's'))
+      + '</button>'
+    : '';
   return '<div class="species-card" data-species="' + escapeAttr(entry.species) + '" title="'
     + escapeAttr((entry.locations || []).join(', ')) + '">'
-    + '<div class="lifer-number">#' + entry.number + '</div>'
-    + (best && best.is_life_list_photo ? '<div class="lifelist-ribbon">Life List</div>' : '')
+    + '<div class="lifer-number">#' + displayNumber + '</div>'
+    + (best && best.is_species_representative ? '<div class="lifelist-ribbon">Representative</div>' : '')
     + (best ? '<img src="' + escapeAttr(thumb) + '" data-photo-id="' + escapeAttr(best.id) + '" alt="' + escapeAttr(best.filename) + '" loading="lazy">' : '')
     + '<div class="species-info">'
     + '<div class="species-name">' + escapeAttr(entry.species) + '</div>'
     + sci
     + '<div class="species-meta">' + metaParts.join(' &middot; ') + '</div>'
     + (locations ? '<div class="species-locations">' + locations + '</div>' : '')
+    + loadMore
     + '</div></div>';
+}
+
+function lifeListEntry(species) {
+  return (currentData && currentData.species || []).find(function(entry) {
+    return entry.species === species;
+  });
+}
+
+function loadMoreLifeListPhotos(entry) {
+  if (!entry || !entry.has_more) return Promise.resolve(entry ? entry.photos : []);
+  if (lifeListLoadPromises[entry.species]) {
+    return lifeListLoadPromises[entry.species];
+  }
+  entry.loading_more = true;
+  render();
+  var params = new URLSearchParams({
+    species: entry.species,
+    offset: String((entry.photos || []).length),
+    limit: String(LIFE_LIST_PAGE_SIZE),
+  });
+  var promise = safeFetch('/api/life-list/species?' + params.toString())
+    .then(function(data) {
+      var seen = new Set((entry.photos || []).map(function(photo) { return photo.id; }));
+      (data.photos || []).forEach(function(photo) {
+        if (!seen.has(photo.id)) {
+          entry.photos.push(photo);
+          seen.add(photo.id);
+        }
+      });
+      entry.loaded_count = data.loaded_count;
+      entry.has_more = data.has_more;
+      return entry.photos;
+    })
+    .catch(function() {
+      return entry.photos;
+    })
+    .finally(function() {
+      entry.loading_more = false;
+      delete lifeListLoadPromises[entry.species];
+      render();
+    });
+  lifeListLoadPromises[entry.species] = promise;
+  return promise;
 }
 
 function render() {
@@ -208,13 +434,16 @@ function render() {
   empty.style.display = 'none';
   controls.style.display = '';
 
-  var search = document.getElementById('speciesSearch').value.trim().toLowerCase();
+  var search = document.getElementById('speciesSearch').value.trim();
+  var searchOptions = VireoTextSearch.readOptions('lifeSpecies');
   var list = sortedSpecies();
   if (search) {
     list = list.filter(function(e) {
-      return e.species.toLowerCase().indexOf(search) >= 0
-        || (e.scientific_name || '').toLowerCase().indexOf(search) >= 0
-        || (e.common_name || '').toLowerCase().indexOf(search) >= 0;
+      return VireoTextSearch.matchesFields(
+        [e.species, e.scientific_name || '', e.common_name || ''],
+        search,
+        searchOptions
+      );
     });
   }
 
@@ -222,22 +451,63 @@ function render() {
     + currentData.meta.photo_count + ' tagged photos'
     + (search ? ' · ' + list.length + ' matching' : '');
 
-  content.innerHTML = list.map(renderCard).join('')
+  var renumberView = document.getElementById('renumberView').checked;
+  content.innerHTML = list.map(function(entry, index) {
+    return renderCard(entry, renumberView ? index + 1 : entry.number);
+  }).join('')
     || '<div class="lifelist-empty" style="grid-column:1/-1;"><p>No species match this search.</p></div>';
+
+  content.querySelectorAll('[data-load-more-species]').forEach(function(button) {
+    button.addEventListener('click', function(event) {
+      event.stopPropagation();
+      loadMoreLifeListPhotos(lifeListEntry(button.getAttribute('data-load-more-species')));
+    });
+  });
 
   content.querySelectorAll('.species-card').forEach(function(card) {
     card.addEventListener('click', function() {
       var sp = card.getAttribute('data-species');
       var entry = (currentData.species || []).find(function(e) { return e.species === sp; });
       if (entry && entry.best && window.openLightbox) {
-        // The lightbox set is this species' top photos so the user can
-        // flip through their best shots of the lifer. The shared lightbox
-        // panel (see _navbar.html) renders its own "Add to Life List" control.
+        // Keep the same array object as pages are appended so the shared
+        // lightbox immediately sees newly loaded photos.
+        lifeListLightboxSpecies = entry.species;
         openLightbox(entry.best.id, entry.best.filename, entry.photos || [entry.best]);
       }
     });
   });
 }
+
+// Prefetch the next page before the viewer reaches the end of the current
+// lightbox list. If navigation reaches the boundary first, the boundary
+// listener waits for that same request and advances as soon as it arrives.
+document.addEventListener('lightbox:photochanged', function(event) {
+  var entry = lifeListEntry(lifeListLightboxSpecies);
+  if (!entry || !entry.has_more) return;
+  var photoId = event && event.detail && event.detail.photoId;
+  var index = (entry.photos || []).findIndex(function(photo) { return photo.id === photoId; });
+  if (index >= entry.photos.length - 3) loadMoreLifeListPhotos(entry);
+});
+
+document.addEventListener('lightbox:navigationboundary', function(event) {
+  var detail = event && event.detail || {};
+  if (detail.delta !== 1) return;
+  var entry = lifeListEntry(lifeListLightboxSpecies);
+  if (!entry || !entry.has_more) return;
+  var currentId = detail.photoId;
+  loadMoreLifeListPhotos(entry).then(function() {
+    if (window._lightboxCurrentId !== currentId) return;
+    var index = entry.photos.findIndex(function(photo) { return photo.id === currentId; });
+    var next = entry.photos[index + 1];
+    if (next && window.openLightbox) {
+      openLightbox(next.id, next.filename, entry.photos);
+    }
+  });
+});
+
+document.addEventListener('lightbox:closed', function() {
+  lifeListLightboxSpecies = null;
+});
 
 function debounceRender() {
   clearTimeout(debounceTimer);
@@ -246,8 +516,57 @@ function debounceRender() {
 
 document.getElementById('speciesSearch').addEventListener('input', debounceRender);
 document.getElementById('sortSelect').addEventListener('change', function() {
+  saveLifeListViewPreference(LIFE_LIST_SORT_STORAGE_KEY, this.value);
   if (currentData) render();
 });
+document.getElementById('renumberView').addEventListener('change', function() {
+  saveLifeListViewPreference(LIFE_LIST_RENUMBER_STORAGE_KEY, this.checked ? '1' : '0');
+  if (currentData) render();
+});
+
+function openExportModal() {
+  var modal = document.getElementById('exportModal');
+  var status = document.getElementById('exportStatus');
+  if (status) status.textContent = '';
+  updateExportControls();
+  modal.classList.add('open');
+  setTimeout(function() {
+    var input = document.getElementById('exportFormat');
+    if (input) input.focus();
+  }, 0);
+}
+
+function closeExportModal() {
+  document.getElementById('exportModal').classList.remove('open');
+}
+
+function updateExportControls() {
+  var format = document.getElementById('exportFormat').value;
+  var detailWrap = document.getElementById('exportDetailWrap');
+  var photosWrap = document.getElementById('exportPhotosWrap');
+  var detail = document.getElementById('exportDetail').value;
+  detailWrap.style.display = format === 'csv' ? '' : 'none';
+  photosWrap.style.display = (
+    format === 'files' || (format === 'csv' && detail === 'photos')
+  ) ? '' : 'none';
+}
+
+function downloadLifeListExport() {
+  var format = document.getElementById('exportFormat').value;
+  var detail = document.getElementById('exportDetail').value;
+  var photos = document.getElementById('exportPhotos').value;
+  var includeLocations = document.getElementById('exportLocations').checked ? '1' : '0';
+  var params = new URLSearchParams({
+    format: format,
+    detail: detail,
+    include_locations: includeLocations,
+  });
+  if (format === 'files' || (format === 'csv' && detail === 'photos')) {
+    params.set('photos', photos);
+  }
+  window.location.href = '/api/life-list/export?' + params.toString();
+  closeExportModal();
+}
 
 function openPublishModal() {
   var modal = document.getElementById('publishModal');
@@ -302,14 +621,577 @@ async function startPublishSite() {
   }
 }
 
-// The "Add to Life List" lightbox panel is shared (see _navbar.html) and
+// The representative lightbox panel is shared (see _navbar.html) and
 // works on every page. When it changes a representative photo, it dispatches
 // `lifelist:changed`; refresh this page's grid + ribbons in response.
 document.addEventListener('lifelist:changed', function() {
   loadLifeList();
 });
 
+// ---------------- Explorer: data load + honesty states (Task 10) ----------------
+
+// Load the explorer tree for a class (rootId = class taxon id, or omit for
+// the default Aves root). Stores the payload and re-renders.
+async function loadExplorer(rootId) {
+  var panel = document.getElementById('tab-explorer');
+  panel.innerHTML = '<div class="ll-exp"><div class="ll-exp-empty">Loading…</div></div>';
+  try {
+    explorerData = await safeFetch('/api/life-list/explorer' + (rootId ? ('?root=' + encodeURIComponent(rootId)) : ''));
+  } catch (e) {
+    panel.innerHTML = '<div class="ll-exp"><div class="ll-exp-empty">Failed to load explorer.</div></div>';
+    return;
+  }
+  explorerPath = [];   // reset drill path whenever a new class is loaded
+  renderExplorer();
+}
+
+// Trigger the taxonomy download job, then poll it and reload the explorer on
+// completion. Mirrors settings.html's downloadTaxonomy() pattern.
+async function explorerDownloadTaxonomy(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Downloading… (see Jobs panel)';
+  try {
+    var data = await safeFetch('/api/jobs/download-taxonomy', { method: 'POST' }, { toast: false });
+    if (typeof safeEventSource === 'function' && data && data.job_id) {
+      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
+        onComplete: function() { loadExplorer(); }
+      });
+    }
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Download the taxonomy';
+  }
+}
+
+function renderExplorer() {
+  var panel = document.getElementById('tab-explorer');
+  var d = explorerData || {};
+
+  // Honesty state 1: reference taxonomy not downloaded — no fake 0/0.
+  if (!d.taxonomy_ready) {
+    panel.innerHTML =
+      '<div class="ll-exp"><div class="ll-exp-cta">'
+      + '<h2>Download the taxonomy to see completeness</h2>'
+      + '<p>The explorer compares your tagged species against the full iNaturalist '
+      + 'reference taxonomy (orders, families, genera, species). That reference '
+      + "hasn't been downloaded yet, so there are no totals to measure against.</p>"
+      + '<button class="publish-btn" onclick="explorerDownloadTaxonomy(this)">Download the taxonomy</button>'
+      + '</div></div>';
+    return;
+  }
+
+  var html = '<div class="ll-exp">';
+
+  // Class selector — always includes the current root so Birds stays selectable
+  // even before the user has tagged any birds.
+  html += '<div class="ll-exp-controls">';
+  html += '<label for="explorerClass">Class</label>';
+  html += '<select id="explorerClass" onchange="loadExplorer(this.value)">';
+  var classes = (d.classes || []).slice();
+  var root = d.root || {};
+  var seenRoot = classes.some(function(c) { return c.id === root.id; });
+  if (root.id != null && !seenRoot) {
+    classes.unshift({ id: root.id, name: root.name, common_name: root.common_name });
+  }
+  classes.forEach(function(c) {
+    var label = c.common_name || c.name;
+    var sel = (root.id != null && c.id === root.id) ? ' selected' : '';
+    html += '<option value="' + escapeAttr(c.id) + '"' + sel + '>' + escapeAttr(label) + '</option>';
+  });
+  html += '</select>';
+  html += '</div>';
+
+  var summary = d.summary || {};
+  var speciesTotal = summary.species ? summary.species.total : 0;
+
+  // Honesty state 2: taxonomy ready but this class has no reference taxa.
+  if (!speciesTotal) {
+    html += '<div class="ll-exp-empty">No reference taxa for this class.</div>';
+    html += renderUnmatched(d);
+    html += '</div>';
+    panel.innerHTML = html;
+    return;
+  }
+
+  // Sunburst goes above the summary chips; rebuilt on every explorer render
+  // (class switch / reload) so no stale SVG survives — panel.innerHTML below
+  // wipes any prior container.
+  html += '<div class="ll-sunburst" id="explorerSunburst"></div>';
+  html += renderSummaryBar(summary);
+  html += renderUnmatched(d);
+  html += '<div id="explorerBody"></div>';
+  html += '</div>';
+  panel.innerHTML = html;
+
+  renderSunburst();
+  wireBreadcrumb(document.getElementById('explorerBody'));
+  renderExplorerBody();
+}
+
+// Single delegated click listener for breadcrumb crumbs. Attached once to the
+// persistent #explorerBody container, so re-rendering its innerHTML (cards,
+// species leaf, loading states) never accumulates duplicate handlers.
+function wireBreadcrumb(container) {
+  if (!container) return;
+  container.addEventListener('click', function(event) {
+    var crumb = event.target.closest('.ll-crumb');
+    if (!crumb || !container.contains(crumb)) return;
+    var depth = parseInt(crumb.getAttribute('data-depth'), 10);
+    if (isNaN(depth) || depth === explorerPath.length) return;   // current crumb: no-op
+    explorerPath = explorerPath.slice(0, depth);
+    renderExplorerBody();
+  });
+}
+
+// Muted footnote for tagged species that aren't matched to the taxonomy and so
+// aren't counted here. If the name list is truncated, say so plainly.
+function renderUnmatched(d) {
+  var u = d.unmatched_species || { count: 0, names: [] };
+  if (!u.count) return '';
+  var names = u.names || [];
+  var truncated = u.count > names.length;
+  var html = '<div class="ll-unmatched">';
+  html += u.count + " tagged species aren't counted here (unmatched, or matched above species rank).";
+  html += '<details><summary>'
+    + (truncated ? ('Show the first ' + names.length + ' of ' + u.count) : 'Show them')
+    + '</summary><ul>';
+  names.forEach(function(n) { html += '<li>' + escapeHtml(n) + '</li>'; });
+  html += '</ul>';
+  if (truncated) html += '<div style="margin-top:4px;">…and ' + (u.count - names.length) + ' more not shown.</div>';
+  html += '</details></div>';
+  return html;
+}
+
+// ---------------- Explorer: summary + breadcrumb + cards (Task 11) ----------------
+
+function renderSummaryBar(summary) {
+  var order = summary.order || { found: 0, total: 0 };
+  var family = summary.family || { found: 0, total: 0 };
+  var genus = summary.genus || { found: 0, total: 0 };
+  var species = summary.species || { found: 0, total: 0 };
+  function chip(v, label) {
+    return '<span class="ll-sumchip"><b>' + v.found + '/' + v.total + '</b> ' + label + '</span>';
+  }
+  return '<div class="ll-summary">'
+    + chip(order, 'orders')
+    + chip(family, 'families')
+    + chip(genus, 'genera')
+    + chip(species, 'species')
+    + '</div>';
+}
+
+// Return the list of nodes at the current drill level, honoring explorerPath.
+function currentExplorerNodes() {
+  var nodes = explorerData.nodes || [];
+  for (var i = 0; i < explorerPath.length; i++) {
+    var step = explorerPath[i];
+    var match = nodes.find(function(n) { return n.id === step.id; });
+    if (!match) return [];
+    nodes = match.children || [];
+  }
+  return nodes;
+}
+
+function renderExplorerBody() {
+  var body = document.getElementById('explorerBody');
+  if (!body) return;
+  var html = renderBreadcrumb();
+
+  var nodes = currentExplorerNodes();
+  html += '<div class="ll-cards">';
+  nodes.forEach(function(n) { html += renderExplorerCard(n); });
+  html += '</div>';
+  body.innerHTML = html;
+
+  body.querySelectorAll('.ll-card').forEach(function(card) {
+    card.addEventListener('click', function() {
+      var id = parseInt(card.getAttribute('data-id'), 10);
+      var node = currentExplorerNodes().find(function(n) { return n.id === id; });
+      if (!node) return;
+      if (node.rank === 'genus') {
+        loadExplorerSpecies(node);
+      } else {
+        explorerPath.push({ id: node.id, name: node.common_name || node.name, rank: node.rank });
+        renderExplorerBody();
+      }
+    });
+  });
+}
+
+function renderBreadcrumb() {
+  var root = explorerData.root || {};
+  var rootLabel = root.common_name || root.name || 'Class';
+  var html = '<div class="ll-crumbs">';
+  var isRootCurrent = explorerPath.length === 0;
+  html += '<span class="ll-crumb' + (isRootCurrent ? ' current' : '') + '" data-depth="0">'
+    + escapeHtml(rootLabel) + '</span>';
+  explorerPath.forEach(function(step, i) {
+    var current = (i === explorerPath.length - 1);
+    html += '<span class="ll-crumb-sep">›</span>';
+    html += '<span class="ll-crumb' + (current ? ' current' : '') + '" data-depth="' + (i + 1) + '">'
+      + escapeHtml(step.name) + '</span>';
+  });
+  html += '</div>';
+  // Crumb click handling is delegated once via wireBreadcrumb() on #explorerBody;
+  // no per-render handler attachment here.
+  return html;
+}
+
+// ---------------- Explorer: sunburst overview (Task 13) ----------------
+//
+// Whole-class completeness at a glance: three rings out from the center —
+// orders (inner) → families (middle) → genera (outer), built from
+// explorerData.nodes (the tree materialized down to genus; species are NOT
+// in that tree, so there is no species ring). Each node's angular span is
+// proportional to its total_species; children partition their parent's arc in
+// the same order the cards use (explorerData.nodes is already found-first-then-
+// alpha from the server). Arc fill is var(--accent) at an opacity scaled by
+// found_species/total_species, over a var(--bg-tertiary) ghost track, so an
+// untouched branch reads clearly faded and a complete branch fully saturated.
+// Clicking an arc drills the cards below via the same explorerPath the cards
+// and breadcrumb use; clicking the center resets to the top level.
+
+var explorerSunburstLineage = {};   // node id -> [{id,name,rank}] root→node lineage
+
+// Convert a polar point (center + radius + angle in radians, 0 = top,
+// clockwise) to SVG x/y. Returns a string "x,y".
+function llPolar(cx, cy, r, a) {
+  return (cx + r * Math.sin(a)).toFixed(3) + ',' + (cy - r * Math.cos(a)).toFixed(3);
+}
+
+// SVG path for a single ring segment (annular sector) spanning [a0,a1] radians
+// between inner radius r0 and outer radius r1.
+function llArcPath(cx, cy, r0, r1, a0, a1) {
+  // A single child spanning (near) a full 360° collapses to a degenerate arc
+  // because start==end. Draw a full annulus (two stacked half-arcs) instead.
+  if ((a1 - a0) >= 2 * Math.PI - 1e-6) {
+    var m = a0 + Math.PI;
+    return llArcPath(cx, cy, r0, r1, a0, m) + ' ' + llArcPath(cx, cy, r0, r1, m, a1);
+  }
+  var largeArc = (a1 - a0) > Math.PI ? 1 : 0;
+  var p0 = llPolar(cx, cy, r1, a0);   // outer start
+  var p1 = llPolar(cx, cy, r1, a1);   // outer end
+  var p2 = llPolar(cx, cy, r0, a1);   // inner end
+  var p3 = llPolar(cx, cy, r0, a0);   // inner start
+  return 'M' + p0
+    + ' A' + r1.toFixed(3) + ',' + r1.toFixed(3) + ' 0 ' + largeArc + ' 1 ' + p1
+    + ' L' + p2
+    + ' A' + r0.toFixed(3) + ',' + r0.toFixed(3) + ' 0 ' + largeArc + ' 0 ' + p3
+    + ' Z';
+}
+
+// Accent fill at an opacity scaled by completeness. 0 found → a ghost track so
+// untouched branches read faded; 1.0 → full accent. Zero-total arcs (should not
+// happen below genus, but guard anyway) render as the plain track.
+function llArcFill(found, total) {
+  if (!total || total <= 0) return { fill: 'var(--bg-tertiary)', op: 1 };
+  var frac = Math.max(0, Math.min(1, found / total));
+  if (frac <= 0) return { fill: 'var(--bg-tertiary)', op: 1 };
+  return { fill: 'var(--accent)', op: (0.15 + 0.85 * frac) };
+}
+
+function renderSunburst() {
+  var host = document.getElementById('explorerSunburst');
+  if (!host) return;
+  var top = (explorerData && explorerData.nodes) || [];
+  explorerSunburstLineage = {};
+
+  // Total angular weight = sum of order total_species. Guard total==0 / empty:
+  // hide the sunburst entirely (honesty states already cover those below).
+  var classTotal = 0;
+  top.forEach(function(n) { classTotal += (n.total_species || 0); });
+  if (!top.length || classTotal <= 0) { host.innerHTML = ''; host.style.display = 'none'; return; }
+  host.style.display = 'flex';
+
+  var SIZE = 360, cx = SIZE / 2, cy = SIZE / 2;
+  var R_CENTER = 46;                       // clickable reset hub
+  var rings = [R_CENTER, 92, 138, 176];    // ring boundaries: center→order→family→genus
+
+  var root = (explorerData && explorerData.root) || {};
+  var rootLineage = [];   // lineage entries accumulate as we recurse
+  var arcs = [];          // collected {path, fill, op, tip, lineage}
+
+  var FULL = 2 * Math.PI;
+
+  // Recurse a level, laying children out proportional to total_species within
+  // [a0,a1]. depth 0 = orders, 1 = families, 2 = genera (last ring).
+  function layout(list, a0, a1, depth, lineage) {
+    if (depth > 2 || !list || !list.length) return;
+    var span = a1 - a0;
+    // Denominator = sum of this level's total_species; fall back to equal
+    // partition if every child is zero (degenerate, keeps geometry valid).
+    var sum = 0;
+    list.forEach(function(n) { sum += (n.total_species || 0); });
+    var equal = sum <= 0;
+    var cursor = a0;
+    list.forEach(function(n) {
+      var w = equal ? (span / list.length)
+                    : (span * (n.total_species || 0) / sum);
+      var s = cursor, e = cursor + w;
+      cursor = e;
+      if (w <= 0) return;   // zero-weight child gets no arc
+      var lin = lineage.concat([{ id: n.id, name: n.common_name || n.name, rank: n.rank }]);
+      explorerSunburstLineage[n.id] = lin;
+      var shade = llArcFill(n.found_species || 0, n.total_species || 0);
+      arcs.push({
+        id: n.id,
+        path: llArcPath(cx, cy, rings[depth], rings[depth + 1], s, e),
+        fill: shade.fill, op: shade.op,
+        name: n.common_name || n.name,
+        sci: (n.common_name && n.common_name !== n.name) ? n.name : '',
+        found: n.found_species || 0, total: n.total_species || 0
+      });
+      layout(n.children || [], s, e, depth + 1, lin);
+    });
+  }
+  layout(top, 0, FULL, 0, rootLineage);
+
+  var parts = [];
+  parts.push('<svg class="ll-sb-svg" width="' + SIZE + '" height="' + SIZE + '" viewBox="0 0 ' + SIZE + ' ' + SIZE + '"'
+    + ' role="img" aria-label="Taxonomic completeness sunburst">');
+  arcs.forEach(function(a) {
+    var pct = a.total > 0 ? Math.round((a.found / a.total) * 100) : 0;
+    parts.push('<path class="ll-sb-arc" d="' + a.path + '" fill="' + a.fill + '"'
+      + ' fill-opacity="' + a.op.toFixed(3) + '"'
+      + ' data-id="' + escapeAttr(a.id) + '"'
+      + ' data-name="' + escapeAttr(a.name) + '"'
+      + ' data-sci="' + escapeAttr(a.sci) + '"'
+      + ' data-found="' + a.found + '" data-total="' + a.total + '" data-pct="' + pct + '"></path>');
+  });
+  // Center hub = reset-to-top control, labeled with class-level completeness.
+  var summary = (explorerData && explorerData.summary) || {};
+  var sp = summary.species || { found: 0, total: 0 };
+  var centerPct = sp.total > 0 ? Math.round((sp.found / sp.total) * 100) : 0;
+  var centerLabel = escapeHtml((root.common_name || root.name || 'All'));
+  parts.push('<circle class="ll-sb-center" id="explorerSunburstCenter" cx="' + cx + '" cy="' + cy + '" r="' + R_CENTER + '"'
+    + ' data-name="' + escapeAttr(root.common_name || root.name || 'All') + '"'
+    + ' data-found="' + sp.found + '" data-total="' + sp.total + '" data-pct="' + centerPct + '"></circle>');
+  parts.push('<text class="ll-sb-center-label" x="' + cx + '" y="' + (cy - 6) + '">' + centerLabel + '</text>');
+  parts.push('<text class="ll-sb-center-label" x="' + cx + '" y="' + (cy + 11) + '" style="font-size:11px;fill:var(--text-secondary)">' + centerPct + '%</text>');
+  parts.push('</svg>');
+  host.innerHTML = parts.join('');
+
+  wireSunburst(host);
+}
+
+// Shared floating tooltip element (one per document, reused).
+function llSunburstTooltip() {
+  var tip = document.getElementById('explorerSunburstTip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.id = 'explorerSunburstTip';
+    tip.className = 'll-sb-tooltip';
+    document.body.appendChild(tip);
+  }
+  return tip;
+}
+
+function wireSunburst(host) {
+  var svg = host.querySelector('.ll-sb-svg');
+  if (!svg) return;
+  var tip = llSunburstTooltip();
+
+  function showTip(el, ev) {
+    var name = el.getAttribute('data-name') || '';
+    var sci = el.getAttribute('data-sci') || '';
+    var found = el.getAttribute('data-found') || '0';
+    var total = el.getAttribute('data-total') || '0';
+    var pct = el.getAttribute('data-pct') || '0';
+    var html = '<b>' + escapeHtml(name) + '</b>';
+    if (sci) html += ' <span class="ll-sb-tt-sci">' + escapeHtml(sci) + '</span>';
+    html += '<br>' + escapeHtml(found) + '/' + escapeHtml(total) + ' species (' + escapeHtml(pct) + '%)';
+    tip.innerHTML = html;
+    tip.style.display = 'block';
+    moveTip(ev);
+  }
+  function moveTip(ev) {
+    // Offset from cursor; clamp to viewport so the tip never spills off-screen.
+    var pad = 14, tw = tip.offsetWidth, th = tip.offsetHeight;
+    var x = ev.clientX + pad, y = ev.clientY + pad;
+    if (x + tw > window.innerWidth - 6) x = ev.clientX - pad - tw;
+    if (y + th > window.innerHeight - 6) y = ev.clientY - pad - th;
+    tip.style.left = Math.max(6, x) + 'px';
+    tip.style.top = Math.max(6, y) + 'px';
+  }
+  function hideTip() { tip.style.display = 'none'; }
+
+  svg.addEventListener('mousemove', function(ev) {
+    var t = ev.target.closest('.ll-sb-arc, .ll-sb-center');
+    if (t) { showTip(t, ev); } else { hideTip(); }
+  });
+  svg.addEventListener('mouseleave', hideTip);
+
+  // Click an arc → drill via its precomputed lineage; click center → reset.
+  svg.addEventListener('click', function(ev) {
+    var center = ev.target.closest('.ll-sb-center');
+    if (center) {
+      explorerPath = [];
+      hideTip();
+      renderExplorerBody();
+      return;
+    }
+    var arc = ev.target.closest('.ll-sb-arc');
+    if (!arc) return;
+    var id = parseInt(arc.getAttribute('data-id'), 10);
+    var lineage = explorerSunburstLineage[id];
+    if (!lineage) return;
+    hideTip();
+    // Genus arcs: drilling to a genus loads its species leaf (matches card
+    // behavior); anything above genus just sets the path and shows cards.
+    var leaf = lineage[lineage.length - 1];
+    if (leaf.rank === 'genus') {
+      // Set path to the genus's parent chain, then load species (which pushes
+      // the genus crumb itself), mirroring a card click on that genus.
+      explorerPath = lineage.slice(0, -1);
+      var node = currentExplorerNodes().find(function(n) { return n.id === id; });
+      if (node) { loadExplorerSpecies(node); return; }
+      // Fallback: if the node isn't in the current level, just set the full path.
+      explorerPath = lineage.slice();
+      renderExplorerBody();
+      return;
+    }
+    explorerPath = lineage.slice();
+    renderExplorerBody();
+  });
+}
+
+// Inline SVG progress ring: accent arc over a --bg-tertiary track, pct% center.
+function renderRing(found, total) {
+  var pct = total > 0 ? Math.round((found / total) * 100) : 0;
+  var r = 20, cx = 24, cy = 24;
+  var circ = 2 * Math.PI * r;
+  var dash = circ * (total > 0 ? found / total : 0);
+  return '<svg class="ll-ring" width="48" height="48" viewBox="0 0 48 48">'
+    + '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="var(--bg-tertiary)" stroke-width="4"/>'
+    + '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="none" stroke="var(--accent)" stroke-width="4"'
+    + ' stroke-dasharray="' + dash.toFixed(2) + ' ' + circ.toFixed(2) + '"'
+    + ' stroke-linecap="round" transform="rotate(-90 ' + cx + ' ' + cy + ')"/>'
+    + '<text x="' + cx + '" y="' + cy + '" text-anchor="middle" dominant-baseline="central">' + pct + '%</text>'
+    + '</svg>';
+}
+
+function rankPlural(rank, n) {
+  var map = { order: 'orders', family: 'families', genus: 'genera',
+              species: 'species', class: 'classes' };
+  return map[rank] || (rank + 's');
+}
+
+function renderExplorerCard(n) {
+  var name = n.common_name || n.name;
+  var sci = (n.common_name && n.common_name !== n.name)
+    ? '<div class="ll-card-sci">' + escapeHtml(n.name) + '</div>' : '';
+  var childRank = n.child_rank ? rankPlural(n.child_rank) : 'children';
+  var sub = n.found_children + '/' + n.total_children + ' ' + childRank + ' · '
+    + n.found_species + '/' + n.total_species + ' species';
+  var emptyCls = (n.found_species === 0) ? ' empty' : '';
+  return '<div class="ll-card' + emptyCls + '" data-id="' + escapeAttr(n.id) + '">'
+    + renderRing(n.found_species, n.total_species)
+    + '<div class="ll-card-body">'
+    + '<div class="ll-card-name">' + escapeHtml(name) + '</div>'
+    + sci
+    + '<div class="ll-card-sub">' + sub + '</div>'
+    + '</div></div>';
+}
+
+// ---------------- Explorer: species leaf (Task 12) ----------------
+
+var explorerLeafData = null;   // last species-leaf payload
+var explorerLeafGenus = null;  // {id,name,rank} of the genus being shown
+
+async function loadExplorerSpecies(node) {
+  explorerLeafGenus = { id: node.id, name: node.common_name || node.name, rank: node.rank };
+  explorerPath.push(explorerLeafGenus);
+  var body = document.getElementById('explorerBody');
+  if (body) body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Loading species…</div>';
+  try {
+    explorerLeafData = await safeFetch('/api/life-list/explorer/species?genus=' + encodeURIComponent(node.id));
+  } catch (e) {
+    if (body) body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Failed to load species.</div>';
+    return;
+  }
+  renderExplorerLeaf(false);
+}
+
+function renderExplorerLeaf(missingOnly) {
+  var body = document.getElementById('explorerBody');
+  if (!body) return;
+  var species = (explorerLeafData && explorerLeafData.species) || [];
+  var found = species.filter(function(s) { return s.found; }).length;
+  var genusName = explorerLeafGenus ? explorerLeafGenus.name : '';
+
+  var html = renderBreadcrumb();
+  html += '<div class="ll-leaf-head">';
+  html += '<h3>' + found + '/' + species.length + ' species in ' + escapeHtml(genusName) + '</h3>';
+  html += '<label><input type="checkbox" id="explorerMissingOnly"' + (missingOnly ? ' checked' : '') + '> Show missing only</label>';
+  html += '</div>';
+
+  var shown = missingOnly ? species.filter(function(s) { return !s.found; }) : species;
+  html += '<div class="ll-leaf-grid">';
+  shown.forEach(function(s) { html += renderSpeciesTile(s); });
+  html += '</div>';
+  if (!shown.length) html += '<div class="ll-exp-empty">Nothing to show.</div>';
+  body.innerHTML = html;
+
+  // Breadcrumb clicks are handled by the delegated wireBreadcrumb listener; wire the checkbox here.
+  var chk = document.getElementById('explorerMissingOnly');
+  if (chk) chk.addEventListener('change', function() { renderExplorerLeaf(chk.checked); });
+}
+
+function renderSpeciesTile(s) {
+  var common = (s.common_name && s.common_name !== s.name)
+    ? '<div class="ll-sp-common">' + escapeHtml(s.common_name) + '</div>' : '';
+  if (s.found) {
+    var thumb = s.photo ? photoThumbnailUrl(s.photo) : '';
+    var img = thumb
+      ? '<img src="' + escapeAttr(thumb) + '" alt="' + escapeAttr(s.photo ? s.photo.filename : s.name) + '" loading="lazy">'
+      : '<div class="ll-sp-ph"></div>';
+    return '<div class="ll-sp">' + img
+      + '<div class="ll-sp-info">'
+      + '<div class="ll-sp-name">' + escapeHtml(s.name) + '</div>'
+      + common
+      + '<span class="ll-sp-chip seen">✓ seen</span>'
+      + '</div></div>';
+  }
+  return '<div class="ll-sp missing"><div class="ll-sp-ph"></div>'
+    + '<div class="ll-sp-info">'
+    + '<div class="ll-sp-name">' + escapeHtml(s.name) + '</div>'
+    + common
+    + '<span class="ll-sp-chip notyet">not yet</span>'
+    + '</div></div>';
+}
+
+// ---------------- Explorer tab ----------------
+var explorerLoaded = false;   // lazy-load guard: fetch explorer once on first open
+var explorerData = null;      // last payload from /api/life-list/explorer
+var explorerPath = [];        // [{id,name,rank}] drill path from class root down
+
+function llSwitchTab(name) {
+  document.querySelectorAll('.ll-tab').forEach(function(t) {
+    t.classList.toggle('active', t.dataset.tab === name);
+  });
+  document.querySelectorAll('.ll-tabpanel').forEach(function(p) {
+    p.classList.toggle('active', p.id === 'tab-' + name);
+  });
+  try {
+    var url = new URL(window.location.href);
+    url.searchParams.set('view', name);
+    history.replaceState(null, '', url.toString());
+  } catch (e) {}
+  if (name === 'explorer' && !explorerLoaded) {
+    explorerLoaded = true;
+    loadExplorer();
+  }
+}
+
+restoreLifeListViewPreferences();
 loadLifeList();
+
+// Initial tab from ?view= (defaults to list).
+(function() {
+  var view = 'list';
+  try { view = new URLSearchParams(window.location.search).get('view') || 'list'; } catch (e) {}
+  if (view === 'explorer') llSwitchTab('explorer');
+})();
 </script>
 </body>
 </html>

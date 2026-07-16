@@ -54,6 +54,7 @@ def _disable_startup_backfill_timers(monkeypatch):
     directly, so coverage is unaffected.
     """
     monkeypatch.setenv("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS", "1")
+    monkeypatch.setenv("VIREO_DISABLE_BROWSER_AUTH", "1")
 
 
 @pytest.fixture(autouse=True)

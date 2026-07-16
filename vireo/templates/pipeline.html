@@ -97,6 +97,10 @@ body { padding-bottom: 36px; }
   background: var(--danger, #E74C3C);
   color: #fff;
 }
+.stage-status-pill.warning {
+  background: color-mix(in srgb, var(--warning, #F0A030) 20%, transparent);
+  color: var(--warning, #F0A030);
+}
 .stage-status-pill.blocked {
   background: color-mix(in srgb, var(--danger, #E74C3C) 18%, transparent);
   color: var(--danger, #E74C3C);
@@ -107,10 +111,10 @@ body { padding-bottom: 36px; }
 }
 .stage-progress-bar {
   display: inline-flex;
-  width: 80px;
-  height: 6px;
+  width: 112px;
+  height: 8px;
   margin-left: 8px;
-  border-radius: 3px;
+  border-radius: 4px;
   overflow: hidden;
   background: var(--bg-tertiary, #14374E);
   vertical-align: middle;
@@ -371,7 +375,7 @@ body { padding-bottom: 36px; }
 /* Progress bar */
 .progress-wrap { margin-top: 10px; }
 .progress-bar-track {
-  height: 4px; background: var(--bg-tertiary, #14374E); border-radius: 2px; overflow: hidden;
+  height: 8px; background: var(--bg-tertiary, #14374E); border-radius: 4px; overflow: hidden;
 }
 .progress-bar-fill {
   height: 100%; background: var(--accent, #24E5CA); width: 0%; transition: width 0.3s;
@@ -412,21 +416,6 @@ body { padding-bottom: 36px; }
   letter-spacing: 1px;
 }
 
-/* Destination card sections */
-.dest-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 8px;
-}
-.dest-option {
-  padding: 4px 0;
-}
-#destCopySection.dimmed {
-  opacity: 0.35;
-  pointer-events: none;
-}
-
 /* Pipeline action bar */
 .pipeline-action-bar {
   margin-top: 8px;
@@ -455,116 +444,9 @@ body { padding-bottom: 36px; }
 }
 .view-results-btn:hover { background: var(--accent-hover, #5AF0DA); }
 
-/* Folder tags (multi-folder input) */
-.folder-tag {
-  display: inline-flex; align-items: center; gap: 6px;
-  background: var(--bg-tertiary); border: 1px solid var(--border-secondary);
-  border-radius: 4px; padding: 4px 8px; margin: 2px; font-size: 12px;
-  font-family: monospace; color: var(--text-secondary);
-}
-.folder-tag-remove {
-  cursor: pointer; color: var(--text-ghost); font-size: 14px;
-}
-.folder-tag-remove:hover { color: var(--warning); }
-
 /* Stage enable/disable checkboxes */
 .stage-enable {
   accent-color: var(--accent); margin-right: 4px;
-}
-
-/* ---------- Folder Browser Modal ---------- */
-.folder-browser-overlay {
-  display: none;
-  position: fixed;
-  inset: 0;
-  z-index: 10000;
-  background: rgba(0,0,0,0.6);
-}
-.folder-browser-overlay.active { display: flex; align-items: center; justify-content: center; }
-.folder-browser-panel {
-  background: var(--bg-secondary);
-  border-radius: 8px;
-  width: 540px;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
-  color: var(--text-primary);
-  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-}
-.folder-browser-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 16px 20px 12px;
-  border-bottom: 1px solid var(--border-color);
-}
-.folder-browser-header h3 { margin: 0; font-size: 15px; }
-.folder-browser-close {
-  background: none; border: none; color: var(--text-muted);
-  font-size: 20px; cursor: pointer; padding: 0 4px;
-}
-.folder-browser-close:hover { color: var(--text-primary); }
-.folder-browser-shortcuts {
-  display: flex; gap: 6px; padding: 10px 20px;
-  border-bottom: 1px solid var(--border-color);
-}
-.folder-browser-shortcuts button {
-  font-size: 12px; padding: 4px 10px; border-radius: 4px;
-  background: var(--bg-tertiary); border: 1px solid var(--border-color);
-  color: var(--text-secondary); cursor: pointer;
-}
-.folder-browser-shortcuts button:hover { color: var(--text-primary); border-color: var(--accent); }
-.folder-browser-breadcrumb {
-  padding: 8px 20px; font-size: 12px; color: var(--text-muted);
-  display: flex; flex-wrap: wrap; gap: 2px; align-items: center;
-}
-.folder-browser-breadcrumb span { cursor: pointer; color: var(--accent); }
-.folder-browser-breadcrumb span:hover { text-decoration: underline; }
-.folder-browser-breadcrumb span.current { color: var(--text-primary); cursor: default; }
-.folder-browser-breadcrumb span.current:hover { text-decoration: none; }
-.folder-browser-list {
-  flex: 1; overflow-y: auto; padding: 4px 0; min-height: 200px;
-  user-select: none;
-}
-.folder-browser-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 20px; cursor: pointer; font-size: 13px;
-}
-.folder-browser-item:hover { background: var(--bg-tertiary); }
-.folder-browser-item.selected { background: color-mix(in srgb, var(--accent) 15%, transparent); }
-.folder-browser-item-name {
-  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.folder-browser-count {
-  font-size: 11px; color: var(--text-muted); margin-left: 8px;
-  font-variant-numeric: tabular-nums; flex-shrink: 0;
-}
-.folder-browser-empty {
-  padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px;
-}
-.folder-browser-error {
-  padding: 12px 20px; color: #e55; font-size: 12px;
-}
-.folder-browser-loading {
-  padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px;
-}
-.folder-browser-footer {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 12px 20px; border-top: 1px solid var(--border-color);
-}
-.folder-browser-path {
-  font-size: 11px; color: var(--text-muted); flex: 1; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  margin-right: 12px;
-}
-.folder-browser-footer .btn { margin-left: 6px; }
-.folder-browser-new-folder {
-  display: flex; gap: 6px; padding: 6px 20px; align-items: center;
-}
-.folder-browser-new-folder input {
-  flex: 1; font-size: 13px; padding: 4px 8px; border-radius: 4px;
-  border: 1px solid var(--border-color); background: var(--bg-primary);
-  color: var(--text-primary); font-family: inherit;
 }
 
 /* Preview panel */
@@ -723,60 +605,16 @@ body { padding-bottom: 36px; }
     </div>
     <div class="stage-body">
       <div class="source-choice">
-        <div class="source-option" id="sourceOptionImport">
-          <div class="source-option-header" onclick="selectSourceMode('import')">
-            <input type="radio" name="sourceMode" value="import" id="radioImport" checked data-testid="source-import">
-            <label for="radioImport" style="cursor:pointer;font-weight:600;font-size:13px;">Import Photos</label>
+        <div class="source-option" id="sourceOptionFolders">
+          <div class="source-option-header" onclick="selectSourceMode('folders')" data-testid="source-folders-option">
+            <input type="radio" name="sourceMode" value="folders" id="radioFolders" checked data-testid="source-folders">
+            <label for="radioFolders" style="cursor:pointer;font-weight:600;font-size:13px;">Workspace Folders</label>
           </div>
           <div class="source-option-body" id="sourceImportBody">
             <div class="setting-row">
-              <div class="setting-item" id="folderLabelItem">
-                <div class="setting-label" id="lblFolder">Folders</div>
-                <div style="display:flex;flex-direction:column;gap:6px;">
-                  <button onclick="browseForFolder()" class="btn btn-primary" style="white-space:nowrap;align-self:flex-start;">Browse&hellip;</button>
-                  <input type="text" class="setting-select" id="cfgSourceInput" list="volumeDatalist"
-                         placeholder="or type a path and press Enter" style="font-family:inherit;"
-                         onkeydown="if(event.key==='Enter'){event.preventDefault();addSourceFolder();}">
-                  <datalist id="volumeDatalist"></datalist>
-                </div>
-                <div id="sourceFolderList" style="margin-top:6px;"></div>
-                <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;margin-top:6px;display:inline-flex;align-items:center;gap:4px;">
-                  <input type="checkbox" id="chkIncludeSubfolders" checked style="accent-color:var(--accent);" onchange="fetchFolderPreview();markFolderPreviewStale()"> Include subfolders
-                </label>
-              </div>
-            </div>
-            <div class="setting-row" style="align-items:flex-start;">
-              <div class="setting-item" style="flex-direction:column;align-items:flex-start;gap:4px;">
-                <div class="setting-label">File Types</div>
-                <div style="display:flex;gap:16px;">
-                  <div>
-                    <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;font-weight:600;">
-                      <input type="checkbox" id="chkStandard" checked style="accent-color:var(--accent);" onchange="onGroupToggle('standard')"> Standard
-                    </label>
-                    <div id="standardExts" style="margin-left:18px;margin-top:2px;display:flex;flex-direction:column;gap:1px;">
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".jpg" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> JPG</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".png" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> PNG</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".tiff" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> TIFF</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".bmp" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> BMP</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="standard" data-ext=".webp" checked style="accent-color:var(--accent);" onchange="onExtToggle('standard')"> WebP</label>
-                    </div>
-                  </div>
-                  <div>
-                    <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;font-weight:600;">
-                      <input type="checkbox" id="chkRaw" checked style="accent-color:var(--accent);" onchange="onGroupToggle('raw')"> RAW
-                    </label>
-                    <div id="rawExts" style="margin-left:18px;margin-top:2px;display:flex;flex-direction:column;gap:1px;">
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".nef" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> NEF</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".cr2" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> CR2</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".cr3" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> CR3</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".arw" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> ARW</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".raf" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> RAF</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".dng" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> DNG</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".rw2" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> RW2</label>
-                      <label style="font-size:11px;color:var(--text-secondary);cursor:pointer;"><input type="checkbox" data-group="raw" data-ext=".orf" checked style="accent-color:var(--accent);" onchange="onExtToggle('raw')"> ORF</label>
-                    </div>
-                  </div>
-                </div>
+              <div class="setting-item">
+                <div class="setting-label">Folders <span style="font-weight:400;color:var(--text-dim);">(each includes its subfolders)</span></div>
+                <div id="folderScopeList" style="display:flex;flex-direction:column;gap:2px;max-height:220px;overflow-y:auto;font-size:12px;"></div>
               </div>
             </div>
           </div>
@@ -817,6 +655,11 @@ body { padding-bottom: 36px; }
         </div>
       </div>
 
+      <div class="hint" style="font-size:12px;color:var(--text-secondary);line-height:1.4;margin-top:12px;" data-testid="source-import-hint">
+        Adding new photos to your library happens on the
+        <a href="/import" style="color:var(--accent);">Import</a> page.
+        Process only works on photos already in the active workspace.
+      </div>
       <div class="progress-wrap" id="progressSource" style="display:none;">
         <div class="progress-bar-track"><div class="progress-bar-fill" id="fillSource"></div></div>
         <div class="progress-text" id="textSource"></div>
@@ -825,151 +668,13 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 2: Destination -->
-  <div class="stage-card" id="card-destination" data-testid="stage-card">
-    <div class="stage-header" onclick="toggleCard('destination')">
-      <span class="stage-num" id="numDestination">2</span>
-      <span class="stage-name">Destination</span>
-      <span class="stage-summary" id="summaryDestination"></span>
-      <span class="stage-chevron">&#9656;</span>
-    </div>
-    <div class="stage-body">
-      <!-- Section 1: Workspace -->
-      <div class="setting-label">Workspace</div>
-      <div class="dest-section">
-        <div class="dest-option">
-          <label style="cursor:pointer;display:flex;align-items:center;gap:8px;">
-            <input type="radio" name="destWorkspace" value="current" id="radioWsCurrent" checked
-                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);" data-testid="workspace-current">
-            <span style="font-size:13px;font-weight:600;">Current workspace</span>
-            <span style="font-size:13px;color:var(--text-dim);" id="lblCurrentWsName"></span>
-          </label>
-        </div>
-        <div class="dest-option">
-          <label style="cursor:pointer;display:flex;align-items:center;gap:8px;">
-            <input type="radio" name="destWorkspace" value="new" id="radioWsNew"
-                   onchange="onDestWorkspaceChange()" style="accent-color:var(--accent);" data-testid="workspace-new">
-            <span style="font-size:13px;font-weight:600;">New workspace</span>
-          </label>
-          <div id="newWsNameRow" style="display:none;margin-top:8px;margin-left:24px;">
-            <input type="text" class="setting-select" id="destNewWsName"
-                   placeholder="e.g. Kenya 2025" style="font-family:inherit;max-width:300px;"
-                   oninput="updateStartButton()" data-testid="new-workspace-name">
-            <div class="dest-error" id="destWsError" style="display:none;color:var(--error,#f66);font-size:12px;margin-top:4px;" data-testid="workspace-name-error"></div>
-          </div>
-        </div>
-        <div id="destWsNewImagesNote" style="display:none;margin-top:6px;font-size:12px;color:var(--text-dim);" data-testid="workspace-new-images-note">
-          Processing new images uses the current workspace — the snapshot is scoped to it.
-        </div>
-      </div>
-
-      <!-- Divider -->
-      <div style="border-top:1px solid var(--border-primary,#14374E);margin:16px 0;"></div>
-
-      <!-- Section 2: File Copying -->
-      <div class="setting-label">File Copying</div>
-      <div id="destCopySection" data-testid="file-copying-section">
-        <div class="setting-row">
-          <div class="setting-item">
-            <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-              <input type="checkbox" id="chkCopyPhotos" style="accent-color:var(--accent);" onchange="onCopyModeChange()" data-testid="copy-photos-toggle"> Copy photos to another location
-            </label>
-          </div>
-        </div>
-        <div id="copyOnlyFields" style="display:none;" data-testid="destination-section">
-          <div class="setting-row">
-            <div class="setting-item">
-              <div class="setting-label">Destination</div>
-              <div style="display:flex;gap:6px;">
-                <input type="text" class="setting-select" id="cfgDestination" list="volumeDatalist"
-                       placeholder="/path/to/photo/library" style="font-family:inherit;flex:1;"
-                       oninput="updateStartButton();markFolderPreviewStale()">
-                <button onclick="openFolderBrowser('destination')" class="btn btn-secondary" style="white-space:nowrap;">Browse&hellip;</button>
-              </div>
-              <div id="recentDestinations" style="display:none;margin-top:6px;" data-testid="recent-destinations">
-                <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px;">Recent</div>
-                <div id="recentDestList" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
-              </div>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-item">
-              <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                <input type="checkbox" id="chkSkipDuplicates" checked style="accent-color:var(--accent);" onchange="onSkipDuplicatesToggle()"> Skip duplicates
-              </label>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-item">
-              <label style="font-size:12px;color:var(--text-secondary);cursor:pointer;">
-                <input type="checkbox" id="chkLocalProcessing" style="accent-color:var(--accent);" onchange="updateStartButton()" data-testid="local-processing-toggle"> Use local disk while processing
-              </label>
-              <div style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.4;">
-                Files are staged locally for faster processing, then archived to the destination after verification.
-              </div>
-            </div>
-          </div>
-          <!-- Folder Organization -->
-          <div style="border-top:1px solid var(--border-primary,#14374E);margin:12px 0;"></div>
-          <div class="setting-row">
-            <div class="setting-item">
-              <div class="setting-label">Folder structure</div>
-              <div style="display:flex;gap:6px;align-items:center;">
-                <select id="cfgFolderTemplate" class="setting-select" style="font-family:inherit;max-width:240px;" onchange="onFolderTemplateChange()">
-                  <option value="%Y/%Y-%m-%d">Year / Date &mdash; 2026/2026-04-08</option>
-                  <option value="%Y-%m-%d">Date only &mdash; 2026-04-08</option>
-                  <option value="%Y/%m">Year / Month &mdash; 2026/04</option>
-                  <option value="%Y">Year only &mdash; 2026</option>
-                  <option value="">Flat &mdash; no subfolders</option>
-                  <option value="__custom__">Custom&hellip;</option>
-                </select>
-              </div>
-              <div id="customTemplateRow" style="display:none;margin-top:6px;">
-                <input type="text" class="setting-select" id="cfgCustomTemplate"
-                       placeholder="%Y/%B" style="font-family:inherit;max-width:240px;"
-                       onblur="if(_folderPreviewShown)previewDestinationFolders()"
-                       onkeydown="if(event.key==='Enter'&&_folderPreviewShown)previewDestinationFolders()"
-                       data-testid="custom-template-input">
-                <div style="font-size:11px;color:var(--text-dim);margin-top:2px;">
-                  Uses strftime format &mdash; e.g. %Y/%B for Year/Month Name
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="setting-item">
-              <button id="btnPreviewFolders" class="btn btn-secondary" onclick="previewDestinationFolders()" disabled
-                      style="font-size:12px;padding:4px 12px;" data-testid="preview-folders-btn">
-                Preview folder structure
-              </button>
-              <span id="previewFoldersHint" style="font-size:11px;color:var(--text-dim);margin-left:8px;">
-                Select source and destination to preview
-              </span>
-            </div>
-          </div>
-          <div id="folderPreviewResults" style="display:none;margin-top:8px;" data-testid="folder-preview-results">
-            <div id="folderPreviewManagedArchive" style="display:none;font-size:12px;line-height:1.4;margin-bottom:8px;padding:6px 8px;border-radius:4px;background:var(--bg-tertiary,#0d2436);border:1px solid var(--accent,#24E5CA);" data-testid="managed-archive-callout"></div>
-            <div id="folderPreviewSummary" style="font-size:12px;font-weight:600;margin-bottom:6px;"></div>
-            <div id="folderPreviewList" style="font-size:12px;max-height:200px;overflow-y:auto;"></div>
-            <div id="folderPreviewStale" style="display:none;font-size:11px;color:var(--warning,#f0ad4e);margin-top:4px;">
-              Source or destination changed &mdash; click Refresh to update
-            </div>
-          </div>
-        </div>
-        <div id="destCopyDisabledNote" style="display:none;font-size:12px;color:var(--text-dim);font-style:italic;margin-top:4px;">
-          Not applicable for existing collections
-        </div>
-      </div>
-    </div>
-  </div>
-
   <div class="stage-section-header">Indexing<span class="stage-section-sub">always runs</span></div>
 
-  <!-- Card 3: Scan & Import -->
+  <!-- Card 2: Scan & Index -->
   <div class="stage-card" id="card-scan" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('scan')">
-      <span class="stage-num" id="numScan">3</span>
-      <span class="stage-name">Scan &amp; Import</span>
+      <span class="stage-num" id="numScan">2</span>
+      <span class="stage-name">Scan &amp; Index</span>
       <span class="stage-status-pill" id="pillScan"></span>
       <span class="stage-summary" id="summaryScan"></span>
       <span class="stage-chevron">&#9656;</span>
@@ -986,10 +691,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 4: Thumbnails & Previews -->
+  <!-- Card 3: Thumbnails & Previews -->
   <div class="stage-card" id="card-previews" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('previews')">
-      <span class="stage-num" id="numPreviews">4</span>
+      <span class="stage-num" id="numPreviews">3</span>
       <span class="stage-name">Thumbnails &amp; Previews</span>
       <span class="stage-status-pill" id="pillPreviews"></span>
       <span class="stage-summary" id="summaryPreviews"></span>
@@ -1014,12 +719,32 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <div class="stage-section-header">AI processing<span class="stage-section-sub">optional &mdash; toggle to include</span></div>
+  <div class="stage-section-header">AI processing<span class="stage-section-sub">optional &mdash; toggle to include</span>
+    <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-secondary);flex-wrap:wrap;justify-content:flex-end;">
+      Saved process
+      <select id="strategySelect" onchange="onProcessSelect()" style="font-size:12px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 6px;">
+        <option value="__custom__" selected>Custom (unsaved)</option>
+      </select>
+      <span id="processModifiedTag" style="color:var(--warning,#e0a030);display:none;">&bull; modified (unsaved)</span>
+      <button type="button" id="btnProcessSave" onclick="saveProcess()" title="Overwrite the selected process with the current toggles" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Save</button>
+      <button type="button" id="btnProcessSaveNew" onclick="saveProcessAsNew()" title="Save the current toggles as a new process" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Save as new&hellip;</button>
+      <button type="button" id="btnProcessRename" onclick="renameProcess()" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Rename</button>
+      <button type="button" id="btnProcessDelete" onclick="deleteProcess()" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Delete</button>
+    </span>
+  </div>
+  <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--text-secondary);margin:2px 0 6px;">
+    <label id="lblEnableMisses" style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;" title="Flag likely-missed keepers (no subject, clipped, out of focus) after grouping. Needs Classify and Group.">
+      <input type="checkbox" id="enableMisses" checked onchange="onPostOptToggle()" style="accent-color:var(--accent);"> Find misses
+    </label>
+    <label id="lblEnableSpeciesReview" style="display:none;align-items:center;gap:6px;cursor:pointer;" title="Write lightweight species-review results instead of full encounter grouping (the Identify-birds path).">
+      <input type="checkbox" id="enableSpeciesReview" onchange="onPostOptToggle()" style="accent-color:var(--accent);"> Write species review results
+    </label>
+  </div>
 
-  <!-- Card 5: Classify -->
+  <!-- Card 4: Classify -->
   <div class="stage-card" id="card-classify" data-testid="stage-card">
     <div class="stage-header" onclick="toggleCard('classify')">
-      <span class="stage-num" id="numClassify">5</span>
+      <span class="stage-num" id="numClassify">4</span>
       <input type="checkbox" class="stage-enable" id="enableClassify" checked
              onchange="onStageToggle('classify')" onclick="event.stopPropagation()">
       <span class="stage-name">Classify</span>
@@ -1068,10 +793,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 6: Extract Features -->
-  <div class="stage-card" id="card-extract" data-testid="stage-card">
+  <!-- Card 5: Extract Features -->
+  <div class="stage-card" id="card-extract" data-testid="stage-card" data-advanced-stage>
     <div class="stage-header" onclick="toggleCard('extract')">
-      <span class="stage-num" id="numExtract">6</span>
+      <span class="stage-num" id="numExtract">5</span>
       <input type="checkbox" class="stage-enable" id="enableExtract" checked
              onchange="onStageToggle('extract')" onclick="event.stopPropagation()">
       <span class="stage-name">Extract Features</span>
@@ -1131,11 +856,11 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 7: Eye Keypoints (optional, off by default until weights downloaded) -->
-  <div class="stage-card" id="card-eyekeypoints" data-testid="stage-card">
+  <!-- Card 6: Eye Keypoints (optional, off by default until weights downloaded) -->
+  <div class="stage-card" id="card-eyekeypoints" data-testid="stage-card" data-advanced-stage>
     <div class="stage-header" onclick="toggleCard('eyekeypoints')">
-      <span class="stage-num" id="numEyeKeypoints">7</span>
-      <input type="checkbox" class="stage-enable" id="enableEyeKeypoints" checked
+      <span class="stage-num" id="numEyeKeypoints">6</span>
+      <input type="checkbox" class="stage-enable" id="enableEyeKeypoints"
              onchange="onStageToggle('eyekeypoints')" onclick="event.stopPropagation()">
       <span class="stage-name">Eye Keypoints (optional)</span>
       <span class="stage-status-pill" id="pillEyeKeypoints"></span>
@@ -1163,10 +888,10 @@ body { padding-bottom: 36px; }
     </div>
   </div>
 
-  <!-- Card 8: Group & Score -->
-  <div class="stage-card" id="card-group" data-testid="stage-card">
+  <!-- Card 7: Group & Score -->
+  <div class="stage-card" id="card-group" data-testid="stage-card" data-advanced-stage>
     <div class="stage-header" onclick="toggleCard('group')">
-      <span class="stage-num" id="numGroup">8</span>
+      <span class="stage-num" id="numGroup">7</span>
       <input type="checkbox" class="stage-enable" id="enableGroup" checked
              onchange="onStageToggle('group')" onclick="event.stopPropagation()">
       <span class="stage-name">Group &amp; Score</span>
@@ -1289,6 +1014,14 @@ body { padding-bottom: 36px; }
 
 <script>
 // -- Page init: fetch pipeline data from API and populate the page --
+// Signals that /api/pipeline/page-init's success/failure handler has run,
+// so tests (and any other code that races the initial load) can wait
+// before touching stage-enable checkboxes. The handler assigns
+// enableEyeKeypoints.checked from cfg.eye_detect_enabled; interacting
+// with the checkbox while this is still true risks having that
+// assignment silently overwrite the interaction.
+window._pageInitPending = true;
+var _dashboardActionScopeError = '';
 function initPipelinePage() {
   fetch('/api/pipeline/page-init')
     .then(function(r) { return r.json(); })
@@ -1315,15 +1048,16 @@ function initPipelinePage() {
       }
 
       // Eye keypoints stage default tracks the global eye_detect_enabled
-      // config so users who turned it off in Settings see it unchecked here
-      // by default. The checkbox is the per-run override.
+      // config. Missing config defaults off; the checkbox is the per-run
+      // override.
       var ekCb = document.getElementById('enableEyeKeypoints');
-      if (ekCb) ekCb.checked = cfg.eye_detect_enabled !== false;
+      if (ekCb) ekCb.checked = cfg.eye_detect_enabled === true;
 
       // Update saved config defaults from server
       _savedModelConfig.sam2_variant = cfg.sam2_variant;
       _savedModelConfig.dinov2_variant = cfg.dinov2_variant;
       _savedModelConfig.proxy_longest_edge = cfg.proxy_longest_edge;
+      _savedModelConfig.eye_detect_enabled = cfg.eye_detect_enabled === true;
 
       updateCardStates();
       if (typeof updateReadiness === 'function') updateReadiness();
@@ -1334,57 +1068,37 @@ function initPipelinePage() {
       if (typeof updateSamVariantWarning === 'function') {
         updateSamVariantWarning(data.sam_variant_warning || null);
       }
-
-      // Populate recent destinations
-      var recents = data.recent_destinations || [];
-      if (recents.length > 0) {
-        var container = document.getElementById('recentDestList');
-        recents.forEach(function(path) {
-          var name = path.split('/').filter(Boolean).slice(-1)[0] || path;
-          var btn = document.createElement('button');
-          btn.className = 'btn btn-secondary';
-          btn.style.cssText = 'font-size:11px;padding:2px 8px;';
-          btn.title = path;
-          btn.textContent = name;
-          btn.addEventListener('click', function() { selectRecentDestination(path); });
-          container.appendChild(btn);
-        });
-        document.getElementById('recentDestinations').style.display = '';
-      }
     })
     .catch(function(e) {
       console.error('Failed to load pipeline page data:', e);
+    })
+    .finally(function() {
+      window._pageInitPending = false;
     });
 
-  // Load active workspace name for Destination card
-  safeFetch('/api/workspaces/active', {}, { toast: false }).then(function(ws) {
-    if (ws && ws.name) {
-      document.getElementById('lblCurrentWsName').textContent = '(' + ws.name + ')';
-    }
-  });
-
-  // Load collections, models, labels, volumes in parallel
-  loadCollections();
+  // Load collections, models, and labels in parallel
+  loadFolderScopeList();
+  var collectionsReady = loadCollections();
   // Models and labels populate the pickers the plan endpoint reads from,
   // so chain the first plan refresh once both are in the DOM. Without
   // this, the initial plan would key off zero models / zero labels and
   // mislabel Classify as "No models selected" until the user clicks
   // something.
-  Promise.all([loadModels(), loadLabels()]).then(function() {
+  Promise.all([loadModels(), loadLabels(), collectionsReady]).then(function() {
     applyClassifyQueryParams();
+    applyDashboardActionQueryParams();
     refreshPipelinePlan();
   });
-  loadVolumes();
 
   // Pre-fill folders from query params (e.g., from audit panel)
   var urlParams = new URLSearchParams(window.location.search);
   var prefillFolders = urlParams.getAll('folder');
   if (prefillFolders.length > 0) {
-    _sourceFolders = prefillFolders;
-    renderSourceFolders();
-    selectSourceMode('import');
+    // Paths from the deep link; loadFolderScopeList checks the matching
+    // scope boxes once the workspace folder list arrives.
+    _prefillFolderPaths = prefillFolders;
+    selectSourceMode('folders');
     updateStartButton();
-    fetchFolderPreview();
   }
 }
 
@@ -1421,38 +1135,124 @@ function applyClassifyQueryParams() {
   if (typeof updateLabelsPickerState === 'function') updateLabelsPickerState();
 }
 
+// Dashboard attention cards deep-link to a deliberately narrow Process
+// setup.  The user still reviews the plan and clicks Run; this only selects
+// the intended scope and optional stages.
+function applyDashboardActionQueryParams() {
+  var qs = new URLSearchParams(window.location.search);
+  var stage = qs.get('dashboard_stage');
+  if (stage !== 'classify' && stage !== 'previews') return;
+
+  var classify = document.getElementById('enableClassify');
+  var extract = document.getElementById('enableExtract');
+  var eyes = document.getElementById('enableEyeKeypoints');
+  var group = document.getElementById('enableGroup');
+  var misses = document.getElementById('enableMisses');
+  var speciesReview = document.getElementById('enableSpeciesReview');
+  if (classify) classify.checked = stage === 'classify';
+  if (extract) extract.checked = false;
+  if (eyes) eyes.checked = false;
+  if (group) group.checked = false;
+  if (misses) misses.checked = false;
+  if (speciesReview) speciesReview.checked = false;
+
+  var collectionId = qs.get('collection_id');
+  var picker = document.getElementById('collectionPicker');
+  if (collectionId) {
+    var option = picker && picker.querySelector(
+      'option[value="' + CSS.escape(collectionId) + '"]');
+    if (!option || option.disabled) {
+      _dashboardActionScopeError =
+        'The Dashboard collection is unavailable. Return to Dashboard and choose another scope.';
+    } else {
+      picker.value = collectionId;
+      selectSourceMode('collection');
+      onCollectionChange();
+    }
+  }
+
+  var card = document.getElementById(stage === 'classify' ? 'card-classify' : 'card-previews');
+  if (card) card.classList.add('expanded');
+  updateCardStates();
+  updateStartButton();
+}
+
 document.addEventListener('DOMContentLoaded', initPipelinePage);
 // Render pills + plan summary immediately from default toggle state, so the
 // page isn't blank while the page-init API call is in flight.
 document.addEventListener('DOMContentLoaded', refreshPipelineUI);
+document.addEventListener('DOMContentLoaded', updateAdvancedPipelineOptions);
+window.addEventListener('advancedmodechange', updateAdvancedPipelineOptions);
+window.addEventListener('devmodechange', updateAdvancedPipelineOptions);
 
 // -- New images (Stage 1 third option) --
 var newImagesSnapshotId = null;
+// True while a snapshot-creation poll loop is running, so re-clicking the
+// card (or a banner deep-link racing a click) can't start a second loop.
+var _newImagesSnapshotCreating = false;
 
 function sleepNewImagesSnapshot(ms) {
   return new Promise(function(resolve) { setTimeout(resolve, ms); });
 }
 
 async function createNewImagesSnapshotWithRetry(onPending) {
-  var maxAttempts = 20;  // About one minute at 3s intervals.
-  for (var attempt = 0; attempt < maxAttempts; attempt++) {
+  // Poll until the server-side walk reaches a terminal state — snapshot
+  // created (200) or walk failed (500). No attempt cap: the walk over a
+  // large network volume can take minutes, and giving up early is exactly
+  // what used to strand users on a blank wizard with no explanation. Each
+  // 202 carries live walk progress (files_checked / new_count_so_far) which
+  // is passed to onPending so the caller can show real numbers instead of
+  // an opaque spinner. Navigating away naturally stops the loop.
+  for (;;) {
     var resp = await fetch('/api/workspaces/active/new-images/snapshot', {method: 'POST'});
     if (resp.status === 202) {
-      if (typeof onPending === 'function') onPending(attempt);
+      var progress = null;
+      try { progress = await resp.json(); } catch (e) { /* keep polling */ }
+      if (typeof onPending === 'function') onPending(progress || {});
       await sleepNewImagesSnapshot(3000);
       continue;
     }
-    if (!resp.ok) throw new Error('snapshot failed');
+    if (!resp.ok) {
+      var errMsg = 'snapshot failed';
+      try {
+        var errBody = await resp.json();
+        if (errBody && errBody.error) errMsg = errBody.error;
+      } catch (e) { /* keep the generic message */ }
+      throw new Error(errMsg);
+    }
     var data = await resp.json();
     if (!data || data.snapshot_id == null) throw new Error('snapshot missing');
     return data.snapshot_id;
   }
-  throw new Error('snapshot timed out');
 }
 
 async function initNewImagesCard() {
   var params = new URLSearchParams(window.location.search);
   var deepLinkId = params.get('new_images');
+  if (deepLinkId === 'preparing') {
+    // Banner click while the server-side walk was still running. The navbar
+    // navigates here immediately instead of freezing on the banner button;
+    // this page owns the wait. Show the card right away in a visible
+    // preparing state — selectSourceMode runs the unbounded snapshot poll
+    // and streams walk progress into the status line and card subtitle.
+    renderNewImagesCardPreparing();
+    await selectSourceMode('new_images');
+    if (newImagesSnapshotId != null) {
+      history.replaceState(null, '', '/pipeline?new_images=' + newImagesSnapshotId);
+      try {
+        var pr = await fetch('/api/workspaces/active/new-images/snapshot/' + newImagesSnapshotId);
+        if (pr.ok) {
+          var psnap = await pr.json();
+          renderNewImagesCard(psnap.file_count, psnap.folder_paths || []);
+        }
+      } catch (e) { /* counts are cosmetic; the snapshot itself is set */ }
+    } else {
+      // selectSourceMode already put the failure reason in the status line.
+      document.getElementById('newImagesCardSubtitle').textContent =
+        ' — could not build the list, click to retry';
+    }
+    return;
+  }
   if (deepLinkId) {
     try {
       var r = await fetch('/api/workspaces/active/new-images/snapshot/' + encodeURIComponent(deepLinkId));
@@ -1513,6 +1313,17 @@ async function probeNewImagesCard() {
   }
 }
 
+function renderNewImagesCardPreparing() {
+  var card = document.getElementById('sourceOptionNewImages');
+  var orSep = document.getElementById('sourceOrNewImages');
+  if (!card || !orSep) return;
+  card.style.display = '';
+  orSep.style.display = '';
+  document.getElementById('newImagesCardSubtitle').textContent =
+    ' — finding new images…';
+  document.getElementById('newImagesFolderList').innerHTML = '';
+}
+
 function renderNewImagesCard(count, folders) {
   var card = document.getElementById('sourceOptionNewImages');
   var orSep = document.getElementById('sourceOrNewImages');
@@ -1535,51 +1346,386 @@ document.addEventListener('DOMContentLoaded', initNewImagesCard);
 
 // -- Collection picker --
 async function loadCollections() {
+  var sel = document.getElementById('collectionPicker');
   try {
     var collections = await safeFetch('/api/collections', {}, { toast: false });
-    var sel = document.getElementById('collectionPicker');
+    if (!Array.isArray(collections)) return;
     collections.forEach(function(c) {
-      sel.innerHTML += '<option value="' + c.id + '">' + escapeHtml(c.name) + '</option>';
+      // count_error means /api/collections couldn't resolve this collection's
+      // rules — selecting it would 500 the downstream /photos endpoint and
+      // leave the pipeline advertising a source it can't actually run. Show
+      // it disabled with a hint so the user knows to edit the rules instead.
+      var disabled = c.count_error ? ' disabled' : '';
+      var label = c.count_error
+        ? escapeHtml(c.name) + ' (unavailable — edit rules to fix)'
+        : escapeHtml(c.name);
+      var title = c.count_error
+        ? ' title="This collection\'s rules could not be resolved. Edit it in Browse to make it usable."'
+        : '';
+      sel.innerHTML += '<option value="' + c.id + '"' + disabled + title + '>' + label + '</option>';
     });
-  } catch(e) {}
-}
-
-// -- Card 2: Destination --
-var _destWorkspaceMode = 'current'; // 'current' or 'new'
-
-function onDestWorkspaceChange() {
-  _destWorkspaceMode = document.getElementById('radioWsNew').checked ? 'new' : 'current';
-  document.getElementById('newWsNameRow').style.display = _destWorkspaceMode === 'new' ? '' : 'none';
-  document.getElementById('destWsError').style.display = 'none';
-  if (_destWorkspaceMode === 'new') {
-    document.getElementById('destNewWsName').focus();
+  } catch(e) {
+    // Don't fail silently: an empty picker used to look like "no collections"
+    // even when the endpoint was 500ing. Surface it so the cause is visible.
+    console.error('Failed to load collections:', e);
+    if (typeof showToast === 'function') {
+      showToast('Could not load collections — see console for details', 'error');
+    }
   }
-  updateStartButton();
 }
 
 // -- Card 1: Source --
-var _sourceMode = 'import'; // 'import' or 'collection'
-var _copyMode = false;
-var _folderPreviewShown = false;
-var _sourceWasReady = false;
-var _sourceFolders = [];
+var _prefillFolderPaths = [];
 
-// -- Import preview state --
-var _previewData = null;       // response from /api/import/folder-preview
+function selectedFolderIds() {
+  var ids = [];
+  document.querySelectorAll('#folderScopeList input[type=checkbox]:checked')
+    .forEach(function(cb) { ids.push(parseInt(cb.value, 10)); });
+  return ids;
+}
+
+async function loadFolderScopeList() {
+  var list = document.getElementById('folderScopeList');
+  if (!list) return;
+  try {
+    var ws = await safeFetch('/api/workspaces/active', {}, { toast: false });
+    var folders = await safeFetch(
+      '/api/workspaces/' + ws.id + '/folders', {}, { toast: false });
+    if (!Array.isArray(folders)) return;
+    var byId = {};
+    folders.forEach(function(f) { byId[f.id] = f; });
+    // Deep links from the audit panel carry the ACTUAL folder path a file
+    // sits in (e.g. /root/2026/07), but only top-level roots are rendered
+    // here because the server-side subtree expansion covers descendants.
+    // An exact-match on cb.checked therefore preselects nothing and Start
+    // stays disabled. Map each prefill path to the top-level root whose
+    // path it lives under, so /pipeline?folder=/root/2026/07 checks the
+    // /root row instead of orphaning the deep link.
+    var prefillRootIds = new Set();
+    if (_prefillFolderPaths.length) {
+      var topLevel = folders.filter(function(f) {
+        return !(f.parent_id && byId[f.parent_id]);
+      });
+      _prefillFolderPaths.forEach(function(prefillPath) {
+        topLevel.forEach(function(f) {
+          if (prefillPath === f.path
+              || prefillPath.indexOf(f.path + '/') === 0) {
+            prefillRootIds.add(f.id);
+          }
+        });
+      });
+    }
+    list.innerHTML = '';
+    if (folders.length === 0) {
+      list.innerHTML = 'No photos are in this workspace yet. '
+        + '<a href="/import" style="color:var(--accent);">Open Import to add photos</a>.';
+      return;
+    }
+    folders.forEach(function(f) {
+      // Only offer top-level entries: children are covered by the
+      // server-side subtree expansion, and listing every dated folder
+      // would bury the roots.
+      if (f.parent_id && byId[f.parent_id]) return;
+      var label = document.createElement('label');
+      label.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text-primary);';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = f.id;
+      cb.dataset.path = f.path;
+      cb.style.accentColor = 'var(--accent)';
+      cb.checked = prefillRootIds.has(f.id);
+      cb.onchange = function() {
+        // Checking a workspace-folder box is a switch to workspace-folder
+        // scope: if we're still in collection or new-images mode,
+        // updateStartButton() and startPipeline() would keep gating on the
+        // previous scope and POST it instead of the folder_ids the user
+        // just picked.
+        if (cb.checked && _sourceMode !== 'folders') selectSourceMode('folders');
+        updateSourceSummary();
+        updateStartButton();
+        schedulePlanRefresh();
+      };
+      var span = document.createElement('span');
+      var count = f.workspace_photo_count != null
+        ? f.workspace_photo_count : f.photo_count;
+      span.textContent = f.path + (count != null ? ' (' + count + ')' : '');
+      label.appendChild(cb);
+      label.appendChild(span);
+      list.appendChild(label);
+    });
+    if (_prefillFolderPaths.length) {
+      updateSourceSummary();
+      updateStartButton();
+      // A deep link maps to at least one workspace root only when the
+      // prefill actually sat under a tracked root; when it did, refresh
+      // the plan so readiness pills describe the preselected subtree
+      // instead of the blank whole-workspace fallback.
+      if (prefillRootIds.size) schedulePlanRefresh();
+    }
+  } catch (e) {
+    list.textContent = 'Could not load workspace folders.';
+  }
+}
+
+function updateSourceSummary() {
+  var el = document.getElementById('txtSource');
+  if (!el) return;
+  if (_sourceMode === 'folders') {
+    var n = selectedFolderIds().length;
+    el.textContent = n ? (n + ' folder(s) selected') : '';
+  }
+}
+
+// ---- Saved processes (the process page IS the editor) --------------------
+// A saved process is a named snapshot of the stage toggles below. The picker
+// loads/saves them; Run always uses the CURRENT toggle values (a one-off
+// tweak never mutates a saved process until you Save).
+var _processesById = {};        // id -> process dict (from /api/processes)
+var _selectedProcessId = null;  // currently-loaded process, or null (Custom)
+var _processDirty = false;      // toggles diverge from the loaded process
+var _applyingProcess = false;   // guard: programmatic toggle changes
+
+async function loadSavedProcesses(selectId) {
+  var sel = document.getElementById('strategySelect');
+  if (!sel) return;
+  try {
+    var resp = await fetch('/api/processes');
+    if (!resp.ok) return;
+    var procs = await resp.json();
+    _processesById = {};
+    sel.innerHTML = '<option value="__custom__">Custom (unsaved)</option>';
+    (procs || []).forEach(function(p) {
+      _processesById[p.id] = p;
+      var opt = document.createElement('option');
+      opt.value = String(p.id);
+      opt.textContent = p.name;
+      sel.appendChild(opt);
+    });
+    if (selectId != null && _processesById[selectId]) {
+      sel.value = String(selectId);
+      onProcessSelect();
+    } else {
+      sel.value = '__custom__';
+      _selectedProcessId = null;
+      _processDirty = false;
+      updateDerivedProcessControls();
+      updateProcessEditorUI();
+    }
+  } catch (e) { /* leave with Custom only */ }
+}
+
+function currentProcessFields() {
+  return {
+    skip_classify: !document.getElementById('enableClassify').checked,
+    skip_extract_masks: !document.getElementById('enableExtract').checked,
+    skip_eye_keypoints: !document.getElementById('enableEyeKeypoints').checked,
+    skip_regroup: !document.getElementById('enableGroup').checked,
+    miss_enabled: !!document.getElementById('enableMisses').checked,
+    review_mode:
+      document.getElementById('enableSpeciesReview').checked ? 'species' : null,
+  };
+}
+
+function applyProcessToToggles(proc) {
+  _applyingProcess = true;
+  try {
+    document.getElementById('enableClassify').checked = !proc.skip_classify;
+    document.getElementById('enableExtract').checked = !proc.skip_extract_masks;
+    document.getElementById('enableEyeKeypoints').checked = !proc.skip_eye_keypoints;
+    document.getElementById('enableGroup').checked = !proc.skip_regroup;
+    document.getElementById('enableMisses').checked = !!proc.miss_enabled;
+    document.getElementById('enableSpeciesReview').checked =
+      (proc.review_mode === 'species');
+    // Re-run the cascade so downstream enable/disable state is consistent,
+    // then force back on any stage the process says should run (the cascade
+    // would otherwise disable e.g. Group when Extract is off).
+    ['classify', 'extract', 'eyekeypoints', 'group'].forEach(function(st) {
+      try { onStageToggle(st); } catch (e) {}
+    });
+    if (!proc.skip_regroup) {
+      var g = document.getElementById('enableGroup'); g.checked = true; g.disabled = false;
+    }
+    if (!proc.skip_eye_keypoints) {
+      var ek = document.getElementById('enableEyeKeypoints'); ek.checked = true; ek.disabled = false;
+    }
+  } finally {
+    _applyingProcess = false;
+  }
+  updateDerivedProcessControls();
+  updateStartButton();
+  refreshPipelineUI();
+  schedulePlanRefresh();
+}
+
+function onProcessSelect() {
+  var sel = document.getElementById('strategySelect');
+  if (!sel) return;
+  if (sel.value === '__custom__') {
+    _selectedProcessId = null;
+    _processDirty = false;
+    updateProcessEditorUI();
+    return;
+  }
+  var proc = _processesById[parseInt(sel.value, 10)];
+  if (!proc) {
+    _selectedProcessId = null;
+    _processDirty = false;
+    updateProcessEditorUI();
+    return;
+  }
+  _selectedProcessId = proc.id;
+  _processDirty = false;
+  applyProcessToToggles(proc);
+  updateProcessEditorUI();
+}
+
+// Called by the two post-processing toggles (Find misses / Species review).
+function onPostOptToggle() {
+  updateDerivedProcessControls();
+  if (!_applyingProcess) markProcessModified();
+  updateStartButton();
+  refreshPipelineUI();
+  schedulePlanRefresh();
+}
+
+function markProcessModified() {
+  _processDirty = true;
+  updateProcessEditorUI();
+}
+
+function updateProcessEditorUI() {
+  var sel = document.getElementById('strategySelect');
+  var tag = document.getElementById('processModifiedTag');
+  var hasSel = _selectedProcessId != null;
+  // Keep the select pointing at the selected process even while modified,
+  // so Save knows which process to overwrite.
+  if (sel) sel.value = hasSel ? String(_selectedProcessId) : '__custom__';
+  if (tag) tag.style.display = _processDirty ? 'inline' : 'none';
+  var save = document.getElementById('btnProcessSave');
+  var rename = document.getElementById('btnProcessRename');
+  var del = document.getElementById('btnProcessDelete');
+  if (save) save.disabled = !(hasSel && _processDirty);
+  if (rename) rename.disabled = !hasSel;
+  if (del) del.disabled = !hasSel;
+}
+
+// Keep Find misses / Species review honest about when they actually apply,
+// mirroring the server-side stage gates.
+function updateDerivedProcessControls() {
+  var classifyOn = document.getElementById('enableClassify').checked;
+  var groupOn = document.getElementById('enableGroup').checked;
+  // Find misses only runs when both Classify and Group ran.
+  var missCb = document.getElementById('enableMisses');
+  var missLbl = document.getElementById('lblEnableMisses');
+  var missOk = classifyOn && groupOn;
+  if (missCb) {
+    missCb.disabled = !missOk;
+    if (!missOk) missCb.checked = false;
+  }
+  if (missLbl) missLbl.style.opacity = missOk ? '1' : '0.5';
+  // Species review only applies when Classify is on and Group is off (the
+  // Identify-birds shape). Hidden otherwise, and force-off so it can't leak
+  // into a run where it means nothing.
+  var srLbl = document.getElementById('lblEnableSpeciesReview');
+  var srCb = document.getElementById('enableSpeciesReview');
+  var srApplies = classifyOn && !groupOn;
+  if (srLbl) srLbl.style.display = srApplies ? 'inline-flex' : 'none';
+  if (srCb && !srApplies) srCb.checked = false;
+}
+
+async function _postProcessJSON(url, method, body) {
+  var opts = { method: method };
+  if (body !== undefined) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(body);
+  }
+  var resp = await fetch(url, opts);
+  if (!resp.ok) {
+    var e = await resp.json().catch(function() { return {}; });
+    throw new Error(e.error || ('HTTP ' + resp.status));
+  }
+  return resp.status === 204 ? null : resp.json();
+}
+
+async function saveProcess() {
+  if (_selectedProcessId == null) return;
+  try {
+    var updated = await _postProcessJSON(
+      '/api/processes/' + _selectedProcessId, 'PUT', currentProcessFields());
+    _processesById[updated.id] = updated;
+    _processDirty = false;
+    updateProcessEditorUI();
+  } catch (e) { alert('Save failed: ' + e.message); }
+}
+
+async function saveProcessAsNew() {
+  var name = prompt('Name this process:');
+  if (name == null) return;
+  name = name.trim();
+  if (!name) return;
+  var body = currentProcessFields();
+  body.name = name;
+  try {
+    var created = await _postProcessJSON('/api/processes', 'POST', body);
+    await loadSavedProcesses(created.id);
+  } catch (e) { alert('Save failed: ' + e.message); }
+}
+
+async function renameProcess() {
+  if (_selectedProcessId == null) return;
+  var cur = _processesById[_selectedProcessId];
+  var name = prompt('Rename process:', cur ? cur.name : '');
+  if (name == null) return;
+  name = name.trim();
+  if (!name) return;
+  try {
+    await _postProcessJSON(
+      '/api/processes/' + _selectedProcessId, 'PUT', { name: name });
+    await loadSavedProcesses(_selectedProcessId);
+  } catch (e) { alert('Rename failed: ' + e.message); }
+}
+
+async function deleteProcess() {
+  if (_selectedProcessId == null) return;
+  var cur = _processesById[_selectedProcessId];
+  if (!confirm('Delete process "' + (cur ? cur.name : '') +
+               '"? Any workspace defaulting to it falls back to import-only.')) {
+    return;
+  }
+  var id = _selectedProcessId;
+  try {
+    await _postProcessJSON('/api/processes/' + id, 'DELETE');
+    _selectedProcessId = null;
+    _processDirty = false;
+    await loadSavedProcesses(null);
+  } catch (e) { alert('Delete failed: ' + e.message); }
+}
+
+// Saved processes have no advanced tier, so there's nothing to hide/show.
+// Kept for the advancedmodechange/devmodechange listeners it's wired to.
+function updateAdvancedPipelineOptions() {
+  updateDerivedProcessControls();
+}
+document.addEventListener('DOMContentLoaded', function() { loadSavedProcesses(null); });
+
+var _sourceMode = 'folders'; // 'folders', 'collection', or 'new_images'
+
+// -- Preview panel state --
+var _previewData = null;       // response from the preview endpoint
 var _previewSelected = {};     // { filePath: true/false }
-var _previewLoading = false;   // true while import/new-images preview scope is unresolved
+var _previewLoading = false;   // true while the new-images preview scope is unresolved
 var _previewAbort = null;      // AbortController for in-flight request
-var _duplicateResults = {};    // path -> true for duplicates (cache)
-var _duplicateCheckAbort = null;  // AbortController for in-flight check
-// Set from the last destination-preview when the destination is (or sits
-// inside) an existing Vireo-managed archive: { path, photo_count }. null
-// otherwise. Used to reframe the destination preview + duplicate summary as
-// a merge into an existing archive rather than a fresh copy.
-var _managedArchive = null;
 var _thumbSchedulerCancel = null; // cancels the current thumbnail pump on re-render
 
 function fetchFolderPreview() {
   if (_previewAbort) _previewAbort.abort();
+
+  // Folder scope has no per-file preview: the run covers the selected
+  // subtrees and the readiness panels report per-stage work honestly.
+  if (_sourceMode === 'folders') {
+    showPreviewPlaceholder();
+    return;
+  }
 
   // New images mode: fetch from new-images-preview endpoint
   if (_sourceMode === 'new_images') {
@@ -1645,43 +1791,7 @@ function fetchFolderPreview() {
     return;
   }
 
-  // Import mode: existing behavior
-  var folders = _sourceFolders;
-  if (!folders.length) {
-    showPreviewPlaceholder();
-    return;
-  }
-
-  var fileTypes = getIngestFileTypes();
-  if (!fileTypes.length) {
-    showPreviewPlaceholder();
-    return;
-  }
-
-  showPreviewLoading();
-  _previewAbort = new AbortController();
-
-  fetch('/api/import/folder-preview', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ folders: folders, file_types: fileTypes, recursive: document.getElementById('chkIncludeSubfolders').checked }),
-    signal: _previewAbort.signal,
-  })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      _previewData = data;
-      _previewSelected = {};
-      _duplicateResults = {};
-      data.files.forEach(function(f) {
-        _previewSelected[f.path] = !f.duplicate;
-      });
-      renderPreview();
-      if (_copyMode) checkForDuplicates();
-    })
-    .catch(function(err) {
-      if (err.name === 'AbortError') return;
-      showPreviewError('Failed to load preview: ' + err.message);
-    });
+  showPreviewPlaceholder();
 }
 
 function showPreviewPlaceholder() {
@@ -1693,6 +1803,7 @@ function showPreviewPlaceholder() {
   _previewData = null;
   _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
+  updateSourceSummary();
 }
 
 function showPreviewLoading() {
@@ -1707,8 +1818,7 @@ function showPreviewLoading() {
   _pipelinePlan = null;
   updateSamVariantWarning(null);
   refreshPipelineUI();
-  // Cancel any in-flight duplicate check when preview context changes
-  if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
+  updateSourceSummary();
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
 }
 
@@ -1723,6 +1833,7 @@ function showPreviewError(msg) {
   _previewData = null;
   _previewSelected = {};
   if (_thumbSchedulerCancel) { _thumbSchedulerCancel(); _thumbSchedulerCancel = null; }
+  updateSourceSummary();
 }
 
 function renderPreview() {
@@ -1815,178 +1926,10 @@ function renderPreview() {
   // Set up IntersectionObserver for lazy thumbnail loading
   setupThumbnailObserver();
   updatePreviewCounts();
-  // Reapply cached duplicate markers after DOM rebuild
-  if (Object.keys(_duplicateResults).length > 0) applyDuplicateVisuals();
-  // Preview content drives the import-mode plan (which paths are selected).
+  updateSourceSummary();
+  // Preview content drives the run scope (which paths are selected).
   // Refresh debounced — folder-level and select-all checkboxes call us in
   // bursts, and we'd rather not POST to /api/pipeline/plan on every click.
-  schedulePlanRefresh();
-}
-
-function checkForDuplicates() {
-  // Abort any in-flight check
-  if (_duplicateCheckAbort) _duplicateCheckAbort.abort();
-
-  if (!_previewData || !_previewData.files.length) return;
-  if (!_copyMode) return;
-  if (!document.getElementById('chkSkipDuplicates').checked) return;
-
-  _duplicateResults = {};
-  _duplicateCheckAbort = new AbortController();
-
-  // Only send selected files: deselected files are excluded from import and
-  // should not influence which other files are flagged as run-duplicates,
-  // matching the behaviour of the actual import step (exclude_paths applied
-  // before duplicate filtering).
-  var paths = _previewData.files
-    .filter(function(f) { return _previewSelected[f.path] !== false; })
-    .map(function(f) { return f.path; });
-
-  if (!paths.length) {
-    applyDuplicateVisuals();
-    var summary = document.getElementById('previewSummary');
-    var ds = summary ? summary.querySelector('.dup-status') : null;
-    if (ds) ds.remove();
-    return;
-  }
-
-  fetch('/api/import/check-duplicates', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ paths: paths }),
-    signal: _duplicateCheckAbort.signal,
-  }).then(function(response) {
-    if (!response.ok) return;
-    var reader = response.body.getReader();
-    var decoder = new TextDecoder();
-    var buffer = '';
-
-    function read() {
-      reader.read().then(function(result) {
-        if (result.done) return;
-        buffer += decoder.decode(result.value, { stream: true });
-        var parts = buffer.split('\n\n');
-        buffer = parts.pop();
-        parts.forEach(function(part) {
-          var match = part.match(/^data: (.+)$/m);
-          if (!match) return;
-          try { var data = JSON.parse(match[1]); } catch(e) { return; }
-          if (data.duplicates) {
-            data.duplicates.forEach(function(p) {
-              _duplicateResults[p] = true;
-            });
-          }
-          // Only update UI if the user still wants to skip duplicates
-          if (document.getElementById('chkSkipDuplicates').checked) {
-            if (data.duplicates) applyDuplicateVisuals();
-            updateDuplicateSummary(data);
-            // Newly-discovered hash duplicates change the import scope —
-            // ingest() will skip those files, so the plan must shift them
-            // from "new" to "already known". Debounced via
-            // schedulePlanRefresh so the burst of SSE batches collapses
-            // into a single plan POST.
-            if (data.duplicates && data.duplicates.length) {
-              schedulePlanRefresh();
-            }
-          }
-        });
-        read();
-      }).catch(function() {});
-    }
-    read();
-  }).catch(function() {});
-}
-
-function applyDuplicateVisuals() {
-  var skipChecked = document.getElementById('chkSkipDuplicates').checked;
-  var grid = document.getElementById('previewGrid');
-  var thumbs = grid.querySelectorAll('.preview-thumb');
-  thumbs.forEach(function(el) {
-    var path = el.dataset.path;
-    var isDup = _duplicateResults[path];
-    if (isDup && skipChecked) {
-      el.classList.add('duplicate');
-      if (!el.querySelector('.duplicate-badge')) {
-        var badge = document.createElement('span');
-        badge.className = 'duplicate-badge';
-        badge.textContent = 'DUPLICATE';
-        el.appendChild(badge);
-      }
-    } else {
-      el.classList.remove('duplicate');
-      var badge = el.querySelector('.duplicate-badge');
-      if (badge) badge.remove();
-    }
-  });
-}
-
-function updateDuplicateSummary(data) {
-  var summary = document.getElementById('previewSummary');
-  // Remove any existing duplicate status
-  var existing = summary.querySelector('.dup-status');
-  if (existing) existing.remove();
-
-  var span = document.createElement('span');
-  span.className = 'stat dup-status';
-  if (data.done) {
-    if (data.duplicate_count > 0) {
-      if (_managedArchive) {
-        // Merging into an existing archive: frame duplicates as already
-        // living in the catalog (they'll be skipped), and \u2014 when we can
-        // reliably derive it \u2014 how many are genuinely new (will be merged).
-        // The duplicate check is catalog-global (matches ingest's global
-        // skip), so a match may live in a different archive \u2014 hence
-        // "in your library", not "in this archive". The count is still
-        // correct for the skip/merge framing.
-        span.innerHTML = '<span class="stat-value">' + data.duplicate_count
-          + '</span> already in your library (will be skipped)';
-        if (typeof data.total === 'number' && data.total >= data.duplicate_count) {
-          var newCount = data.total - data.duplicate_count;
-          span.innerHTML += ', <span class="stat-value">' + newCount
-            + '</span> new (will be merged)';
-        }
-      } else {
-        span.innerHTML = '<span class="stat-value">' + data.duplicate_count + '</span> already imported';
-      }
-    }
-    // If 0 duplicates, show nothing
-  } else {
-    span.textContent = 'Checking duplicates\u2026 ' + data.checked + '/' + data.total;
-  }
-  if (span.innerHTML || span.textContent) summary.appendChild(span);
-}
-
-function onSkipDuplicatesToggle() {
-  var checked = document.getElementById('chkSkipDuplicates').checked;
-  if (!checked) {
-    // Abort any in-flight check so SSE callbacks stop updating the UI
-    if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
-    // Remove visuals and summary before clearing cache
-    applyDuplicateVisuals();
-    var summary = document.getElementById('previewSummary');
-    var existing = summary.querySelector('.dup-status');
-    if (existing) existing.remove();
-    _duplicateResults = {};
-  } else if (Object.keys(_duplicateResults).length > 0) {
-    applyDuplicateVisuals();
-    var dupCount = Object.keys(_duplicateResults).length;
-    var summary = document.getElementById('previewSummary');
-    var existing = summary.querySelector('.dup-status');
-    if (existing) existing.remove();
-    if (dupCount > 0) {
-      var span = document.createElement('span');
-      span.className = 'stat dup-status';
-      span.innerHTML = _managedArchive
-        ? '<span class="stat-value">' + dupCount + '</span> already in your library (will be skipped)'
-        : '<span class="stat-value">' + dupCount + '</span> already imported';
-      summary.appendChild(span);
-    }
-  } else {
-    checkForDuplicates();
-  }
-  // Toggling the gate flips whether known-by-hash files count as
-  // "new" (gate off → ingest will copy them) or "known" (gate on →
-  // ingest will skip them). Either way the plan changes; refresh it.
   schedulePlanRefresh();
 }
 
@@ -2090,292 +2033,32 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-function addSourceFolder() {
-  var input = document.getElementById('cfgSourceInput');
-  var val = input.value.trim();
-  if (!val || _sourceFolders.indexOf(val) !== -1) return;
-  _sourceFolders.push(val);
-  markFolderPreviewStale();
-  input.value = '';
-  renderSourceFolders();
-  updateStartButton();
-  fetchFolderPreview();
-}
-
-function removeSourceFolder(idx) {
-  _sourceFolders.splice(idx, 1);
-  markFolderPreviewStale();
-  renderSourceFolders();
-  updateStartButton();
-  fetchFolderPreview();
-}
-
-function renderSourceFolders() {
-  var el = document.getElementById('sourceFolderList');
-  if (!_sourceFolders.length) { el.innerHTML = ''; return; }
-  el.innerHTML = _sourceFolders.map(function(f, i) {
-    return '<div class="folder-tag"><span>' + escapeHtml(f) +
-      '</span> <span class="folder-tag-remove" onclick="removeSourceFolder(' + i + ')">&times;</span></div>';
-  }).join('');
-}
-
-function selectRecentDestination(path) {
-  document.getElementById('chkCopyPhotos').checked = true;
-  onCopyModeChange();
-  document.getElementById('cfgDestination').value = path;
-  updateStartButton();
-  markFolderPreviewStale();
-}
-
-function onCopyModeChange() {
-  _copyMode = document.getElementById('chkCopyPhotos').checked;
-  var copyFields = document.getElementById('copyOnlyFields');
-
-  if (_copyMode) {
-    copyFields.style.display = '';
-    checkForDuplicates();
-  } else {
-    copyFields.style.display = 'none';
-    _folderPreviewShown = false;
-    document.getElementById('folderPreviewResults').style.display = 'none';
-    // Clear duplicate state when copy mode is disabled
-    if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
-    applyDuplicateVisuals();
-    var summary = document.getElementById('previewSummary');
-    var dupStatus = summary ? summary.querySelector('.dup-status') : null;
-    if (dupStatus) dupStatus.remove();
-    _duplicateResults = {};
-  }
-  updateStartButton();
-  // Toggling copy mode flips whether _buildPlanBody sends
-  // hash_duplicate_paths (only sent when _copyMode is on with skip
-  // duplicates checked and cached results exist). Without this refresh,
-  // pills keep showing the prior mode's run estimate until some other
-  // UI action triggers a plan fetch — exactly the staleness the
-  // CORE_PHILOSOPHY transparency rule prohibits.
-  schedulePlanRefresh();
-}
-
-function getSelectedFolderTemplate() {
-  var sel = document.getElementById('cfgFolderTemplate');
-  if (sel.value === '__custom__') {
-    return document.getElementById('cfgCustomTemplate').value.trim() || '%Y/%Y-%m-%d';
-  }
-  return sel.value;
-}
-
-function onFolderTemplateChange() {
-  var sel = document.getElementById('cfgFolderTemplate');
-  var customRow = document.getElementById('customTemplateRow');
-  customRow.style.display = sel.value === '__custom__' ? '' : 'none';
-
-  // Auto-refresh if preview is already showing
-  if (_folderPreviewShown) {
-    previewDestinationFolders();
-  }
-}
-
-async function previewDestinationFolders() {
-  var btn = document.getElementById('btnPreviewFolders');
-  var hint = document.getElementById('previewFoldersHint');
-  var resultsDiv = document.getElementById('folderPreviewResults');
-  var summaryDiv = document.getElementById('folderPreviewSummary');
-  var listDiv = document.getElementById('folderPreviewList');
-  var staleDiv = document.getElementById('folderPreviewStale');
-
-  btn.disabled = true;
-  btn.textContent = 'Loading...';
-  hint.textContent = '';
-  staleDiv.style.display = 'none';
-
-  var sources = _sourceFolders.length > 0 ? _sourceFolders : [];
-  var destination = document.getElementById('cfgDestination').value.trim();
-
-  try {
-    var data = await safeFetch('/api/import/destination-preview', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(function() {
-        var req = {
-          sources: sources,
-          destination: destination,
-          folder_template: getSelectedFolderTemplate(),
-          file_types: getIngestFileTypes(),
-          recursive: document.getElementById('chkIncludeSubfolders').checked,
-        };
-        if (_previewData && _previewSelected) {
-          var excluded = [];
-          _previewData.files.forEach(function(f) {
-            if (!_previewSelected[f.path]) excluded.push(f.path);
-          });
-          if (excluded.length > 0) req.exclude_paths = excluded;
-        }
-        return req;
-      }()),
-    }, { toast: false });
-
-    if (data.error) {
-      hint.textContent = data.error;
-      btn.textContent = 'Preview folder structure';
-      btn.disabled = false;
-      return;
-    }
-
-    // Render summary
-    var newCount = data.new_folders;
-    var existCount = data.existing_folders;
-    var parts = [data.total_photos + ' photo' + (data.total_photos !== 1 ? 's' : '')];
-    parts.push(data.total_folders + ' folder' + (data.total_folders !== 1 ? 's' : ''));
-    var detail = [];
-    if (newCount > 0) detail.push(newCount + ' new folder' + (newCount !== 1 ? 's' : ''));
-    if (existCount > 0) detail.push(existCount + ' existing folder' + (existCount !== 1 ? 's' : ''));
-    summaryDiv.textContent = parts.join(' \u2192 ') + (detail.length ? ' (' + detail.join(', ') + ')' : '');
-
-    // Render folder list
-    listDiv.innerHTML = data.folders.map(function(f) {
-      var tag = f.exists
-        ? '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--accent);color:#fff;margin-left:6px;white-space:nowrap;">Existing folder</span>'
-        : '<span style="font-size:10px;padding:1px 5px;border-radius:3px;background:var(--success,#28a745);color:#fff;margin-left:6px;white-space:nowrap;">New folder</span>';
-      var fullPath = f.full_path || (f.path === '.' ? destination : destination.replace(/\/$/, '') + '/' + f.path);
-      return '<div style="padding:3px 0;display:flex;align-items:center;gap:4px;">'
-        + '<span title="' + escapeAttr(fullPath) + '" style="font-family:monospace;color:var(--text-secondary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(fullPath) + '</span>'
-        + tag
-        + '<span style="color:var(--text-dim);margin-left:auto;">' + f.count + ' photo' + (f.count !== 1 ? 's' : '') + '</span>'
-        + '</div>';
-    }).join('');
-
-    // Managed-archive callout: when the destination is (or sits inside) an
-    // existing Vireo-managed archive, say so plainly so the dialog never
-    // presents an existing archive as an empty/new destination.
-    _managedArchive = data.managed_archive || null;
-    renderManagedArchiveCallout();
-
-    resultsDiv.style.display = '';
-    _folderPreviewShown = true;
-    btn.textContent = 'Refresh preview';
-    btn.disabled = false;
-
-  } catch(e) {
-    hint.textContent = 'Preview failed';
-    btn.textContent = 'Preview folder structure';
-    btn.disabled = false;
-  }
-}
-
-// Render (or hide) the "destination is an existing managed archive" callout
-// based on _managedArchive. Built with textContent so the archive path is
-// never interpreted as HTML.
-function renderManagedArchiveCallout() {
-  var el = document.getElementById('folderPreviewManagedArchive');
-  if (!el) return;
-  if (!_managedArchive || !_managedArchive.path) {
-    el.textContent = '';
-    el.style.display = 'none';
-    return;
-  }
-  var count = _managedArchive.photo_count || 0;
-  el.textContent = '';
-
-  var lead = document.createElement('span');
-  lead.textContent = 'Destination is an existing Vireo archive (';
-  el.appendChild(lead);
-
-  var pathEl = document.createElement('code');
-  pathEl.style.fontFamily = 'monospace';
-  pathEl.textContent = _managedArchive.path;
-  el.appendChild(pathEl);
-
-  var mid = document.createElement('span');
-  mid.textContent = ', ' + count.toLocaleString() + ' photo' + (count === 1 ? '' : 's')
-    + '). New files will be merged in.';
-  el.appendChild(mid);
-
-  el.style.display = '';
-}
-
-function markFolderPreviewStale() {
-  if (!_folderPreviewShown) return;
-  // A source/destination change invalidates the managed-archive verdict — drop
-  // it so the duplicate summary doesn't keep merge-framing against a stale
-  // destination, and hide the callout so it never asserts an "existing archive"
-  // for a path that may no longer be the destination. The amber "click Refresh"
-  // banner below still prompts the user; the callout is recomputed on refresh.
-  _managedArchive = null;
-  renderManagedArchiveCallout();
-  document.getElementById('folderPreviewStale').style.display = '';
-  var btn = document.getElementById('btnPreviewFolders');
-  btn.textContent = 'Refresh preview';
-  // Only enable if prerequisites are still met (sources + destination)
-  var hasSources = _sourceFolders.length > 0;
-  var hasDest = document.getElementById('cfgDestination').value.trim();
-  btn.disabled = !(hasSources && hasDest);
-}
-
 async function selectSourceMode(mode) {
-  // Cancel any in-flight duplicate scan before switching context
-  if (_duplicateCheckAbort) { _duplicateCheckAbort.abort(); _duplicateCheckAbort = null; }
   _sourceMode = mode;
-  document.getElementById('radioImport').checked = (mode === 'import');
+  var isFolders = (mode === 'folders');
+  document.getElementById('radioFolders').checked = isFolders;
   document.getElementById('radioCollection').checked = (mode === 'collection');
   var newImgRadio = document.getElementById('radioNewImages');
   if (newImgRadio) newImgRadio.checked = (mode === 'new_images');
 
-  var importBody = document.getElementById('sourceImportBody');
+  var foldersBody = document.getElementById('sourceImportBody');
   var collBody = document.getElementById('sourceCollectionBody');
   var newImgBody = document.getElementById('sourceNewImagesBody');
 
-  if (mode === 'import') {
-    importBody.classList.remove('dimmed');
-    collBody.classList.add('dimmed');
-    if (newImgBody) newImgBody.classList.add('dimmed');
-  } else if (mode === 'collection') {
-    importBody.classList.add('dimmed');
-    collBody.classList.remove('dimmed');
-    if (newImgBody) newImgBody.classList.add('dimmed');
-  } else if (mode === 'new_images') {
-    importBody.classList.add('dimmed');
-    collBody.classList.add('dimmed');
-    if (newImgBody) newImgBody.classList.remove('dimmed');
-  }
-
-  var copySection = document.getElementById('destCopySection');
-  var copyNote = document.getElementById('destCopyDisabledNote');
-  if (mode === 'collection' || mode === 'new_images') {
-    copySection.classList.add('dimmed');
-    copyNote.style.display = '';
-  } else {
-    copySection.classList.remove('dimmed');
-    copyNote.style.display = 'none';
-  }
-
-  // Snapshot IDs are scoped to the workspace they were captured in, so the
-  // "New workspace" destination would produce a 404 at lookup time. Lock the
-  // destination to the current workspace while new-images mode is active.
-  // Apply the destination lock and button state BEFORE any async snapshot
-  // POST — callers don't await this function, so a click on Start during
-  // the POST's network round-trip would otherwise see stale state.
-  var wsNewRadio = document.getElementById('radioWsNew');
-  var wsCurrentRadio = document.getElementById('radioWsCurrent');
-  var wsNewNote = document.getElementById('destWsNewImagesNote');
-  if (mode === 'new_images') {
-    if (wsNewRadio) wsNewRadio.disabled = true;
-    if (wsCurrentRadio && !wsCurrentRadio.checked) {
-      wsCurrentRadio.checked = true;
-      onDestWorkspaceChange();
-    }
-    if (wsNewNote) wsNewNote.style.display = '';
-  } else {
-    if (wsNewRadio) wsNewRadio.disabled = false;
-    if (wsNewNote) wsNewNote.style.display = 'none';
-  }
+  foldersBody.classList.toggle('dimmed', !isFolders);
+  collBody.classList.toggle('dimmed', mode !== 'collection');
+  if (newImgBody) newImgBody.classList.toggle('dimmed', mode !== 'new_images');
 
   // With new-images mode selected but no snapshot yet, updateStartButton()
   // correctly disables Start (gate on `newImagesSnapshotId`). Call it now
   // so stale state from the previous mode can't slip through during await.
   updateStartButton();
 
-  if (mode === 'new_images' && newImagesSnapshotId === null) {
-    // User is selecting the card directly (no deep-link) — freeze the list now.
+  if (mode === 'new_images' && newImagesSnapshotId === null
+      && !_newImagesSnapshotCreating) {
+    // Freeze the list now (card click or banner deep-link). The guard stops
+    // a second click from stacking a parallel poll loop on the first one.
+    _newImagesSnapshotCreating = true;
     var actionStatus = document.getElementById('pipelineActionStatus');
     var snapshotError = null;
     try {
@@ -2383,14 +2066,31 @@ async function selectSourceMode(mode) {
         actionStatus.textContent = 'Preparing new-images snapshot...';
         actionStatus.className = 'status-msg';
       }
-      newImagesSnapshotId = await createNewImagesSnapshotWithRetry(function() {
-        if (actionStatus) {
-          actionStatus.textContent = 'Still preparing new-images snapshot...';
+      newImagesSnapshotId = await createNewImagesSnapshotWithRetry(function(progress) {
+        // Show the walk's real totals so a multi-minute scan of a big
+        // library reads as work happening, not a stuck page.
+        var text = 'Scanning your folders for new images…';
+        if (progress && progress.files_checked > 0) {
+          text = 'Scanning for new images — '
+            + progress.files_checked.toLocaleString() + ' files checked, '
+            + (progress.new_count_so_far || 0).toLocaleString() + ' new so far…';
+        }
+        if (actionStatus) actionStatus.textContent = text;
+        var subtitle = document.getElementById('newImagesCardSubtitle');
+        if (subtitle && progress && progress.files_checked > 0) {
+          subtitle.textContent = ' — '
+            + (progress.new_count_so_far || 0).toLocaleString()
+            + ' found so far…';
         }
       });
+      if (actionStatus) actionStatus.textContent = '';
     } catch (e) {
       // Leave snapshot id null; submit will fail validation via updateStartButton.
-      snapshotError = 'New-images snapshot is still being prepared. Try again in a moment.';
+      snapshotError = 'Could not build the new-images list: '
+        + ((e && e.message) ? e.message : 'unknown error')
+        + '. Click the card to retry.';
+    } finally {
+      _newImagesSnapshotCreating = false;
     }
     // Snapshot resolved (or failed) — refresh start-button state.
     updateStartButton();
@@ -2428,58 +2128,6 @@ function onCollectionChange() {
   schedulePlanRefresh();
 }
 
-async function loadVolumes() {
-  try {
-    var volumes = await safeFetch('/api/volumes', {}, { toast: false });
-    var dl = document.getElementById('volumeDatalist');
-    if (dl) {
-      volumes.forEach(function(v) {
-        dl.innerHTML += '<option value="' + escapeHtml(v.path) + '">' + escapeHtml(v.name) + '</option>';
-      });
-    }
-  } catch(e) {}
-}
-
-function onGroupToggle(group) {
-  var parentId = group === 'standard' ? 'chkStandard' : 'chkRaw';
-  var checked = document.getElementById(parentId).checked;
-  var children = document.querySelectorAll('input[data-group="' + group + '"]');
-  children.forEach(function(cb) { cb.checked = checked; });
-  updateStartButton();
-  fetchFolderPreview();
-  markFolderPreviewStale();
-}
-
-function onExtToggle(group) {
-  var parentId = group === 'standard' ? 'chkStandard' : 'chkRaw';
-  var children = document.querySelectorAll('input[data-group="' + group + '"]');
-  var allChecked = true;
-  var anyChecked = false;
-  children.forEach(function(cb) {
-    if (cb.checked) anyChecked = true;
-    else allChecked = false;
-  });
-  var parent = document.getElementById(parentId);
-  parent.checked = allChecked;
-  parent.indeterminate = anyChecked && !allChecked;
-  updateStartButton();
-  fetchFolderPreview();
-  markFolderPreviewStale();
-}
-
-function getIngestFileTypes() {
-  var exts = [];
-  var stdMap = {'.jpg': ['.jpg', '.jpeg'], '.png': ['.png'], '.tiff': ['.tiff', '.tif'], '.bmp': ['.bmp'], '.webp': ['.webp']};
-  document.querySelectorAll('input[data-group="standard"]:checked').forEach(function(cb) {
-    var ext = cb.getAttribute('data-ext');
-    (stdMap[ext] || [ext]).forEach(function(e) { exts.push(e); });
-  });
-  document.querySelectorAll('input[data-group="raw"]:checked').forEach(function(cb) {
-    exts.push(cb.getAttribute('data-ext'));
-  });
-  return exts;
-}
-
 function updateStartButton() {
   var btn = document.getElementById('btnStartPipeline');
   var actionStatus = document.getElementById('pipelineActionStatus');
@@ -2509,10 +2157,17 @@ function updateStartButton() {
     actionStatus.className = 'status-msg';
   }
 
-  if (_sourceMode === 'import') {
-    var hasFolders = _sourceFolders.length > 0;
-    var anyType = getIngestFileTypes().length > 0;
-    btn.disabled = !hasFolders || !anyType;
+  if (_dashboardActionScopeError) {
+    btn.disabled = true;
+    if (actionStatus) {
+      actionStatus.textContent = _dashboardActionScopeError;
+      actionStatus.className = 'status-msg error';
+    }
+    return;
+  }
+
+  if (_sourceMode === 'folders') {
+    btn.disabled = selectedFolderIds().length === 0;
   } else if (_sourceMode === 'new_images') {
     btn.disabled = !newImagesSnapshotId;
   } else {
@@ -2520,21 +2175,8 @@ function updateStartButton() {
     btn.disabled = !collId;
   }
 
-  // Destination card validation
-  if (!btn.disabled) {
-    if (_destWorkspaceMode === 'new') {
-      var wsName = document.getElementById('destNewWsName').value.trim();
-      if (!wsName) btn.disabled = true;
-    }
-    if (_sourceMode === 'import' && _copyMode) {
-      var dest = document.getElementById('cfgDestination').value.trim();
-      if (!dest) btn.disabled = true;
-    }
-  }
-
-  // Snapshot whether source + destination are configured *before* the
-  // classify gates below. The stage-1 "complete" indicator and the
-  // auto-expand of the destination card key off this; if we let the
+  // Snapshot whether the source is configured *before* the classify gates
+  // below. The stage-1 "complete" indicator keys off this; if we let the
   // classify gate (which can flip while a plan refresh is pending) drive
   // the source indicator, the source stage flickers between complete and
   // incomplete every time the plan refetches.
@@ -2573,33 +2215,14 @@ function updateStartButton() {
     }
   }
 
-  // Update preview button state
-  var previewBtn = document.getElementById('btnPreviewFolders');
-  var previewHint = document.getElementById('previewFoldersHint');
-  if (previewBtn) {
-    var hasSources = _sourceFolders.length > 0;
-    var hasDest = _copyMode && document.getElementById('cfgDestination').value.trim();
-    if (hasSources && hasDest) {
-      if (!_folderPreviewShown) previewBtn.disabled = false;
-      previewHint.textContent = '';
-    } else {
-      previewBtn.disabled = true;
-      previewHint.textContent = 'Select source and destination to preview';
-    }
-  }
-
-  // Update stage 1 indicator and auto-expand stage 2 when source is ready
-  // (sourceReady was captured above, before the classify gates).
+  // Update stage 1 indicator when the source is ready (sourceReady was
+  // captured above, before the classify gates).
   var numSource = document.getElementById('numSource');
   if (sourceReady) {
     numSource.classList.add('complete');
-    if (!_sourceWasReady) {
-      document.getElementById('card-destination').classList.add('expanded');
-    }
   } else {
     numSource.className = 'stage-num';
   }
-  _sourceWasReady = sourceReady;
 }
 
 // -- Stage enable/disable dependency chain --
@@ -2641,6 +2264,8 @@ function onStageToggle(stage) {
     }
   }
 
+  updateDerivedProcessControls();
+  if (!_applyingProcess) markProcessModified();
   updateStartButton();
   refreshPipelineUI();
   schedulePlanRefresh();
@@ -2724,6 +2349,10 @@ var _currentPipelineJobId = null;
 
 async function startPipeline() {
   if (_pipelineRunning) return;
+  if (_dashboardActionScopeError) {
+    updateStartButton();
+    return;
+  }
 
   // Belt-and-suspenders: updateStartButton() should already have disabled
   // this button when Classify is enabled and the plan is mid-refresh, but
@@ -2765,45 +2394,6 @@ async function startPipeline() {
   var _prevErrBanner = document.getElementById('pipelineErrorBanner');
   if (_prevErrBanner) _prevErrBanner.style.display = 'none';
 
-  // Create new workspace if requested
-  if (_destWorkspaceMode === 'new') {
-    var wsName = document.getElementById('destNewWsName').value.trim();
-    if (!wsName) {
-      document.getElementById('destWsError').textContent = 'Name is required';
-      document.getElementById('destWsError').style.display = '';
-      _pipelineRunning = false;
-      _pipelineCancelling = false;
-      return;
-    }
-    try {
-      var wsData = await safeFetch('/api/workspaces', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ name: wsName })
-      }, { toast: false });
-      // Activate the new workspace
-      await safeFetch('/api/workspaces/' + wsData.id + '/activate', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ current_path: window.location.pathname })
-      });
-      if (window.vireoEditNav) window.vireoEditNav.clearWorkspaceScopedCursors();
-      // Update the navbar workspace display ('wsCurrentName' is the
-      // navbar's actual element — the old 'wsDropdownBtn' id never
-      // existed, so the navbar kept showing the previous workspace for
-      // the whole run).
-      var wsBtn = document.getElementById('wsCurrentName');
-      if (wsBtn) wsBtn.textContent = wsName;
-      document.getElementById('lblCurrentWsName').textContent = '(' + wsName + ')';
-    } catch(e) {
-      document.getElementById('destWsError').textContent = e.message || 'Failed to create workspace';
-      document.getElementById('destWsError').style.display = '';
-      _pipelineRunning = false;
-      _pipelineCancelling = false;
-      return;
-    }
-  }
-
   var btn = document.getElementById('btnStartPipeline');
   btn.textContent = 'Stop Pipeline';
   btn.onclick = stopPipeline;
@@ -2818,32 +2408,13 @@ async function startPipeline() {
   // Gather config from the UI
   var body = {};
 
-  if (_sourceMode === 'import') {
-    if (_sourceFolders.length > 0) {
-      body.sources = _sourceFolders;
-    }
-    body.recursive = document.getElementById('chkIncludeSubfolders').checked;
-    body.file_types = getIngestFileTypes();
-    // Add excluded paths from preview selection
-    if (_previewData && _previewSelected) {
-      var excluded = [];
-      _previewData.files.forEach(function(f) {
-        if (!_previewSelected[f.path]) excluded.push(f.path);
-      });
-      if (excluded.length > 0) body.exclude_paths = excluded;
-    }
-    if (_copyMode) {
-      body.destination = document.getElementById('cfgDestination').value.trim();
-      body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
-      body.folder_template = getSelectedFolderTemplate();
-      var localProcessing = document.getElementById('chkLocalProcessing');
-      body.local_processing = !!(localProcessing && localProcessing.checked);
-    }
+  if (_sourceMode === 'folders') {
+    // Scope = selected workspace folders; the server expands each to
+    // its active-workspace subtree and pins the run to an ad-hoc
+    // collection (import/process split PR 1).
+    body.folder_ids = selectedFolderIds();
   } else if (_sourceMode === 'new_images') {
     body.source_snapshot_id = newImagesSnapshotId;
-    delete body.source;
-    delete body.sources;
-    delete body.file_types;
     // Honor per-file deselections from the preview grid — otherwise the
     // user can uncheck photos and still see them run through the pipeline.
     if (_previewData && _previewSelected) {
@@ -2865,7 +2436,9 @@ async function startPipeline() {
     }
   }
 
-  // Optional stages
+  // The process page sends explicit stage flags: Run always uses the CURRENT
+  // toggle values (whether or not a saved process is selected), including
+  // miss_enabled and review_mode which used to be preset-only server-side.
   var classifyEnabled = document.getElementById('enableClassify').checked;
   var extractEnabled = document.getElementById('enableExtract').checked;
   var eyeKeypointsEnabled = document.getElementById('enableEyeKeypoints').checked;
@@ -2875,6 +2448,23 @@ async function startPipeline() {
   body.skip_extract_masks = !extractEnabled;
   body.skip_eye_keypoints = !eyeKeypointsEnabled;
   body.skip_regroup = !groupEnabled;
+  body.miss_enabled = !!document.getElementById('enableMisses').checked;
+  body.review_mode =
+    document.getElementById('enableSpeciesReview').checked ? 'species' : null;
+
+  // Only send ``eye_detect_override`` when the checkbox is CHECKED — an
+  // explicit per-run opt-in that forces ``pipeline_cfg["eye_detect_enabled"]``
+  // on for the run. An unchecked box is not an explicit eye-scoring
+  // opt-out: on a workspace with Settings ``eye_detect_enabled=true``, the
+  // user may simply want to skip the (expensive) stage while still scoring
+  // against existing ``eye_tenengrad``. Sending ``false`` here would
+  // silently disable eye-based scoring on such workspaces and produce
+  // different KEEP/REJECT results than the same server-side strategy /
+  // API path would (which leaves the override ``None``). When unset, the
+  // backend falls back to workspace Settings.
+  if (eyeKeypointsEnabled) {
+    body.eye_detect_override = true;
+  }
 
   // Classification options (only if enabled)
   if (classifyEnabled) {
@@ -2900,14 +2490,10 @@ async function startPipeline() {
   }
 
   // Reset all stage cards to pending state
-  ['Source', 'Destination', 'Scan', 'Previews', 'Classify', 'Extract', 'Group'].forEach(function(name) {
+  ['Source', 'Scan', 'Previews', 'Classify', 'Extract', 'Group'].forEach(function(name) {
     var numEl = document.getElementById('num' + name);
     if (numEl) numEl.className = 'stage-num';
   });
-
-  // Destination is a config-only card — mark complete immediately since
-  // workspace creation and copy settings are already resolved at this point.
-  document.getElementById('numDestination').classList.add('complete');
 
   try {
     var data = await safeFetch('/api/jobs/pipeline', {
@@ -2983,9 +2569,10 @@ async function startPipeline() {
   }
 }
 
-// Map pipeline stage names to UI card element suffixes
+// Map pipeline stage names to UI card element suffixes. Stages with no
+// card here (e.g. the import job's storage/archive stages) are ignored by
+// _updatePipelineStageUI.
 var _stageToCard = {
-  storage: 'Destination',
   ingest: 'Source',
   scan: 'Scan',
   thumbnails: 'Previews',
@@ -2995,7 +2582,6 @@ var _stageToCard = {
   extract_masks: 'Extract',
   eye_keypoints: 'EyeKeypoints',
   regroup: 'Group',
-  archive: 'Destination',
 };
 
 // Reverse of _stageToCard: cardSuffix -> [backend stage names]. Used by
@@ -3036,6 +2622,23 @@ function _formatETA(seconds) {
   return h + 'h ' + m + 'm';
 }
 
+// Ingest is the only stage that ever reads the source (SD card/etc.) — every
+// later stage works off the copy it made. Once it reports success, surface
+// that explicitly instead of leaving the user to guess whether the card is
+// still in use (`ingestInfo.copied` is absent entirely in scan-in-place mode,
+// where there was never a copy and the card stays needed for the whole run).
+function _showSourceEjectSafe(ingestInfo) {
+  if (!ingestInfo || typeof ingestInfo.copied !== 'number') return;
+  var statusSourceEl = document.getElementById('statusSource');
+  if (!statusSourceEl) return;
+  var parts = [ingestInfo.copied.toLocaleString() + ' copied'];
+  if (ingestInfo.skipped_duplicate) {
+    parts.push(ingestInfo.skipped_duplicate.toLocaleString() + ' already present');
+  }
+  statusSourceEl.textContent = parts.join(', ') + ' — the card is safe to eject.';
+  statusSourceEl.className = 'status-msg ok';
+}
+
 function _updatePipelineStageUI(p) {
   var stages = p.stages || {};
 
@@ -3045,18 +2648,22 @@ function _updatePipelineStageUI(p) {
   // substages reach a terminal state. Resolving each substage event in
   // isolation made the pill flash 'Done' as soon as the first substage
   // finished, even though more work was pending.
-  var cardAgg = {};  // cardSuffix -> {running, failed, completed, skipped, present}
+  var cardAgg = {};  // cardSuffix -> aggregate substage outcomes
   for (var stageName in stages) {
     var cardSuffix = _stageToCard[stageName];
     if (!cardSuffix) continue;
     var agg = cardAgg[cardSuffix] || (cardAgg[cardSuffix] = {
-      running: false, failed: false, completed: 0, skipped: 0, present: 0,
+      running: false, failed: false, warning: false,
+      completed: 0, skipped: 0, present: 0,
     });
     agg.present += 1;
     var st = stages[stageName].status;
     if (st === 'running') agg.running = true;
     else if (st === 'failed') agg.failed = true;
-    else if (st === 'completed') agg.completed += 1;
+    else if (st === 'completed') {
+      agg.completed += 1;
+      if ((stages[stageName].error_count || 0) > 0) agg.warning = true;
+    }
     else if (st === 'skipped') agg.skipped += 1;
   }
 
@@ -3108,8 +2715,9 @@ function _updatePipelineStageUI(p) {
       numEl.className = 'stage-num complete';
       delete _runningStages[cardSuffix2];
       if (a.completed > 0) {
-        _stageOutcomes[cardSuffix2] = 'done';
-        _setPill(cardSuffix2, 'done');
+        _stageOutcomes[cardSuffix2] = a.warning ? 'warning' : 'done';
+        _setPill(cardSuffix2, a.warning ? 'warning' : 'done');
+        if (cardSuffix2 === 'Source') _showSourceEjectSafe(stages['ingest']);
       } else {
         // Every substage was skipped. Backend 'skipped' covers both
         // user-disabled stages and auto-skip; pick the right label so a
@@ -3225,7 +2833,7 @@ function _onPipelineComplete(result) {
       actionStatus.textContent = 'Pipeline cancelled.';
       actionStatus.className = 'status-msg';
     }
-    ['Source', 'Destination', 'Scan', 'Previews', 'Classify', 'Extract', 'EyeKeypoints', 'Group'].forEach(function(cardSuffix) {
+    ['Source', 'Scan', 'Previews', 'Classify', 'Extract', 'EyeKeypoints', 'Group'].forEach(function(cardSuffix) {
       if (_runningStages[cardSuffix]) {
         delete _runningStages[cardSuffix];
         // Record a real 'cancelled' outcome so later refreshPipelineUI
@@ -3249,7 +2857,7 @@ function _onPipelineComplete(result) {
   if (_sourceMode === 'collection') {
     document.getElementById('txtSource').textContent = 'Collection selected';
   } else {
-    document.getElementById('txtSource').textContent = _sourceFolders.length + ' folder(s)';
+    updateSourceSummary();
   }
   // If the ingest progress bar was shown (copy mode), finalize it
   // only on a successful pipeline run. On failure, leave the bar at
@@ -3259,8 +2867,12 @@ function _onPipelineComplete(result) {
     var fillSource = document.getElementById('fillSource');
     if (fillSource && fillSource.style.width && fillSource.style.width !== '0%') {
       fillSource.style.width = '100%';
-      var statusSourceEl = document.getElementById('statusSource');
-      if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
+      if (stageResults.ingest && typeof stageResults.ingest.copied === 'number') {
+        _showSourceEjectSafe(stageResults.ingest);
+      } else {
+        var statusSourceEl = document.getElementById('statusSource');
+        if (statusSourceEl) { statusSourceEl.textContent = 'Done!'; statusSourceEl.className = 'status-msg ok'; }
+      }
     }
   }
 
@@ -3477,99 +3089,6 @@ async function stopPipeline() {
       actionStatus.textContent = e.message || 'Unable to cancel pipeline';
       actionStatus.className = 'status-msg error';
     }
-  }
-}
-
-async function runImportStep() {
-  var source = _sourceFolders.length > 0 ? _sourceFolders[0] : '';
-  var destination = _copyMode
-    ? document.getElementById('cfgDestination').value.trim()
-    : '';
-
-  var num = document.getElementById('numSource');
-  var status = document.getElementById('statusSource');
-  var progressWrap = document.getElementById('progressSource');
-  var fill = document.getElementById('fillSource');
-  var text = document.getElementById('textSource');
-
-  num.className = 'stage-num running';
-  status.textContent = _copyMode ? 'Starting import...' : 'Scanning folder...';
-  progressWrap.style.display = '';
-  fill.style.width = '0%';
-
-  // Expand the source card
-  document.getElementById('card-source').classList.add('expanded');
-
-  try {
-    var body = {
-      source: source,
-      copy: _copyMode,
-      file_types: getIngestFileTypes(),
-    };
-    if (_copyMode) {
-      body.destination = destination;
-      body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
-      body.folder_template = getSelectedFolderTemplate();
-    }
-
-    var data = await safeFetch('/api/jobs/import-full', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    }, { toast: false });
-
-    if (!data.job_id) {
-      status.textContent = data.error || 'Failed to start';
-      num.className = 'stage-num';
-      progressWrap.style.display = 'none';
-      return null;
-    }
-
-    return await new Promise(function(resolve) {
-      safeEventSource('/api/jobs/' + data.job_id + '/stream', {
-        onProgress: function(p) {
-          var pct = p.total > 0 ? Math.round(p.current / p.total * 100) : 0;
-          fill.style.width = pct + '%';
-          var parts = [];
-          if (p.phase) parts.push(p.phase);
-          if (p.total > 0 && p.current > 0) parts.push(p.current + '/' + p.total);
-          if (p.current_file) parts.push(p.current_file);
-          text.textContent = parts.join(' \u2014 ');
-          status.textContent = parts.join(' \u2014 ');
-        },
-        onComplete: function(result) {
-          window.dispatchEvent(new CustomEvent('vireo-job-done', {detail: {job_id: data.job_id}}));
-          if (result.status === 'completed' && result.result) {
-            fill.style.width = '100%';
-            text.textContent = 'Complete';
-            num.className = 'stage-num complete';
-            var r = result.result;
-            var summary = [];
-            if (_copyMode && r.copied != null) summary.push(r.copied + ' imported');
-            if (_copyMode && r.skipped_duplicate > 0) summary.push(r.skipped_duplicate + ' duplicates skipped');
-            if (r.photos_indexed) summary.push(r.photos_indexed + ' indexed');
-            document.getElementById('txtSource').textContent = summary.join(', ');
-            status.textContent = 'Done!';
-            status.className = 'status-msg ok';
-            resolve(r.collection_id);
-          } else {
-            status.textContent = _copyMode ? 'Import failed' : 'Scan failed';
-            num.className = 'stage-num';
-            resolve(null);
-          }
-        },
-        onError: function() {
-          status.textContent = 'Connection lost';
-          num.className = 'stage-num';
-          resolve(null);
-        }
-      });
-    });
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-    num.className = 'stage-num';
-    progressWrap.style.display = 'none';
-    return null;
   }
 }
 
@@ -4203,6 +3722,7 @@ function _currentModelConfigFromDom() {
     sam2_variant: samEl ? samEl.value : '',
     dinov2_variant: dinoEl ? dinoEl.value : '',
     proxy_longest_edge: proxyEl ? parseInt(proxyEl.value, 10) : 0,
+    eye_detect_enabled: false,
   };
 }
 
@@ -4234,6 +3754,7 @@ function onModelConfigChange() {
     sam2_variant: document.getElementById('cfgSam2').value,
     dinov2_variant: document.getElementById('cfgDinov2').value,
     proxy_longest_edge: parseInt(document.getElementById('cfgProxy').value),
+    eye_detect_enabled: _savedModelConfig.eye_detect_enabled === true,
   };
 
   // Save to server
@@ -4549,7 +4070,7 @@ var _planDebounceTimer = null;
 var _planRefreshPending = false;
 
 var _STAGES = [
-  { suffix: 'Scan',         label: 'Scan & Import',          enable: null },
+  { suffix: 'Scan',         label: 'Scan & Index',           enable: null },
   { suffix: 'Previews',     label: 'Thumbnails & Previews',  enable: null },
   { suffix: 'Classify',     label: 'Classify',               enable: 'enableClassify' },
   { suffix: 'Extract',      label: 'Extract Features',       enable: 'enableExtract' },
@@ -4597,6 +4118,7 @@ function _formatPillLabel(stage, planEntry, state) {
   // labels — counts during a run come from a separate channel.
   if (state === 'running')   return 'Running…';
   if (state === 'done')      return 'Done';
+  if (state === 'warning')   return 'Completed with warnings';
   if (state === 'failed')    return 'Failed';
   if (state === 'cancelled') return 'Cancelled';
   if (state === 'will-skip') return 'Will skip';
@@ -4622,6 +4144,10 @@ function _formatPillLabel(stage, planEntry, state) {
   if (eligible === null || eligible === 0) {
     if (state === 'will-run' && labelSetChanged) return 'Different label set';
     if (state === 'will-run' && outdated) return 'Outdated';
+    // All-duplicates import: the stage executes but processes nothing.
+    // A bare "Will run" pill reads as "work will happen" — put the zero
+    // on the pill itself so the user doesn't have to open the card.
+    if (state === 'will-run' && detail.import_no_new) return 'Will run (0 photos)';
     return state === 'done-prior' ? 'Already done' : 'Will run';
   }
 
@@ -4673,9 +4199,20 @@ function _stageStateFor(stage) {
   if (_runningStages[stage.suffix]) return 'running';
   if (_stageOutcomes[stage.suffix]) return _stageOutcomes[stage.suffix];
 
-  // User-toggled skip overrides anything the server-side plan returned —
-  // matches the user's mental model that toggling a stage off is the
-  // strongest signal of "do not run this".
+  var fromPlan = _pipelinePlan && _pipelinePlan.stages
+    ? _pipelinePlan.stages[stage.suffix] : null;
+
+  // Plan wins on 'will-run': /api/pipeline/plan expands ``strategy`` the
+  // same way /api/jobs/pipeline does, so when it says a stage will run,
+  // the actual job WILL run it — even if the stage's checkbox is off.
+  // The identify preset auto-unchecks Group but its species-review
+  // branch still runs regroup_stage and rewrites the review cache;
+  // without this the pill lies about what pressing Start would do.
+  if (fromPlan && fromPlan.state === 'will-run') return 'will-run';
+
+  // Otherwise user-toggled skip overrides the plan — matches the user's
+  // mental model that toggling a stage off is the strongest signal of
+  // "do not run this".
   if (stage.enable) {
     var cb = document.getElementById(stage.enable);
     if (cb && !cb.checked) return 'will-skip';
@@ -4683,7 +4220,6 @@ function _stageStateFor(stage) {
   // Stages with no plan entry (Scan in non-import modes) default to
   // "will-run" — they always run when the pipeline starts.
   if (!_pipelinePlan) return 'will-run';
-  var fromPlan = _pipelinePlan.stages && _pipelinePlan.stages[stage.suffix];
   if (!fromPlan) return 'will-run';
   return fromPlan.state || 'will-run';
 }
@@ -4784,13 +4320,14 @@ function refreshPipelineUI() {
 function _buildPlanBody() {
   var body = {};
   // Source mode determines how the backend scopes the plan:
+  //   - 'folders': scope = selected workspace folder subtrees.
   //   - 'collection': scope = collection's photo ids (real per-photo status).
-  //   - 'import' / 'new_images': send the SELECTED preview file paths so
-  //     the backend can split them into already-known-vs-new and report
-  //     truthful counts. Without this the plan falls back to whole-workspace
-  //     counts, which renders "Already done" for an import into a
-  //     non-empty workspace — exactly the bug we're fixing.
-  if (_sourceMode === 'collection') {
+  //   - 'new_images': send selected snapshot paths so the backend can split
+  //     them into already-known-vs-new and report truthful counts.
+  if (_sourceMode === 'folders') {
+    var folderIds = selectedFolderIds();
+    if (folderIds.length) body.folder_ids = folderIds;
+  } else if (_sourceMode === 'collection') {
     var picker = document.getElementById('collectionPicker');
     var cid = picker && picker.value ? parseInt(picker.value, 10) : NaN;
     if (!isNaN(cid)) body.collection_id = cid;
@@ -4801,7 +4338,7 @@ function _buildPlanBody() {
       });
       if (excludedIds.length) body.exclude_photo_ids = excludedIds;
     }
-  } else if ((_sourceMode === 'import' || _sourceMode === 'new_images')
+  } else if (_sourceMode === 'new_images'
              && _previewData && _previewData.files && _previewSelected) {
     // Send only the selected paths — the user can deselect duplicates
     // or specific files in the preview, and the plan should reflect
@@ -4810,7 +4347,7 @@ function _buildPlanBody() {
     _previewData.files.forEach(function(f) {
       if (_previewSelected[f.path]) selectedPaths.push(f.path);
     });
-    // Always send source_paths in import / new-images mode — even when
+    // Always send source_paths in new-images mode — even when
     // the list is empty (every preview file deselected) or exceeds the
     // backend cap (50k). Dropping the field would make the server fall
     // back to whole-workspace scope, which is the misleading plan this
@@ -4819,29 +4356,30 @@ function _buildPlanBody() {
     // clears — both accurate states.
     body.source_paths = selectedPaths;
 
-    // Copy-mode imports with skip_duplicates=true dedupe by file_hash, not
-    // by source path. The /api/import/check-duplicates SSE feed has
-    // already populated _duplicateResults with the hash-matched preview
-    // paths; pass that subset along so the plan counts those as already
-    // known instead of new (otherwise pills overstate work for files
-    // ingest() will silently skip). Only send when the duplicate gate is
-    // actually on; toggling it off must drop the field so the backend
-    // doesn't keep treating the cache as live.
-    var skipDup = document.getElementById('chkSkipDuplicates');
-    if (_copyMode && skipDup && skipDup.checked
-        && Object.keys(_duplicateResults).length > 0) {
-      var hashDupPaths = [];
-      selectedPaths.forEach(function(p) {
-        if (_duplicateResults[p]) hashDupPaths.push(p);
-      });
-      if (hashDupPaths.length) body.hash_duplicate_paths = hashDupPaths;
-    }
   }
 
   body.skip_classify       = !document.getElementById('enableClassify').checked;
   body.skip_extract_masks  = !document.getElementById('enableExtract').checked;
   body.skip_eye_keypoints  = !document.getElementById('enableEyeKeypoints').checked;
   body.skip_regroup        = !document.getElementById('enableGroup').checked;
+
+  // Send review_mode so the plan describes the species-review path correctly:
+  // with skip_regroup=true + review_mode="species" the run prepares species
+  // review results, and without this the plan would report Group as
+  // "Disabled" and imply no grouping work at all.
+  body.review_mode =
+    document.getElementById('enableSpeciesReview').checked ? 'species' : null;
+
+  // Only send ``eye_detect_override`` when the checkbox is CHECKED. An
+  // unchecked box means "skip the eye stage" and does NOT imply "disable eye
+  // scoring" — on a workspace with Settings ``eye_detect_enabled=true`` the
+  // plan must still reflect Settings for regroup, otherwise the plan would
+  // show a different outcome (e.g. no ``eye_override_differs``) than the
+  // workspace would produce via any non-Process-page path. Sending ``false``
+  // here caused the plan to silently disable eye scoring on such workspaces.
+  if (document.getElementById('enableEyeKeypoints').checked) {
+    body.eye_detect_override = true;
+  }
 
   // Preview size is a workspace/library setting. Omit preview_max_size so
   // the backend planner and job both use the same workspace-effective value.
@@ -4866,10 +4404,6 @@ function _buildPlanBody() {
 }
 
 function _planIsWaitingForImportPreview() {
-  if (_sourceMode === 'import') {
-    return _sourceFolders.length > 0 && getIngestFileTypes().length > 0
-      && (_previewLoading || !_previewData);
-  }
   if (_sourceMode === 'new_images') {
     return newImagesSnapshotId !== null && (_previewLoading || !_previewData);
   }
@@ -4942,450 +4476,8 @@ function updateCardStates() {
   refreshPipelineUI();
 }
 
-/* ---------- Native folder picker (Tauri only) ---------- */
-(function() {
-  if (typeof isTauri === 'function' && isTauri()) {
-    document.querySelectorAll('.tauri-only').forEach(function(el) {
-      el.style.display = '';
-    });
-  }
-})();
-
-async function browseForFolder() {
-  if (typeof pickDirectory === 'function') {
-    var result = await pickDirectory('Select photo folders', { multiple: true });
-    if (result) {
-      var paths = Array.isArray(result) ? result : [result];
-      var added = false;
-      for (var i = 0; i < paths.length; i++) {
-        if (paths[i] && _sourceFolders.indexOf(paths[i]) === -1) {
-          _sourceFolders.push(paths[i]);
-          added = true;
-        }
-      }
-      if (added) {
-        markFolderPreviewStale();
-        renderSourceFolders();
-        updateStartButton();
-        fetchFolderPreview();
-      }
-      return;
-    }
-  }
-  openFolderBrowser('source');
-}
-
-async function browseForDestination() {
-  if (typeof pickDirectory === 'function') {
-    var path = await pickDirectory('Select destination folder');
-    if (path) {
-      document.getElementById('cfgDestination').value = path;
-      updateStartButton();
-      markFolderPreviewStale();
-      return;
-    }
-  }
-  openFolderBrowser('destination');
-}
-
-// ---------- Folder Browser ----------
-var _fbCurrentPath = '';
-var _fbSelectedDir = '';
-var _fbSelectedDirs = []; // source mode: all selected paths; destination mode: at most one
-var _fbSelectAnchorPath = ''; // source mode: anchor for shift-click range selection
-var _fbMode = 'destination'; // 'source' or 'destination'
-var _fbCountsAbort = null;
-var _fbCountCache = {}; // key: "path|ext1,ext2" -> count (session-scoped)
-var _fbBrowseToken = 0; // incremented on every browseTo to stamp stale responses
-
-function openFolderBrowser(mode) {
-  _fbMode = mode || 'destination';
-  document.getElementById('fbTitle').textContent = _fbMode === 'source' ? 'Select Source Folders' : 'Select Destination Folder';
-  var overlay = document.getElementById('folderBrowserOverlay');
-  overlay.classList.add('active');
-  document.body.style.overflow = 'hidden';
-  // Close on clicking the backdrop
-  overlay.onclick = function(e) {
-    if (e.target === overlay) closeFolderBrowser();
-  };
-  // Start at home directory
-  browseTo(null);
-  // Close on Escape — remove previous listener to prevent accumulation
-  if (overlay._escHandler) {
-    document.removeEventListener('keydown', overlay._escHandler);
-  }
-  overlay._escHandler = function(e) {
-    if (e.key === 'Escape') closeFolderBrowser();
-  };
-  document.addEventListener('keydown', overlay._escHandler);
-}
-
-function closeFolderBrowser() {
-  var overlay = document.getElementById('folderBrowserOverlay');
-  overlay.classList.remove('active');
-  document.body.style.overflow = '';
-  cancelNewFolder();
-  if (overlay._escHandler) {
-    document.removeEventListener('keydown', overlay._escHandler);
-    overlay._escHandler = null;
-  }
-}
-
-function browseTo(path) {
-  var listEl = document.getElementById('fbList');
-  listEl.innerHTML = '<div class="folder-browser-loading">Loading\u2026</div>';
-  // Clear _fbCurrentPath before the async fetch resolves so New Folder
-  // cannot target the previous location's path if the user clicks it
-  // while the new browse is still in flight. updateNewFolderButton()
-  // re-disables the button until the fetch sets _fbCurrentPath again.
-  _fbCurrentPath = '';
-  updateNewFolderButton();
-  _fbSelectedDir = '';
-  _fbSelectedDirs = [];
-  _fbSelectAnchorPath = '';
-  document.getElementById('fbSelectedPath').textContent = '';
-  updateFbSelectButtonLabel();
-  cancelNewFolder();
-  // Invalidate any in-flight photo-count request so its results don't
-  // land in a now-stale list.
-  _fbBrowseToken += 1;
-  if (_fbCountsAbort) { _fbCountsAbort.abort(); _fbCountsAbort = null; }
-
-  var url = '/api/browse';
-  if (path === '__pictures__') {
-    url = '/api/browse?path=' + encodeURIComponent(_fbHomePath + '/Pictures');
-  } else if (path === '__volumes__') {
-    // Windows has no single "volumes root" directory — drives live at C:\,
-    // D:\, etc. /api/volumes enumerates them via the Win32 API; render the
-    // drive list directly as a synthetic listing the user can drill into.
-    if (navigator.userAgent.indexOf('Win') >= 0) {
-      fetch('/api/volumes').then(function(r) {
-        if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Failed to enumerate volumes'); });
-        return r.json();
-      }).then(function(volumes) {
-        _fbCurrentPath = '';
-        _fbSelectedDir = '';
-        _fbSelectedDirs = [];
-        _fbSelectAnchorPath = '';
-        document.getElementById('fbSelectedPath').textContent = '';
-        updateFbSelectButtonLabel();
-        updateNewFolderButton();
-        var bc = document.getElementById('fbBreadcrumb');
-        bc.innerHTML = '<span class="current">Volumes</span>';
-        bc.onclick = null;
-        // Skip recursive photo counts on the synthetic drive-root list:
-        // /api/volumes includes the system drive, and counting it would
-        // recursively walk all of C:\ before the user has picked anything.
-        // Counts resume once the user drills into a specific drive.
-        renderFolderList(volumes, { skipCounts: true });
-      }).catch(function(err) {
-        listEl.innerHTML = '<div class="folder-browser-error">' + escapeHtml(err.message) + '</div>';
-      });
-      return;
-    }
-    var volDir = navigator.userAgent.indexOf('Mac') >= 0 ? '/Volumes' : '/media';
-    url = '/api/browse?path=' + encodeURIComponent(volDir);
-  } else if (path) {
-    url = '/api/browse?path=' + encodeURIComponent(path);
-  }
-
-  fetch(url).then(function(r) {
-    if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Failed to browse'); });
-    return r.json();
-  }).then(function(data) {
-    _fbCurrentPath = data.path;
-    updateNewFolderButton();
-    if (!path) _fbHomePath = data.path;
-    // Implicit fallback: selectFolder() uses _fbSelectedDir when the user
-    // hits Select without clicking any subfolder. Keep _fbSelectedDirs empty
-    // so the first cmd/shift-click starts from a clean slate instead of
-    // silently including the unhighlighted parent folder.
-    _fbSelectedDir = data.path;
-    _fbSelectedDirs = [];
-    _fbSelectAnchorPath = '';
-    document.getElementById('fbSelectedPath').textContent = data.path;
-    updateFbSelectButtonLabel();
-    renderBreadcrumb(data.path);
-    // Drilling into a Windows drive root (e.g. C:\, D:/) lists top-level
-    // system directories like Users, Windows, Program Files. Recursive
-    // photo counts on those would scan the entire volume and hang the
-    // UI/server, so skip counts here and resume once the user drills in
-    // one more level. The synthetic Volumes list is handled separately
-    // (with skipCounts:true) above; this guard covers the post-drill
-    // path that /api/browse renders.
-    var isWindowsDriveRoot = /^[A-Za-z]:[\\\/]?$/.test(data.path || '');
-    renderFolderList(data.dirs, { skipCounts: isWindowsDriveRoot });
-  }).catch(function(err) {
-    listEl.innerHTML = '<div class="folder-browser-error">' + escapeHtml(err.message) + '</div>';
-  });
-}
-
-function renderBreadcrumb(path) {
-  var el = document.getElementById('fbBreadcrumb');
-  var parts = path.split('/').filter(Boolean);
-  var html = '<span data-browse="/">/</span>';
-  var accum = '';
-  for (var i = 0; i < parts.length; i++) {
-    accum += '/' + parts[i];
-    if (i === parts.length - 1) {
-      html += ' <span class="current">' + escapeHtml(parts[i]) + '</span>';
-    } else {
-      html += ' <span data-browse="' + escapeAttr(accum) + '">' + escapeHtml(parts[i]) + '</span> /';
-    }
-  }
-  el.innerHTML = html;
-  el.onclick = function(e) {
-    var target = e.target.closest('[data-browse]');
-    if (target) browseTo(target.getAttribute('data-browse'));
-  };
-}
-
-function renderFolderList(dirs, opts) {
-  var listEl = document.getElementById('fbList');
-  if (!dirs.length) {
-    listEl.innerHTML = '<div class="folder-browser-empty">No subfolders</div>';
-    return;
-  }
-  var html = '';
-  for (var i = 0; i < dirs.length; i++) {
-    html += '<div class="folder-browser-item" data-path="' + escapeAttr(dirs[i].path) + '">' +
-            '<span class="folder-browser-item-name">\uD83D\uDCC1 ' + escapeHtml(dirs[i].name) + '</span>' +
-            '<span class="folder-browser-count" data-count-path="' + escapeAttr(dirs[i].path) + '"></span>' +
-            '</div>';
-  }
-  listEl.innerHTML = html;
-  // In source mode, asynchronously fetch recursive photo counts for each
-  // subfolder so users can see which ones contain photos. Callers can pass
-  // skipCounts to avoid this for synthetic listings (e.g. Windows drive
-  // roots) where counting would recursively walk an entire volume.
-  if (_fbMode === 'source' && !(opts && opts.skipCounts)) {
-    fetchFolderCounts(dirs.map(function(d) { return d.path; }));
-  }
-  // Event delegation: click to select, double-click to drill in.
-  // In source mode, shift-click extends a range and cmd/ctrl-click toggles.
-  listEl.onclick = function(e) {
-    var item = e.target.closest('.folder-browser-item');
-    if (!item) return;
-    var items = listEl.querySelectorAll('.folder-browser-item');
-    var path = item.getAttribute('data-path');
-    var isSource = _fbMode === 'source';
-    var shift = isSource && e.shiftKey;
-    var toggle = isSource && (e.metaKey || e.ctrlKey);
-
-    if (shift && _fbSelectAnchorPath) {
-      var anchorIdx = -1, clickIdx = -1;
-      for (var i = 0; i < items.length; i++) {
-        var p = items[i].getAttribute('data-path');
-        if (p === _fbSelectAnchorPath) anchorIdx = i;
-        if (p === path) clickIdx = i;
-      }
-      if (anchorIdx === -1) anchorIdx = clickIdx;
-      var lo = Math.min(anchorIdx, clickIdx);
-      var hi = Math.max(anchorIdx, clickIdx);
-      _fbSelectedDirs = [];
-      for (var j = lo; j <= hi; j++) {
-        _fbSelectedDirs.push(items[j].getAttribute('data-path'));
-      }
-    } else if (toggle) {
-      var idx = _fbSelectedDirs.indexOf(path);
-      if (idx === -1) _fbSelectedDirs.push(path);
-      else _fbSelectedDirs.splice(idx, 1);
-      _fbSelectAnchorPath = path;
-    } else {
-      _fbSelectedDirs = [path];
-      _fbSelectAnchorPath = path;
-    }
-
-    var sel = {};
-    for (var k = 0; k < _fbSelectedDirs.length; k++) sel[_fbSelectedDirs[k]] = true;
-    for (var m = 0; m < items.length; m++) {
-      if (sel[items[m].getAttribute('data-path')]) items[m].classList.add('selected');
-      else items[m].classList.remove('selected');
-    }
-
-    _fbSelectedDir = _fbSelectedDirs.length ? _fbSelectedDirs[_fbSelectedDirs.length - 1] : '';
-    var label = document.getElementById('fbSelectedPath');
-    if (_fbMode === 'source' && _fbSelectedDirs.length > 1) {
-      label.textContent = _fbSelectedDirs.length + ' folders selected';
-    } else {
-      label.textContent = _fbSelectedDir;
-    }
-    updateFbSelectButtonLabel();
-  };
-  listEl.ondblclick = function(e) {
-    var item = e.target.closest('.folder-browser-item');
-    if (item) browseTo(item.getAttribute('data-path'));
-  };
-}
-
-function updateFbSelectButtonLabel() {
-  var btn = document.getElementById('fbSelectBtn');
-  if (!btn) return;
-  if (_fbMode === 'source' && _fbSelectedDirs.length > 1) {
-    btn.textContent = 'Select ' + _fbSelectedDirs.length + ' folders';
-  } else {
-    btn.textContent = 'Select';
-  }
-}
-
-function applyCount(path, count) {
-  // Hide zero counts to reduce visual noise; show formatted number otherwise.
-  if (!count) return;
-  // Iterate rather than use a CSS selector so paths containing quotes,
-  // backslashes, or other special chars match correctly.
-  var badges = document.getElementsByClassName('folder-browser-count');
-  var label = count.toLocaleString() + (count === 1 ? ' photo' : ' photos');
-  for (var i = 0; i < badges.length; i++) {
-    if (badges[i].getAttribute('data-count-path') === path) {
-      badges[i].textContent = label;
-    }
-  }
-}
-
-function fetchFolderCounts(paths) {
-  if (!paths || !paths.length) return;
-  var fileTypes = getIngestFileTypes();
-  if (!fileTypes.length) return;
-  var cacheKey = fileTypes.slice().sort().join(',');
-  var token = _fbBrowseToken;
-
-  // Serve cached counts immediately, collect uncached paths.
-  var uncached = [];
-  for (var i = 0; i < paths.length; i++) {
-    var p = paths[i];
-    var key = p + '|' + cacheKey;
-    if (Object.prototype.hasOwnProperty.call(_fbCountCache, key)) {
-      applyCount(p, _fbCountCache[key]);
-    } else {
-      uncached.push(p);
-    }
-  }
-  if (!uncached.length) return;
-
-  _fbCountsAbort = new AbortController();
-  fetch('/api/browse/photo-counts', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ paths: uncached, file_types: fileTypes }),
-    signal: _fbCountsAbort.signal,
-  })
-    .then(function(r) { return r.ok ? r.json() : null; })
-    .then(function(data) {
-      if (!data || token !== _fbBrowseToken) return; // stale response
-      var counts = data.counts || {};
-      for (var p in counts) {
-        if (!Object.prototype.hasOwnProperty.call(counts, p)) continue;
-        _fbCountCache[p + '|' + cacheKey] = counts[p];
-        applyCount(p, counts[p]);
-      }
-    })
-    .catch(function(err) { if (err.name !== 'AbortError') { /* silent */ } });
-}
-
-function selectFolder() {
-  if (_fbMode === 'source') {
-    var picks = _fbSelectedDirs.length ? _fbSelectedDirs : (_fbSelectedDir ? [_fbSelectedDir] : []);
-    if (!picks.length) return;
-    var added = false;
-    for (var i = 0; i < picks.length; i++) {
-      if (_sourceFolders.indexOf(picks[i]) === -1) {
-        _sourceFolders.push(picks[i]);
-        added = true;
-      }
-    }
-    if (added) {
-      markFolderPreviewStale();
-      renderSourceFolders();
-    }
-  } else {
-    if (!_fbSelectedDir) return;
-    document.getElementById('cfgDestination').value = _fbSelectedDir;
-    markFolderPreviewStale();
-  }
-  updateStartButton();
-  fetchFolderPreview();
-  closeFolderBrowser();
-}
-
-function showNewFolderInput() {
-  document.getElementById('fbNewFolderRow').style.display = 'flex';
-  document.getElementById('fbNewFolderInput').value = '';
-  document.getElementById('fbNewFolderInput').focus();
-}
-
-function cancelNewFolder() {
-  document.getElementById('fbNewFolderRow').style.display = 'none';
-  document.getElementById('fbNewFolderInput').value = '';
-}
-
-function updateNewFolderButton() {
-  // The synthetic Windows Volumes listing leaves _fbCurrentPath empty —
-  // letting users click New Folder there would POST mkdir to '/<name>'
-  // (the current drive root on Windows) instead of a real selected path.
-  var btn = document.getElementById('fbNewFolderBtn');
-  if (!btn) return;
-  btn.disabled = !_fbCurrentPath;
-  btn.style.opacity = _fbCurrentPath ? '' : '0.5';
-  btn.title = _fbCurrentPath ? '' : 'Open a drive to create folders inside it';
-}
-
-function createNewFolder() {
-  var name = document.getElementById('fbNewFolderInput').value.trim();
-  if (!name) return;
-  if (!_fbCurrentPath) {
-    alert('Open a drive before creating a folder.');
-    return;
-  }
-  var newPath = _fbCurrentPath.replace(/\/+$/, '') + '/' + name;
-  fetch('/api/browse/mkdir', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({path: newPath})
-  }).then(function(r) {
-    if (!r.ok) return r.json().then(function(d) { throw new Error(d.error || 'Failed to create folder'); });
-    return r.json();
-  }).then(function(data) {
-    cancelNewFolder();
-    browseTo(data.path);
-  }).catch(function(err) {
-    alert('Error: ' + err.message);
-  });
-}
-
-var _fbHomePath = '';
 
 </script>
-
-<!-- Folder Browser Modal -->
-<div class="folder-browser-overlay" id="folderBrowserOverlay">
-  <div class="folder-browser-panel">
-    <div class="folder-browser-header">
-      <h3 id="fbTitle">Select Destination Folder</h3>
-      <button class="folder-browser-close" onclick="closeFolderBrowser()">&times;</button>
-    </div>
-    <div class="folder-browser-shortcuts">
-      <button onclick="browseTo(null)">Home</button>
-      <button onclick="browseTo('__pictures__')">Pictures</button>
-      <button onclick="browseTo('__volumes__')">Volumes</button>
-    </div>
-    <div class="folder-browser-breadcrumb" id="fbBreadcrumb"></div>
-    <div id="fbNewFolderRow" class="folder-browser-new-folder" style="display:none;">
-      <input type="text" id="fbNewFolderInput" placeholder="New folder name"
-             onkeydown="if(event.key==='Enter'){createNewFolder();} if(event.key==='Escape'){cancelNewFolder();}">
-      <button class="btn btn-secondary" onclick="createNewFolder()" style="font-size:12px;padding:4px 10px;">Create</button>
-      <button class="btn btn-secondary" onclick="cancelNewFolder()" style="font-size:12px;padding:4px 10px;">Cancel</button>
-    </div>
-    <div class="folder-browser-list" id="fbList"></div>
-    <div class="folder-browser-footer">
-      <button id="fbNewFolderBtn" class="btn btn-secondary" onclick="showNewFolderInput()" style="font-size:12px;flex-shrink:0;">New Folder</button>
-      <div style="display:flex;align-items:center;flex:1;min-width:0;margin-left:12px;">
-        <span class="folder-browser-path" id="fbSelectedPath"></span>
-        <button class="btn btn-secondary" onclick="closeFolderBrowser()" style="font-size:12px;flex-shrink:0;">Cancel</button>
-        <button class="btn btn-primary" id="fbSelectBtn" onclick="selectFolder()" style="font-size:12px;flex-shrink:0;">Select</button>
-      </div>
-    </div>
-  </div>
-</div>
 
 </body>
 </html>

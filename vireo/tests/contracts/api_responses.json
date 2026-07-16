@@ -1,0 +1,104 @@
+[
+  {
+    "name": "internal health",
+    "method": "GET",
+    "path": "/api/health",
+    "status": 200,
+    "body": {"status": "ok"}
+  },
+  {
+    "name": "automation health",
+    "method": "GET",
+    "path": "/api/v1/health",
+    "headers": {"X-Vireo-Token": "$api_token"},
+    "status": 200,
+    "body": {"service": "vireo", "status": "ok"}
+  },
+  {
+    "name": "automation token required",
+    "method": "GET",
+    "path": "/api/v1/health",
+    "status": 401,
+    "error": {
+      "error": "Invalid or missing X-Vireo-Token",
+      "code": "unauthorized"
+    }
+  },
+  {
+    "name": "rating validation",
+    "method": "POST",
+    "path": "/api/photos/1/rating",
+    "json": {"rating": true},
+    "status": 400,
+    "error": {
+      "error": "rating must be an integer 0-5",
+      "code": "invalid_request"
+    }
+  },
+  {
+    "name": "flag validation",
+    "method": "POST",
+    "path": "/api/photos/1/flag",
+    "json": {"flag": "maybe"},
+    "status": 400,
+    "error": {
+      "error": "flag must be 'none', 'flagged', or 'rejected'",
+      "code": "invalid_request"
+    }
+  },
+  {
+    "name": "color label validation",
+    "method": "POST",
+    "path": "/api/photos/1/color_label",
+    "json": {"color": "orange"},
+    "status": 400,
+    "error": {
+      "error": "color must be one of ('red', 'yellow', 'green', 'blue', 'purple')",
+      "code": "invalid_request"
+    }
+  },
+  {
+    "name": "batch rating requires photos",
+    "method": "POST",
+    "path": "/api/batch/rating",
+    "json": {"rating": 3},
+    "status": 400,
+    "error": {
+      "error": "photo_ids required",
+      "code": "invalid_request"
+    }
+  },
+  {
+    "name": "workspace tab id type",
+    "method": "POST",
+    "path": "/api/workspace/tabs/pin",
+    "json": {},
+    "status": 400,
+    "error": {
+      "error": "nav_id must be a string",
+      "code": "invalid_request"
+    }
+  },
+  {
+    "name": "workspace tab id value",
+    "method": "POST",
+    "path": "/api/workspace/tabs/pin",
+    "json": {"nav_id": "retired-page"},
+    "status": 400,
+    "error": {
+      "error": "nav_id is not a known page",
+      "code": "invalid_request"
+    }
+  },
+  {
+    "name": "workspace tab order type",
+    "method": "POST",
+    "path": "/api/workspace/tabs/reorder",
+    "json": {},
+    "status": 400,
+    "error": {
+      "error": "tabs must be a list",
+      "code": "invalid_request"
+    }
+  }
+]

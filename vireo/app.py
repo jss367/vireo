@@ -6,6 +6,10 @@ Usage:
 
 import argparse
 import contextlib
+import copy
+import csv
+import hashlib
+import io
 import json
 import logging
 import logging.handlers
@@ -13,22 +17,27 @@ import math
 import os
 import queue
 import re
+import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import uuid
 import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import places
 from db import (
     KEYWORD_TYPES,
     Database,
     IncompatibleDatabaseError,
+    MissingPhotosCancelled,
     commit_with_retry,
+    text_search_match,
 )
 from flask import (
     Flask,
@@ -43,12 +52,14 @@ from flask import (
     send_from_directory,
 )
 from jobs import SLOT_CAP, JobRunner, LogBroadcaster
+from keyword_normalization import keyword_match_key, normalize_keyword_display
 from preview_cache import (
     evict_if_over_quota as evict_preview_cache_if_over_quota,
 )
 from preview_cache import (
     reconcile_preview_cache,
 )
+from proc import no_window_kwargs
 from render_source import (
     companion_image_can_replace_raw_result as _companion_image_can_replace_raw_result,
 )
@@ -57,6 +68,9 @@ from render_source import (
 )
 from render_source import (
     image_is_smaller_than_expected as _image_is_smaller_than_expected,
+)
+from render_source import (
+    image_size_after_exif_orientation as _image_size_after_exif_orientation,
 )
 from render_source import path_satisfies_recipe_render as _path_satisfies_recipe_render
 from render_source import (
@@ -71,6 +85,32 @@ from render_source import (
 from render_source import (
     scaled_recipe_source_dimensions as _scaled_recipe_source_dimensions,
 )
+from render_source import (
+    working_copy_path_if_satisfies as _working_copy_path_if_satisfies,
+)
+from schema import ensure_schema
+from services.local_folder import (
+    affected_workspace_ids as local_folder_workspace_ids,
+)
+from services.local_folder import (
+    local_root_for_folder,
+    local_root_under_folder,
+    local_roots_under_folder,
+    workspace_ids_for_folder_tree,
+    workspace_local_root_ids,
+)
+from services.local_workspace import (
+    folder_has_local_workspace,
+    has_local_workspace,
+    stage_boundary_lock,
+)
+from web.local_folder import LOCAL_FOLDER_JOB_TYPES, create_local_folder_blueprint
+from web.local_workspace import LOCAL_WORKSPACE_JOB_TYPES, create_local_workspace_blueprint
+from web.pages import pages_blueprint
+from web.photo_labels import create_photo_labels_blueprint
+from web.photo_review import create_photo_review_blueprint
+from web.system import system_blueprint
+from web.workspaces import create_workspace_blueprint
 from werkzeug.exceptions import BadRequest
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -86,8 +126,10 @@ _WIN_ERROR_MODE_LOCK = threading.Lock()
 # The `id` is the nav-id used in `tabs`; `href` is the canonical
 # route. Labels match what the navbar showed before the unification.
 ALL_PAGES = [
+    {"id": "import",          "label": "Import",          "href": "/import",
+     "keywords": "import add photos card copy ingest new"},
     {"id": "pipeline",        "label": "Process",         "href": "/pipeline",
-     "keywords": "import add photos ingest scan process new"},
+     "keywords": "process classify detect group stages"},
     {"id": "jobs",            "label": "Jobs",            "href": "/jobs"},
     {"id": "pipeline_review", "label": "Process Review",  "href": "/pipeline/review"},
     {"id": "pipeline_rapid_review", "label": "Rapid Review", "href": "/pipeline/rapid-review"},
@@ -101,13 +143,12 @@ ALL_PAGES = [
     {"id": "map",             "label": "Map",             "href": "/map"},
     {"id": "variants",        "label": "Variants",        "href": "/variants"},
     {"id": "dashboard",       "label": "Dashboard",       "href": "/dashboard"},
+    {"id": "storage",         "label": "Storage",         "href": "/storage"},
     {"id": "audit",           "label": "Audit",           "href": "/audit"},
     {"id": "move",            "label": "Move",            "href": "/move"},
     {"id": "compare",         "label": "Compare",         "href": "/compare"},
-    {"id": "zoom_test",       "label": "Zoom Test",       "href": "/zoom-test"},
     {"id": "settings",        "label": "Settings",        "href": "/settings"},
     {"id": "workspace",       "label": "Workspace",       "href": "/workspace"},
-    {"id": "lightroom",       "label": "Lightroom",       "href": "/lightroom"},
     {"id": "shortcuts",       "label": "Shortcuts",       "href": "/shortcuts"},
     {"id": "keywords",        "label": "Keywords",        "href": "/keywords"},
     {"id": "duplicates",      "label": "Duplicates",      "href": "/duplicates"},
@@ -186,8 +227,13 @@ def _highlight_area_score(subject_size):
     return min(1.0, math.sqrt(subject_size) * 2.0)
 
 
-def _highlight_score_bucket(photos):
-    """Attach highlight scores and compact reason labels to one species bucket."""
+def _highlight_score_bucket(photos, picked_first=False):
+    """Attach highlight scores and compact reason labels to one species bucket.
+
+    picked_first promotes flagged photos above unflagged ones regardless of
+    score — desired on the Highlights page, but off by default so callers
+    like the Life List keep selecting the highest-scored photo.
+    """
     subject_values = [p.get("subject_tenengrad") for p in photos]
     eye_values = [p.get("eye_tenengrad") for p in photos if p.get("eye_tenengrad") is not None]
     bg_values = [p.get("bg_tenengrad") for p in photos]
@@ -246,12 +292,19 @@ def _highlight_score_bucket(photos):
             score = p.get("quality_score") if p.get("quality_score") is not None else 0.0
 
         rating = p.get("rating") or 0
-        if p.get("flag") == "flagged":
-            score += 0.08
         if rating >= 4:
             score += 0.04 + 0.02 * (rating - 4)
         elif rating == 3:
             score += 0.015
+        # Baseline BEFORE the pick bonus, so the client can recompute
+        # highlight_score on a lightbox pick/unpick via clamp(base + bonus)
+        # instead of subtracting the bonus from the already-clamped value —
+        # which loses precision when the raw score exceeded 1.0 pre-clamp
+        # (e.g. base 0.97 → cached 1.0 → subtract 0.08 → 0.92, but the
+        # correct unpicked value is 0.97).
+        base_score_pre_pick = score
+        if p.get("flag") == "flagged":
+            score += 0.08
 
         reasons = []
         if p.get("flag") == "flagged":
@@ -277,6 +330,9 @@ def _highlight_score_bucket(photos):
             reasons.append("legacy quality")
 
         p["highlight_score"] = round(max(0.0, min(1.0, score)), 4)
+        p["highlight_base_score"] = round(
+            max(0.0, min(1.0, base_score_pre_pick)), 4
+        )
         p["score_parts"] = {
             "focus": round(focus, 3),
             "exposure": round(exposure, 3),
@@ -286,16 +342,41 @@ def _highlight_score_bucket(photos):
         }
         p["reasons"] = reasons[:3]
 
-    photos.sort(
-        key=lambda p: (
-            p.get("highlight_score") or 0,
-            p.get("predicted_confidence") or 0,
-            p.get("quality_score") or 0,
-            p.get("rating") or 0,
-            -p.get("id", 0),
-        ),
-        reverse=True,
-    )
+    if picked_first:
+        # Highlights page ordering: three contiguous regions —
+        #   1. picks (flagged): analyzed first (by score desc), then
+        #      unanalyzed picks in capture order;
+        #   2. analyzed non-picks: by highlight_score desc;
+        #   3. unanalyzed non-picks: capture order (earliest first).
+        # The analyzed-before-unanalyzed tier separates the groups so the
+        # score term only reorders analyzed rows and the timestamp term only
+        # reorders unanalyzed rows — they never compete. Timestamps are ISO
+        # text, so lexicographic order is chronological; missing timestamps
+        # sort to the end of their group. This is an ascending sort (no
+        # reverse), negating the score to rank analyzed rows high-first.
+        def _bucket_sort_key(p):
+            analyzed = p.get("quality_score") is not None
+            ts = p.get("timestamp")
+            return (
+                0 if p.get("flag") == "flagged" else 1,
+                0 if analyzed else 1,
+                -(p.get("highlight_score") or 0) if analyzed else 0.0,
+                (ts is None, ts),
+                p.get("id", 0),
+            )
+
+        photos.sort(key=_bucket_sort_key)
+    else:
+        photos.sort(
+            key=lambda p: (
+                p.get("highlight_score") or 0,
+                p.get("predicted_confidence") or 0,
+                p.get("quality_score") or 0,
+                p.get("rating") or 0,
+                -p.get("id", 0),
+            ),
+            reverse=True,
+        )
 
 
 def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
@@ -313,18 +394,174 @@ def _apply_preferred_photo(photos, preferred_photo_id, marker_key):
     return False
 
 
+def _sort_photos_with_representatives_first(photos, representative_order):
+    """Promote representative photos while preserving ranked order otherwise."""
+    ranked_position = {photo["id"]: idx for idx, photo in enumerate(photos)}
+    photos.sort(key=lambda photo: (
+        0 if photo["id"] in representative_order else 1,
+        representative_order.get(photo["id"], 0),
+        ranked_position.get(photo["id"], 0),
+    ))
+
+
+def _bucket_best_score(photos):
+    """Return the highest highlight_score in a bucket, or None if empty.
+
+    Used to rank buckets on the Highlights page. Reads the max across all
+    photos so a pick-first (or user-preferred) reorder at photos[0] can't
+    demote a species by anchoring the bucket score to a lower-scored photo.
+    """
+    scores = [p.get("highlight_score") for p in photos if p.get("highlight_score") is not None]
+    return max(scores) if scores else None
+
+
+def _bucket_unanalyzed_count(photos):
+    """Length of the trailing "Not yet analyzed" tail of a bucket.
+
+    Counts only the contiguous run of unscored non-pick photos at the END of
+    ``photos``. This is what the divider labels, so callers can trust that a
+    non-zero value marks a real tail below the divider.
+
+    Only the trailing run is counted (not every unscored non-pick in the
+    bucket) so that curated ordering — where
+    :func:`_apply_ordered_highlights` or :func:`_apply_highlight_preferences`
+    can promote an unscored, non-flagged photo to the front as a species
+    highlight or representative — doesn't inflate the count with photos that
+    now live above the divider. Unscored picks are excluded because they
+    stay grouped with the other picks at the front regardless.
+    """
+    if not photos:
+        return 0
+    tail = 0
+    for p in reversed(photos):
+        if p.get("quality_score") is None and p.get("flag") != "flagged":
+            tail += 1
+        else:
+            break
+    return tail
+
+
 def _apply_highlight_preferences(db, buckets):
-    preferences = db.get_photo_preferences("highlights")
+    preferences = db.get_species_representative_lists(eligible_only=True)
     for bucket in buckets:
-        preferred_id = preferences.get(bucket["species"])
-        applied = _apply_preferred_photo(
-            bucket["photos"], preferred_id, "is_highlights_photo"
-        )
-        best = bucket["photos"][0] if bucket["photos"] else {}
+        representative_ids = preferences.get(bucket["species"]) or []
+        representative_set = set(representative_ids)
+        representative_order = {
+            photo_id: idx for idx, photo_id in enumerate(representative_ids)
+        }
+        preferred_id = representative_ids[0] if representative_ids else None
+        applied = False
+        for photo in bucket.get("photos") or []:
+            is_rep = photo.get("id") in representative_set
+            photo["is_species_representative"] = is_rep
+            applied = applied or is_rep
+        # Promote representatives to the front so cross-workspace reps
+        # (visible via species_representatives but without a workspace-scoped
+        # species_highlights rank) become the bucket's primary photo.
+        # _apply_ordered_highlights runs before this and only sorts when a
+        # visible photo has a workspace highlight rank, so without this pass
+        # a rep chosen in another workspace stays buried in score order.
+        # Matches the Life List behavior which also promotes reps over
+        # workspace highlights.
+        if applied:
+            _sort_photos_with_representatives_first(
+                bucket["photos"], representative_order
+            )
+        top = bucket["photos"][0] if bucket["photos"] else {}
         bucket["preferred_photo_id"] = preferred_id
+        # Species-level state stays true even when the representative photo is
+        # outside the current folder or search result.
+        bucket["has_species_representative"] = preferred_id is not None
         bucket["has_preferred_photo"] = applied
+        bucket["best_quality"] = top.get("quality_score")
+        # Rank by the highest-scored photo in the bucket, not photos[0].
+        # A picked (or manually preferred) photo may sit at photos[0] with a
+        # lower highlight_score; using its score for bucket ranking would
+        # demote the whole species below buckets with worse actual best
+        # photos.
+        bucket["best_score"] = _bucket_best_score(bucket["photos"])
+        bucket["best_timestamp"] = top.get("timestamp")
+        # Run last so curated promotion (an unscored rep pushed to the front)
+        # doesn't leave a stale tail count that anchors the divider above
+        # analyzed content.
+        bucket["unanalyzed_count"] = _bucket_unanalyzed_count(bucket.get("photos"))
+
+
+def _apply_ordered_highlights(db, buckets):
+    highlights = db.get_species_highlights(eligible_only=True)
+    for bucket in buckets:
+        ranks = highlights.get(bucket["species"], {})
+        # Species-level state stays true even when every selected highlight is
+        # outside the current folder or search result.
+        bucket["has_highlight_selection"] = bool(ranks)
+        photos = bucket.get("photos") or []
+        matched = False
+        for p in photos:
+            rank = ranks.get(p.get("id"))
+            p["is_highlighted"] = rank is not None
+            p["highlight_rank"] = rank
+            if rank is not None:
+                matched = True
+        # Only re-sort when at least one visible photo actually maps to a
+        # stored highlight rank. `ranks` is workspace-scoped, so a folder
+        # or search view of the same species can be truthy here while none
+        # of its photos are highlights — re-sorting then discards the
+        # picked-first order that _highlight_score_bucket already applied.
+        if matched:
+            bucket["photos"].sort(
+                key=lambda p: (
+                    0 if p.get("is_highlighted") else 1,
+                    p.get("highlight_rank") if p.get("highlight_rank") is not None else 10**9,
+                    -(p.get("highlight_score") or 0),
+                    -(p.get("predicted_confidence") or 0),
+                    -(p.get("quality_score") or 0),
+                    -(p.get("rating") or 0),
+                    p.get("id", 0),
+                )
+            )
+        best = bucket["photos"][0] if bucket.get("photos") else {}
+        bucket["highlight_count"] = sum(
+            1 for p in bucket.get("photos") or [] if p.get("is_highlighted")
+        )
+        # unanalyzed_count is assigned in _apply_highlight_preferences instead:
+        # that runs after this pass and can still reorder photos, so anchoring
+        # the tail count here would be stale under curated ordering.
         bucket["best_quality"] = best.get("quality_score")
         bucket["best_score"] = best.get("highlight_score")
+        bucket["best_timestamp"] = best.get("timestamp")
+
+
+def _photo_highlight_entries(db, photo_id):
+    """Return highlight-eligible species entries for one visible photo.
+
+    Restricts both the candidate scan and the species-highlights lookup to
+    the requested photo so the photo-detail endpoint doesn't rebuild every
+    workspace bucket for each call (browse detail, lightbox, batch actions).
+    """
+    candidates = db.get_highlights_candidates(
+        None, min_quality=0.0, photo_id=photo_id
+    )
+    buckets, _unidentified = _collect_highlight_buckets(
+        candidates, confidence_threshold=0.0
+    )
+    entries = []
+    for bucket in buckets:
+        species = bucket.get("species")
+        if not species:
+            continue
+        ranks = db.get_species_highlights(species).get(species, {})
+        for photo in bucket.get("photos") or []:
+            if photo.get("id") != photo_id:
+                continue
+            rank = ranks.get(photo_id)
+            entries.append({
+                "species": species,
+                "is_highlighted": rank is not None,
+                "highlight_rank": rank,
+                "is_confirmed": bool(photo.get("has_accepted_species")),
+            })
+            break
+    return entries
 
 
 def _highlight_confidence_label(confidence, is_accepted):
@@ -340,6 +577,13 @@ def _highlight_confidence_label(confidence, is_accepted):
 def _normalize_highlight_confirmation_filter(value):
     value = (value or "all").strip().lower()
     if value not in {"all", "confirmed", "unconfirmed"}:
+        return "all"
+    return value
+
+
+def _normalize_highlight_presence_filter(value):
+    value = (value or "all").strip().lower()
+    if value not in {"all", "yes", "no"}:
         return "all"
     return value
 
@@ -380,9 +624,14 @@ def _collect_highlight_buckets(
         photo = {
             "id": r["id"],
             "filename": r["filename"],
+            "timestamp": r.get("timestamp"),
+            "folder_name": r.get("folder_name"),
+            "folder_path": r.get("folder_path"),
+            "keyword_names": r.get("keyword_names") or "",
             "rating": r.get("rating") or 0,
             "flag": r.get("flag") or "none",
             "quality_score": r.get("quality_score"),
+            "is_analyzed": r.get("quality_score") is not None,
             "subject_sharpness": r.get("subject_sharpness"),
             "subject_size": r.get("subject_size"),
             "sharpness": r.get("sharpness"),
@@ -401,6 +650,7 @@ def _collect_highlight_buckets(
             "predicted_species": r.get("predicted_species"),
             "predicted_confidence": predicted_conf,
             "has_accepted_species": accepted is not None,
+            "is_unidentified": species is None,
             "is_confirmable_prediction": (
                 accepted is None
                 and species is not None
@@ -420,7 +670,7 @@ def _collect_highlight_buckets(
     buckets = []
     for species, entry in bucket_map.items():
         photos = entry["photos"]
-        _highlight_score_bucket(photos)
+        _highlight_score_bucket(photos, picked_first=True)
         confidences = [
             p["predicted_confidence"]
             for p in photos
@@ -430,7 +680,7 @@ def _collect_highlight_buckets(
             round(sum(confidences) / len(confidences), 4)
             if confidences else None
         )
-        best = photos[0] if photos else {}
+        top = photos[0] if photos else {}
         buckets.append({
             "species": species,
             "is_accepted": entry["is_accepted"],
@@ -439,12 +689,13 @@ def _collect_highlight_buckets(
             ),
             "avg_confidence": avg_confidence,
             "photo_count": len(photos),
-            "best_quality": best.get("quality_score"),
-            "best_score": best.get("highlight_score"),
+            "best_quality": top.get("quality_score"),
+            "best_score": _bucket_best_score(photos),
+            "best_timestamp": top.get("timestamp"),
             "photos": photos,
         })
 
-    _highlight_score_bucket(unidentified_photos)
+    _highlight_score_bucket(unidentified_photos, picked_first=True)
     buckets.sort(
         key=lambda b: (
             b.get("best_score") or 0,
@@ -454,6 +705,128 @@ def _collect_highlight_buckets(
         reverse=True,
     )
     return buckets, unidentified_photos
+
+
+def _highlight_search_fields(photo):
+    return [
+        photo.get("filename") or "",
+        photo.get("folder_name") or "",
+        photo.get("folder_path") or "",
+        photo.get("keyword_names") or "",
+        photo.get("species") or "",
+        photo.get("predicted_species") or "",
+        "unidentified" if photo.get("is_unidentified") else "",
+    ]
+
+
+def _highlight_photo_matches_query(
+    photo,
+    query,
+    match_case=False,
+    whole_word=False,
+):
+    tokens = str(query or "").split()
+    if not tokens:
+        return True
+    fields = _highlight_search_fields(photo)
+    return all(
+        any(
+            text_search_match(field, token, match_case, whole_word)
+            for field in fields
+        )
+        for token in tokens
+    )
+
+
+def _refresh_highlight_bucket_metadata(bucket):
+    photos = bucket.get("photos") or []
+    confidences = [
+        p.get("predicted_confidence")
+        for p in photos
+        if p.get("predicted_confidence") is not None
+    ]
+    avg_confidence = (
+        round(sum(confidences) / len(confidences), 4)
+        if confidences else None
+    )
+    top = photos[0] if photos else {}
+    # Filtering can drop the unconfirmed photos from a mixed bucket, leaving
+    # only confirmed ones — recompute so the "candidate" badge and the
+    # `confirmed` sort match what the row now actually contains.
+    bucket["is_accepted"] = bool(photos) and all(
+        p.get("has_accepted_species") for p in photos
+    )
+    bucket["avg_confidence"] = avg_confidence
+    bucket["certainty"] = _highlight_confidence_label(
+        avg_confidence, bucket.get("is_accepted")
+    )
+    bucket["photo_count"] = len(photos)
+    bucket["best_quality"] = top.get("quality_score")
+    bucket["best_score"] = _bucket_best_score(photos)
+    bucket["best_timestamp"] = top.get("timestamp")
+    return bucket
+
+
+def _filter_highlight_sections(
+    buckets,
+    unidentified_photos,
+    query,
+    match_case=False,
+    whole_word=False,
+):
+    query = (query or "").strip()
+    if not query:
+        for bucket in buckets:
+            _refresh_highlight_bucket_metadata(bucket)
+        return buckets, unidentified_photos
+
+    filtered_buckets = []
+    for bucket in buckets:
+        photos = [
+            p for p in (bucket.get("photos") or [])
+            if _highlight_photo_matches_query(p, query, match_case, whole_word)
+        ]
+        if photos:
+            updated = {**bucket, "photos": photos}
+            filtered_buckets.append(_refresh_highlight_bucket_metadata(updated))
+
+    unidentified = [
+        p for p in unidentified_photos
+        if _highlight_photo_matches_query(p, query, match_case, whole_word)
+    ]
+    return filtered_buckets, unidentified
+
+
+def _filter_highlight_curation_state(
+    buckets,
+    unidentified_photos,
+    highlight_filter="all",
+    representative_filter="all",
+):
+    highlight_filter = _normalize_highlight_presence_filter(highlight_filter)
+    representative_filter = _normalize_highlight_presence_filter(
+        representative_filter
+    )
+
+    def matches(bucket, filter_value, field):
+        if filter_value == "all":
+            return True
+        return bool(bucket.get(field)) == (filter_value == "yes")
+
+    filtered = [
+        bucket for bucket in buckets
+        if matches(bucket, highlight_filter, "has_highlight_selection")
+        and matches(
+            bucket,
+            representative_filter,
+            "has_species_representative",
+        )
+    ]
+    # These two states only apply to named species. Unidentified photos have
+    # neither a species highlight list nor a species representative assignment.
+    if highlight_filter != "all" or representative_filter != "all":
+        unidentified_photos = []
+    return filtered, unidentified_photos
 
 
 # Maximum number of bound parameters per SQL statement. SQLite's
@@ -887,6 +1260,7 @@ def _trash_via_finder(filepath):
         ],
         capture_output=True,
         text=True,
+        **no_window_kwargs(),
     )
     if result.returncode != 0:
         raise OSError(result.stderr.strip() or f"Finder trash failed ({result.returncode})")
@@ -902,6 +1276,26 @@ def _compute_time_range(photos_by_id, photo_ids):
     if not timestamps:
         return [None, None]
     return [min(timestamps), max(timestamps)]
+
+
+def _rebuild_encounter_species_label(results, photo_ids, fallback=None):
+    """Return the encounter-level species label for exactly photo_ids."""
+    from encounters import encounter_species_label
+
+    id_set = set(photo_ids or [])
+    photos = [p for p in results.get("photos", []) if p.get("id") in id_set]
+    name, confidence = encounter_species_label(photos)
+    if name is None and fallback is not None:
+        return list(fallback)
+    return [name, confidence]
+
+
+def _candidate_species_override(species_label):
+    """Convert a derived species label into an unconfirmed burst candidate."""
+    species = species_label[0] if species_label else None
+    if not species:
+        return None
+    return {"species": species, "confirmed": False}
 
 
 def _find_merge_target(encounters, detached_range, target_species):
@@ -1016,6 +1410,9 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         enc["photo_count"] = len(remaining)
         enc["burst_count"] = len(bursts)
         enc["species_predictions"] = rebuild_species_predictions(results, remaining)
+        enc["species"] = _rebuild_encounter_species_label(
+            results, remaining, fallback=enc.get("species")
+        )
         for b in bursts:
             b["species_predictions"] = rebuild_species_predictions(results, b["photo_ids"])
         enc["time_range"] = _compute_time_range(photos_by_id, remaining)
@@ -1036,6 +1433,9 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
         target["species_predictions"] = rebuild_species_predictions(
             results, target["photo_ids"]
         )
+        target["species"] = _rebuild_encounter_species_label(
+            results, target["photo_ids"], fallback=target.get("species")
+        )
         # Same reason as above — target's trace no longer matches its photo set.
         target.pop("trace", None)
         t_min, t_max = target.get("time_range") or [None, None]
@@ -1047,8 +1447,11 @@ def _auto_detach_burst_for_species(results, enc_idx, burst_idx, new_species):
             max(maxs) if maxs else None,
         ]
     else:
+        detached_species = _rebuild_encounter_species_label(
+            results, detached_ids, fallback=enc.get("species")
+        )
         encounters.append({
-            "species": enc.get("species"),
+            "species": detached_species,
             "confirmed_species": new_species,
             "species_predictions": detached["species_predictions"],
             "species_confirmed": True,
@@ -1335,6 +1738,18 @@ def _migrate_edit_math_render_caches(app):
                 )
                 purge_failed = True
                 continue
+            for source in ("raw", "jpeg"):
+                variant = os.path.join(thumb_dir, f"{pid}_{source}.jpg")
+                try:
+                    if os.path.exists(variant):
+                        os.remove(variant)
+                        invalidated_thumbs += 1
+                except OSError:
+                    log.warning(
+                        "Failed to remove paired thumbnail %s during "
+                        "edit-math migration", variant, exc_info=True,
+                    )
+                    purge_failed = True
             db.conn.execute(
                 "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
             )
@@ -1367,6 +1782,126 @@ def _migrate_edit_math_render_caches(app):
             log.info(
                 "edit_math_version %s -> %s: no edited photos, nothing to "
                 "invalidate", stored_version, EDIT_MATH_VERSION,
+            )
+    finally:
+        try:
+            db.conn.close()
+        except Exception:
+            pass
+
+
+def _migrate_unedited_raw_preview_sources(app):
+    """Drop previews that may have used an edit-quality RAW working copy.
+
+    RAW working copies deliberately preserve highlight headroom and therefore
+    look flatter/darker than the camera-rendered rendition used for browsing.
+    Older preview routing treated that working copy as the canonical source
+    even when a RAW had no edit recipe.  Those bytes are keyed only by
+    ``(photo_id, size)``, so fixing source selection alone would keep serving
+    already-cached dark tiers indefinitely.
+
+    Purge only recipe-free RAWs that currently have a working copy, and gate
+    the migration in ``db_meta`` so large libraries pay the directory scan
+    once.  If any cache file cannot be inspected or removed, leave the marker
+    unset so the next launch retries instead of permanently adopting stale
+    pixels.
+    """
+    from image_loader import RAW_EXTENSIONS
+
+    marker = "unedited_raw_camera_preview_source_v1"
+    vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+    preview_dir = os.path.join(vireo_dir, "previews")
+    db = Database(app.config["DB_PATH"])
+    try:
+        if db.get_meta(marker) == "1":
+            return
+
+        rows = db.conn.execute(
+            """SELECT p.id, p.filename
+               FROM photos p
+               LEFT JOIN photo_edit_recipes r ON r.photo_id = p.id
+               WHERE p.working_copy_path IS NOT NULL
+                 AND r.photo_id IS NULL"""
+        ).fetchall()
+        affected = {
+            int(row["id"])
+            for row in rows
+            if os.path.splitext(row["filename"] or "")[1].lower()
+            in RAW_EXTENSIONS
+        }
+
+        purge_failed = False
+        names_by_pid = {}
+        try:
+            preview_names = os.listdir(preview_dir)
+        except FileNotFoundError:
+            preview_names = ()
+        except OSError:
+            log.warning(
+                "Failed to list preview cache dir %s while migrating "
+                "unedited RAW preview sources; retrying next launch",
+                preview_dir,
+                exc_info=True,
+            )
+            preview_names = ()
+            purge_failed = True
+
+        for name in preview_names:
+            if not name.endswith(".jpg"):
+                continue
+            underscore = name.find("_")
+            if underscore <= 0:
+                continue
+            try:
+                photo_id = int(name[:underscore])
+            except ValueError:
+                continue
+            if photo_id in affected:
+                names_by_pid.setdefault(photo_id, set()).add(name)
+
+        invalidated = 0
+        for photo_id in affected:
+            tracked = db.conn.execute(
+                "SELECT size FROM preview_cache WHERE photo_id=?",
+                (photo_id,),
+            ).fetchall()
+            names = names_by_pid.get(photo_id, set())
+            names.update(
+                f"{photo_id}_{row['size']}.jpg" for row in tracked
+            )
+            photo_failed = False
+            for name in names:
+                path = os.path.join(preview_dir, name)
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    log.warning(
+                        "Failed to remove stale unedited RAW preview %s",
+                        path,
+                        exc_info=True,
+                    )
+                    photo_failed = True
+                    purge_failed = True
+            if photo_failed:
+                continue
+            cursor = db.conn.execute(
+                "DELETE FROM preview_cache WHERE photo_id=?", (photo_id,)
+            )
+            invalidated += max(cursor.rowcount, 0)
+
+        if purge_failed:
+            db.conn.commit()
+            return
+
+        db.set_meta(marker, "1", _commit=False)
+        db.conn.commit()
+        if affected:
+            log.info(
+                "Invalidated %d preview-cache entries across %d unedited "
+                "RAW photos so camera-rendered previews can regenerate",
+                invalidated,
+                len(affected),
             )
     finally:
         try:
@@ -1433,6 +1968,135 @@ def _scan_metadata_warning():
     return scan_metadata_warning()
 
 
+_EXPLORER_RANKS = ["order", "family", "genus", "species"]
+_EXPLORER_CHILD_RANK = {"class": "order", "order": "family",
+                        "family": "genus", "genus": "species"}
+
+
+def _build_explorer_payload(db, root_id=None):
+    """Completeness tree (down to genus) for one class. Species leaves load
+    separately via _build_explorer_species. Honest about the two failure
+    states: taxonomy-not-downloaded and unmatched species."""
+    root = (db.get_explorer_root() if root_id is None
+            else db.get_taxon_by_id(root_id))
+    if root is None:
+        # Taxonomy absent (default lookup found no Aves class) -> not ready.
+        return {"taxonomy_ready": False, "valid_root": False, "root": None,
+                "summary": {}, "nodes": [],
+                "unmatched_species": {"count": 0, "names": []}, "classes": []}
+    if root["rank"] != "class":
+        # Explorer roots must be class-rank; an order/family/etc. root produces a
+        # semantically confusing summary (e.g. an order counting itself). The
+        # taxonomy exists, but this root is not valid.
+        return {"taxonomy_ready": True, "valid_root": False, "root": None,
+                "summary": {}, "nodes": [],
+                "unmatched_species": {"count": 0, "names": []}, "classes": []}
+
+    rows = db.get_taxon_subtree(root["id"])
+    found = db.get_life_list_taxon_ids()
+
+    # Build node index + children lists.
+    nodes = {r["id"]: {**r, "children": [], "found_species": 0,
+                       "total_species": 0} for r in rows}
+    for n in nodes.values():
+        pid = n["parent_id"]
+        if pid in nodes and pid != n["id"]:
+            nodes[pid]["children"].append(n)
+
+    # Post-order rollup of species totals/found.
+    def rollup(node):
+        if node["rank"] == "species":
+            node["total_species"] = 1
+            node["found_species"] = 1 if node["id"] in found else 0
+        else:
+            for c in node["children"]:
+                rollup(c)
+                node["total_species"] += c["total_species"]
+                node["found_species"] += c["found_species"]
+    rollup(nodes[root["id"]])
+
+    # Per-rank summary across the whole class.
+    summary = {r: {"found": 0, "total": 0} for r in _EXPLORER_RANKS}
+    for n in nodes.values():
+        if n["rank"] in summary:
+            summary[n["rank"]]["total"] += 1
+            if n["found_species"] > 0:
+                summary[n["rank"]]["found"] += 1
+
+    def to_out(node):
+        child_rank = _EXPLORER_CHILD_RANK.get(node["rank"])
+        kids = list(node["children"])
+        found_children = sum(1 for c in kids if c["found_species"] > 0)
+        out = {
+            "id": node["id"], "name": node["name"],
+            "common_name": node["common_name"], "rank": node["rank"],
+            "found_species": node["found_species"],
+            "total_species": node["total_species"],
+            "child_rank": child_rank,
+            "found_children": found_children,
+            "total_children": len(kids),
+        }
+        # Materialize tree down to genus; species leaves load on demand.
+        if node["rank"] != "genus":
+            out["children"] = [to_out(c) for c in sorted(
+                kids, key=lambda c: (c["found_species"] == 0,
+                                     (c["common_name"] or c["name"]).lower()))]
+        else:
+            out["children"] = []  # species fetched via leaf endpoint
+        return out
+
+    top = [to_out(c) for c in sorted(
+        nodes[root["id"]]["children"],
+        key=lambda c: (c["found_species"] == 0,
+                       (c["common_name"] or c["name"]).lower()))]
+
+    unmatched = db.get_life_list_unmatched_species()
+    classes = db.get_classes_for_taxa(found)
+    # Always include the default Aves class in the selector, regardless of the
+    # currently selected root. `get_classes_for_taxa(found)` only returns classes
+    # the user has actually tagged in, so a user who tags only non-bird species
+    # and then picks that class would otherwise lose Birds from the selector with
+    # no in-page way back to the default view.
+    default_root = root if root_id is None else db.get_explorer_root()
+    if default_root is not None and not any(
+        c["id"] == default_root["id"] for c in classes
+    ):
+        classes.insert(0, {"id": default_root["id"],
+                           "name": default_root["name"],
+                           "common_name": default_root.get("common_name")})
+    return {
+        "taxonomy_ready": True,
+        "valid_root": True,
+        "root": {"id": root["id"], "name": root["name"],
+                 "common_name": root.get("common_name"), "rank": root["rank"]},
+        "summary": summary,
+        "nodes": top,
+        "unmatched_species": {"count": len(unmatched), "names": unmatched[:200]},
+        "classes": classes,
+    }
+
+
+def _build_explorer_species(db, genus_id):
+    """Found+missing species directly under a genus, found ones with a
+    representative photo. Found sorted first, then missing; each alphabetical."""
+    rows = [r for r in db.get_taxon_subtree(genus_id, max_depth=1)
+            if r["rank"] == "species"]
+    found = db.get_life_list_taxon_ids()
+    found_ids = [r["id"] for r in rows if r["id"] in found]
+    photos = db.get_life_list_best_photo_by_taxon(found_ids)
+    species = []
+    for r in rows:
+        is_found = r["id"] in found
+        species.append({
+            "id": r["id"], "name": r["name"], "common_name": r["common_name"],
+            "found": is_found,
+            "photo": photos.get(r["id"]) if is_found else None,
+        })
+    species.sort(key=lambda s: (not s["found"],
+                                (s["common_name"] or s["name"]).lower()))
+    return {"genus_id": genus_id, "species": species}
+
+
 def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -1452,15 +2116,111 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         "~/.vireo/thumbnails"
     )
     app.config["API_TOKEN"] = api_token
+    app.config["TRUSTED_HOSTS"] = ["localhost", "127.0.0.1", "::1"]
+    app.config["BROWSER_SESSION_COOKIE"] = "vireo_session"
+    app.config["BROWSER_SESSION_TOKEN"] = secrets.token_urlsafe(32)
+    app.config["BROWSER_AUTH_ENABLED"] = (
+        os.environ.get("VIREO_DISABLE_BROWSER_AUTH") != "1"
+    )
+
+    # Schema creation and migrations are startup work, never request work.
+    # `:memory:` is the development exception because each SQLite connection
+    # owns a distinct database and therefore must initialize itself.
+    ensure_schema(db_path)
 
     _migrate_legacy_preview_cache(app)
     _migrate_edit_math_render_caches(app)
+    _migrate_unedited_raw_preview_sources(app)
     _enforce_preview_cache_quota_at_startup(app)
 
     # Request timing middleware — logs slow requests and user actions
     @app.before_request
     def _start_timer():
         request._start_time = time.time()
+        supplied_request_id = request.headers.get("X-Request-ID", "")
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", supplied_request_id):
+            g.request_id = supplied_request_id
+        else:
+            g.request_id = uuid.uuid4().hex
+
+    @app.before_request
+    def _protect_browser_surface():
+        """Keep hostile web pages away from Vireo's localhost interface.
+
+        `/api/v1` remains token-authenticated for automation.  The internal
+        browser API and photo responses use an HttpOnly, SameSite-strict
+        session established by a Vireo HTML page.  Unsafe browser requests
+        additionally carry a header that cross-origin forms cannot emit.
+        """
+        if not app.config["BROWSER_AUTH_ENABLED"]:
+            return None
+
+        path = request.path
+        if path.startswith("/api/v1/") or path in {
+            "/api/health",
+            "/api/shutdown",
+        }:
+            return None
+
+        protected = (
+            path.startswith("/api/")
+            or path.startswith("/photos/")
+            or path.startswith("/thumbnails/")
+        )
+        if not protected:
+            return None
+
+        # Native desktop clients cannot use the HttpOnly browser cookie.
+        # They authenticate with the same per-runtime secret as /api/v1.
+        expected_api_token = app.config.get("API_TOKEN")
+        supplied_api_token = request.headers.get("X-Vireo-Token", "")
+        if (
+            expected_api_token
+            and supplied_api_token
+            and secrets.compare_digest(supplied_api_token, expected_api_token)
+        ):
+            return None
+
+        fetch_site = request.headers.get("Sec-Fetch-Site", "").lower()
+        if fetch_site and fetch_site not in {"same-origin", "none"}:
+            return json_error(
+                "Non-origin requests are not allowed",
+                403,
+                code="cross_site_request",
+            )
+
+        origin = request.headers.get("Origin")
+        if origin:
+            parsed = urlsplit(origin)
+            expected = urlsplit(request.host_url)
+            if (parsed.scheme, parsed.netloc) != (expected.scheme, expected.netloc):
+                return json_error(
+                    "Cross-origin requests are not allowed",
+                    403,
+                    code="cross_origin_request",
+                )
+
+        cookie_name = app.config["BROWSER_SESSION_COOKIE"]
+        expected_token = app.config["BROWSER_SESSION_TOKEN"]
+        if not secrets.compare_digest(
+            request.cookies.get(cookie_name, ""), expected_token,
+        ):
+            return json_error(
+                "Browser session required",
+                401,
+                code="browser_session_required",
+            )
+
+        if (
+            request.method not in {"GET", "HEAD", "OPTIONS"}
+            and request.headers.get("X-Vireo-Client") != "browser"
+        ):
+            return json_error(
+                "Missing browser request header",
+                403,
+                code="browser_header_required",
+            )
+        return None
 
     @app.after_request
     def _log_requests(response):
@@ -1492,29 +2252,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 elif "/scan" in path:
                     detail = f" root={body.get('root', '')}"
                 log.info(
-                    "Action: %s %s → %s (%.1fs)%s",
+                    "Action: %s %s → %s (%.1fs)%s request_id=%s",
                     request.method,
                     path,
                     response.status_code,
                     elapsed,
                     detail,
+                    getattr(g, "request_id", "-"),
                 )
             elif elapsed > 0.5:
                 log.warning(
-                    "Slow request: %s %s took %.1fs",
+                    "Slow request: %s %s took %.1fs request_id=%s",
                     request.method,
                     request.path,
                     elapsed,
+                    getattr(g, "request_id", "-"),
                 )
             if request.path.startswith("/api/"):
                 _quiet = request.method == "GET" and request.path == "/api/jobs"
                 (log.debug if _quiet else log.info)(
-                    "API: %s %s → %s (%.3fs)",
+                    "API: %s %s → %s (%.3fs) request_id=%s",
                     request.method,
                     request.path,
                     response.status_code,
                     elapsed,
+                    getattr(g, "request_id", "-"),
                 )
+        request_id = getattr(g, "request_id", None)
+        if request_id:
+            response.headers["X-Request-ID"] = request_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Content-Security-Policy-Report-Only"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com; "
+            "style-src 'self' 'unsafe-inline' https://unpkg.com; "
+            "img-src 'self' data: blob: https:; "
+            "connect-src 'self' https:; frame-ancestors 'none'; "
+            "base-uri 'self'; form-action 'self'"
+        )
+        if (
+            app.config["BROWSER_AUTH_ENABLED"]
+            and response.mimetype == "text/html"
+            and 200 <= response.status_code < 400
+        ):
+            response.set_cookie(
+                app.config["BROWSER_SESSION_COOKIE"],
+                app.config["BROWSER_SESSION_TOKEN"],
+                httponly=True,
+                samesite="Strict",
+                secure=request.is_secure,
+                path="/",
+            )
         return response
 
     # Catch uncaught exceptions so they don't disappear silently
@@ -1524,13 +2314,83 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if isinstance(e, HTTPException):
             return e
         log.exception("Unhandled error: %s %s", request.method, request.path)
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({
+            "error": "Internal server error",
+            "code": "internal_error",
+            "request_id": getattr(g, "request_id", None),
+        }), 500
 
     _MAX_PER_PAGE = 500
 
-    def json_error(msg, status=400):
+    def json_error(msg, status=400, *, code=None):
         """Return a JSON error response. Standard shape: {"error": "msg"}."""
-        return jsonify({"error": msg}), status
+        if code is None:
+            code = {
+                400: "invalid_request",
+                401: "unauthorized",
+                403: "forbidden",
+                404: "not_found",
+                409: "conflict",
+            }.get(status, "request_failed")
+        payload = {
+            "error": msg,
+            "code": code,
+            "request_id": getattr(g, "request_id", None),
+        }
+        return jsonify(payload), status
+
+    def _resolve_remote_archive_target(remote_target_id, remote_subpath):
+        """Shared remote-archive-target resolution for the import-photos
+        and pipeline routes.
+
+        Returns ``(remote_archive_config, rsync_bin, None)`` on success,
+        or ``(None, None, error_response)`` when the request can't be
+        served (unknown target, invalid subpath, GNU rsync unavailable).
+        Callers still own their own mutual-exclusivity /
+        local_processing checks — this helper handles only the shared
+        target-lookup + resolve_remote_archive + rsync-availability
+        block that was duplicated across the two endpoints. See PR
+        #1113 review.
+        """
+        import config as cfg
+        import move as move_mod
+        from pipeline_job import resolve_remote_archive
+
+        target = cfg.get_remote_target(remote_target_id)
+        if not target:
+            return None, None, json_error("Remote target not found", status=404)
+        try:
+            remote_archive_config = resolve_remote_archive(
+                target, remote_subpath,
+            )
+        except ValueError as exc:
+            return None, None, json_error(str(exc))
+        effective_cfg = _get_db().get_effective_config(cfg.load())
+        rsync_bin = move_mod.resolve_rsync_bin(
+            effective_cfg.get("rsync_bin", "") or "")
+        # An explicit rsync_bin path in Settings → Paths bypasses the
+        # macOS auto-select guard in resolve_rsync_bin (it just checks
+        # executability), so Apple's /usr/bin/rsync can still land here
+        # even though it can't drive rsync-over-SSH. Fail fast before
+        # enqueue instead of starting a job that dies mid-transfer, the
+        # same way the remote-target list/test routes do.
+        if rsync_bin and not move_mod.is_gnu_rsync(rsync_bin):
+            rsync_bin = None
+        if not rsync_bin:
+            return None, None, json_error(
+                "No usable GNU rsync was found for remote archiving. Install "
+                "GNU rsync for your platform or set its executable under "
+                "Settings → Paths."
+            )
+        ssh_bin = move_mod.resolve_ssh_bin(effective_cfg.get("ssh_bin", "") or "")
+        if not ssh_bin:
+            return None, None, json_error(
+                "OpenSSH Client was not found. On Windows, install the OpenSSH "
+                "Client optional feature or set ssh.exe under Settings → Paths."
+            )
+        remote_archive_config["target"] = dict(remote_archive_config["target"])
+        remote_archive_config["target"]["ssh_bin"] = ssh_bin
+        return remote_archive_config, rsync_bin, None
 
     def _coerce_collection_id(raw):
         """Parse an optional collection_id from a request body.
@@ -1556,8 +2416,60 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _get_db():
         """Get a Database instance. One connection per request via Flask g."""
         if "db" not in g:
-            g.db = Database(db_path)
+            g.db = Database(
+                db_path,
+                initialize_schema=(db_path == ":memory:"),
+            )
         return g.db
+
+    def _requested_pair_source(photo, folder_path):
+        """Resolve an explicit RAW/JPEG display choice for a paired photo.
+
+        Paired files remain one catalog record, but browser image requests can
+        select which physical source supplies the pixels with
+        ``?source=jpeg`` or ``?source=raw``. Invalid and non-paired choices
+        fall back to the established canonical rendering path so old clients
+        and ordinary photos are unchanged. Live files are preferred, with the
+        offline-original cache as the fallback; a known pair missing both
+        returns the source name with no path so routes can fail explicitly
+        instead of showing RAW pixels under a JPEG label.
+        """
+        requested = (request.args.get("source") or "").strip().lower()
+        if requested not in {"jpeg", "raw"}:
+            return None, None
+
+        from image_loader import RAW_EXTENSIONS
+
+        primary_ext = os.path.splitext(photo["filename"])[1].lower()
+        if primary_ext not in RAW_EXTENSIONS or not photo["companion_path"]:
+            return None, None
+
+        def _offline_path(column):
+            try:
+                row = _get_db().offline_original_get(photo["id"])
+            except Exception:
+                return None
+            if not row or not row[column]:
+                return None
+            cached = row[column]
+            if not os.path.isabs(cached):
+                vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+                cached = os.path.join(vireo_dir, cached)
+            return cached if os.path.isfile(cached) else None
+
+        if requested == "raw":
+            primary = os.path.join(folder_path, photo["filename"])
+            if os.path.isfile(primary):
+                return "raw", primary
+            return "raw", _offline_path("original_path")
+
+        companion = os.path.join(folder_path, photo["companion_path"])
+        companion_ext = os.path.splitext(companion)[1].lower()
+        if companion_ext not in {".jpg", ".jpeg"}:
+            return "jpeg", None
+        if os.path.isfile(companion):
+            return "jpeg", companion
+        return "jpeg", _offline_path("companion_path")
 
     _invalid_preview_cache_paths = set()
 
@@ -1601,6 +2513,56 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ).fetchone()
         return row is not None
 
+    def _full_resolution_render_signature(photo, recipe, file_state=None):
+        """Describe every catalogued input to a cached inspection render.
+
+        The source size/mtime pair is refreshed by scans, the canonical recipe
+        JSON includes content-addressed local-mask references, and the edit-math
+        version invalidates bytes produced by older rendering code. Hashing the
+        signature into the JPEG filename lets /original safely reuse prepared
+        renders without a database table or cross-recipe cache race.
+        """
+        from image_edits import EDIT_MATH_VERSION, recipe_to_json
+
+        return {
+            "photo_id": int(photo["id"]),
+            "source_size": photo["file_size"],
+            "source_mtime": photo["file_mtime"],
+            "filename": photo["filename"],
+            "companion_path": photo["companion_path"],
+            "file_state": file_state,
+            "recipe": recipe_to_json(recipe),
+            "edit_math_version": EDIT_MATH_VERSION,
+        }
+
+    def _full_resolution_render_path(
+        vireo_dir, photo, recipe, file_state=None,
+    ):
+        signature = json.dumps(
+            _full_resolution_render_signature(
+                photo, recipe, file_state,
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        cache_key = hashlib.sha256(signature).hexdigest()[:16]
+        return os.path.join(
+            vireo_dir, "originals", f"{photo['id']}_{cache_key}.jpg",
+        )
+
+    def _prepared_full_resolution_render(
+        vireo_dir, photo, recipe, file_state=None,
+    ):
+        cache_path = _full_resolution_render_path(
+            vireo_dir, photo, recipe, file_state,
+        )
+        try:
+            if not os.path.isfile(cache_path) or os.path.getsize(cache_path) <= 0:
+                return None
+        except OSError:
+            return None
+        return cache_path
+
     def _invalidate_photo_render_cache(db, photo_ids):
         """Drop cached rendered derivatives after an edit recipe changes."""
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
@@ -1620,6 +2582,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "Failed to remove stale thumbnail cache %s", thumb_cache,
                     exc_info=True,
                 )
+            for source in ("raw", "jpeg"):
+                variant = os.path.join(thumb_dir, f"{pid}_{source}.jpg")
+                try:
+                    if os.path.exists(variant):
+                        os.remove(variant)
+                except OSError:
+                    log.warning(
+                        "Failed to remove stale paired-source thumbnail %s",
+                        variant,
+                        exc_info=True,
+                    )
             if clear_thumb_path:
                 db.conn.execute(
                     "UPDATE photos SET thumb_path = NULL WHERE id = ?", (pid,),
@@ -1682,12 +2655,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "DELETE FROM preview_cache WHERE photo_id = ? AND size = ?",
                     removed_preview_rows,
                 )
-            original_cache = os.path.join(originals_dir, f"{pid}.jpg")
-            try:
-                if os.path.exists(original_cache):
-                    os.remove(original_cache)
-            except OSError:
-                log.warning("Failed to remove stale original cache %s", original_cache)
+            original_paths = [
+                os.path.join(originals_dir, f"{pid}.jpg"),
+                *Path(originals_dir).glob(f"{pid}_*.jpg"),
+            ]
+            for original_path in original_paths:
+                try:
+                    if os.path.exists(original_path):
+                        os.remove(original_path)
+                except OSError:
+                    log.warning(
+                        "Failed to remove stale original cache %s",
+                        original_path,
+                    )
             external_cache = os.path.join(external_edits_dir, f"{pid}.jpg")
             external_meta = os.path.join(external_edits_dir, f"{pid}.json")
             for path in (external_cache, external_meta):
@@ -1853,11 +2833,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if db is not None:
             db.conn.close()
 
-    def _cleanup_cached_files_for_deleted_photos(files):
-        from preview_cache import cleanup_cached_files_for_deleted_photos
-        cleanup_cached_files_for_deleted_photos(
-            app.config["THUMB_CACHE_DIR"], files,
-        )
+    def _reraise_fatal_cleanup_error(exc):
+        if isinstance(exc, (KeyboardInterrupt, GeneratorExit)):
+            raise exc
+
+    def _cleanup_cached_files_for_deleted_photos(files, progress_callback=None):
+        try:
+            from preview_cache import cleanup_cached_files_for_deleted_photos
+            cleanup_cached_files_for_deleted_photos(
+                app.config["THUMB_CACHE_DIR"], files, progress_callback=progress_callback,
+            )
+        except BaseException as exc:
+            _reraise_fatal_cleanup_error(exc)
+            log.exception("Failed to clean cached files after delete")
 
     @app.before_request
     def _enforce_api_v1_token():
@@ -1871,22 +2859,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("Invalid or missing X-Vireo-Token", 401)
         return None
 
-    @app.route("/api/health")
-    def api_health():
-        return jsonify({"status": "ok"})
-
-    @app.route("/api/v1/health")
-    def api_v1_health():
-        # The "service" field is a Vireo-specific marker the single-instance
-        # guard's probe checks for. An unrelated local service that happens
-        # to return 200 on /api/v1/health (catch-all) would not carry it,
-        # so Vireo can distinguish a live peer from a port-reusing stranger.
-        from runtime import SERVICE_MARKER
-        return jsonify({"service": SERVICE_MARKER, "status": "ok"})
-
-    @app.route("/api/v1/version")
-    def api_v1_version():
-        return api_version()  # reuse existing implementation
+    app.register_blueprint(system_blueprint)
 
     @app.route("/api/v1/shutdown", methods=["POST"])
     def api_v1_shutdown():
@@ -2024,7 +2997,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # Initialize job runner, log broadcaster, and default collections
     _t0 = time.time()
-    init_db = Database(db_path)
+    init_db = Database(
+        db_path,
+        initialize_schema=(db_path == ":memory:"),
+    )
     log.info("Database init took %.2fs (workspace: %s)", time.time() - _t0,
              init_db.get_workspace(init_db._active_workspace_id)["name"])
     # Migrate the legacy 'Needs Classification' default collection BEFORE
@@ -2034,11 +3010,63 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     init_db.migrate_default_subject_collection()
     init_db.migrate_default_needs_identification_collection()
     init_db.migrate_default_location_collections()
+    # One-shot keyword-name normalization backfill. Database.__init__ only
+    # runs it when initialize_schema=True, and every file-backed connection
+    # this app opens — including this startup init_db and every per-request
+    # connection at `_get_db` — passes initialize_schema=False. Without an
+    # explicit run here, an upgraded DB can serve requests with `‘apapane`-
+    # style variant rows still present until some background job happens
+    # to construct a full `Database()` (initialize_schema=True); in that
+    # window an add/rename can miss the legacy row and create duplicate
+    # tags or stale XMP. The method is idempotent (db_meta-gated) so
+    # subsequent boots are a cheap SELECT.
+    init_db.normalize_keyword_data()
     # One-time rewrite of the previous miss-threshold defaults (0.25 / 0.15)
     # to the new defaults (0.20 / 0.12) in both ~/.vireo/config.json and
     # workspace overrides. Gated by a marker so it runs once; re-saved
     # legacy values are preserved on subsequent boots.
     cfg.migrate_legacy_miss_thresholds(init_db)
+    # One-time rewrite of the previous eye-focus detection default from on to
+    # off in both global config and workspace overrides.
+    cfg.migrate_eye_detect_default_off(init_db)
+    # One-time resolution of the browse.toggle_ui="h" default clashing with
+    # any pre-existing browse binding on ``h``. Writes an explicit "" so the
+    # user's existing action keeps working; they can re-bind toggle_ui from
+    # the shortcuts editor.
+    cfg.migrate_toggle_ui_h_conflict()
+    # Existing users commonly have the previous Browse card defaults persisted
+    # verbatim. Add the new coordinate-source field only for that exact legacy
+    # list; customized card layouts remain unchanged.
+    cfg.migrate_browse_location_status_field()
+    # One-time rewrite of the global pipeline.default_strategy (legacy
+    # hardcoded strategy name) to pipeline.default_process_id (saved_processes
+    # id). The workspace-side rewrite happens inside Database(); this covers
+    # the global config file so workspaces that inherit the global default
+    # don't silently fall back to import-only after upgrade.
+    #
+    # init_db uses initialize_schema=False for boot perf, so on the first
+    # boot after upgrade the saved_processes table isn't guaranteed to
+    # exist yet on this connection — the migration would silently defer
+    # and any import in this session that would inherit the legacy global
+    # default falls back to import-only until the *next* boot. Open a
+    # short-lived schema-initializing handle so the migration completes on
+    # the very first boot instead. Only pay the schema-init cost if the
+    # migration hasn't been stamped yet; subsequent boots short-circuit
+    # inside the function and pass ``init_db`` (whose schema state is
+    # irrelevant because the marker check runs first).
+    if (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID
+        not in cfg._migrations_applied(cfg._read_raw())
+    ):
+        _default_strategy_migration_db = Database(db_path)
+        try:
+            cfg.migrate_default_strategy_to_process_id(
+                _default_strategy_migration_db,
+            )
+        finally:
+            _default_strategy_migration_db.close()
+    else:
+        cfg.migrate_default_strategy_to_process_id(init_db)
     init_db.create_default_collections_for_all_workspaces()
 
     # Wildlife backfill timing:
@@ -2095,12 +3123,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                  time.time() - _t1)
 
     def _mark_species():
+        bg_db = None
         try:
             bg_db = Database(db_path)
         except Exception:
             log.debug("Could not open background db for species marking", exc_info=True)
             return
-        _mark_species_and_maybe_backfill(bg_db, "background")
+        try:
+            _mark_species_and_maybe_backfill(bg_db, "background")
+        finally:
+            bg_db.close()
 
     threading.Thread(target=_mark_species, daemon=True).start()
 
@@ -2109,13 +3141,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import time as _time
         _time.sleep(30)  # Initial delay
         while True:
+            health_db = None
             try:
                 health_db = Database(db_path)
                 changed = health_db.check_folder_health()
                 if changed:
                     log.info("Folder health check: %d folder(s) changed status", changed)
+                    # A background ok↔missing flip would otherwise leave a
+                    # ready /api/photos/missing cache serving the pre-flip
+                    # photo list: the modal/banner could offer to delete
+                    # rows whose folder just went offline, or hide ghosts
+                    # from a folder that just came back, until a later
+                    # rescan replaced the entry.
+                    _invalidate_missing_originals_cache()
             except Exception:
                 log.debug("Folder health check failed", exc_info=True)
+            finally:
+                if health_db is not None:
+                    health_db.close()
             _time.sleep(600)  # 10 minutes
 
     # Suppressed in tests via ``VIREO_DISABLE_STARTUP_BACKFILL_TIMERS``: the
@@ -2138,14 +3181,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app._log_broadcaster = LogBroadcaster(buffer_size=500)
     app._log_broadcaster.install()
 
-    # Per-workspace monotonic timestamp recording when the current snapshot
-    # POST forced a fresh recompute. Subsequent polls on the same request
-    # compare the cache entry's set_at to this value: if the entry was
-    # written after we invalidated, it's the fresh walk's result and can be
-    # reused; if it predates our invalidation, it's a stale navbar probe and
-    # must be re-walked. Cleared when a snapshot is successfully returned.
-    app._new_images_snapshot_kickoff_at = {}
-    app._new_images_snapshot_kickoff_lock = threading.Lock()
+    def _cleanup_app_resources():
+        with contextlib.suppress(Exception):
+            app._log_broadcaster.uninstall()
+        with contextlib.suppress(Exception):
+            init_db.close()
+
+    app._cleanup_app_resources = _cleanup_app_resources
+
+    # Live progress of the most recent new-images walk, keyed by
+    # (db_path, workspace_id). Written by the walk's progress callback and
+    # read by the GET/POST endpoints so a ``pending`` response can say
+    # "38,000 files checked, 2,100 new so far" instead of a bare spinner —
+    # the transparency the banner-click path needs on multi-minute walks
+    # over large network volumes. Values are per-spawn dicts; a new walk
+    # replaces the key wholesale, so readers never see torn state.
+    app._new_images_walk_progress = {}
+    app._missing_originals_lock = threading.Lock()
+    app._missing_originals_cache = {}
+    app._missing_originals_inflight = {}
+    app._missing_originals_errors = {}
+    # Monotonic per-key counter bumped whenever the cache is invalidated
+    # while a scan is in flight. Each scan snapshots this at start; if the
+    # counter has advanced by the time it finishes, the scan's results are
+    # from a pre-invalidation view of the library and must be discarded so
+    # deleted photos don't reappear in the banner/modal.
+    app._missing_originals_generation = {}
 
     # Self-healing background backfill of missing working copies. RAW (and
     # oversized JPEG) imports need a JPEG working copy at
@@ -2166,6 +3227,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             working_copy_backfill_candidate_count,
         )
 
+        wcdb = None
         try:
             wcdb = Database(db_path)
             # Defer to scanner's own predicate so the gate matches what
@@ -2178,6 +3240,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except Exception:
             log.exception("Working-copy backfill: candidate check failed")
             return
+        finally:
+            if wcdb is not None:
+                wcdb.close()
         if candidate_count == 0:
             log.debug("Working-copy backfill: no candidates, skipping")
             return
@@ -2187,43 +3252,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         def work(job):
             thread_db = Database(db_path)
-            # Working-copy backfill is workspace-agnostic (photos are
-            # global), but the JobRunner path leans on having an active
-            # workspace for some bookkeeping. Mirror the active workspace
-            # of init_db so any incidental ws-scoped helpers stay valid.
-            active_ws = init_db._active_workspace_id
-            if active_ws is not None:
-                thread_db.set_active_workspace(active_ws)
+            try:
+                # Working-copy backfill is workspace-agnostic (photos are
+                # global), but the JobRunner path leans on having an active
+                # workspace for some bookkeeping. Mirror the active workspace
+                # of init_db so any incidental ws-scoped helpers stay valid.
+                active_ws = init_db._active_workspace_id
+                if active_ws is not None:
+                    thread_db.set_active_workspace(active_ws)
 
-            def progress_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": current,
-                        "total": total,
-                        "phase": f"{current:,} / {total:,} working copies",
-                    },
+                def progress_cb(current, total):
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    runner.push_event(
+                        job["id"],
+                        "progress",
+                        {
+                            "current": current,
+                            "total": total,
+                            "phase": f"{current:,} / {total:,} working copies",
+                        },
+                    )
+
+                def status_cb(message, **_phase):
+                    runner.push_event(job["id"], "progress", {
+                        "phase": message,
+                        "current": job["progress"].get("current", 0),
+                        "total": job["progress"].get("total", 0),
+                    })
+
+                def cancel_check():
+                    return runner.is_cancelled(job["id"])
+
+                return backfill_working_copies(
+                    thread_db, vireo_dir,
+                    progress_callback=progress_cb,
+                    status_callback=status_cb,
+                    cancel_check=cancel_check,
                 )
-
-            def status_cb(message):
-                runner.push_event(job["id"], "progress", {
-                    "phase": message,
-                    "current": job["progress"].get("current", 0),
-                    "total": job["progress"].get("total", 0),
-                })
-
-            def cancel_check():
-                return runner.is_cancelled(job["id"])
-
-            return backfill_working_copies(
-                thread_db, vireo_dir,
-                progress_callback=progress_cb,
-                status_callback=status_cb,
-                cancel_check=cancel_check,
-            )
+            finally:
+                thread_db.close()
 
         try:
             runner.start(
@@ -2276,6 +3344,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             thumb_path_backfill_candidate_count,
         )
 
+        tpdb = None
         try:
             tpdb = Database(db_path)
             candidate_count = thumb_path_backfill_candidate_count(
@@ -2284,6 +3353,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except Exception:
             log.exception("thumb_path backfill: candidate check failed")
             return
+        finally:
+            if tpdb is not None:
+                tpdb.close()
         if candidate_count == 0:
             log.debug("thumb_path backfill: no candidates, skipping")
             return
@@ -2293,39 +3365,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         def work(job):
             thread_db = Database(db_path)
-            active_ws = init_db._active_workspace_id
-            if active_ws is not None:
-                thread_db.set_active_workspace(active_ws)
+            try:
+                active_ws = init_db._active_workspace_id
+                if active_ws is not None:
+                    thread_db.set_active_workspace(active_ws)
 
-            def progress_cb(current, total):
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                runner.push_event(
-                    job["id"],
-                    "progress",
-                    {
-                        "current": current,
-                        "total": total,
-                        "phase": f"{current:,} / {total:,} photos reconciled",
-                    },
+                def progress_cb(current, total):
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    runner.push_event(
+                        job["id"],
+                        "progress",
+                        {
+                            "current": current,
+                            "total": total,
+                            "phase": f"{current:,} / {total:,} photos reconciled",
+                        },
+                    )
+
+                def status_cb(message, **_phase):
+                    runner.push_event(job["id"], "progress", {
+                        "phase": message,
+                        "current": job["progress"].get("current", 0),
+                        "total": job["progress"].get("total", 0),
+                    })
+
+                def cancel_check():
+                    return runner.is_cancelled(job["id"])
+
+                return backfill_thumb_paths(
+                    thread_db, cache_dir,
+                    progress_callback=progress_cb,
+                    status_callback=status_cb,
+                    cancel_check=cancel_check,
                 )
-
-            def status_cb(message):
-                runner.push_event(job["id"], "progress", {
-                    "phase": message,
-                    "current": job["progress"].get("current", 0),
-                    "total": job["progress"].get("total", 0),
-                })
-
-            def cancel_check():
-                return runner.is_cancelled(job["id"])
-
-            return backfill_thumb_paths(
-                thread_db, cache_dir,
-                progress_callback=progress_cb,
-                status_callback=status_cb,
-                cancel_check=cancel_check,
-            )
+            finally:
+                thread_db.close()
 
         try:
             runner.start(
@@ -2362,6 +3437,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + json.dumps(sys.platform)
             + ";\nwindow.VIREO_REVEAL_LABEL = "
             + json.dumps(labels["reveal"])
+            + ";\nwindow.VIREO_FILE_MANAGER_NAME = "
+            + json.dumps(labels["name"])
             + ";\nwindow.VIREO_EDITOR_PATH_PLACEHOLDER = "
             + json.dumps(labels["editor_placeholder"])
             + ";\n",
@@ -2399,104 +3476,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             cfg.save(raw)
         return jsonify({"ok": True})
 
-    @app.route("/browse")
-    def browse():
-        return render_template("browse.html")
-
-    @app.route("/best-batch")
-    def best_batch_page():
-        return render_template("best_batch.html")
-
-    @app.route("/zoom-test")
-    def zoom_test_page():
-        return render_template("zoom_test.html")
-
-    @app.route("/review")
-    def review():
-        return render_template("review.html")
-
-    @app.route("/edit/<int:photo_id>")
-    def photo_editor_page(photo_id):
-        return render_template("photo_editor.html")
-
-    @app.route("/edit")
-    def photo_editor_page_current():
-        # No photo id in the URL: the editor resolves the last-viewed photo
-        # from localStorage client-side (see initEditor in photo_editor.html)
-        # and rewrites the URL to /edit/<id>, or shows an empty state.
-        return render_template("photo_editor.html")
-
-    @app.route("/lightroom")
-    def lightroom_page():
-        return render_template("lightroom.html")
-
-    @app.route("/audit")
-    def audit():
-        return render_template("audit.html")
-
-    @app.route("/cull")
-    def cull_page():
-        return render_template("cull.html")
-
-    @app.route("/pipeline")
-    def pipeline_page():
-        return render_template("pipeline.html")
-
-    @app.route("/pipeline/review")
-    def pipeline_review_page():
-        return render_template("pipeline_review.html")
-
-    @app.route("/pipeline/rapid-review")
-    def pipeline_rapid_review_page():
-        return render_template("pipeline_rapid_review.html")
-
-    @app.route("/variants")
-    def variants_page():
-        return render_template("variants.html")
-
-    @app.route("/workspace")
-    def workspace_page():
-        return render_template("workspace.html")
-
-    @app.route("/compare")
-    def compare():
-        return render_template("compare.html")
-
-    @app.route("/settings")
-    def settings():
-        return render_template("settings.html")
-
-    @app.route("/shortcuts")
-    def shortcuts_page():
-        return render_template("shortcuts.html")
-
-    @app.route("/keywords")
-    def keywords_page():
-        return render_template("keywords.html")
-
-    @app.route("/jobs")
-    def jobs_page():
-        return render_template("jobs.html")
-
-    @app.route("/duplicates")
-    def duplicates_page():
-        return render_template("duplicates.html")
-
-    @app.route("/move")
-    def move_page():
-        return render_template("move.html")
-
-    @app.route("/highlights")
-    def highlights_page():
-        return render_template("highlights.html")
-
-    @app.route("/life-list")
-    def life_list_page():
-        return render_template("life_list.html")
-
-    @app.route("/misses")
-    def misses_page():
-        return render_template("misses.html")
+    app.register_blueprint(pages_blueprint)
 
     # -- API routes --
 
@@ -2508,6 +3488,56 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species_map = db.get_species_keywords_for_photos(ids)
         for p in photo_dicts:
             p["species"] = species_map.get(p["id"], [])
+        return photo_dicts
+
+    def _attach_location_statuses(db, photo_dicts):
+        """Attach the effective coordinate source used by Browse and Map UI."""
+        if not photo_dicts:
+            return photo_dicts
+        ids = [p["id"] for p in photo_dicts if isinstance(p.get("id"), int)]
+        statuses = db.get_photo_location_statuses(ids)
+        for photo in photo_dicts:
+            photo["location_status"] = statuses.get(photo.get("id"), "none")
+        return photo_dicts
+
+    def _attach_species_representatives(db, photo_dicts):
+        """Attach species representative state to photo dicts (in-place)."""
+        if not photo_dicts:
+            return photo_dicts
+        ids = []
+        for p in photo_dicts:
+            pid = p.get("photo_id", p.get("id"))
+            if isinstance(pid, int) and not isinstance(pid, bool):
+                ids.append(pid)
+        species_map = db.get_species_keywords_for_photos(ids)
+        # Gate representatives on current DB eligibility so a stale preference
+        # row (photo later rejected, folder removed from workspace, or species
+        # keyword untagged) doesn't light up a Representative badge on views
+        # whose photo dicts lack the `flag` column (notably /api/predictions,
+        # whose SELECT only pulls filename/timestamp from photos). The
+        # in-loop `p.get("flag") == "rejected"` shortcut still short-circuits
+        # rejected photos for views that DO include flag, so this only shifts
+        # behavior for the payloads that were previously reading raw prefs.
+        representatives = db.get_species_representatives(eligible_only=True)
+        for p in photo_dicts:
+            pid = p.get("photo_id", p.get("id"))
+            if p.get("flag") == "rejected":
+                species = []
+            else:
+                species = species_map.get(pid, [])
+            entries = [
+                {
+                    "species": s,
+                    "is_current_photo": representatives.get(s) == pid,
+                    "is_species_representative": representatives.get(s) == pid,
+                }
+                for s in species
+            ]
+            p["life_list"] = entries
+            p["species_representatives"] = entries
+            p["is_species_representative"] = any(
+                entry["is_species_representative"] for entry in entries
+            )
         return photo_dicts
 
     def _attach_detections(db, photo_dicts):
@@ -2560,6 +3590,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         recipe_map = db.get_photo_edit_recipes(sorted({pid for _, pid in refs}))
         for photo, pid in refs:
             photo["edit_recipe"] = recipe_map.get(pid)
+        _attach_species_representatives(db, [photo for photo, _pid in refs])
         return payload
 
     def _request_flag_filter():
@@ -2570,6 +3601,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             raise ValueError("flag must be 'none', 'flagged', or 'rejected'")
         return flag
 
+    def _request_bool_arg(name):
+        raw = request.args.get(name, "")
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _request_location_status_filter():
+        value = (request.args.get("location_status") or "").strip().lower()
+        if not value:
+            return None
+        if value not in {"exif", "assigned", "none"}:
+            raise ValueError(
+                "location_status must be 'exif', 'assigned', or 'none'"
+            )
+        return value
+
+    def _collection_rules_state(db, rules_json):
+        """Return parsed collection rules and whether they are degraded."""
+        try:
+            parsed_rules = json.loads(rules_json)
+        except (TypeError, ValueError):
+            return None, True
+        return parsed_rules, not db.rules_resolvable(parsed_rules)
+
     @app.route("/api/browse/init")
     def api_browse_init():
         """Combined endpoint for browse page initial load — one request instead of five."""
@@ -2579,26 +3632,95 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         default_per_page = cfg.load().get("photos_per_page", 50)
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
+        folder_id = request.args.get("folder_id", None, type=int)
+        collection_id = request.args.get("collection_id", None, type=int)
+        rating_min = request.args.get("rating_min", None, type=int)
+        date_from = request.args.get("date_from", None)
+        date_to = request.args.get("date_to", None)
+        keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
+        color_label = request.args.get("color_label", None)
+        try:
+            flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
+        except ValueError as e:
+            return json_error(str(e), 400)
 
-        photos = db.get_photos(page=page, per_page=per_page, sort=sort)
-        total = db.count_photos()
+        try:
+            photos = db.get_photos(
+                folder_id=folder_id,
+                collection_id=collection_id,
+                page=page,
+                per_page=per_page,
+                sort=sort,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
+                color_label=color_label,
+                flag=flag,
+                location_status=location_status,
+            )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        if not any([folder_id, collection_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
+            total = db.count_photos()
+        else:
+            try:
+                total = db.count_filtered_photos(
+                    folder_id=folder_id,
+                    collection_id=collection_id,
+                    rating_min=rating_min,
+                    date_from=date_from,
+                    date_to=date_to,
+                    keyword=keyword,
+                    keyword_match_case=keyword_match_case,
+                    keyword_whole_word=keyword_whole_word,
+                    color_label=color_label,
+                    flag=flag,
+                    location_status=location_status,
+                )
+            except ValueError as exc:
+                return json_error(str(exc), 400)
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
 
         photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
         _attach_species(db, photo_dicts)
+        _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
         _attach_edit_recipes(db, photo_dicts)
         collection_dicts = []
         for c in collections:
             d = dict(c)
-            try:
-                d["can_add_photos"] = _collection_accepts_manual_photos(
-                    json.loads(c["rules"])
-                )
-            except (TypeError, ValueError):
+            # Flag degraded rules at first paint so a fast click on the
+            # sidebar row can't fall into the 400 /photos path before
+            # loadCollectionCounts() lands. Only validate the rules — do
+            # not run COUNT(DISTINCT p.id) per collection here; that
+            # N+1 is what the async loadCollectionCounts() call in
+            # bootstrapBrowse() was designed to avoid, and re-adding it
+            # to the critical first-paint path makes opening Browse wait
+            # on every smart-collection query. Malformed JSON is treated
+            # as degraded too — those rules would 400 downstream just
+            # like an unresolvable rule.
+            parsed_rules, degraded = _collection_rules_state(db, c["rules"])
+            if degraded:
                 d["can_add_photos"] = False
+                d["count_error"] = True
+                collection_dicts.append(d)
+                app.logger.warning(
+                    "Collection %s (%s) has unresolvable rules; marking degraded",
+                    c["id"],
+                    c["name"],
+                )
+                continue
+            else:
+                d["can_add_photos"] = _collection_accepts_manual_photos(parsed_rules)
             collection_dicts.append(d)
 
         return jsonify(
@@ -2649,8 +3771,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         total_photos = db.count_photos()
 
         import config as cfg
-        from pipeline import compute_review_readiness, load_results
+        from pipeline import (
+            compute_group_fingerprint,
+            compute_review_readiness,
+            load_results,
+            prune_missing_photos,
+        )
         cache_dir = os.path.dirname(db_path)
+        prune_missing_photos(cache_dir, db._active_workspace_id, db)
         results = load_results(cache_dir, db._active_workspace_id)
         if results and results.get("photos"):
             photo_ids = [p["id"] for p in results["photos"]]
@@ -2668,9 +3796,49 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f, r = flag_map.get(p["id"], ("none", 0))
                 p["flag"] = f
                 p["rating"] = r
+            # Overlay representative state onto the cached results so
+            # pipeline cards render the badge after a page reload. The
+            # cache is written before eligibility runs (and by pipeline
+            # runs that predate the badge), so is_species_representative
+            # is otherwise absent and every card renders unbadged even
+            # when the DB says the photo is the species rep. The flag
+            # overlay above is what makes this call correct — the shared
+            # attacher short-circuits rejected photos, and the overlay
+            # ensures p["flag"] reflects the live DB, not a stale cache.
+            _attach_species_representatives(db, results["photos"])
 
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
+
+        results_cache_info = None
+        if results is not None:
+            cached_photo_ids = {
+                p.get("id")
+                for p in results.get("photos", [])
+                if p.get("id") is not None
+            }
+            row = db.conn.execute(
+                "SELECT last_group_fingerprint FROM workspaces WHERE id = ?",
+                (db._active_workspace_id,),
+            ).fetchone()
+            last_group_fp = row["last_group_fingerprint"] if row else None
+            current_group_fp = compute_group_fingerprint(effective_cfg)
+            if not last_group_fp:
+                fp_status = "untracked"
+            elif last_group_fp == current_group_fp:
+                fp_status = "current"
+            else:
+                fp_status = "outdated"
+            results_cache_info = {
+                "workspace_photo_count": total_photos,
+                "cached_photo_count": len(cached_photo_ids),
+                "missing_photo_count": max(
+                    total_photos - len(cached_photo_ids), 0,
+                ),
+                "is_partial": len(cached_photo_ids) < total_photos,
+                "group_fingerprint_status": fp_status,
+                "review_mode": results.get("review_mode"),
+            }
 
         # Variant must match the active DINOv2 variant so embedding coverage
         # reflects what /api/pipeline/regroup-live would actually consume —
@@ -2718,15 +3886,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "sam2_variant": sam2_variant,
                 "dinov2_variant": dinov2_variant,
                 "proxy_longest_edge": proxy_longest_edge,
-                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", True),
+                "eye_detect_enabled": pipeline_cfg.get("eye_detect_enabled", False),
                 "preview_max_size": effective_cfg.get("preview_max_size", 1920),
             },
             "mask_variant_coverage": db.mask_variant_coverage(),
             "sam_variant_warning": db.sam_variant_rerun_warning(sam2_variant),
             "results": results,
+            "results_cache_info": results_cache_info,
             "review_readiness": review_readiness,
             "workspace_overrides": ws_overrides,
-            "recent_destinations": effective_cfg.get("ingest", {}).get("recent_destinations", []),
         })
 
     @app.route("/api/pipeline/plan", methods=["POST"])
@@ -2769,11 +3937,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("source_paths entries must be strings", 400)
         else:
             source_paths = None
+        deprecated_plan_fields = [
+            key for key in (
+                "destination", "local_processing",
+                "remote_target_id", "remote_subpath",
+            )
+            if body.get(key) not in (None, "", False)
+        ]
+        if deprecated_plan_fields:
+            return json_error(
+                "import/archive fields are no longer accepted by the "
+                "process planner; use the Import page for photo imports",
+                400,
+            )
+        # Reject the previous strategy-name shape so the plan endpoint's
+        # contract matches /api/jobs/pipeline: an old caller that still
+        # sends {"strategy": "quick_look"} must fail here rather than
+        # silently planning a full-pipeline run the job route would then
+        # reject too.
+        if "strategy" in body:
+            return json_error(
+                "strategy is no longer accepted; send process_id (a "
+                "saved_processes id) or explicit stage flags",
+                400,
+            )
         # hash_duplicate_paths is the frontend's pre-computed set of source
-        # paths that ingest() will skip via the file_hash global-dedup gate
-        # (copy mode + skip_duplicates=True). Same shape/limits as
+        # paths that ingest() will skip via the global duplicate gate (copy
+        # mode + skip_duplicates=True; metadata-first matching or content
+        # hashes depending on the verify-by-hash toggle — the preview and
+        # ingest share import_dedup.DuplicateChecker, so the set matches
+        # what ingest will actually skip). Same shape/limits as
         # source_paths; the planner subtracts these from new_count so the
-        # plan doesn't overstate work for hash-skipped files.
+        # plan doesn't overstate work for duplicate-skipped files.
         if "hash_duplicate_paths" in body:
             hash_duplicate_paths = body.get("hash_duplicate_paths")
             if not isinstance(hash_duplicate_paths, list):
@@ -2789,12 +3984,125 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
         else:
             hash_duplicate_paths = None
+        # Folder scope (Process page): resolve folder_ids to their
+        # active-workspace subtree photo ids with the same guards as
+        # /api/jobs/pipeline, so the plan describes exactly the photos a
+        # folder-scoped run would process.
+        scope_photo_ids = None
+        folder_ids = body.get("folder_ids")
+        if folder_ids is not None:
+            if (
+                not isinstance(folder_ids, list)
+                or not folder_ids
+                or any(
+                    isinstance(fid, bool) or not isinstance(fid, int)
+                    for fid in folder_ids
+                )
+            ):
+                return json_error(
+                    "folder_ids must be a non-empty list of integers"
+                )
+            db = _get_db()
+            ws_for_folders = db._active_workspace_id
+            subtree_ids = set()
+            # Mirror the /api/jobs/pipeline folder resolution exactly so the
+            # plan describes the same photos the run will process. Without
+            # the path-based fallback, legacy folders with parent_id=NULL
+            # (whose paths sit under the selected root) are silently omitted
+            # from the plan even though the run walks them via
+            # _folder_subtree_ids_by_path.
+            from db import _chunks  # noqa: PLC0415
+            for fid in folder_ids:
+                linked = db.conn.execute(
+                    "SELECT 1 FROM workspace_folders "
+                    "WHERE workspace_id = ? AND folder_id = ?",
+                    (ws_for_folders, fid),
+                ).fetchone()
+                if not linked:
+                    return json_error("folder not found", 404)
+                subtree_ids.update(db.get_folder_subtree_ids(fid))
+                # Intersect the path-based descendants with the workspace's
+                # folder set so nothing leaks in from another workspace that
+                # happens to share a path prefix.
+                for chunk in _chunks(db._folder_subtree_ids_by_path(fid)):
+                    marks = ",".join("?" for _ in chunk)
+                    rows = db.conn.execute(
+                        f"SELECT folder_id FROM workspace_folders "
+                        f"WHERE workspace_id = ? AND folder_id IN ({marks})",
+                        [ws_for_folders] + list(chunk),
+                    )
+                    subtree_ids.update(r["folder_id"] for r in rows)
+            scope_photo_ids = []
+            for chunk in _chunks(list(subtree_ids)):
+                marks = ",".join("?" for _ in chunk)
+                scope_photo_ids.extend(
+                    r["id"] for r in db.conn.execute(
+                        f"SELECT id FROM photos WHERE folder_id IN ({marks})",
+                        tuple(chunk),
+                    )
+                )
+        # Expand a saved-process id the same way /api/jobs/pipeline does so
+        # the plan describes the run the same job body would produce. Without
+        # this, the Identify-birds process (skip_regroup=True + species review)
+        # shows Group as "Disabled" in the plan even though the actual run
+        # prepares species review results — the exact "plan summary is wrong
+        # for the default workflow" transparency failure the review flagged.
+        # Expansion supplies *defaults*; explicitly-present body keys still
+        # win, so a Custom caller can pin one flag on top of a process
+        # (mirrors the merge /api/jobs/pipeline runs). The process page's Run
+        # sends explicit stage flags (including miss_enabled/review_mode), so
+        # process_id is optional here.
+        # Key presence — not truthiness — decides whether a process was
+        # requested, matching /api/jobs/pipeline: a present-but-null process_id
+        # must 400 (not be treated as omitted), so previewing and starting the
+        # same body agree instead of the plan describing a run the job route
+        # would reject.
+        if "process_id" in body:
+            pid = body.get("process_id")
+            if not isinstance(pid, int) or isinstance(pid, bool):
+                kind = "null" if pid is None else type(pid).__name__
+                return json_error(
+                    f"process_id must be an integer, got {kind}", 400
+                )
+            try:
+                expanded = _get_db().resolve_process(pid)
+            except ValueError as e:
+                return json_error(str(e), 404)
+            body = {**expanded, **body}
+            # Mirror the job path: a process with Eye Keypoints on opts into
+            # eye scoring, so the plan reflects the eye stage running rather
+            # than deferring to the workspace eye_detect_enabled default.
+            if (
+                not body.get("skip_eye_keypoints")
+                and body.get("eye_detect_override") is None
+            ):
+                body["eye_detect_override"] = True
+        review_mode = body.get("review_mode")
+        if review_mode is not None and not isinstance(review_mode, str):
+            return json_error(
+                "review_mode must be a string or null, got "
+                f"{type(review_mode).__name__}", 400,
+            )
+        # ``eye_detect_override`` is tri-state (None/True/False); accept
+        # only bool or missing so the plan matches what /api/jobs/pipeline
+        # would do.
+        eye_detect_override_body = body.get("eye_detect_override")
+        if (
+            eye_detect_override_body is not None
+            and not isinstance(eye_detect_override_body, bool)
+        ):
+            return json_error(
+                f"eye_detect_override must be boolean, got "
+                f"{type(eye_detect_override_body).__name__}", 400,
+            )
         params = PipelinePlanParams(
             collection_id=body.get("collection_id"),
+            photo_ids=scope_photo_ids,
             exclude_photo_ids=body.get("exclude_photo_ids") or [],
             skip_classify=bool(body.get("skip_classify")),
             skip_extract_masks=bool(body.get("skip_extract_masks")),
             skip_eye_keypoints=bool(body.get("skip_eye_keypoints")),
+            eye_detect_override=eye_detect_override_body,
             skip_regroup=bool(body.get("skip_regroup")),
             model_ids=body.get("model_ids") or (
                 [body["model_id"]] if body.get("model_id") else []
@@ -2804,6 +4112,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             source_paths=source_paths,
             hash_duplicate_paths=hash_duplicate_paths,
             preview_max_size=body.get("preview_max_size"),
+            review_mode=review_mode,
         )
         db = _get_db()
         return jsonify(compute_plan(db, params, db_path))
@@ -2833,37 +4142,154 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         missing = db.get_missing_folders()
         return jsonify([dict(f) for f in missing])
 
-    @app.route("/api/photos/missing")
-    def api_photos_missing():
-        """Return photos whose original file is gone but the folder remains.
+    _MISSING_ORIGINALS_STALE_SECONDS = 30 * 60
+    _MISSING_ORIGINALS_BACKOFF_SECONDS = 30 * 60
+    _MISSING_ORIGINALS_HEAVY_JOB_TYPES = {
+        "scan",
+        "pipeline",
+        "thumbnails",
+        "previews",
+        "move-photos",
+        "move-folder",
+        "sync",
+        "classify",
+        "cull",
+        "develop",
+        "extract-masks",
+        "regroup",
+        "import",
+        "import-full",
+        "import-in-place",
+        "ingest",
+        "import-photos",
+        "batch-delete",
+        "duplicate-scan",
+        "offline-cache",
+        # Navbar's new-images probe walks the same folders a missing-originals
+        # scan would; letting them run concurrently can double the filesystem
+        # load on slow NAS/SMB libraries.
+        "new_images_walk",
+        # Folder-scoped and workspace-wide missing-originals scans have
+        # distinct cache keys, so the same-key in-flight coalescing does
+        # not catch a workspace scan started while a folder scan is
+        # running (or vice versa). Treat any in-flight
+        # missing_originals_scan as heavy work so automatic reruns
+        # don't kick off a second filesystem walk over the same tree.
+        "missing_originals_scan",
+        # audit.verify_hashes walks every workspace source file and
+        # hashes readable ones — the same NAS/SMB trees a Missing
+        # Originals scan touches. Letting the 30-minute automatic
+        # missing-originals timer fire during verification would
+        # double the I/O on those slow volumes.
+        "verify-hashes",
+        # The startup working-copy backfill job walks the same source
+        # trees and additionally performs RAW decode + JPEG encode
+        # work per file, so overlapping it with an automatic Missing
+        # Originals scan can double the source-volume I/O on large
+        # legacy RAW libraries over NAS/SMB.
+        "working_copy_backfill",
+    }
 
-        For each ghost row we report what cached/sidecar artifacts still exist
-        (thumb, preview, working copy, XMP) so the user can decide whether
-        anything is worth keeping before deleting the row.
+    def _utc_iso_now():
+        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
-        Optional ``?folder_id=N`` scopes the check to that folder and its
-        descendants — the "rescan a specific folder" flow. The id must be
-        linked to the active workspace (same guard as folder rescan); an
-        unknown or foreign id returns 404 rather than silently widening to
-        the whole library.
-        """
-        db = _get_db()
+    def _parse_missing_originals_folder_id(db):
         folder_id = request.args.get("folder_id")
-        if folder_id is not None:
-            try:
-                folder_id = int(folder_id)
-            except (TypeError, ValueError):
-                return json_error("folder_id must be an integer")
-            linked = db.conn.execute(
-                "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
-                (db._active_workspace_id, folder_id),
-            ).fetchone()
-            if not linked:
-                return json_error("folder not found", 404)
+        if request.is_json:
+            body = request.get_json(silent=True) or {}
+            if "folder_id" in body:
+                folder_id = body.get("folder_id")
+        if folder_id in (None, ""):
+            return None
+        try:
+            folder_id = int(folder_id)
+        except (TypeError, ValueError):
+            raise ValueError("folder_id must be an integer") from None
+        linked = db.conn.execute(
+            "SELECT 1 FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+            (db._active_workspace_id, folder_id),
+        ).fetchone()
+        if not linked:
+            raise LookupError("folder not found")
+        return folder_id
+
+    def _missing_originals_key(db, folder_id):
+        return (db._db_path, db._active_workspace_id, folder_id)
+
+    def _missing_originals_payload(db, folder_id):
+        key = _missing_originals_key(db, folder_id)
+        now = time.monotonic()
+        with app._missing_originals_lock:
+            entry = app._missing_originals_cache.get(key)
+            inflight = app._missing_originals_inflight.get(key)
+            err = app._missing_originals_errors.get(key)
+            # An error recorded after the last cached scan means a later
+            # refresh failed. Returning the pre-refresh photo list as a
+            # fresh "ready" result would hide the failure — and worse,
+            # let the user delete rows whose originals may have been
+            # restored between scans. When a scan is in flight the UI
+            # already shows "pending", so still surface the stale
+            # entry then; otherwise prefer the error state.
+            cache_superseded_by_error = (
+                entry is not None
+                and err is not None
+                and not inflight
+                and err["set_at"] > entry["set_at"]
+            )
+            if entry is not None and not cache_superseded_by_error:
+                status = "pending" if inflight else "ready"
+                photos = entry["photos"]
+                checked_at = entry["checked_at"]
+                stale = now - entry["set_at"] > _MISSING_ORIGINALS_STALE_SECONDS
+                error = None
+            elif inflight:
+                status = "pending"
+                photos = []
+                checked_at = None
+                stale = False
+                error = None
+            elif err is not None:
+                status = "error"
+                photos = []
+                checked_at = err["checked_at"]
+                stale = False
+                error = err["error"]
+            else:
+                status = "not_ready"
+                photos = []
+                checked_at = None
+                stale = False
+                error = None
+            backoff_seconds = 0
+            if err is not None:
+                backoff_seconds = max(0, int(err["backoff_until"] - now))
+            return {
+                "status": status,
+                "pending": bool(inflight),
+                "checked_at": checked_at,
+                "stale": stale,
+                "error": error,
+                "job_id": inflight if isinstance(inflight, str) else None,
+                "photos": photos,
+                "backoff_seconds": backoff_seconds,
+                "workspace_id": db._active_workspace_id,
+                "folder_id": folder_id,
+            }
+
+    def _build_missing_originals_rows(
+        db,
+        folder_id=None,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
         thumb_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_dir)
         preview_dir = os.path.join(vireo_dir, "previews")
         working_dir = os.path.join(vireo_dir, "working")
+
+        def check_cancelled():
+            if cancel_callback is not None and cancel_callback():
+                raise MissingPhotosCancelled("missing originals scan cancelled")
 
         # Index preview cache once. The endpoint is polled from the navbar,
         # so per-photo `glob(preview_dir, f"{pid}_*.jpg")` was O(missing ×
@@ -2871,20 +4297,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # listdir and check the set in O(1) per row.
         preview_pids: set[int] = set()
         try:
-            for name in os.listdir(preview_dir):
-                # Match `{id}.jpg` (legacy full preview) or `{id}_{size}.jpg`
-                # (sized variant). Anything else is not part of the per-photo
-                # cache and should be ignored.
-                if not name.endswith(".jpg"):
-                    continue
-                head = name[:-4].split("_", 1)[0]
-                if head.isdigit():
-                    preview_pids.add(int(head))
+            check_cancelled()
+            with os.scandir(preview_dir) as it:
+                for entry in it:
+                    check_cancelled()
+                    name = entry.name
+                    # Match `{id}.jpg` (legacy full preview) or `{id}_{size}.jpg`
+                    # (sized variant). Anything else is not part of the per-photo
+                    # cache and should be ignored.
+                    if not name.endswith(".jpg"):
+                        continue
+                    head = name[:-4].split("_", 1)[0]
+                    if head.isdigit():
+                        preview_pids.add(int(head))
         except FileNotFoundError:
             pass  # cache dir hasn't been created yet — no previews
 
         out = []
-        for row in db.get_missing_photos(folder_id=folder_id):
+        for row in db.get_missing_photos(
+            folder_id=folder_id,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        ):
+            check_cancelled()
             pid = row["id"]
             src = os.path.join(row["folder_path"], row["filename"])
             stem, _ext = os.path.splitext(src)
@@ -2919,12 +4354,315 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ),
             })
         _attach_nested_edit_recipes(db, out)
-        return jsonify(out)
+        return out
+
+    def _missing_originals_heavy_job_active():
+        for job in app._job_runner.list_jobs():
+            if job.get("status") not in ("running", "queued"):
+                continue
+            if job.get("type") in _MISSING_ORIGINALS_HEAVY_JOB_TYPES:
+                return True
+        return False
+
+    def _pending_local_workspace_transition(workspace_id):
+        # ``has_local_workspace`` only observes the ``local_workspaces`` row
+        # a stage worker inserts once it actually runs; a stage/sync/discard
+        # that has been enqueued but not yet reached that insert would leave
+        # the row absent. A scan or move-folder enqueued in that window
+        # passes its own guard and then rebases the catalog after the
+        # transition worker later claims the workspace, so the folder /
+        # workspace_folders / folders rows those jobs write end up outside
+        # the manifest and local_workspace_folders. Detecting the pending
+        # transition job in the runner queue closes that race at enqueue.
+        if workspace_id is None:
+            return None
+        for job in app._job_runner.list_jobs():
+            if job.get("status") not in ("queued", "running"):
+                continue
+            job_type = job.get("type")
+            if job_type in LOCAL_WORKSPACE_JOB_TYPES and job.get("workspace_id") == workspace_id:
+                return job
+            if job_type in LOCAL_FOLDER_JOB_TYPES:
+                if job.get("workspace_id") == workspace_id:
+                    return job
+                config = job.get("config") or {}
+                root_ids = (config.get("root_folder_ids") or []) if isinstance(config, dict) else []
+                db = _get_db()
+                if any(
+                    workspace_id in workspace_ids_for_folder_tree(db, int(root_id))
+                    for root_id in root_ids
+                ):
+                    return job
+        return None
+
+    def _invalidate_missing_originals_cache(workspace_ids=None):
+        """Drop cached Missing Originals results for this app's database.
+
+        Photos are shared across workspaces (a folder can be linked into
+        more than one), so a photo-row removal must clear every
+        workspace cache that could still list it — scoping to the
+        active workspace lets other workspaces keep serving stale
+        ready payloads until their next scan.
+
+        ``workspace_ids`` narrows the invalidation to those workspace
+        ids. Use it on workspace create/delete to clear entries that
+        could otherwise be served to a later workspace that reuses a
+        SQLite rowid.
+        """
+        ws_filter = None if workspace_ids is None else {int(w) for w in workspace_ids}
+        with app._missing_originals_lock:
+            for store in (
+                app._missing_originals_cache,
+                app._missing_originals_errors,
+            ):
+                for key in list(store.keys()):
+                    if key[0] != db_path:
+                        continue
+                    if ws_filter is not None and key[1] not in ws_filter:
+                        continue
+                    store.pop(key, None)
+            # Bump generation for every in-flight scan under this DB so
+            # its completion path refuses to write its stale
+            # pre-invalidation snapshot back into the cache.
+            for key in list(app._missing_originals_inflight.keys()):
+                if key[0] != db_path:
+                    continue
+                if ws_filter is not None and key[1] not in ws_filter:
+                    continue
+                app._missing_originals_generation[key] = (
+                    app._missing_originals_generation.get(key, 0) + 1
+                )
+
+    def _start_missing_originals_scan(db, folder_id=None, automatic=False):
+        key = _missing_originals_key(db, folder_id)
+        scan_started_at = time.monotonic()
+        now = scan_started_at
+        token = object()
+        suppressed_reason = None
+        reuse_existing = False
+        fresh_cache = False
+        with app._missing_originals_lock:
+            inflight = app._missing_originals_inflight.get(key)
+            if inflight:
+                reuse_existing = True
+            entry = app._missing_originals_cache.get(key)
+            # Gate on when the last scan STARTED, not when it finished. The
+            # navbar re-arms its 30-minute automatic timer from POST time,
+            # so a scan that takes real wall-clock time to walk the disk
+            # leaves ``set_at`` well under the threshold when the next tick
+            # arrives — every other automatic scan would otherwise be
+            # skipped, and deletions could stay undiscovered for nearly an
+            # hour. Legacy entries without ``started_at`` fall back to
+            # ``set_at``.
+            if (
+                not reuse_existing
+                and automatic
+                and entry is not None
+                and now - entry.get("started_at", entry["set_at"])
+                < _MISSING_ORIGINALS_STALE_SECONDS
+            ):
+                fresh_cache = True
+            err = app._missing_originals_errors.get(key)
+            if (
+                not reuse_existing
+                and not fresh_cache
+                and automatic
+                and err is not None
+                and now < err["backoff_until"]
+            ):
+                suppressed_reason = "backoff"
+        if reuse_existing:
+            return _missing_originals_payload(db, folder_id)
+        if fresh_cache:
+            return _missing_originals_payload(db, folder_id)
+        if automatic and suppressed_reason is None and _missing_originals_heavy_job_active():
+            suppressed_reason = "heavy_job_active"
+        if suppressed_reason is not None:
+            payload = _missing_originals_payload(db, folder_id)
+            payload["suppressed"] = True
+            payload["reason"] = suppressed_reason
+            if suppressed_reason == "heavy_job_active":
+                payload["status"] = "skipped"
+            return payload
+        scan_generation = 0
+        with app._missing_originals_lock:
+            inflight = app._missing_originals_inflight.get(key)
+            if inflight:
+                reuse_existing = True
+            else:
+                app._missing_originals_inflight[key] = token
+                scan_generation = app._missing_originals_generation.get(key, 0)
+        if reuse_existing:
+            return _missing_originals_payload(db, folder_id)
+
+        runner = app._job_runner
+        ws_id = db._active_workspace_id
+        db_file = db._db_path
+        scope_label = "workspace" if folder_id is None else f"folder #{folder_id}"
+
+        def work(job):
+            thread_db = None
+            try:
+                thread_db = Database(db_file)
+                if ws_id is not None:
+                    thread_db.set_active_workspace(ws_id)
+
+                def progress(payload):
+                    current = int(payload.get("photos_considered") or 0)
+                    total = int(payload.get("total_photos") or 0)
+                    missing_found = int(payload.get("missing_found") or 0)
+                    folders_checked = int(payload.get("folders_checked") or 0)
+                    current_folder = payload.get("current_folder") or ""
+                    job["progress"]["current"] = current
+                    job["progress"]["total"] = total
+                    job["progress"]["current_file"] = current_folder
+                    phase = (
+                        f"{folders_checked:,} folders checked, "
+                        f"{current:,} photos considered, "
+                        f"{missing_found:,} missing"
+                    )
+                    runner.push_event(job["id"], "progress", {
+                        "current": current,
+                        "total": total,
+                        "current_file": current_folder,
+                        "folders_checked": folders_checked,
+                        "missing_found": missing_found,
+                        "phase": phase,
+                    })
+
+                def cancel_check():
+                    return runner.is_cancelled(job["id"])
+
+                photos = _build_missing_originals_rows(
+                    thread_db,
+                    folder_id=folder_id,
+                    progress_callback=progress,
+                    cancel_callback=cancel_check,
+                )
+                if cancel_check():
+                    return {"cancelled": True, "scope": scope_label}
+                checked_at = _utc_iso_now()
+                stale = False
+                with app._missing_originals_lock:
+                    current_gen = app._missing_originals_generation.get(key, 0)
+                    if cancel_check():
+                        return {"cancelled": True, "scope": scope_label}
+                    if current_gen != scan_generation:
+                        # A batch delete (or other invalidation) fired
+                        # while this scan was walking the disk. Its photo
+                        # list reflects the pre-delete library, so writing
+                        # it back would resurrect just-removed photos in
+                        # the banner. Drop the result and let the next
+                        # scan recompute.
+                        stale = True
+                    else:
+                        app._missing_originals_cache[key] = {
+                            "photos": photos,
+                            "checked_at": checked_at,
+                            "set_at": time.monotonic(),
+                            "started_at": scan_started_at,
+                        }
+                        app._missing_originals_errors.pop(key, None)
+                return {
+                    "missing_count": len(photos),
+                    "checked_at": checked_at,
+                    "scope": scope_label,
+                    "stale": stale,
+                }
+            except MissingPhotosCancelled:
+                raise
+            except Exception as exc:
+                checked_at = _utc_iso_now()
+                with app._missing_originals_lock:
+                    current_gen = app._missing_originals_generation.get(key, 0)
+                    if current_gen == scan_generation:
+                        app._missing_originals_errors[key] = {
+                            "error": str(exc) or exc.__class__.__name__,
+                            "checked_at": checked_at,
+                            "set_at": time.monotonic(),
+                            "backoff_until": (
+                                time.monotonic()
+                                + _MISSING_ORIGINALS_BACKOFF_SECONDS
+                            ),
+                        }
+                raise
+            finally:
+                if thread_db is not None:
+                    thread_db.close()
+                with app._missing_originals_lock:
+                    if app._missing_originals_inflight.get(key) in (
+                        token,
+                        job["id"],
+                    ):
+                        app._missing_originals_inflight.pop(key, None)
+
+        try:
+            job_id = runner.start(
+                "missing_originals_scan",
+                work,
+                workspace_id=ws_id,
+                config={"scope": scope_label, "folder_id": folder_id},
+                ephemeral=True,
+                counts_for_badge=False,
+            )
+        except Exception:
+            with app._missing_originals_lock:
+                if app._missing_originals_inflight.get(key) is token:
+                    app._missing_originals_inflight.pop(key, None)
+            raise
+
+        with app._missing_originals_lock:
+            if app._missing_originals_inflight.get(key) is token:
+                app._missing_originals_inflight[key] = job_id
+        payload = _missing_originals_payload(db, folder_id)
+        if payload.get("status") != "ready":
+            payload["job_id"] = job_id
+            payload["pending"] = True
+            payload["status"] = "pending"
+        return payload
+
+    @app.route("/api/photos/missing")
+    def api_photos_missing():
+        """Return cached Missing Originals scan status without filesystem work."""
+        db = _get_db()
+        try:
+            folder_id = _parse_missing_originals_folder_id(db)
+        except ValueError as exc:
+            return json_error(str(exc))
+        except LookupError:
+            return json_error("folder not found", 404)
+        return jsonify(_missing_originals_payload(db, folder_id))
+
+    @app.route("/api/photos/missing/check", methods=["POST"])
+    def api_photos_missing_check():
+        """Start or reuse a background Missing Originals scan."""
+        db = _get_db()
+        try:
+            folder_id = _parse_missing_originals_folder_id(db)
+        except ValueError as exc:
+            return json_error(str(exc))
+        except LookupError:
+            return json_error("folder not found", 404)
+        body = request.get_json(silent=True) or {}
+        automatic = bool(body.get("automatic"))
+        payload = _start_missing_originals_scan(
+            db,
+            folder_id=folder_id,
+            automatic=automatic,
+        )
+        status_code = 202 if payload.get("pending") else 200
+        return jsonify(payload), status_code
 
     @app.route("/api/folders/check-health", methods=["POST"])
     def api_folders_check_health():
         db = _get_db()
         changed = db.check_folder_health()
+        # A folder flipping ok→missing turns every one of its photos into a
+        # ghost, and missing→ok resurrects them. Either transition would
+        # otherwise be masked by a ready /api/photos/missing cache until the
+        # next full scan.
+        if changed:
+            _invalidate_missing_originals_cache()
         missing = db.get_missing_folders()
         return jsonify({
             "changed": changed,
@@ -2953,6 +4691,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ws_id = db._active_workspace_id
         deleted = 0
         skipped = 0
+        folder_online_cache = {}
         for raw_id in photo_ids:
             try:
                 pid = int(raw_id)
@@ -2970,7 +4709,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not row:
                 skipped += 1
                 continue
-            src = os.path.join(row["folder_path"], row["filename"])
+            folder_path = row["folder_path"]
+            folder_online = folder_online_cache.get(folder_path)
+            if folder_online is None:
+                # Match /api/photos/missing/remove: a path that stats as a
+                # directory but can't be enumerated (NAS/share ACL denial,
+                # missing search permission) makes ``os.path.exists(src)``
+                # unreliable for every child, so we'd otherwise unlink
+                # sidecars belonging to originals we couldn't actually
+                # verify were missing.
+                folder_online = False
+                if os.path.isdir(folder_path):
+                    try:
+                        with os.scandir(folder_path):
+                            folder_online = True
+                    except OSError:
+                        folder_online = False
+                folder_online_cache[folder_path] = folder_online
+            if not folder_online:
+                # Folder is currently unreachable — we can't tell whether
+                # the original was restored before the mount went offline,
+                # so skip the sidecar (a valid original could have a
+                # matching .xmp we would wrongly delete once the volume
+                # comes back).
+                skipped += 1
+                continue
+            src = os.path.join(folder_path, row["filename"])
             if os.path.exists(src):
                 # Original came back — refuse to touch the sidecar.
                 skipped += 1
@@ -2990,6 +4754,155 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             else:
                 skipped += 1
         return jsonify({"deleted": deleted, "skipped": skipped})
+
+    @app.route("/api/photos/missing/remove", methods=["POST"])
+    def api_photos_missing_remove():
+        """Delete Vireo rows for photos whose originals are still gone.
+
+        Body: ``{"photo_ids": [int, ...], "delete_sidecars": bool,
+        "mode": "vireo"|"disk"|"disk_permanent"}``.
+
+        A ready ``/api/photos/missing`` cache is served for up to
+        ``_MISSING_ORIGINALS_STALE_SECONDS`` (30 min) without a filesystem
+        recheck, so a photo whose original came back between the last
+        scan and the user clicking Remove would otherwise be deleted
+        from Vireo by trusting the cache. This endpoint pre-checks each
+        photo's source on disk in the active workspace and only forwards
+        the still-missing IDs to the shared batch-delete implementation.
+        Sidecar cleanup follows the same guard, so a restored original
+        never loses its ``.xmp`` either.
+
+        Response: ``{deleted, restored: [ids], skipped, sidecars_deleted,
+        sidecars_skipped, mode}``. ``restored`` lets the client show which
+        photos were saved from the cache-driven delete so the modal can
+        surface them (e.g. via toast) instead of silently discarding the
+        request.
+        """
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids") or []
+        if not isinstance(photo_ids, list):
+            return json_error("photo_ids must be a list")
+        delete_sidecars = bool(body.get("delete_sidecars"))
+        mode = body.get("mode", "vireo")
+        if mode not in ("vireo", "disk", "disk_permanent"):
+            return json_error(
+                "mode must be 'vireo', 'disk', or 'disk_permanent'"
+            )
+
+        db = _get_db()
+        ws_id = db._active_workspace_id
+        confirmed_ids = []
+        restored_ids = []
+        folder_offline_ids = []
+        skipped = 0
+        sidecar_targets = []
+        folder_online_cache = {}
+
+        def folder_accessible(folder_path):
+            cached = folder_online_cache.get(folder_path)
+            if cached is not None:
+                return cached
+            accessible = False
+            if os.path.isdir(folder_path):
+                try:
+                    with os.scandir(folder_path):
+                        accessible = True
+                except OSError:
+                    accessible = False
+            folder_online_cache[folder_path] = accessible
+            return accessible
+
+        for raw_id in photo_ids:
+            try:
+                pid = int(raw_id)
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            row = db.conn.execute(
+                """SELECT p.filename, f.path AS folder_path
+                   FROM photos p
+                   JOIN folders f ON p.folder_id = f.id
+                   JOIN workspace_folders wf ON wf.folder_id = f.id
+                   WHERE p.id = ? AND wf.workspace_id = ?""",
+                (pid, ws_id),
+            ).fetchone()
+            if not row:
+                skipped += 1
+                continue
+            folder_path = row["folder_path"]
+            if not folder_accessible(folder_path):
+                # The parent folder/NAS mount is currently unreachable, so
+                # ``os.path.exists(src)`` would return False for every row
+                # regardless of whether the original was restored before
+                # the volume went offline. Deleting under that ambiguity
+                # would remove valid Vireo rows; leave the decision for a
+                # later scan (once folder health flips or the volume comes
+                # back) instead.
+                folder_offline_ids.append(pid)
+                continue
+            src = os.path.join(folder_path, row["filename"])
+            if os.path.exists(src):
+                # Original is back on disk — the cached "missing" verdict
+                # was stale. Keep the Vireo row (and its sidecar).
+                restored_ids.append(pid)
+                continue
+            confirmed_ids.append(pid)
+            if delete_sidecars:
+                sidecar_targets.append(src)
+
+        sidecars_deleted = 0
+        sidecars_skipped = 0
+        if delete_sidecars:
+            for src in sidecar_targets:
+                stem, _ = os.path.splitext(src)
+                removed_one = False
+                for candidate in (stem + ".xmp", stem + ".XMP",
+                                  src + ".xmp", src + ".XMP"):
+                    if os.path.isfile(candidate):
+                        try:
+                            os.remove(candidate)
+                            removed_one = True
+                        except OSError as e:
+                            log.warning(
+                                "Failed to delete sidecar %s: %s", candidate, e
+                            )
+                if removed_one:
+                    sidecars_deleted += 1
+                else:
+                    sidecars_skipped += 1
+
+        deleted_count = 0
+        if confirmed_ids:
+            try:
+                result = _run_batch_delete(
+                    db, confirmed_ids, mode, include_companions=False,
+                )
+            except ValueError as exc:
+                return json_error(str(exc))
+            deleted_count = int(result.get("deleted") or 0)
+            if deleted_count:
+                _invalidate_missing_originals_cache()
+
+        # A cache invalidation is still worth doing when everything came
+        # back online: the ready payload we just refused to trust for
+        # deletion is also the one the banner will keep serving until the
+        # next scan. Dropping it now forces a fresh check the next time
+        # the banner/modal asks, so the restored photos stop appearing
+        # as ghosts. Do the same when we deferred rows because a folder
+        # was offline: the cache is unreliable evidence for those IDs and
+        # the next scan (or health flip) needs to replace it.
+        if deleted_count == 0 and (restored_ids or folder_offline_ids):
+            _invalidate_missing_originals_cache()
+
+        return jsonify({
+            "deleted": deleted_count,
+            "restored": restored_ids,
+            "folder_offline": folder_offline_ids,
+            "skipped": skipped,
+            "sidecars_deleted": sidecars_deleted,
+            "sidecars_skipped": sidecars_skipped,
+            "mode": mode,
+        })
 
     @app.route("/api/folders/<int:folder_id>", methods=["GET"])
     def api_folder_get(folder_id):
@@ -3026,20 +4939,68 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not os.path.isdir(new_path):
             return json_error("path does not exist or is not a directory")
 
-        # Capture the old path before the DB rewrite so we can rebase the
-        # corresponding darktable output subdir on disk. Developed outputs
-        # are nested under developed_folder_key(folder_path), so a path
-        # change invalidates the old key and would silently regress export
-        # to RAW until the user re-developed.
-        old_row = db.conn.execute(
-            "SELECT path FROM folders WHERE id = ?", (folder_id,)
-        ).fetchone()
-        old_path = old_row["path"] if old_row else ""
+        # Relocating a folder that a local workspace has rebased would leave
+        # local_workspace_folders and the manifest pointing at a path this
+        # route just moved out from under them, so a later sync/discard could
+        # not restore the catalog to the source layout. The guard and the
+        # subsequent write must both run under stage_boundary_lock so a stage
+        # claim cannot commit between them.
+        with stage_boundary_lock():
+            local_root_id = local_root_for_folder(db, folder_id)
+            if local_root_id is not None:
+                return json_error(
+                    "Cannot relocate this folder while it has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
+            # Staging a descendant rebases its folders.path under local-folders/,
+            # so a folders.path subtree scan (as db.relocate_folder does) no
+            # longer sees it — while local_folder_mappings.source_path still
+            # points at the pre-relocation location. Without this check the
+            # relocate would rewrite the ancestor while the manifest keeps
+            # pointing at the old descendant path, so a later sync/discard
+            # could not restore or publish to the new location.
+            descendant_root_id = local_root_under_folder(db, folder_id)
+            if descendant_root_id is not None:
+                return json_error(
+                    "Cannot relocate this folder while a subfolder has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
+            staged, owner_ws = folder_has_local_workspace(db, folder_id)
+            if staged:
+                return json_error(
+                    f"Cannot relocate this folder — workspace {owner_ws} has it staged locally. "
+                    "Switch to that workspace and sync or discard the local copy first.",
+                    409,
+                )
 
-        try:
-            cascaded = db.relocate_folder(folder_id, new_path)
-        except ValueError as e:
-            return json_error(str(e), 409)
+            # Capture the old path before the DB rewrite so we can rebase the
+            # corresponding darktable output subdir on disk. Developed outputs
+            # are nested under developed_folder_key(folder_path), so a path
+            # change invalidates the old key and would silently regress export
+            # to RAW until the user re-developed.
+            old_row = db.conn.execute(
+                "SELECT path, status FROM folders WHERE id = ?", (folder_id,)
+            ).fetchone()
+            old_path = old_row["path"] if old_row else ""
+
+            try:
+                cascaded = db.relocate_folder(folder_id, new_path)
+            except ValueError as e:
+                if old_row and old_row["status"] == "missing":
+                    current_row = db.conn.execute(
+                        "SELECT status FROM folders WHERE id = ?", (folder_id,)
+                    ).fetchone()
+                    if current_row and current_row["status"] == "ok":
+                        _invalidate_missing_originals_cache()
+                return json_error(str(e), 409)
+
+        # Relocation rewrites folders.path (and can merge/delete rows via the
+        # missing→existing branch). A ready /api/photos/missing cache would
+        # otherwise keep offering the pre-relocation ghost rows for removal
+        # even though the originals just came back online at the new path.
+        _invalidate_missing_originals_cache()
 
         import config as cfg
         from export import relocate_developed_dir
@@ -3059,10 +5020,44 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
     def api_folder_delete(folder_id):
         db = _get_db()
-        result = db.delete_folder(folder_id)
+        # Deleting a folder that a local workspace has rebased removes the
+        # folders row that local_workspace_folders and the manifest depend on,
+        # so a later sync/discard would be unable to restore the catalog. The
+        # guard and delete run under stage_boundary_lock so a stage claim
+        # cannot commit between them; the local_workspace_folders FK to
+        # folders(id) ON DELETE CASCADE is the final safety net.
+        with stage_boundary_lock():
+            local_root_id = local_root_for_folder(db, folder_id)
+            if local_root_id is not None:
+                return json_error(
+                    "Cannot delete this folder while it has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
+            descendant_root_id = local_root_under_folder(db, folder_id)
+            if descendant_root_id is not None:
+                return json_error(
+                    "Cannot delete this folder while a subfolder has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
+            staged, owner_ws = folder_has_local_workspace(db, folder_id)
+            if staged:
+                return json_error(
+                    f"Cannot delete this folder — workspace {owner_ws} has it staged locally. "
+                    "Switch to that workspace and sync or discard the local copy first.",
+                    409,
+                )
+            result = db.delete_folder(folder_id)
         # Clean up cached files alongside the cascaded photo rows so preview
         # files don't get orphaned on disk (untracked by preview_cache).
         _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+        # The cascaded row deletion here is the same shape as any other
+        # photo-removal path: without invalidation, a ready
+        # /api/photos/missing cache could keep listing ghosts from the
+        # now-deleted folder (offered up for removal a second time in
+        # the modal) until the next scan runs.
+        _invalidate_missing_originals_cache()
         # Don't leak the internal file list to the API response — keep the
         # shape callers expect.
         return jsonify({"deleted_photos": result["deleted_photos"]})
@@ -3076,45 +5071,65 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
+        collection_id = request.args.get("collection_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
 
-        photos = db.get_photos(
-            folder_id=folder_id,
-            page=page,
-            per_page=per_page,
-            sort=sort,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            color_label=color_label,
-            flag=flag,
-        )
-
-        # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
-        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
-            total = db.count_photos()
-        else:
-            total = db.count_filtered_photos(
+        try:
+            photos = db.get_photos(
                 folder_id=folder_id,
+                collection_id=collection_id,
+                page=page,
+                per_page=per_page,
+                sort=sort,
                 rating_min=rating_min,
                 date_from=date_from,
                 date_to=date_to,
                 keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
                 color_label=color_label,
                 flag=flag,
+                location_status=location_status,
             )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+
+        # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
+        if not any([folder_id, collection_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
+            total = db.count_photos()
+        else:
+            try:
+                total = db.count_filtered_photos(
+                    folder_id=folder_id,
+                    collection_id=collection_id,
+                    rating_min=rating_min,
+                    date_from=date_from,
+                    date_to=date_to,
+                    keyword=keyword,
+                    keyword_match_case=keyword_match_case,
+                    keyword_whole_word=keyword_whole_word,
+                    color_label=color_label,
+                    flag=flag,
+                    location_status=location_status,
+                )
+            except ValueError as exc:
+                return json_error(str(exc), 400)
 
         photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
         _attach_species(db, photo_dicts)
+        _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
         _attach_edit_recipes(db, photo_dicts)
 
@@ -3133,26 +5148,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
+        collection_id = request.args.get("collection_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
 
-        photo_ids = db.get_photo_ids(
-            folder_id=folder_id,
-            sort=sort,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            color_label=color_label,
-            flag=flag,
-        )
+        try:
+            photo_ids = db.get_photo_ids(
+                folder_id=folder_id,
+                collection_id=collection_id,
+                sort=sort,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
+                color_label=color_label,
+                flag=flag,
+                location_status=location_status,
+            )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
         return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
 
     @app.route("/api/photos/calendar")
@@ -3164,14 +5190,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         folder_id = request.args.get("folder_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
         data = db.get_calendar_data(
             year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword,
+            keyword_match_case=keyword_match_case,
+            keyword_whole_word=keyword_whole_word,
             color_label=color_label, flag=flag,
+            location_status=location_status,
         )
         return jsonify(data)
 
@@ -3183,10 +5215,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         collection_id = request.args.get("collection_id", None, type=int)
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
         return jsonify(
@@ -3196,21 +5231,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 date_from=date_from,
                 date_to=date_to,
                 keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
                 collection_id=collection_id,
                 color_label=color_label,
                 flag=flag,
+                location_status=location_status,
             )
         )
-
-    @app.route("/api/photos/color_labels")
-    def api_photos_color_labels():
-        db = _get_db()
-        ids_str = request.args.get("ids", "")
-        if not ids_str:
-            return jsonify({})
-        photo_ids = [int(x) for x in ids_str.split(",") if x.strip().isdigit()]
-        labels = db.get_color_labels_for_photos(photo_ids)
-        return jsonify(labels)
 
     @app.route("/api/photos/<int:photo_id>")
     def api_photo_detail(photo_id):
@@ -3223,6 +5251,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("not found", 404)
 
         result = dict(photo)
+        _attach_location_statuses(db, [result])
 
         # Parse exif_data JSON into metadata field
         raw_exif = result.pop("exif_data", None)
@@ -3237,21 +5266,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         keywords = db.get_photo_keywords(photo_id)
         result["keywords"] = [dict(k) for k in keywords]
 
-        # Life-list block: the photo's eligible species plus whether this photo
-        # is the current representative for each, so the shared lightbox and
-        # browse context menu can offer "Add to Life List" and show the honest
-        # selected state without page-local data. Empty when the photo has no
-        # lifelist species (built from the same eligibility rule as the list).
-        life_list_prefs = db.get_photo_preferences("life_list")
+        # Representative block: the photo's eligible species plus whether this
+        # photo is the primary species representative. Only the primary (item 0
+        # of get_species_representative_lists, which sorts newest-selection
+        # first) flips these flags — secondary reps stay false so shared UI
+        # code (context menus, panel buttons) can still offer to promote them
+        # via set_species_representative's re-select-to-newest behavior.
+        # Keep the legacy ``life_list`` key because shared lightbox/menu code
+        # reads it.
+        representatives = db.get_species_representative_lists(eligible_only=True)
+        life_list_species = db.get_photo_life_list_species(photo_id)
+        primary_by_species = {
+            species: (photo_ids[0] if photo_ids else None)
+            for species, photo_ids in representatives.items()
+        }
         result["life_list"] = [
-            {"species": s, "is_current_photo": life_list_prefs.get(s) == photo_id}
-            for s in db.get_photo_life_list_species(photo_id)
+            {
+                "species": s,
+                "is_current_photo": photo_id == primary_by_species.get(s),
+                "is_species_representative": photo_id == primary_by_species.get(s),
+            }
+            for s in life_list_species
         ]
+        result["species_representatives"] = result["life_list"]
+        result["highlight_list"] = _photo_highlight_entries(db, photo_id)
 
         # Location section: pre-resolved leaf + parent chain so the photo
         # detail panel can render the filled state without a second roundtrip.
         result["location"] = _serialize_photo_location(db, photo_id)
         result["edit_recipe"] = db.get_photo_edit_recipe(photo_id)
+        # The shared lightbox normally warms /original after /full settles.
+        # In full-resolution preview mode /full already redirects to /original,
+        # so tell the client not to repeat that potentially expensive RAW work.
+        import config as cfg
+        result["full_uses_original"] = (
+            db.get_effective_config(cfg.load()).get("preview_max_size") == 0
+        )
 
         # Read XMP sidecar keywords
         folder = db.conn.execute(
@@ -3312,7 +5362,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo = db.get_photo(pid, verify_workspace=True)
             if photo:
                 photos.append(dict(photo))
+        _attach_location_statuses(db, photos)
         _attach_species(db, photos)
+        _attach_species_representatives(db, photos)
         _attach_detections(db, photos)
         return jsonify({"photos": photos})
 
@@ -3488,6 +5540,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         species = request.args.get("species", None)
 
         photos = db.get_geolocated_photos(
@@ -3496,12 +5550,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             date_from=date_from,
             date_to=date_to,
             keyword=keyword,
+            keyword_match_case=keyword_match_case,
+            keyword_whole_word=keyword_whole_word,
             species=species,
         )
 
         total_photos = db.count_photos()
-        total_without_gps = db.count_photos_without_gps()
-        total_with_gps = total_photos - total_without_gps
+        total_without_coordinates = db.count_photos_without_coordinates()
+        total_geolocated = total_photos - total_without_coordinates
 
         photo_dicts = [dict(p) for p in photos]
         _attach_edit_recipes(db, photo_dicts)
@@ -3510,8 +5566,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "photos": photo_dicts,
             "total_filtered": len(photos),
             "total_photos": total_photos,
-            "total_with_gps": total_with_gps,
-            "total_without_gps": total_without_gps,
+            "total_geolocated": total_geolocated,
+            "total_without_coordinates": total_without_coordinates,
+            # Compatibility for older clients; new UI uses coordinate-neutral
+            # names because assigned locations are included in these totals.
+            "total_with_gps": total_geolocated,
+            "total_without_gps": total_without_coordinates,
         })
 
     @app.route("/api/species")
@@ -3534,7 +5594,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/keywords/duplicates")
     def api_keyword_duplicates():
-        """Find case-insensitive duplicate keywords within current workspace."""
+        """Find case-insensitive duplicate keywords within current workspace.
+
+        Groups by the same slot key as merge_duplicate_keywords()
+        — (LOWER(name), parent_id, type, species-bearing) — so the UI does
+        not report legitimate same-name-different-slot rows (a taxonomy
+        `Robin` and an individual `Robin`, a legacy species-bearing general
+        and an ordinary general homonym, or leaves under different parents)
+        as duplicates the cleanup endpoint can never actually merge.
+        """
         db = _get_db()
         ws = db._active_workspace_id
         dupes = db.conn.execute(
@@ -3545,7 +5613,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?
-               GROUP BY LOWER(k.name) HAVING COUNT(DISTINCT k.id) > 1""",
+               GROUP BY LOWER(k.name), k.parent_id, k.type,
+                        CASE WHEN k.type = 'taxonomy' OR k.is_species = 1
+                             THEN 1 ELSE 0 END
+               HAVING COUNT(DISTINCT k.id) > 1""",
             (ws,),
         ).fetchall()
         results = []
@@ -3579,6 +5650,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _queue_keyword_add(photo_id, keyword_name, workspace_id=None, _commit=True):
         """Queue a keyword add unless it cancels a pending removal."""
+        # Normalize before the cancellation lookup: queue_change normalizes
+        # on insert, so pending values are stored in clean form and an
+        # exact-match cancel against a raw variant would miss its pair.
+        keyword_name = normalize_keyword_display(keyword_name)
+        if not keyword_name:
+            return
         db = _get_db()
         removed = db.remove_pending_changes(
             photo_id, "keyword_remove", keyword_name,
@@ -3592,6 +5669,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _queue_keyword_remove(photo_id, keyword_name, workspace_id=None, _commit=True):
         """Queue a keyword removal unless it cancels a pending add."""
+        # See _queue_keyword_add: keep the cancellation lookup in the same
+        # normalized form queue_change stores.
+        keyword_name = normalize_keyword_display(keyword_name)
+        if not keyword_name:
+            return
         db = _get_db()
         removed = db.remove_pending_changes(
             photo_id, "keyword_add", keyword_name,
@@ -3773,7 +5855,272 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error("collection not found", 404)
         return db.get_collection_photo_ids(collection_id), None
 
-    def _bulk_gps_location_payload(db, body):
+    def _location_review_groups(photos, cluster_radius_m=750.0):
+        """Cluster photos by their observed coordinates for human review.
+
+        Reverse-geocoded place ids are deliberately not involved: they are
+        suggestions for the reviewer, not the identity of a coordinate group.
+        A small spatial hash keeps the neighbor search close to O(n) for large
+        libraries while connected components allow a photographed route to
+        remain one reviewable area.
+        """
+        valid = []
+        unresolved = []
+        for order, photo in enumerate(photos):
+            lat = photo["latitude"]
+            lng = photo["longitude"]
+            if lat is None or lng is None:
+                unresolved.append({
+                    "photo_id": photo["id"],
+                    "filename": photo["filename"],
+                    "reason": "missing_gps",
+                })
+                continue
+            try:
+                lat = float(lat)
+                lng = float(lng)
+            except (TypeError, ValueError):
+                lat = lng = math.nan
+            if (
+                not math.isfinite(lat)
+                or not math.isfinite(lng)
+                or not -90 <= lat <= 90
+                or not -180 <= lng <= 180
+            ):
+                unresolved.append({
+                    "photo_id": photo["id"],
+                    "filename": photo["filename"],
+                    "reason": "invalid_gps",
+                })
+                continue
+            valid.append({
+                "photo": photo,
+                "order": order,
+                "lat": lat,
+                "lng": lng,
+            })
+
+        if not valid:
+            return [], unresolved
+
+        earth_radius_m = 6_371_000.0
+        reference_lat = math.radians(
+            sum(item["lat"] for item in valid) / len(valid)
+        )
+        reference_lng = valid[0]["lng"]
+
+        def projected(item):
+            lng_delta = ((item["lng"] - reference_lng + 180.0) % 360.0) - 180.0
+            return (
+                earth_radius_m * math.radians(lng_delta) * math.cos(reference_lat),
+                earth_radius_m * math.radians(item["lat"]),
+            )
+
+        parents = list(range(len(valid)))
+
+        def find(index):
+            while parents[index] != index:
+                parents[index] = parents[parents[index]]
+                index = parents[index]
+            return index
+
+        def union(left, right):
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parents[right_root] = left_root
+
+        buckets = {}
+        radius_sq = cluster_radius_m * cluster_radius_m
+        for index, item in enumerate(valid):
+            x_coord, y_coord = projected(item)
+            item["x"] = x_coord
+            item["y"] = y_coord
+            cell = (
+                math.floor(x_coord / cluster_radius_m),
+                math.floor(y_coord / cluster_radius_m),
+            )
+            for x_offset in (-1, 0, 1):
+                for y_offset in (-1, 0, 1):
+                    for neighbor in buckets.get(
+                        (cell[0] + x_offset, cell[1] + y_offset), []
+                    ):
+                        dx = x_coord - valid[neighbor]["x"]
+                        dy = y_coord - valid[neighbor]["y"]
+                        if dx * dx + dy * dy <= radius_sq:
+                            union(index, neighbor)
+            buckets.setdefault(cell, []).append(index)
+
+        components = {}
+        for index, item in enumerate(valid):
+            components.setdefault(find(index), []).append(item)
+
+        ordered = sorted(
+            components.values(),
+            key=lambda items: min(item["order"] for item in items),
+        )
+        groups = []
+        for group_index, items in enumerate(ordered, start=1):
+            center_lat = sum(item["lat"] for item in items) / len(items)
+            # Longitudes were normalized around the first input point above;
+            # use the same frame so groups around the antimeridian do not get
+            # a center near Greenwich.
+            lng_deltas = [
+                ((item["lng"] - reference_lng + 180.0) % 360.0) - 180.0
+                for item in items
+            ]
+            center_lng = (
+                reference_lng + sum(lng_deltas) / len(lng_deltas) + 180.0
+            ) % 360.0 - 180.0
+            center_x = sum(item["x"] for item in items) / len(items)
+            center_y = sum(item["y"] for item in items) / len(items)
+            spread_m = max(
+                math.hypot(item["x"] - center_x, item["y"] - center_y)
+                for item in items
+            )
+            timestamps = sorted(
+                item["photo"]["timestamp"]
+                for item in items
+                if item["photo"]["timestamp"]
+            )
+            photo_data = [{
+                "id": item["photo"]["id"],
+                "filename": item["photo"]["filename"],
+                "timestamp": item["photo"]["timestamp"],
+                "latitude": item["lat"],
+                "longitude": item["lng"],
+            } for item in sorted(items, key=lambda item: item["order"])]
+            groups.append({
+                "id": f"group-{group_index}",
+                "count": len(photo_data),
+                "photo_ids": [photo["id"] for photo in photo_data],
+                "photos": photo_data,
+                "sample_filenames": [
+                    photo["filename"] for photo in photo_data[:3]
+                ],
+                "center": {"lat": center_lat, "lng": center_lng},
+                "bounds": {
+                    "south": min(item["lat"] for item in items),
+                    "west": min(item["lng"] for item in items),
+                    "north": max(item["lat"] for item in items),
+                    "east": max(item["lng"] for item in items),
+                },
+                "spread_m": round(spread_m, 1),
+                "captured_from": timestamps[0] if timestamps else None,
+                "captured_to": timestamps[-1] if timestamps else None,
+            })
+        return groups, unresolved
+
+    @app.route("/api/location-review/preview", methods=["POST"])
+    def api_location_review_preview():
+        """Return coordinate-derived groups without choosing place names."""
+        body = request.get_json(silent=True) or {}
+        db = _get_db()
+        photo_ids, error = _bulk_gps_location_source_ids(db, body)
+        if error is not None:
+            return error
+        if not photo_ids:
+            return jsonify({
+                "total": 0,
+                "reviewable": 0,
+                "groups": [],
+                "unresolved": [],
+                "skipped": [],
+            })
+
+        photos_map = db.get_photos_by_ids(photo_ids)
+        if len(photos_map) != len(photo_ids):
+            return json_error("One or more photos were not found", 404)
+        for photo_id in photo_ids:
+            edit_error = _photo_location_edit_error(db, photo_id)
+            if edit_error is not None:
+                return edit_error
+
+        assigned_ids = _location_keyword_photo_ids(db, photo_ids)
+        skipped = [{
+            "photo_id": photo_id,
+            "filename": photos_map[photo_id]["filename"],
+            "reason": "already_has_location",
+        } for photo_id in photo_ids if photo_id in assigned_ids]
+        review_photos = [
+            photos_map[photo_id]
+            for photo_id in photo_ids
+            if photo_id not in assigned_ids
+        ]
+        groups, unresolved = _location_review_groups(review_photos)
+        return jsonify({
+            "total": len(photo_ids),
+            "reviewable": sum(group["count"] for group in groups),
+            "groups": groups,
+            "unresolved": unresolved,
+            "skipped": skipped,
+        })
+
+    @app.route("/api/location-review/saved-suggestions")
+    def api_location_review_saved_suggestions():
+        """Return nearby location keywords already used in this workspace."""
+        try:
+            lat = float(request.args.get("lat", ""))
+            lng = float(request.args.get("lng", ""))
+            radius_m = float(request.args.get("radius_m", "25000"))
+        except (TypeError, ValueError):
+            return json_error("invalid coordinates", 400)
+        if (
+            not math.isfinite(lat)
+            or not math.isfinite(lng)
+            or not math.isfinite(radius_m)
+            or not -90 <= lat <= 90
+            or not -180 <= lng <= 180
+            or radius_m <= 0
+        ):
+            return json_error("invalid coordinates", 400)
+        radius_m = min(radius_m, 100_000.0)
+
+        db = _get_db()
+        rows = db.conn.execute(
+            """SELECT k.id, k.name, k.place_id, k.latitude, k.longitude,
+                      k.parent_id, COUNT(DISTINCT pk.photo_id) AS photo_count
+               FROM keywords k
+               JOIN photo_keywords pk ON pk.keyword_id = k.id
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ? AND k.type = 'location'
+                 AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL
+               GROUP BY k.id""",
+            (db._ws_id(),),
+        ).fetchall()
+
+        def distance_m(row):
+            lat1 = math.radians(lat)
+            lat2 = math.radians(float(row["latitude"]))
+            delta_lat = lat2 - lat1
+            delta_lng = math.radians(float(row["longitude"]) - lng)
+            value = (
+                math.sin(delta_lat / 2) ** 2
+                + math.cos(lat1) * math.cos(lat2)
+                * math.sin(delta_lng / 2) ** 2
+            )
+            return 2 * 6_371_000.0 * math.asin(min(1.0, math.sqrt(value)))
+
+        suggestions = []
+        for row in rows:
+            distance = distance_m(row)
+            if distance > radius_m:
+                continue
+            suggestions.append({
+                "keyword_id": row["id"],
+                "name": row["name"],
+                "place_id": row["place_id"],
+                "latitude": row["latitude"],
+                "longitude": row["longitude"],
+                "photo_count": row["photo_count"],
+                "distance_m": round(distance, 1),
+                "parent_chain": _walk_parent_chain(db, row["parent_id"]),
+            })
+        suggestions.sort(key=lambda item: (item["distance_m"], -item["photo_count"], item["name"]))
+        return jsonify({"suggestions": suggestions[:8]})
+
+    def _bulk_gps_location_payload(db, body, cancel_check=None):
         """Build preview/apply data for resolving locations from EXIF GPS."""
         photo_ids, error = _bulk_gps_location_source_ids(db, body)
         if error is not None:
@@ -3787,9 +6134,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "unresolved": [],
                 "skipped": [],
             }, None
-        if len(photo_ids) > 10000:
-            return None, json_error("too many photo_ids", 400)
-
         photos_map = db.get_photos_by_ids(photo_ids)
         if len(photos_map) != len(photo_ids):
             return None, json_error("One or more photos were not found", 404)
@@ -3807,7 +6151,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         unresolved = []
         skipped = []
         ordered_group_keys = []
+        cancelled = False
         for pid in photo_ids:
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                break
             photo = photos_map[pid]
             if pid in assigned_ids:
                 skipped.append({
@@ -3855,7 +6203,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "sample_filenames": group["sample_filenames"],
             })
 
-        return {
+        result = {
             "total": len(photo_ids),
             "resolvable": sum(group["count"] for group in group_list),
             "updated": 0,
@@ -3863,45 +6211,283 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "unresolved": unresolved,
             "skipped": skipped,
             "_details_by_place_id": {k: v["details"] for k, v in groups.items()},
-        }, None
+        }
+        if cancelled:
+            result["cancelled"] = True
+        return result, None
+
+    def _validate_import_tag_options(body):
+        """Normalize optional tags attached to a photo import request."""
+        raw_tags = body.get("tags", [])
+        if not isinstance(raw_tags, list):
+            return None, None, json_error("tags must be a list of names")
+        if len(raw_tags) > 50:
+            return None, None, json_error("at most 50 import tags are allowed")
+
+        tags = []
+        seen = set()
+        for raw in raw_tags:
+            if not isinstance(raw, str):
+                return None, None, json_error(
+                    "tags must contain only strings"
+                )
+            name = normalize_keyword_display(raw)
+            if not name:
+                return None, None, json_error("import tags must not be empty")
+            if len(name) > 200:
+                return None, None, json_error(
+                    "import tags must be 200 characters or fewer"
+                )
+            match_key = keyword_match_key(name) or name.casefold()
+            if match_key not in seen:
+                seen.add(match_key)
+                tags.append(name)
+
+        location_from_gps = body.get("location_from_gps", False)
+        if not isinstance(location_from_gps, bool):
+            return None, None, json_error(
+                "location_from_gps must be a boolean"
+            )
+        return tags, location_from_gps, None
+
+    def _queue_import_keyword_add(
+        db, photo_id, keyword_name, workspace_id, *, commit=False,
+    ):
+        """Thread-safe equivalent of _queue_keyword_add for import jobs."""
+        removed = db.remove_pending_changes(
+            photo_id, "keyword_remove", keyword_name,
+            workspace_id=workspace_id, _commit=commit,
+        )
+        if removed == 0:
+            db.queue_change(
+                photo_id, "keyword_add", keyword_name,
+                workspace_id=workspace_id, _commit=commit,
+            )
+
+    def _queue_import_location_sync(
+        db, photo_id, workspace_id, *, commit=False,
+    ):
+        """Thread-safe equivalent of _queue_location_sync_if_enabled."""
+        db.remove_pending_changes(
+            photo_id, "location", workspace_id=workspace_id, _commit=commit,
+        )
+        db.queue_change(
+            photo_id, "location", "effective",
+            workspace_id=workspace_id, _commit=commit,
+        )
+
+    def _apply_import_tags(
+        workspace_id, photo_ids, tags, location_from_gps, result,
+        *, job=None, runner=None,
+    ):
+        """Apply requested common tags and per-photo GPS locations.
+
+        Tagging is deliberately post-import: ``photo_ids`` is the importer's
+        authoritative set of successfully cataloged photos, so skipped
+        archive duplicates never gain tags. Failures here do not change the
+        copy/verification result; they are reported separately in the job.
+        """
+        if not tags and not location_from_gps:
+            return
+
+        summary = {
+            "requested_tags": list(tags),
+            "tagged_photos": 0,
+            "location_requested": bool(location_from_gps),
+            "locations_added": 0,
+            "locations_unresolved": 0,
+            "locations_skipped": 0,
+            "errors": [],
+        }
+        result["tagging"] = summary
+
+        def cancel_requested():
+            cancelled = result.get("cancelled") or (
+                job is not None and runner is not None
+                and runner.is_cancelled(job["id"])
+            )
+            if cancelled:
+                # The cancellation may arrive after the importer itself has
+                # returned a successful result. Persist it on the shared
+                # result so downstream after-import chaining also stops.
+                result["cancelled"] = True
+            return cancelled
+
+        if cancel_requested():
+            summary["skipped"] = "import cancelled"
+            return
+        if not photo_ids:
+            summary["skipped"] = "no new photos"
+            return
+
+        if job is not None and runner is not None:
+            phase = (
+                "Adding tags and GPS locations"
+                if tags and location_from_gps
+                else "Adding GPS locations"
+                if location_from_gps
+                else "Adding tags"
+            )
+            runner.push_event(job["id"], "progress", {
+                "current": job["progress"].get("current", 0),
+                "total": job["progress"].get("total", 0),
+                "current_file": "",
+                "phase": phase,
+            })
+
+        thread_db = Database(db_path)
+        thread_db.set_active_workspace(workspace_id)
+        tagged_photo_ids = set()
+
+        for requested_name in tags:
+            if cancel_requested():
+                summary["skipped"] = "import cancelled"
+                break
+            try:
+                keyword_id = thread_db.add_keyword(
+                    requested_name, kw_type="general", _commit=False,
+                )
+                stored = thread_db.conn.execute(
+                    "SELECT name, parent_id, type FROM keywords WHERE id = ?",
+                    (keyword_id,),
+                ).fetchone()
+                keyword_name = (
+                    stored["name"] if stored and stored["name"]
+                    else requested_name
+                )
+                items = []
+                for photo_id in photo_ids:
+                    if cancel_requested():
+                        break
+                    exists = thread_db.conn.execute(
+                        "SELECT 1 FROM photo_keywords "
+                        "WHERE photo_id = ? AND keyword_id = ?",
+                        (photo_id, keyword_id),
+                    ).fetchone()
+                    if exists is not None:
+                        continue
+                    thread_db.tag_photo(photo_id, keyword_id, _commit=False)
+                    _queue_import_keyword_add(
+                        thread_db, photo_id, keyword_name, workspace_id,
+                    )
+                    items.append({
+                        "photo_id": photo_id,
+                        "old_value": "",
+                        "new_value": str(keyword_id),
+                    })
+                if cancel_requested():
+                    thread_db.conn.rollback()
+                    summary["skipped"] = "import cancelled"
+                    break
+                if items:
+                    thread_db.record_edit(
+                        "keyword_add",
+                        f'Added "{keyword_name}" during import to '
+                        f"{len(items)} photos",
+                        str(keyword_id), items, is_batch=True, _commit=False,
+                    )
+                thread_db.conn.commit()
+                tagged_photo_ids.update(item["photo_id"] for item in items)
+            except Exception as exc:
+                thread_db.conn.rollback()
+                log.exception("Failed to add import tag %r", requested_name)
+                summary["errors"].append(
+                    f'Could not add tag "{requested_name}": {exc}'
+                )
+        summary["tagged_photos"] = len(tagged_photo_ids)
+
+        if location_from_gps and not cancel_requested():
+            unresolved = 0
+            skipped = 0
+            added = 0
+            cancelled_during_gps = False
+            # Resolve imports in bounded chunks to limit each payload's memory
+            # use and give cancellation a chance between large batches while
+            # sharing the persistent ~110 m geocode cache.
+            for photo_chunk in _gps_location_chunks(photo_ids, size=10000):
+                if cancel_requested():
+                    cancelled_during_gps = True
+                    break
+                try:
+                    payload, error = _bulk_gps_location_payload(
+                        thread_db, {"photo_ids": photo_chunk},
+                        cancel_check=cancel_requested,
+                    )
+                    if error is not None:
+                        raise RuntimeError("location resolution was rejected")
+                    if payload.pop("cancelled", False) or cancel_requested():
+                        cancelled_during_gps = True
+                        break
+                    details_by_place_id = payload.pop(
+                        "_details_by_place_id", {}
+                    )
+                    unresolved += len(payload["unresolved"])
+                    skipped += len(payload["skipped"])
+                    for group in payload["groups"]:
+                        if cancel_requested():
+                            cancelled_during_gps = True
+                            break
+                        details = details_by_place_id.get(group["place_id"])
+                        if not details:
+                            unresolved += len(group["photo_ids"])
+                            continue
+                        try:
+                            leaf_id = thread_db.upsert_place_chain(details)
+                        except Exception as exc:
+                            log.exception(
+                                "Failed to create GPS import location %s",
+                                group["place_id"],
+                            )
+                            summary["errors"].append(
+                                f"Could not create location "
+                                f"{group.get('summary') or group['place_id']}: "
+                                f"{exc}"
+                            )
+                            unresolved += len(group["photo_ids"])
+                            continue
+                        location_items = []
+                        for photo_id in group["photo_ids"]:
+                            if cancel_requested():
+                                cancelled_during_gps = True
+                                break
+                            thread_db.set_photo_location(photo_id, leaf_id)
+                            _queue_import_location_sync(
+                                thread_db, photo_id, workspace_id,
+                            )
+                            location_items.append({
+                                "photo_id": photo_id,
+                                "old_value": "",
+                                "new_value": str(leaf_id),
+                            })
+                        added += len(location_items)
+                        if location_items:
+                            thread_db.record_edit(
+                                "location_set",
+                                f"Added GPS location during import to "
+                                f"{len(location_items)} photos",
+                                "from_exif", location_items,
+                                is_batch=True, _commit=False,
+                            )
+                    thread_db.conn.commit()
+                    if cancelled_during_gps:
+                        break
+                except Exception as exc:
+                    thread_db.conn.rollback()
+                    log.exception("Failed to add GPS locations during import")
+                    summary["errors"].append(
+                        f"Could not add GPS locations: {exc}"
+                    )
+                    unresolved += len(photo_chunk)
+            summary["locations_added"] = added
+            summary["locations_unresolved"] = unresolved
+            summary["locations_skipped"] = skipped
+            if cancelled_during_gps:
+                summary["skipped"] = "import cancelled"
+        elif location_from_gps:
+            summary["skipped"] = "import cancelled"
+        thread_db.conn.close()
 
     # -- Edit API routes --
-
-    @app.route("/api/photos/<int:photo_id>/rating", methods=["POST"])
-    def api_set_rating(photo_id):
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        rating = body.get("rating", 0)
-        if isinstance(rating, bool) or not isinstance(rating, int) or rating < 0 or rating > 5:
-            return json_error("rating must be an integer 0-5")
-        old = db.get_photo(photo_id)
-        old_rating = old["rating"] if old else 0
-        try:
-            db.update_photo_rating(photo_id, rating)
-        except ValueError as e:
-            return json_error(str(e), 403)
-        db.queue_change(photo_id, "rating", str(rating))
-        db.record_edit('rating', f'Set rating to {rating}', str(rating),
-                       [{'photo_id': photo_id, 'old_value': str(old_rating), 'new_value': str(rating)}])
-        return jsonify({"ok": True})
-
-    @app.route("/api/photos/<int:photo_id>/flag", methods=["POST"])
-    def api_set_flag(photo_id):
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        flag = body.get("flag", "none")
-        if flag not in ("none", "flagged", "rejected"):
-            return json_error("flag must be 'none', 'flagged', or 'rejected'")
-        old = db.get_photo(photo_id)
-        old_flag = old["flag"] if old else "none"
-        try:
-            db.update_photo_flag(photo_id, flag)
-        except ValueError as e:
-            return json_error(str(e), 403)
-        db.queue_flag_change_if_enabled(photo_id, flag)
-        db.record_edit('flag', f'Set flag to {flag}', flag,
-                       [{'photo_id': photo_id, 'old_value': old_flag, 'new_value': flag}])
-        return jsonify({"ok": True})
 
     @app.route("/api/photos/<int:photo_id>/wildlife_excluded", methods=["POST"])
     def api_set_wildlife_excluded(photo_id):
@@ -3927,42 +6513,60 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"ok": True, "wildlife_excluded": excluded})
 
-    @app.route("/api/photos/<int:photo_id>/color_label", methods=["POST"])
-    def api_set_color_label(photo_id):
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        color = body.get("color")
-        if color is not None and color not in db.VALID_COLOR_LABELS:
-            return json_error(f"color must be one of {db.VALID_COLOR_LABELS}")
-        # Existence + workspace checks mirror the rating/flag endpoints. A
-        # stale id from an open browse tab would otherwise hit the
-        # photo_color_labels FK and 500.
-        if db.get_photo(photo_id) is None:
-            return json_error("not found", 404)
-        try:
-            db._verify_photo_in_workspace(photo_id)
-        except ValueError as e:
-            return json_error(str(e), 403)
-        old_color = db.get_color_label(photo_id) or ''
-        new_color = color or ''
-        if color:
-            db.set_color_label(photo_id, color)
-        else:
-            db.remove_color_label(photo_id)
-        db.record_edit('color_label', f'Set color to {color or "none"}', new_color,
-                       [{'photo_id': photo_id, 'old_value': old_color, 'new_value': new_color}])
-        return jsonify({"ok": True})
-
     @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["GET"])
     def api_get_photo_edit_recipe(photo_id):
         db = _get_db()
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return json_error("not found", 404)
-        return jsonify({
-            "photo_id": photo_id,
-            "recipe": db.get_photo_edit_recipe(photo_id),
-        })
+        recipe = db.get_photo_edit_recipe(photo_id)
+        payload = {"photo_id": photo_id, "recipe": recipe}
+        if recipe and recipe.get("local"):
+            import local_masks
+            variant_row = db.conn.execute(
+                "SELECT active_mask_variant FROM photos WHERE id=?",
+                (photo_id,),
+            ).fetchone()
+            variant = variant_row["active_mask_variant"] if variant_row else None
+            mask_row = (
+                db.get_photo_mask(photo_id, variant) if variant else None
+            )
+            payload["local_mask_stale"] = local_masks.is_stale(
+                recipe, mask_row
+            )
+        return jsonify(payload)
+
+    @app.route(
+        "/api/photos/<int:photo_id>/local-mask/snapshot", methods=["POST"]
+    )
+    def api_create_local_mask_snapshot(photo_id):
+        """Freeze the photo's active SAM mask into an edit-mask snapshot.
+
+        Returns the recipe ``local.mask`` fields the editor embeds when
+        saving local adjustments. Renders read only the snapshot, so the
+        live mask can regenerate without silently changing committed edits.
+        """
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return json_error("not found", 404)
+        import local_masks
+        variant_row = db.conn.execute(
+            "SELECT active_mask_variant FROM photos WHERE id=?",
+            (photo_id,),
+        ).fetchone()
+        variant = variant_row["active_mask_variant"] if variant_row else None
+        mask_row = db.get_photo_mask(photo_id, variant) if variant else None
+        try:
+            mask = local_masks.create_snapshot(
+                photo_id=photo_id,
+                mask_row=mask_row,
+                vireo_dir=os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+                native_size=_recipe_source_dimensions(photo),
+            )
+        except ValueError as e:
+            return json_error(str(e))
+        return jsonify({"mask": mask, "stale": False})
 
     @app.route("/api/photos/<int:photo_id>/edit-recipe", methods=["PUT", "POST"])
     def api_set_photo_edit_recipe(photo_id):
@@ -3979,7 +6583,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
             return json_error("not found", 404)
-        from image_edits import RecipeError, recipe_to_json
+        from image_edits import RecipeError, normalize_recipe, recipe_to_json
+        try:
+            normalized = normalize_recipe(recipe)
+        except RecipeError as e:
+            return json_error(str(e))
+        local = (normalized or {}).get("local")
+        if local:
+            import local_masks
+            snap = local_masks.snapshot_path(
+                os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+                photo_id, local["mask"]["ref"],
+            )
+            if not os.path.exists(snap):
+                return json_error(
+                    "unknown edit-mask snapshot for this photo; create one "
+                    "via POST /api/photos/<id>/local-mask/snapshot first"
+                )
         old_recipe = db.get_photo_edit_recipe(photo_id)
         try:
             old_value = recipe_to_json(old_recipe) or ""
@@ -4066,23 +6686,67 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             description = "Pasted edit settings"
         description = description.strip()
 
+        has_local = bool(recipe.get("local"))
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
         items = []
         applied = []
         skipped = []
+        local_errors = {}
+        applied_recipes = {}
         for pid in ids:
             photo = db.get_photo(pid, verify_workspace=True)
             if not photo:
                 skipped.append(pid)
                 continue
+            target_recipe = recipe
+            if has_local:
+                # Local adjustments reference a photo-specific mask, so each
+                # target gets its OWN snapshot (frozen from its active mask);
+                # the slider values copy, the mask does not. Photos without a
+                # usable mask are skipped and reported, not silently given a
+                # wrong mask.
+                import local_masks
+                variant_row = db.conn.execute(
+                    "SELECT active_mask_variant FROM photos WHERE id=?",
+                    (pid,),
+                ).fetchone()
+                variant = (
+                    variant_row["active_mask_variant"] if variant_row else None
+                )
+                mask_row = (
+                    db.get_photo_mask(pid, variant) if variant else None
+                )
+                try:
+                    target_mask = local_masks.create_snapshot(
+                        photo_id=pid,
+                        mask_row=mask_row,
+                        vireo_dir=vireo_dir,
+                        native_size=_recipe_source_dimensions(photo),
+                    )
+                except (ValueError, OSError) as e:
+                    # OSError covers disk-write failures inside create_snapshot
+                    # (os.makedirs, f.write, os.replace) so a transient I/O
+                    # hiccup on one target doesn't abort the whole batch.
+                    skipped.append(pid)
+                    local_errors[str(pid)] = str(e)
+                    continue
+                target_recipe = copy.deepcopy(recipe)
+                target_local_mask = dict(
+                    target_recipe["local"].get("mask") or {}
+                )
+                target_local_mask.update(target_mask)
+                target_recipe["local"]["mask"] = target_local_mask
             old_recipe = db.get_photo_edit_recipe(pid)
             old_value = recipe_to_json(old_recipe) or ""
             try:
-                new_recipe = db.set_photo_edit_recipe(pid, recipe, verify_workspace=True)
+                new_recipe = db.set_photo_edit_recipe(pid, target_recipe, verify_workspace=True)
             except (RecipeError, ValueError):
                 skipped.append(pid)
                 continue
             new_value = recipe_to_json(new_recipe) or ""
             applied.append(pid)
+            applied_recipes[str(pid)] = new_recipe
             if old_value != new_value:
                 _queue_edit_recipe_sync(db, pid, new_value)
                 items.append({
@@ -4095,13 +6759,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _invalidate_photo_render_cache(db, applied)
         if items:
             db.record_edit("edit_recipe", description, target_json, items, is_batch=True)
-        return jsonify({
+        # ``recipes`` maps each applied id to the recipe actually stored for
+        # it — critical when ``has_local`` is true because each target has
+        # its own mask snapshot ref, so callers cannot reuse the pasted
+        # recipe (or the first applied recipe) for every id. ``recipe`` is
+        # kept as the first applied recipe for backwards compatibility.
+        payload = {
             "ok": True,
             "applied": applied,
             "skipped": skipped,
             "count": len(applied),
-            "recipe": db.get_photo_edit_recipe(applied[0]) if applied else None,
-        })
+            "recipe": applied_recipes[str(applied[0])] if applied else None,
+            "recipes": applied_recipes,
+        }
+        if local_errors:
+            payload["local_errors"] = local_errors
+        return jsonify(payload)
+
+    @app.route("/api/edit-presets", methods=["GET", "POST"])
+    def api_edit_presets():
+        """List or save (upsert by name) global edit presets.
+
+        Presets store an adjustments-only recipe — a reusable look. Geometry
+        is stripped on save; see db.save_edit_preset.
+        """
+        db = _get_db()
+        if request.method == "GET":
+            return jsonify({"presets": db.list_edit_presets()})
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        recipe = body.get("recipe")
+        if not isinstance(recipe, dict):
+            return json_error("recipe must be a JSON object")
+        try:
+            preset = db.save_edit_preset(body.get("name"), recipe)
+        except ValueError as e:  # includes RecipeError
+            return json_error(str(e))
+        return jsonify({"ok": True, "preset": preset})
+
+    @app.route("/api/edit-presets/<int:preset_id>", methods=["DELETE"])
+    def api_delete_edit_preset(preset_id):
+        db = _get_db()
+        if not db.delete_edit_preset(preset_id):
+            return json_error("preset not found", 404)
+        return jsonify({"ok": True})
 
     @app.route("/api/photos/<int:photo_id>/edit-history")
     def api_photo_edit_history(photo_id):
@@ -4228,14 +6930,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # "open -R <dir>" reveals the folder inside its parent; that's
                 # the right behavior for folder reveals too, consistent with
                 # how Finder treats folder-targeted reveal.
-                subprocess.run(["open", "-R", "--", path], timeout=5, check=False)
+                proc = subprocess.run(
+                    ["open", "-R", "--", path],
+                    timeout=5,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    **no_window_kwargs(),
+                )
             elif sys.platform.startswith("win"):
+                # explorer.exe's exit status is not a reliable success signal
+                # (see the returncode-check gate below), so a stale catalog
+                # entry whose path no longer exists would otherwise silently
+                # return ok=True and produce a bogus "Revealed in File
+                # Explorer" toast. Preflight the target path so those cases
+                # surface as failures instead.
                 if is_folder:
+                    if not os.path.isdir(path):
+                        return jsonify({"ok": False, "reason": "folder not found"})
                     # Open the folder itself so the user sees its contents.
-                    subprocess.run(["explorer", path], timeout=5, check=False)
+                    proc = subprocess.run(
+                        ["explorer", path],
+                        timeout=5,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        **no_window_kwargs(),
+                    )
                 else:
-                    subprocess.run(
-                        ["explorer", f"/select,{path}"], timeout=5, check=False
+                    if not os.path.isfile(path):
+                        return jsonify({"ok": False, "reason": "photo file not found"})
+                    proc = subprocess.run(
+                        ["explorer", f"/select,{path}"],
+                        timeout=5,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        **no_window_kwargs(),
                     )
             else:
                 # xdg-open on a file has inconsistent behavior across desktops
@@ -4243,11 +6974,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # photo reveals we open the parent directory instead. Passing
                 # a directory to xdg-open opens the folder in the file manager,
                 # which is exactly what we want for folder reveals.
+                #
+                # Because photo reveals target the parent directory rather than
+                # the file itself, xdg-open will happily succeed for a stale
+                # catalog entry whose folder still exists but whose photo has
+                # been deleted or moved — the user gets a "revealed" toast even
+                # though nothing is selected. Verify the photo file exists first
+                # so those cases surface as failures instead of false successes.
+                if not is_folder and not os.path.isfile(path):
+                    return jsonify({"ok": False, "reason": "photo file not found"})
                 target = path if is_folder else (os.path.dirname(path) or path)
                 # xdg-open doesn't honor `--`; abspath guarantees a leading `/`
                 # so a crafted leading-dash path can't be parsed as a flag.
                 target = os.path.abspath(target)
-                subprocess.run(["xdg-open", target], timeout=5, check=False)
+                proc = subprocess.run(
+                    ["xdg-open", target],
+                    timeout=5,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    **no_window_kwargs(),
+                )
+            # explorer.exe's exit status is not a reliable success signal:
+            # `explorer /select,<path>` (and `explorer <folder>`) routinely
+            # return 1 even when File Explorer opens correctly, with nothing
+            # useful on stdout/stderr. Skipping the returncode check on Windows
+            # avoids reporting "reveal failed" for reveals that actually worked.
+            if not sys.platform.startswith("win") and proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or "").strip()
+                if not reason:
+                    reason = f"reveal command exited {proc.returncode}"
+                return jsonify({"ok": False, "reason": reason})
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             return jsonify({"ok": False, "reason": str(exc)})
         return jsonify({"ok": True})
@@ -4285,7 +7042,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
                 else None
             )
-            kid = db.add_keyword(name, kw_type=kw_type)
+            try:
+                kid = db.add_keyword(name, kw_type=kw_type)
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Queue/record the stored spelling: add_keyword normalizes
+            # punctuation and applies the species casing convention, so it
+            # can differ from the raw request name.
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored:
+                name = stored["name"]
+        # tag_photo is INSERT OR IGNORE, so a repeated Add click on a
+        # keyword the photo already carries would still queue a
+        # keyword_add sidecar change and record a keyword_add edit whose
+        # undo calls untag_photo — removing the pre-existing tag. Skip
+        # the pending/history bookkeeping when the row already exists, so
+        # the second click is a true no-op (mirrors the batch route's
+        # already_tagged precheck).
+        already_tagged = db.conn.execute(
+            "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+            (photo_id, kid),
+        ).fetchone() is not None
+        if already_tagged:
+            return jsonify({"ok": True, "keyword_id": kid})
         db.tag_photo(photo_id, kid)
         _queue_keyword_add(photo_id, name)
         db.record_edit('keyword_add', f'Added keyword "{name}"', str(kid),
@@ -4311,7 +7092,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/selection/keyword-suggestions", methods=["POST"])
     def api_selection_keyword_suggestions():
-        """Return selected keywords that are present on some, but not all photos."""
+        """Return selected keywords and which selected photos carry each one."""
         db = _get_db()
         body = request.get_json(silent=True) or {}
         raw_ids = body.get("photo_ids", [])
@@ -4365,53 +7146,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             entry["photo_ids"].add(row["photo_id"])
 
-        suggestions = []
+        keywords = []
         for entry in by_keyword.values():
             count = len(entry["photo_ids"])
             missing_count = selected_count - count
-            if 0 < count < selected_count:
-                missing_photo_ids = [
-                    pid for pid in photo_ids if pid not in entry["photo_ids"]
-                ]
-                suggestions.append({
-                    "id": entry["id"],
-                    "name": entry["name"],
-                    "type": entry["type"],
-                    "count": count,
-                    "missing_count": missing_count,
-                    "missing_photo_ids": missing_photo_ids,
-                })
-        suggestions.sort(
+            present_photo_ids = [
+                pid for pid in photo_ids if pid in entry["photo_ids"]
+            ]
+            missing_photo_ids = [
+                pid for pid in photo_ids if pid not in entry["photo_ids"]
+            ]
+            item = {
+                "id": entry["id"],
+                "name": entry["name"],
+                "type": entry["type"],
+                "count": count,
+                "missing_count": missing_count,
+                "present_photo_ids": present_photo_ids,
+                "missing_photo_ids": missing_photo_ids,
+            }
+            keywords.append(item)
+        keywords.sort(
             key=lambda item: (-item["count"], item["name"].lower(), item["id"])
         )
-        return jsonify({"selected_count": selected_count, "suggestions": suggestions})
+        suggestions = [item for item in keywords if 0 < item["count"] < selected_count]
+        return jsonify({
+            "selected_count": selected_count,
+            "keywords": keywords,
+            "suggestions": suggestions,
+        })
 
     @app.route("/api/keywords/<int:keyword_id>", methods=["PUT"])
     def api_update_keyword(keyword_id):
         db = _get_db()
         body = request.get_json(silent=True) or {}
-        # Capture old name before update for sidecar queuing
-        new_name = body.get("name")
-        old_name = None
-        old_is_species_keyword = False
-        if new_name:
-            old_row = db.conn.execute(
-                """SELECT name, is_species, type
-                   FROM keywords WHERE id = ?""",
-                (keyword_id,),
-            ).fetchone()
-            if old_row and old_row["name"] != new_name:
-                old_name = old_row["name"]
-                old_is_species_keyword = (
-                    old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
-                )
-        # Apply the update first — if it raises, no sidecar changes are queued
-        try:
-            db.update_keyword(keyword_id, **body)
-        except ValueError as e:
-            return json_error(str(e), 400)
-        # Queue sidecar updates only after successful DB update, for all affected workspaces
-        if old_name:
+        # Capture old identity and tagged photos BEFORE the update: a rename
+        # or retype can merge this row into a normalized same-slot peer, in
+        # which case the original id and its photo_keywords rows are gone
+        # afterwards (update_keyword returns the surviving id).
+        old_row = db.conn.execute(
+            """SELECT name, is_species, type
+               FROM keywords WHERE id = ?""",
+            (keyword_id,),
+        ).fetchone()
+        affected = []
+        # Capture affected photos whenever a rename OR a retype is being
+        # requested: update_keyword's merge-into-peer path can move photo
+        # tags for either kind of change (a type-only PUT with an existing
+        # same-name peer under the new type moves the tagged photos onto the
+        # peer's stored spelling), and without the snapshot the
+        # keyword_remove/keyword_add sidecar queueing below iterates an
+        # empty list and XMP keeps exporting the old spelling until another
+        # edit occurs.
+        if body.get("name") or body.get("type"):
             affected = db.conn.execute(
                 """SELECT pk.photo_id, wf.workspace_id
                    FROM photo_keywords pk
@@ -4420,25 +7207,53 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                    WHERE pk.keyword_id = ?""",
                 (keyword_id,),
             ).fetchall()
-            new_row = db.conn.execute(
-                """SELECT is_species, type
-                   FROM keywords WHERE id = ?""",
-                (keyword_id,),
-            ).fetchone()
+        # Apply the update first — if it raises, no sidecar changes are queued
+        try:
+            effective_id = db.update_keyword(keyword_id, **body)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        # Queue sidecar updates only after a successful DB update, using the
+        # STORED spelling of the surviving row — update_keyword normalizes
+        # the requested name, so it can differ from the raw request value.
+        new_row = db.conn.execute(
+            """SELECT name, is_species, type
+               FROM keywords WHERE id = ?""",
+            (effective_id,),
+        ).fetchone()
+        if (
+            old_row is not None and new_row is not None
+            and old_row["name"] != new_row["name"]
+        ):
+            old_name = old_row["name"]
+            new_name = new_row["name"]
+            old_is_species_keyword = (
+                old_row["is_species"] == 1 or old_row["type"] == "taxonomy"
+            )
             new_is_species_keyword = (
-                new_row is not None
-                and (new_row["is_species"] == 1 or new_row["type"] == "taxonomy")
+                new_row["is_species"] == 1 or new_row["type"] == "taxonomy"
             )
             if old_is_species_keyword and new_is_species_keyword:
+                pairs = [
+                    (row["photo_id"], row["workspace_id"]) for row in affected
+                ]
                 db.rename_photo_preferences_species(
                     old_name,
                     new_name,
-                    [(row["photo_id"], row["workspace_id"]) for row in affected],
+                    pairs,
+                )
+                db.rename_species_highlights_species(
+                    old_name,
+                    new_name,
+                    pairs,
                 )
             for row in affected:
                 _queue_keyword_remove(row["photo_id"], old_name, workspace_id=row["workspace_id"])
                 _queue_keyword_add(row["photo_id"], new_name, workspace_id=row["workspace_id"])
-        return jsonify({"ok": True})
+        # keywords.html's updateType/renameKeyword/bulk-apply handlers refetch
+        # only when `merged` is truthy; without it the UI keeps the deleted
+        # source id and its next edit/delete would 404 or hit the wrong row.
+        merged = effective_id != keyword_id
+        return jsonify({"ok": True, "keyword_id": effective_id, "merged": merged})
 
     @app.route("/api/keywords/<int:keyword_id>", methods=["DELETE"])
     def api_delete_keyword(keyword_id):
@@ -4808,6 +7623,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name.strip():
             return json_error("missing name", 400)
         stripped = name.strip()
+        latitude = body.get("latitude")
+        longitude = body.get("longitude")
+        if (latitude is None) != (longitude is None):
+            return json_error("latitude and longitude must be provided together", 400)
+        if latitude is not None:
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+            except (TypeError, ValueError):
+                return json_error("invalid coordinates", 400)
+            if (
+                not math.isfinite(latitude)
+                or not math.isfinite(longitude)
+                or not -90 <= latitude <= 90
+                or not -180 <= longitude <= 180
+            ):
+                return json_error("invalid coordinates", 400)
 
         db = _get_db()
         edit_error = _photo_location_edit_error(db, photo_id)
@@ -4818,6 +7650,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError:
             # Defensive: validation above should already catch empty input.
             return json_error("missing name", 400)
+        if latitude is not None:
+            db.conn.execute(
+                "UPDATE keywords SET latitude = COALESCE(latitude, ?), "
+                "longitude = COALESCE(longitude, ?) WHERE id = ?",
+                (latitude, longitude, leaf_id),
+            )
+            db.conn.commit()
         db.set_photo_location(photo_id, leaf_id)
         _queue_location_sync_if_enabled(photo_id)
         db.record_edit(
@@ -4853,6 +7692,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name.strip():
             return json_error("missing name", 400)
         stripped = name.strip()
+        latitude = body.get("latitude")
+        longitude = body.get("longitude")
+        if (latitude is None) != (longitude is None):
+            return json_error("latitude and longitude must be provided together", 400)
+        if latitude is not None:
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+            except (TypeError, ValueError):
+                return json_error("invalid coordinates", 400)
+            if (
+                not math.isfinite(latitude)
+                or not math.isfinite(longitude)
+                or not -90 <= latitude <= 90
+                or not -180 <= longitude <= 180
+            ):
+                return json_error("invalid coordinates", 400)
 
         db = _get_db()
         for pid in photo_ids:
@@ -4864,6 +7720,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             leaf_id = db.get_or_create_text_location(stripped)
         except ValueError:
             return json_error("missing name", 400)
+        if latitude is not None:
+            # A custom name chosen from the map should be available as a
+            # nearby saved suggestion next time. Preserve an existing
+            # location's established map point when the name is reused.
+            db.conn.execute(
+                "UPDATE keywords SET latitude = COALESCE(latitude, ?), "
+                "longitude = COALESCE(longitude, ?) WHERE id = ?",
+                (latitude, longitude, leaf_id),
+            )
+            db.conn.commit()
 
         items = []
         for pid in photo_ids:
@@ -5284,55 +8150,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Batch operations --
 
-    @app.route("/api/batch/rating", methods=["POST"])
-    def api_batch_rating():
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
-        rating = body.get("rating", 0)
-        if isinstance(rating, bool) or not isinstance(rating, int) or rating < 0 or rating > 5:
-            return json_error("rating must be an integer 0-5")
-        if not photo_ids:
-            return json_error("photo_ids required")
-        photos_map = db.get_photos_by_ids(photo_ids)
-        old_values = {pid: photos_map[pid]["rating"] for pid in photo_ids if pid in photos_map}
-        valid_ids = list(old_values.keys())
-        try:
-            db.batch_update_photo_rating(valid_ids, rating)
-        except ValueError as e:
-            return json_error(str(e), 403)
-        for pid in valid_ids:
-            db.queue_change(pid, "rating", str(rating))
-        items = [{'photo_id': pid, 'old_value': str(old_values[pid]), 'new_value': str(rating)} for pid in old_values]
-        db.record_edit('rating', f'Set rating to {rating} on {len(photo_ids)} photos',
-                       str(rating), items, is_batch=True)
-        return jsonify({"ok": True, "updated": len(old_values)})
-
-    @app.route("/api/batch/flag", methods=["POST"])
-    def api_batch_flag():
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
-        flag = body.get("flag", "none")
-        if flag not in ("none", "flagged", "rejected"):
-            return json_error("flag must be 'none', 'flagged', or 'rejected'")
-        if not photo_ids:
-            return json_error("photo_ids required")
-        photos_map = db.get_photos_by_ids(photo_ids)
-        old_values = {pid: photos_map[pid]["flag"] for pid in photo_ids if pid in photos_map}
-        valid_ids = list(old_values.keys())
-        try:
-            db.batch_update_photo_flag(valid_ids, flag)
-        except ValueError as e:
-            return json_error(str(e), 403)
-        for pid in valid_ids:
-            db.queue_flag_change_if_enabled(pid, flag, _commit=False)
-        db.conn.commit()
-        items = [{'photo_id': pid, 'old_value': old_values[pid], 'new_value': flag} for pid in old_values]
-        db.record_edit('flag', f'Set flag to {flag} on {len(photo_ids)} photos',
-                       flag, items, is_batch=True)
-        return jsonify({"ok": True, "updated": len(old_values)})
-
     @app.route("/api/batch/best-batch-flags", methods=["POST"])
     def api_batch_best_batch_flags():
         db = _get_db()
@@ -5404,41 +8221,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             },
         })
 
-    @app.route("/api/batch/color_label", methods=["POST"])
-    def api_batch_color_label():
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        photo_ids = body.get("photo_ids", [])
-        color = body.get("color")
-        if color is not None and color not in db.VALID_COLOR_LABELS:
-            return json_error(f"color must be one of {db.VALID_COLOR_LABELS}")
-        if not photo_ids:
-            return json_error("photo_ids required")
-        # Filter to photos that exist AND are visible in the active workspace
-        # (mirrors api_batch_rating's stale-id filtering). Stale ids would
-        # otherwise hit the photo_color_labels FK and abort the batch with a
-        # 500 partway through.
-        photos_map = db.get_photos_by_ids(photo_ids)
-        ws_folder_ids = {
-            r["folder_id"] for r in db.conn.execute(
-                "SELECT folder_id FROM workspace_folders WHERE workspace_id = ?",
-                (db._ws_id(),),
-            )
-        }
-        valid_ids = list(dict.fromkeys(
-            pid for pid in photo_ids
-            if pid in photos_map and photos_map[pid]["folder_id"] in ws_folder_ids
-        ))
-        old_labels = db.get_color_labels_for_photos(valid_ids)
-        new_color = color or ''
-        db.batch_set_color_label(valid_ids, color)
-        items = [{'photo_id': pid, 'old_value': old_labels.get(pid, ''), 'new_value': new_color}
-                 for pid in valid_ids]
-        if items:
-            db.record_edit('color_label', f'Set color to {color or "none"} on {len(valid_ids)} photos',
-                           new_color, items, is_batch=True)
-        return jsonify({"ok": True, "updated": len(valid_ids)})
-
     @app.route("/api/batch/keyword", methods=["POST"])
     def api_batch_keyword():
         db = _get_db()
@@ -5471,7 +8253,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if isinstance(kw_type_raw, str) and kw_type_raw in KEYWORD_TYPES
                 else None
             )
-            kid = db.add_keyword(name, kw_type=kw_type)
+            try:
+                kid = db.add_keyword(name, kw_type=kw_type)
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Queue/record the stored spelling (see api_add_keyword).
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored:
+                name = stored["name"]
 
         already_tagged = set()
         batch_size = 800
@@ -5495,17 +8286,89 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                            str(kid), items, is_batch=True)
         return jsonify({"ok": True, "updated": len(added_ids)})
 
-    @app.route("/api/batch/delete", methods=["POST"])
-    def api_batch_delete():
-        """Delete photos from Vireo, optionally moving files to trash."""
+    @app.route("/api/batch/keyword-remove", methods=["POST"])
+    def api_batch_keyword_remove():
         db = _get_db()
         body = request.get_json(silent=True) or {}
         photo_ids = body.get("photo_ids", [])
-        mode = body.get("mode", "vireo")
-        include_companions = body.get("include_companions", False)
-        # For disk_permanent retry: accept paths directly since DB rows
-        # were already deleted in the initial disk-mode call.
-        paths = body.get("paths", [])
+        keyword_id = body.get("keyword_id")
+        if not isinstance(photo_ids, list) or not photo_ids:
+            return json_error("photo_ids required")
+        if isinstance(keyword_id, bool) or not isinstance(keyword_id, int):
+            return json_error("keyword_id must be an integer")
+
+        clean_ids = []
+        seen = set()
+        for raw in photo_ids:
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return json_error("photo_ids must be integers")
+            if raw not in seen:
+                clean_ids.append(raw)
+                seen.add(raw)
+        if not clean_ids:
+            return json_error("photo_ids required")
+
+        keyword_row = db.conn.execute(
+            "SELECT id, name FROM keywords WHERE id = ?", (keyword_id,)
+        ).fetchone()
+        if keyword_row is None:
+            return json_error("keyword not found", 404)
+
+        for pid in clean_ids:
+            if not db._photo_in_workspace(pid):
+                return json_error(
+                    f"Photo {pid} does not belong to the active workspace", 403
+                )
+
+        tagged_ids = []
+        batch_size = 800
+        for i in range(0, len(clean_ids), batch_size):
+            chunk = clean_ids[i:i + batch_size]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT photo_id FROM photo_keywords
+                    WHERE keyword_id = ? AND photo_id IN ({placeholders})""",
+                [keyword_id] + chunk,
+            ).fetchall()
+            tagged_ids.extend(row["photo_id"] for row in rows)
+
+        tagged_set = set(tagged_ids)
+        removed_ids = [pid for pid in clean_ids if pid in tagged_set]
+        name = keyword_row["name"]
+        for pid in removed_ids:
+            db.untag_photo(pid, keyword_id)
+            _queue_keyword_remove(pid, name)
+
+        items = [
+            {"photo_id": pid, "old_value": str(keyword_id), "new_value": ""}
+            for pid in removed_ids
+        ]
+        if items:
+            db.record_edit(
+                "keyword_remove",
+                f'Removed "{name}" from {len(removed_ids)} photos',
+                str(keyword_id),
+                items,
+                is_batch=True,
+            )
+        return jsonify({"ok": True, "updated": len(removed_ids)})
+
+    def _run_batch_delete(
+        db, photo_ids, mode="vireo", include_companions=False, paths=None,
+        progress_callback=None,
+    ):
+        """Delete photos using the same phases for sync and job endpoints."""
+        paths = paths or []
+
+        def emit(phase, current=0, total=0, current_file="", detail=""):
+            if progress_callback:
+                progress_callback({
+                    "phase": phase,
+                    "current": current,
+                    "total": total,
+                    "current_file": current_file,
+                    "detail": detail,
+                })
 
         if mode == "disk_permanent" and paths:
             # Retry path: DB rows were already deleted by the initial
@@ -5516,8 +8379,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # files) is refused, not removed.
             trashed = 0
             trash_failed = []
-            for p in paths:
+            total_paths = len(paths)
+            emit("Deleting files permanently", 0, total_paths)
+            for idx, p in enumerate(paths, start=1):
                 if not isinstance(p, str) or not p:
+                    emit("Deleting files permanently", idx, total_paths)
                     continue
                 candidates = {os.path.dirname(p), os.path.dirname(os.path.realpath(p))}
                 known = db.conn.execute(
@@ -5529,8 +8395,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "Refusing disk_permanent retry for path outside Vireo folders: %s", p
                     )
                     trash_failed.append({"path": p, "error": "not in a Vireo folder"})
+                    emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
                     continue
                 if not os.path.isfile(p):
+                    emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
                     continue
                 try:
                     os.remove(p)
@@ -5538,15 +8406,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 except OSError:
                     log.warning("Permanent delete failed for %s", p, exc_info=True)
                     trash_failed.append({"path": p})
-            return jsonify({
+                emit("Deleting files permanently", idx, total_paths, os.path.basename(p))
+            return {
                 "ok": True, "deleted": 0, "trashed": trashed,
                 "trash_failed": trash_failed,
-            })
+            }
 
         if not photo_ids:
-            return json_error("photo_ids required")
+            raise ValueError("photo_ids required")
         if mode not in ("vireo", "disk", "disk_permanent"):
-            return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
+            raise ValueError("mode must be 'vireo', 'disk', or 'disk_permanent'")
 
         # Chunked because delete_photos issues several IN-clause queries; a
         # 1000+ id request would hit SQLite's bound-parameter cap on legacy
@@ -5559,6 +8428,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # later chunk doesn't leave the cache permanently stripped of rows
         # the DB just restored.
         result = {"deleted": 0, "ids": [], "files": []}
+        total_requested = len(photo_ids)
+        prepared = 0
+        emit(
+            "Removing from Vireo",
+            0,
+            total_requested,
+            detail="Preparing database changes; nothing is committed yet.",
+        )
         try:
             for chunk in _chunked(photo_ids):
                 chunk_result = db.delete_photos(
@@ -5569,67 +8446,190 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 result["deleted"] += chunk_result["deleted"]
                 result["ids"].extend(chunk_result["ids"])
                 result["files"].extend(chunk_result["files"])
+                prepared += len(chunk)
+                emit(
+                    "Removing from Vireo",
+                    min(prepared, total_requested),
+                    total_requested,
+                    detail="Preparing database changes; nothing is committed yet.",
+                )
             db.conn.commit()
         except Exception:
             db.conn.rollback()
             raise
+        emit(
+            "Removed from Vireo",
+            result["deleted"],
+            result["deleted"],
+            detail="Database changes committed.",
+        )
 
         # Run the deferred non-DB side effects only after the outer
         # transaction committed successfully.
-        db.prune_pipeline_cache_for_ids(result["ids"])
-        _cleanup_cached_files_for_deleted_photos(result["files"])
+        emit("Pruning pipeline cache", 0, 1)
+        try:
+            db.prune_pipeline_cache_for_ids(result["ids"])
+        except BaseException as exc:
+            _reraise_fatal_cleanup_error(exc)
+            log.exception("Failed to prune pipeline cache after delete")
+        emit("Pruning pipeline cache", 1, 1)
+
+        def cache_progress(current, total, filename):
+            emit("Cleaning cached files", current, total, filename)
+
+        emit("Cleaning cached files", 0, len(result["files"]))
+        _cleanup_cached_files_for_deleted_photos(
+            result["files"], progress_callback=cache_progress,
+        )
 
         trashed = 0
         trash_failed = []
         if mode in ("disk", "disk_permanent"):
+            disk_targets = []
             for f in result["files"]:
                 # Collect all files to delete: primary + companion
-                file_paths = []
                 primary = os.path.join(f["folder_path"], f["filename"])
-                file_paths.append(primary)
+                disk_targets.append(primary)
                 if include_companions and f.get("companion_path"):
                     companion = os.path.join(f["folder_path"], f["companion_path"])
-                    file_paths.append(companion)
+                    disk_targets.append(companion)
 
-                for filepath in file_paths:
-                    if not os.path.isfile(filepath):
-                        log.warning("File already missing: %s", filepath)
-                        continue
-                    if mode == "disk":
-                        try:
-                            from send2trash import send2trash as _trash
-                            _trash(filepath)
-                            trashed += 1
-                        except Exception as send_err:
-                            # send2trash implements the platform trash spec on
-                            # Linux/Windows; the AppleScript Finder fallback only
-                            # helps on macOS. Off-mac, report the real send2trash
-                            # error instead of masking it with the Finder guard.
-                            if sys.platform == "darwin":
-                                log.debug("send2trash failed for %s, trying Finder", filepath)
-                                try:
-                                    _trash_via_finder(filepath)
-                                    trashed += 1
-                                except Exception:
-                                    log.warning("Trash failed for %s", filepath, exc_info=True)
-                                    trash_failed.append({"path": filepath})
-                            else:
-                                log.warning("Trash failed for %s: %s", filepath, send_err)
+            disk_phase = (
+                "Moving files to Trash"
+                if mode == "disk" else "Deleting files permanently"
+            )
+            ensured_volumes = set()
+            emit(disk_phase, 0, len(disk_targets))
+            for idx, filepath in enumerate(disk_targets, start=1):
+                basename = os.path.basename(filepath)
+                if not os.path.isfile(filepath):
+                    log.warning("File already missing: %s", filepath)
+                    emit(disk_phase, idx, len(disk_targets), basename)
+                    continue
+                if mode == "disk":
+                    _ensure_volume_trashes_dir(filepath, ensured_volumes)
+                    try:
+                        from send2trash import send2trash as _trash
+                        _trash(filepath)
+                        trashed += 1
+                    except BaseException as send_err:
+                        _reraise_fatal_cleanup_error(send_err)
+                        # send2trash implements the platform trash spec on
+                        # Linux/Windows; the AppleScript Finder fallback only
+                        # helps on macOS. Off-mac, report the real send2trash
+                        # error instead of masking it with the Finder guard.
+                        if sys.platform == "darwin":
+                            log.debug("send2trash failed for %s, trying Finder", filepath)
+                            try:
+                                _trash_via_finder(filepath)
+                                trashed += 1
+                            except Exception:
+                                log.warning("Trash failed for %s", filepath, exc_info=True)
                                 trash_failed.append({"path": filepath})
-                    else:  # disk_permanent
-                        try:
-                            os.remove(filepath)
-                            trashed += 1
-                        except OSError:
-                            log.warning("Permanent delete failed for %s", filepath, exc_info=True)
+                        else:
+                            log.warning("Trash failed for %s: %s", filepath, send_err)
                             trash_failed.append({"path": filepath})
+                else:  # disk_permanent
+                    try:
+                        os.remove(filepath)
+                        trashed += 1
+                    except OSError:
+                        log.warning("Permanent delete failed for %s", filepath, exc_info=True)
+                        trash_failed.append({"path": filepath})
+                emit(disk_phase, idx, len(disk_targets), basename)
 
-        return jsonify({
+        emit("Finishing", 1, 1)
+        return {
             "ok": True,
             "deleted": result["deleted"],
             "trashed": trashed,
             "trash_failed": trash_failed,
-        })
+        }
+
+    @app.route("/api/batch/delete", methods=["POST"])
+    def api_batch_delete():
+        """Delete photos from Vireo, optionally moving files to trash."""
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        mode = body.get("mode", "vireo")
+        include_companions = body.get("include_companions", False)
+        # For disk_permanent retry: accept paths directly since DB rows
+        # were already deleted in the initial disk-mode call.
+        paths = body.get("paths", [])
+
+        try:
+            result = _run_batch_delete(
+                db, photo_ids, mode, include_companions, paths=paths,
+            )
+        except ValueError as exc:
+            return json_error(str(exc))
+        if result.get("deleted"):
+            _invalidate_missing_originals_cache()
+        return jsonify(result)
+
+    @app.route("/api/jobs/batch-delete", methods=["POST"])
+    def api_job_batch_delete():
+        """Start a background delete job with phase progress."""
+        body = request.get_json(silent=True) or {}
+        photo_ids = body.get("photo_ids", [])
+        mode = body.get("mode", "vireo")
+        include_companions = body.get("include_companions", False)
+        paths = body.get("paths", [])
+
+        if mode not in ("vireo", "disk", "disk_permanent"):
+            return json_error("mode must be 'vireo', 'disk', or 'disk_permanent'")
+        if not photo_ids and not (mode == "disk_permanent" and paths):
+            return json_error("photo_ids required")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+
+        def work(job):
+            thread_db = Database(db_path)
+            if active_ws is not None:
+                thread_db.set_active_workspace(active_ws)
+            started = time.time()
+
+            def progress(payload):
+                current = payload.get("current", 0)
+                total = payload.get("total", 0)
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = payload.get("current_file", "")
+                runner.push_event(job["id"], "progress", {
+                    **payload,
+                    "rate": round(current / max(time.time() - started, 0.01), 1)
+                    if current else 0,
+                })
+
+            try:
+                result = _run_batch_delete(
+                    thread_db,
+                    photo_ids,
+                    mode,
+                    include_companions,
+                    paths=paths,
+                    progress_callback=progress,
+                )
+                if result.get("deleted"):
+                    _invalidate_missing_originals_cache()
+                return result
+            finally:
+                thread_db.conn.close()
+
+        job_id = runner.start(
+            "batch-delete",
+            work,
+            config={
+                "photo_count": len(photo_ids or []),
+                "mode": mode,
+                "include_companions": bool(include_companions),
+                "path_count": len(paths or []),
+            },
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
 
     # -- Undo --
 
@@ -5732,18 +8732,48 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Statistics --
 
+    def _dashboard_scope_args():
+        return {
+            "folder_id": request.args.get("folder_id", None, type=int),
+            "collection_id": request.args.get("collection_id", None, type=int),
+            "date_from": request.args.get("date_from", None),
+            "date_to": request.args.get("date_to", None),
+        }
+
+    @app.route("/api/dashboard/options")
+    def api_dashboard_options():
+        """Return lightweight scope choices without running collection counts.
+
+        Collections whose rules can't be compiled (malformed JSON or
+        unresolvable fields) are marked ``degraded`` so the Dashboard scope
+        picker can disable them. Selecting one would 400 both /api/stats and
+        /api/coverage via ``_build_collection_query`` and leave the Dashboard
+        panels wedged until the scope is reset.
+        """
+        db = _get_db()
+        folders = [dict(row) for row in db.get_folder_tree()]
+        collection_rows = db.conn.execute(
+            "SELECT id, name, rules FROM collections "
+            "WHERE workspace_id = ? ORDER BY name COLLATE NOCASE, id",
+            (db._ws_id(),),
+        ).fetchall()
+        collections = []
+        for row in collection_rows:
+            _, degraded = _collection_rules_state(db, row["rules"])
+            collections.append({
+                "id": row["id"],
+                "name": row["name"],
+                "degraded": degraded,
+            })
+        return jsonify({"folders": folders, "collections": collections})
+
     @app.route("/api/stats")
     def api_stats():
         db = _get_db()
-        stats = db.get_dashboard_stats()
-        # ``total_photos`` is the workspace's full inventory (includes photos
-        # whose folders are currently flagged 'missing'), so the dashboard's
-        # headline number stays honest when a drive is unmounted.
-        # ``accessible_photos`` is the subset that's actually reachable right
-        # now — when this is lower, the UI surfaces the gap with a banner.
-        stats["total_photos"] = db.count_photos_in_workspace()
-        stats["accessible_photos"] = db.count_photos()
-        stats["missing_folder_count"] = len(db.get_missing_folders())
+        try:
+            stats = db.get_dashboard_stats(**_dashboard_scope_args())
+        except ValueError as exc:
+            return json_error(str(exc), 400)
         return jsonify(stats)
 
     @app.route("/api/coverage")
@@ -5755,10 +8785,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         linked to the workspace). Both share the same coverage keys.
         """
         db = _get_db()
-        return jsonify({
-            "overall": db.get_coverage_stats(),
-            "folders": db.get_folder_coverage_stats(),
-        })
+        scope = _dashboard_scope_args()
+        try:
+            return jsonify({
+                "overall": db.get_coverage_stats(**scope),
+                "folders": db.get_folder_coverage_stats(**scope),
+            })
+        except ValueError as exc:
+            return json_error(str(exc), 400)
 
     @app.route("/api/workspace/classification-inventory")
     def api_workspace_classification_inventory():
@@ -6076,13 +9110,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = []
         for c in collections:
             d = dict(c)
-            d["photo_count"] = db.count_collection_photos(c["id"])
+            # A single collection with an unresolvable rule must not 500 the
+            # whole list — that blanks every collection dropdown in the UI.
+            # Degrade to an unknown count and flag it so the client can show
+            # the collection instead of hiding all of them.
+            #
+            # Only rule-validation failures degrade to count_error: the pickers
+            # tell users to fix the rule, so labelling a locked/corrupt DB or a
+            # bad generated query as count_error would send them to edit rules
+            # that aren't the actual problem. ValueError covers both malformed
+            # rules (raised by _build_query_from_rules) and malformed JSON in
+            # the rules column (json.JSONDecodeError is a ValueError subclass).
+            # Anything else bubbles up as a 500 so real infra failures surface.
             try:
-                d["can_add_photos"] = _collection_accepts_manual_photos(
-                    json.loads(c["rules"])
+                d["photo_count"] = db.count_collection_photos(c["id"])
+            except ValueError:
+                app.logger.exception(
+                    "Failed to count photos for collection %s (%s)",
+                    c["id"],
+                    c["name"],
                 )
-            except (TypeError, ValueError):
+                d["photo_count"] = None
+                d["count_error"] = True
+            # Degraded rows must never advertise manual-add support: the
+            # add-to-collection modal filters only on can_add_photos, and
+            # /api/collections/<id>/add-photos calls set(ids_rule["value"])
+            # on the existing rule — which 500s on any malformed photo_ids
+            # payload (non-scalar entries, non-list value, etc.). If the
+            # rule is bad enough to fail count, it isn't safe to merge into.
+            if d.get("count_error"):
                 d["can_add_photos"] = False
+            else:
+                try:
+                    d["can_add_photos"] = _collection_accepts_manual_photos(
+                        json.loads(c["rules"])
+                    )
+                except (TypeError, ValueError):
+                    d["can_add_photos"] = False
             result.append(d)
         return jsonify(result)
 
@@ -6267,10 +9331,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
-        photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
-        total = db.count_collection_photos(collection_id)
+        # If the saved rules can't be resolved (e.g. an unknown field/op left
+        # over from an older schema), surface a 400 instead of a 500 so
+        # callers can render a real error — this is the same collection state
+        # that /api/collections flags with count_error=True.
+        try:
+            photos = db.get_collection_photos(collection_id, page=page, per_page=per_page)
+            total = db.count_collection_photos(collection_id)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
         photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
         _attach_species(db, photo_dicts)
+        _attach_species_representatives(db, photo_dicts)
         _attach_detections(db, photo_dicts)
         _attach_edit_recipes(db, photo_dicts)
         return jsonify(
@@ -6286,7 +9362,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_collection_photo_ids(collection_id):
         """Return every photo ID matching a collection."""
         db = _get_db()
-        photo_ids = db.get_collection_photo_ids(collection_id)
+        try:
+            photo_ids = db.get_collection_photo_ids(collection_id)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
         return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
 
     # -- Highlights --
@@ -6376,13 +9458,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = body.get("species", "")
         purpose = purpose.strip() if isinstance(purpose, str) else ""
         species = species.strip() if isinstance(species, str) else ""
-        if purpose not in {"life_list", "highlights"}:
-            return None, "purpose must be life_list or highlights"
+        if purpose not in {"species_representative", "life_list", "highlights"}:
+            return None, (
+                "purpose must be one of species_representative, "
+                "life_list, or highlights"
+            )
         if not species:
             return None, "species required"
 
         photo_id = body.get("photo_id")
-        if require_photo:
+        # Ordered highlights are per-photo (multiple photos per species),
+        # so photo_id is always required for purpose=highlights — even on
+        # DELETE, where representative purposes let it be omitted to clear
+        # the whole species preference.
+        needs_photo = require_photo or purpose == "highlights"
+        if needs_photo:
             if isinstance(photo_id, bool) or not isinstance(photo_id, int):
                 return None, "photo_id must be an integer"
         else:
@@ -6390,6 +9480,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         return {
             "purpose": purpose,
+            "canonical_purpose": (
+                "highlights" if purpose == "highlights"
+                else "species_representative"
+            ),
             "species": species,
             "photo_id": photo_id,
         }, None
@@ -6425,9 +9519,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return False
 
     def _photo_can_be_preference(db, purpose, species, photo_id):
-        if purpose == "life_list":
-            return _photo_can_be_life_list_preference(db, species, photo_id)
-        return _photo_can_be_highlights_preference(db, species, photo_id)
+        # Ordered highlights use their own (stricter) eligibility check —
+        # the photo must appear in the workspace's highlight buckets for
+        # this species. Representative-style purposes (species_representative,
+        # life_list) only require the photo to carry the species keyword.
+        if purpose == "highlights":
+            return _photo_can_be_highlights_preference(db, species, photo_id)
+        return _photo_can_be_life_list_preference(db, species, photo_id)
 
     @app.route("/api/photo-preferences", methods=["POST"])
     def api_photo_preferences_set():
@@ -6445,10 +9543,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(
                 "photo_id is not eligible for that purpose/species", 400,
             )
-        db.set_photo_preference(
-            parsed["purpose"], parsed["species"], parsed["photo_id"]
+        # Route legacy `purpose=highlights` writes to the ordered-highlights
+        # table so a cached Highlights page or older client doesn't silently
+        # overwrite the species representative instead.
+        if parsed["purpose"] == "highlights":
+            rank = db.add_species_highlight(
+                parsed["species"], parsed["photo_id"]
+            )
+            return jsonify({"ok": True, **parsed, "rank": rank})
+        db.set_species_representative(
+            parsed["species"], parsed["photo_id"], _commit=False
         )
-        return jsonify({"ok": True, **parsed})
+        # Only promote to `species_highlights` when the photo is actually a
+        # Highlights candidate. Otherwise the row is invisible on the
+        # Highlights page (which filters by quality_score) — the user could
+        # neither see it nor remove it.
+        rank = None
+        if _photo_can_be_highlights_preference(
+            db, parsed["species"], parsed["photo_id"]
+        ):
+            rank = db.promote_species_highlight(
+                parsed["species"], parsed["photo_id"], _commit=False
+            )
+        db.conn.commit()
+        return jsonify({"ok": True, **parsed, "highlight_rank": rank})
 
     @app.route("/api/photo-preferences", methods=["DELETE"])
     def api_photo_preferences_clear():
@@ -6457,12 +9575,93 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         parsed, error = _parse_photo_preference_body(body, require_photo=False)
         if error:
             return json_error(error)
-        db.clear_photo_preference(parsed["purpose"], parsed["species"])
+        # See the POST handler: `purpose=highlights` targets one row in the
+        # ordered-highlights table, so it needs a photo_id (enforced by
+        # _parse_photo_preference_body) and routes to remove_species_highlight
+        # rather than clearing all representative rows for the species.
+        if parsed["purpose"] == "highlights":
+            removed = db.remove_species_highlight(
+                parsed["species"], parsed["photo_id"]
+            )
+            return jsonify({
+                "ok": True,
+                "purpose": parsed["canonical_purpose"],
+                "species": parsed["species"],
+                "photo_id": parsed["photo_id"],
+                "removed": removed,
+            })
+        db.clear_species_representative(parsed["species"])
         return jsonify({
             "ok": True,
-            "purpose": parsed["purpose"],
+            "purpose": parsed["canonical_purpose"],
             "species": parsed["species"],
         })
+
+    def _parse_species_highlight_body(body, require_direction=False):
+        species = body.get("species", "")
+        species = species.strip() if isinstance(species, str) else ""
+        if not species:
+            return None, "species required"
+        photo_id = body.get("photo_id")
+        if isinstance(photo_id, bool) or not isinstance(photo_id, int):
+            return None, "photo_id must be an integer"
+        parsed = {"species": species, "photo_id": photo_id}
+        if require_direction:
+            direction = body.get("direction", "")
+            direction = direction.strip().lower() if isinstance(direction, str) else ""
+            if direction not in {"up", "down"}:
+                return None, "direction must be up or down"
+            parsed["direction"] = direction
+        return parsed, None
+
+    @app.route("/api/species-highlights", methods=["POST"])
+    def api_species_highlights_add():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        parsed, error = _parse_species_highlight_body(body)
+        if error:
+            return json_error(error)
+        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if error:
+            return json_error(error, status)
+        if not _photo_can_be_highlights_preference(
+            db, parsed["species"], parsed["photo_id"]
+        ):
+            return json_error(
+                "photo_id is not eligible as a highlight for that species", 400,
+            )
+        rank = db.add_species_highlight(parsed["species"], parsed["photo_id"])
+        return jsonify({"ok": True, **parsed, "rank": rank})
+
+    @app.route("/api/species-highlights", methods=["DELETE"])
+    def api_species_highlights_remove():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        parsed, error = _parse_species_highlight_body(body)
+        if error:
+            return json_error(error)
+        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if error:
+            return json_error(error, status)
+        removed = db.remove_species_highlight(parsed["species"], parsed["photo_id"])
+        return jsonify({"ok": True, **parsed, "removed": removed})
+
+    @app.route("/api/species-highlights/order", methods=["PATCH", "POST"])
+    def api_species_highlights_order():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        parsed, error = _parse_species_highlight_body(body, require_direction=True)
+        if error:
+            return json_error(error)
+        error, status = _validate_highlight_photo_ids(db, [parsed["photo_id"]])
+        if error:
+            return json_error(error, status)
+        ok = db.move_species_highlight(
+            parsed["species"], parsed["photo_id"], parsed["direction"]
+        )
+        if not ok:
+            return json_error("highlight not found", 404)
+        return jsonify({"ok": True, **parsed})
 
     def _build_highlights_payload(
         db,
@@ -6472,7 +9671,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         confidence_threshold=0.70,
         limit_per_bucket=20,
         species_filter="",
+        species_match_case=False,
+        species_whole_word=False,
+        search_query="",
+        search_match_case=False,
+        search_whole_word=False,
         confirmation_filter="all",
+        highlight_filter="all",
+        representative_filter="all",
     ):
         folders = db.get_folders_with_quality_data()
         if scope == "workspace":
@@ -6480,9 +9686,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         elif folder_id is None and folders:
             folder_id = folders[0]["id"]  # Most recent
         limit_per_bucket = max(1, min(int(limit_per_bucket), 100))
-        species_filter = (species_filter or "").strip().lower()
+        species_filter = (species_filter or "").strip()
         confirmation_filter = _normalize_highlight_confirmation_filter(
             confirmation_filter
+        )
+        highlight_filter = _normalize_highlight_presence_filter(highlight_filter)
+        representative_filter = _normalize_highlight_presence_filter(
+            representative_filter
         )
 
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
@@ -6494,13 +9704,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         eligible_count = sum(b["photo_count"] for b in buckets) + len(
             unidentified_photos
         )
-        _apply_highlight_preferences(db, buckets)
         if species_filter:
             buckets = [
-                b for b in buckets if species_filter in b["species"].lower()
+                b for b in buckets
+                if text_search_match(
+                    b["species"],
+                    species_filter,
+                    species_match_case,
+                    species_whole_word,
+                )
             ]
-            if "unidentified".find(species_filter) < 0:
+            if not text_search_match(
+                "unidentified",
+                species_filter,
+                species_match_case,
+                species_whole_word,
+            ):
                 unidentified_photos = []
+
+        buckets, unidentified_photos = _filter_highlight_sections(
+            buckets,
+            unidentified_photos,
+            search_query,
+            search_match_case,
+            search_whole_word,
+        )
+        _apply_ordered_highlights(db, buckets)
+        _apply_highlight_preferences(db, buckets)
+        buckets, unidentified_photos = _filter_highlight_curation_state(
+            buckets,
+            unidentified_photos,
+            highlight_filter,
+            representative_filter,
+        )
 
         def limited_bucket(bucket):
             photos = bucket["photos"]
@@ -6527,6 +9763,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "photos": unidentified_limited,
                 "loaded_count": len(unidentified_limited),
                 "has_more": len(unidentified_photos) > len(unidentified_limited),
+                "unanalyzed_count": _bucket_unanalyzed_count(unidentified_photos),
             },
             "folders": [
                 {"id": f["id"], "name": f["name"], "photo_count": f["photo_count"]}
@@ -6537,6 +9774,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "eligible": eligible_count,
                 "limit_per_bucket": limit_per_bucket,
                 "confirmation": confirmation_filter,
+                "highlight_selection": highlight_filter,
+                "species_representative": representative_filter,
+                "search": (search_query or "").strip(),
             },
             "scope": "workspace" if folder_id is None else "folder",
         }
@@ -6554,16 +9794,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
             limit_per_bucket=request.args.get("limit_per_bucket", 20, type=int),
             species_filter=request.args.get("species") or "",
+            species_match_case=_request_bool_arg("species_match_case"),
+            species_whole_word=_request_bool_arg("species_whole_word"),
+            search_query=request.args.get("q") or "",
+            search_match_case=_request_bool_arg("q_match_case"),
+            search_whole_word=_request_bool_arg("q_whole_word"),
             confirmation_filter=request.args.get("confirmation") or "all",
+            highlight_filter=request.args.get("highlight_selection") or "all",
+            representative_filter=(
+                request.args.get("species_representative") or "all"
+            ),
         )
         return jsonify(payload)
 
-    def _build_life_list_payload(db, photos_per_species=12):
-        rows = db.get_life_list_candidates()
-        locations_by_species = db.get_life_list_locations()
-        photos_per_species = max(
-            1, min(int(photos_per_species), 100)
-        )
+    def _build_life_list_payload(
+        db,
+        photos_per_species=12,
+        photo_offset=0,
+        species_filter=None,
+    ):
+        rows = db.get_life_list_candidates(species=species_filter)
+        locations_by_species = db.get_life_list_locations(species=species_filter)
+        photo_offset = max(0, int(photo_offset))
+        if photos_per_species is None:
+            photo_limit = None
+        else:
+            photo_limit = max(
+                1, min(int(photos_per_species), 100)
+            )
 
         buckets = {}
         for row in rows:
@@ -6615,22 +9873,62 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "quality_score": photo.get("quality_score"),
                 "highlight_score": photo.get("highlight_score"),
                 "reasons": photo.get("reasons") or [],
-                "is_life_list_photo": bool(photo.get("is_life_list_photo")),
+                "is_species_representative": bool(
+                    photo.get("is_species_representative")
+                ),
+                "is_life_list_photo": bool(photo.get("is_species_representative")),
+                "is_highlighted": bool(photo.get("is_highlighted")),
+                "highlight_rank": photo.get("highlight_rank"),
             }
 
         species_entries = []
         distinct_photo_ids = set()
-        life_list_preferences = db.get_photo_preferences("life_list")
+        representatives = db.get_species_representative_lists(species=species_filter)
+        highlights_by_species = db.get_species_highlights(species=species_filter)
         for species, entry in buckets.items():
             photos = entry["photos"]
             distinct_photo_ids.update(p["id"] for p in photos)
             timestamps = [p["timestamp"] for p in photos if p.get("timestamp")]
             _highlight_score_bucket(photos)
-            preferred_id = life_list_preferences.get(species)
-            preferred_applied = _apply_preferred_photo(
-                photos, preferred_id, "is_life_list_photo"
+            representative_ids = representatives.get(species) or []
+            representative_order = {
+                photo_id: idx for idx, photo_id in enumerate(representative_ids)
+            }
+            preferred_id = representative_ids[0] if representative_ids else None
+            highlight_ranks = highlights_by_species.get(species, {})
+            for photo in photos:
+                rank = highlight_ranks.get(photo["id"])
+                photo["is_highlighted"] = rank is not None
+                photo["highlight_rank"] = rank
+                photo["is_species_representative"] = (
+                    photo["id"] in representative_order
+                )
+            preferred_applied = any(
+                photo.get("is_species_representative") for photo in photos
             )
-            top = photos[:photos_per_species]
+            if preferred_applied:
+                _sort_photos_with_representatives_first(
+                    photos, representative_order
+                )
+            best_source = "representative" if preferred_applied else "algorithm"
+            if not preferred_applied and highlight_ranks:
+                valid_highlights = [
+                    (highlight_ranks[p["id"]], p["id"])
+                    for p in photos
+                    if p["id"] in highlight_ranks
+                ]
+                if valid_highlights:
+                    _, highlight_id = min(valid_highlights)
+                    for idx, photo in enumerate(photos):
+                        if photo["id"] == highlight_id:
+                            if idx:
+                                photos.insert(0, photos.pop(idx))
+                            best_source = "highlight"
+                            break
+            if photo_limit is None:
+                top = photos[photo_offset:]
+            else:
+                top = photos[photo_offset:photo_offset + photo_limit]
             species_entries.append({
                 "species": species,
                 "scientific_name": entry["scientific_name"],
@@ -6641,8 +9939,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "locations": locations_by_species.get(species, []),
                 "preferred_photo_id": preferred_id,
                 "has_preferred_photo": preferred_applied,
-                "best": compact(top[0]) if top else None,
+                "best_source": best_source,
+                "best": compact(photos[0]) if photos else None,
                 "photos": [compact(p) for p in top],
+                "loaded_count": min(len(photos), photo_offset + len(top)),
+                "has_more": photo_offset + len(top) < len(photos),
             })
 
         # Life-list numbering: chronological by first photographed date,
@@ -6667,7 +9968,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "meta": {
                 "species_count": len(species_entries),
                 "photo_count": len(distinct_photo_ids),
-                "photos_per_species": photos_per_species,
+                "photos_per_species": photo_limit,
             },
         }
 
@@ -6676,9 +9977,248 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         payload = _build_life_list_payload(
             db,
-            photos_per_species=request.args.get("photos_per_species", 12, type=int),
+            photos_per_species=request.args.get("photos_per_species", 100, type=int),
         )
         return jsonify(payload)
+
+    @app.route("/api/life-list/species")
+    def api_life_list_species():
+        db = _get_db()
+        species = (request.args.get("species") or "").strip()
+        if not species:
+            return json_error("species required")
+        offset = max(0, request.args.get("offset", 0, type=int))
+        limit = max(1, min(request.args.get("limit", 100, type=int), 500))
+        payload = _build_life_list_payload(
+            db,
+            photos_per_species=limit,
+            photo_offset=offset,
+            species_filter=species,
+        )
+        if not payload["species"]:
+            return json_error("species not found", 404)
+        entry = payload["species"][0]
+        return jsonify({
+            "species": entry["species"],
+            "photos": entry["photos"],
+            "photo_count": entry["photo_count"],
+            "loaded_count": entry["loaded_count"],
+            "has_more": entry["has_more"],
+        })
+
+    @app.route("/api/life-list/explorer")
+    def api_life_list_explorer():
+        db = _get_db()
+        root_id = request.args.get("root", type=int)  # None -> default Aves
+        return jsonify(_build_explorer_payload(db, root_id=root_id))
+
+    @app.route("/api/life-list/explorer/species")
+    def api_life_list_explorer_species():
+        db = _get_db()
+        genus_id = request.args.get("genus", type=int)
+        if not genus_id:
+            return jsonify({"genus_id": None, "species": []})
+        return jsonify(_build_explorer_species(db, genus_id))
+
+    _LIFE_LIST_EXPORT_FORMATS = {
+        "json": "json",
+        "csv": "csv",
+        "txt": "txt",
+        "text": "txt",
+        "file": "files",
+        "files": "files",
+        "filenames": "files",
+        "file-list": "files",
+    }
+
+    def _life_list_export_bool_arg(name, default=False):
+        raw = request.args.get(name)
+        if raw is None:
+            return default
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _strip_life_list_locations(payload):
+        for entry in payload.get("species", []):
+            entry["locations"] = []
+
+    def _life_list_export_photos(entry, mode):
+        if mode == "all":
+            return entry.get("photos") or []
+        best = entry.get("best")
+        return [best] if best else []
+
+    def _life_list_export_response(body, mimetype, extension):
+        today = datetime.now(UTC).date().isoformat()
+        resp = make_response(body)
+        resp.headers["Content-Type"] = mimetype
+        resp.headers["Content-Disposition"] = (
+            f'attachment; filename="vireo-life-list-{today}.{extension}"'
+        )
+        return resp
+
+    def _life_list_csv_cell(value):
+        if value is None:
+            return ""
+        text = str(value)
+        stripped = text.lstrip(" \t\r\n")
+        if stripped[:1] in {"=", "+", "-", "@"}:
+            return "'" + text
+        return text
+
+    def _life_list_species_csv(payload):
+        out = io.StringIO()
+        fieldnames = [
+            "number",
+            "species",
+            "scientific_name",
+            "common_name",
+            "photo_count",
+            "first_seen",
+            "last_seen",
+            "locations",
+            "best_photo_id",
+            "best_filename",
+        ]
+        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        writer.writeheader()
+        for entry in payload.get("species", []):
+            best = entry.get("best") or {}
+            writer.writerow({
+                "number": entry.get("number") or "",
+                "species": _life_list_csv_cell(entry.get("species")),
+                "scientific_name": _life_list_csv_cell(entry.get("scientific_name")),
+                "common_name": _life_list_csv_cell(entry.get("common_name")),
+                "photo_count": entry.get("photo_count") or 0,
+                "first_seen": _life_list_csv_cell(entry.get("first_seen")),
+                "last_seen": _life_list_csv_cell(entry.get("last_seen")),
+                "locations": _life_list_csv_cell(
+                    "; ".join(entry.get("locations") or [])
+                ),
+                "best_photo_id": best.get("id") or "",
+                "best_filename": _life_list_csv_cell(best.get("filename")),
+            })
+        return out.getvalue()
+
+    def _life_list_photos_csv(payload, photo_mode):
+        out = io.StringIO()
+        fieldnames = [
+            "number",
+            "species",
+            "scientific_name",
+            "common_name",
+            "photo_id",
+            "filename",
+            "timestamp",
+            "is_life_list_photo",
+            "quality_score",
+            "locations",
+        ]
+        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        writer.writeheader()
+        for entry in payload.get("species", []):
+            for photo in _life_list_export_photos(entry, photo_mode):
+                writer.writerow({
+                    "number": entry.get("number") or "",
+                    "species": _life_list_csv_cell(entry.get("species")),
+                    "scientific_name": _life_list_csv_cell(entry.get("scientific_name")),
+                    "common_name": _life_list_csv_cell(entry.get("common_name")),
+                    "photo_id": photo.get("id") or "",
+                    "filename": _life_list_csv_cell(photo.get("filename")),
+                    "timestamp": _life_list_csv_cell(photo.get("timestamp")),
+                    "is_life_list_photo": "yes" if photo.get("is_life_list_photo") else "no",
+                    "quality_score": photo.get("quality_score")
+                    if photo.get("quality_score") is not None else "",
+                    "locations": _life_list_csv_cell(
+                        "; ".join(entry.get("locations") or [])
+                    ),
+                })
+        return out.getvalue()
+
+    def _life_list_text(payload):
+        lines = []
+        for entry in payload.get("species", []):
+            name = entry.get("species") or ""
+            sci = entry.get("scientific_name")
+            if sci and sci != name:
+                name = f"{name} ({sci})"
+            parts = [
+                f"#{entry.get('number') or ''} {name}".strip(),
+                f"{entry.get('photo_count') or 0} photo"
+                + ("" if entry.get("photo_count") == 1 else "s"),
+            ]
+            if entry.get("first_seen"):
+                parts.append(f"first seen {entry['first_seen']}")
+            if entry.get("last_seen") and entry.get("last_seen") != entry.get("first_seen"):
+                parts.append(f"latest {entry['last_seen']}")
+            if entry.get("locations"):
+                parts.append("locations: " + "; ".join(entry["locations"]))
+            lines.append(" - ".join(parts))
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    def _life_list_file_list(payload, photo_mode):
+        seen = set()
+        lines = []
+        for entry in payload.get("species", []):
+            for photo in _life_list_export_photos(entry, photo_mode):
+                photo_id = photo.get("id")
+                if photo_id in seen:
+                    continue
+                seen.add(photo_id)
+                filename = photo.get("filename")
+                if not filename:
+                    continue
+                lines.append(filename)
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    @app.route("/api/life-list/export")
+    def api_life_list_export():
+        fmt = (request.args.get("format") or "json").strip().lower()
+        fmt = _LIFE_LIST_EXPORT_FORMATS.get(fmt)
+        if not fmt:
+            return json_error("format must be json, csv, txt, or files")
+
+        detail = (request.args.get("detail") or "species").strip().lower()
+        if detail not in {"species", "photos"}:
+            return json_error("detail must be species or photos")
+
+        photo_mode = (request.args.get("photos") or "best").strip().lower()
+        if photo_mode not in {"best", "all"}:
+            return json_error("photos must be best or all")
+
+        db = _get_db()
+        uses_photo_scope = fmt == "files" or (fmt == "csv" and detail == "photos")
+        payload_photos_per_species = (
+            None if uses_photo_scope and photo_mode == "all"
+            else request.args.get("photos_per_species", 12, type=int)
+        )
+        payload = _build_life_list_payload(
+            db,
+            photos_per_species=payload_photos_per_species,
+        )
+        if not _life_list_export_bool_arg("include_locations"):
+            _strip_life_list_locations(payload)
+
+        if fmt == "json":
+            body = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+            return _life_list_export_response(body, "application/json", "json")
+        if fmt == "csv":
+            body = (
+                _life_list_photos_csv(payload, photo_mode)
+                if detail == "photos"
+                else _life_list_species_csv(payload)
+            )
+            return _life_list_export_response(body, "text/csv; charset=utf-8", "csv")
+        if fmt == "files":
+            return _life_list_export_response(
+                _life_list_file_list(payload, photo_mode),
+                "text/plain; charset=utf-8",
+                "txt",
+            )
+        return _life_list_export_response(
+            _life_list_text(payload),
+            "text/plain; charset=utf-8",
+            "txt",
+        )
 
     @app.route("/api/highlights/confirm", methods=["POST"])
     def api_highlights_confirm():
@@ -6789,16 +10329,286 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(error)
         species = body.get("species", "")
         species = species.strip() if isinstance(species, str) else ""
+        # Normalize up front: the curation snapshots below compare this
+        # value against stored species strings, and add_keyword would
+        # normalize on insert anyway — one spelling throughout the route.
+        species = normalize_keyword_display(species)
         if not species:
             return json_error("species required")
+        # Canonicalize the submitted spelling to the final stored keyword
+        # name BEFORE the snapshot passes below. resolve_species_display_name
+        # mirrors add_keyword's two branches: preserve an existing NOCASE
+        # match, otherwise apply the species casing convention (`black
+        # phoebe` → `Black Phoebe`). Without this, the `row["species"] ==
+        # species` snapshots (hl_dst_preexisting, pref_dst_taken,
+        # rep_dst_preexisting, plus the source-side skips in the
+        # preference/rep passes) would miss pre-existing target rows for
+        # the destination species — from another keyword row, or from
+        # prediction-seeded curation with no keyword row — and record
+        # dst_existed=false; undo would then delete the user's
+        # pre-existing highlight/preference/rep.
+        species = db.resolve_species_display_name(species)
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)
 
         top_predictions = _highlight_top_predictions(db, photo_ids)
+        # Snapshot the top-prediction species per photo, keyed by
+        # keyword_match_key (SQLite's ASCII-only NOCASE fold). Used below
+        # in the current_species-empty filter branch to accept only
+        # curation whose old species matches an active prediction — see
+        # the prediction-only relabel scenario in
+        # test_highlights_relabel_prediction_only_undo_restores_curation.
+        # keyword_match_key (not Python's str.lower()) matches
+        # add_keyword's SQLite dedupe, so `Éclair` vs `éclair` — which
+        # SQLite/add_keyword keep distinct — stay distinct here too;
+        # otherwise a stale curation row for one would fold onto the
+        # other on relabel.
+        predicted_species_by_pid = {}
+        for pid_pred, pred_row in top_predictions.items():
+            pred_species = pred_row["species"] if pred_row else None
+            if pred_species:
+                key = keyword_match_key(pred_species)
+                if key:
+                    predicted_species_by_pid.setdefault(pid_pred, set()).add(key)
         ws_id = db._ws_id()
+        # Chunk both lookups: photo_ids has no upstream cap
+        # (_parse_highlight_photo_ids just parses the list), so a bulk
+        # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
+        # on the legacy builds this file already guards against.
+
+        # Snapshot each photo's current taxonomy keywords before the relabel
+        # touches them. Used to skip stale curation rows for species the
+        # photo no longer carries across all three curation tables
+        # (species_highlights, photo_preferences, species_representatives):
+        # untag_photo does not clear any of them, so a photo can retain a
+        # curation row for species A after that keyword was removed. Without
+        # this filter, relabeling the photo's current species B→C would
+        # sweep the stale A rows into A→C renames — losing the preserved A
+        # state and making C look manually selected.
+        current_species_by_pid = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT pk.photo_id, k.name
+                    FROM photo_keywords pk
+                    JOIN keywords k ON k.id = pk.keyword_id
+                    WHERE pk.photo_id IN ({placeholders})
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                key = keyword_match_key(row["name"])
+                if key:
+                    current_species_by_pid.setdefault(row["photo_id"], set()).add(key)
+
+        def _accept_curation_source(pid, old_species_name):
+            """Shared filter for the highlight, preference, and rep passes.
+
+            With any current taxonomy keywords, only migrate curation for
+            species the photo currently carries. Without any taxonomy —
+            the prediction-only relabel path (``keyword_add`` instead of
+            ``species_replace``) — only migrate curation whose species
+            matches an active prediction on the photo. That preserves the
+            legitimate prediction-species migration exercised by
+            ``test_highlights_relabel_prediction_only_undo_restores_curation``
+            while blocking stale curation rows for species that were
+            tagged and later untagged.
+
+            Keyed by keyword_match_key (see the snapshot above): SQLite's
+            ASCII-only NOCASE keeps `Éclair` and `éclair` distinct as
+            separate keyword rows, and str.lower() folds them together —
+            which would let a stale `éclair` curation row migrate onto a
+            photo still carrying `Éclair`.
+            """
+            old_key = keyword_match_key(old_species_name)
+            if not old_key:
+                return False
+            current = current_species_by_pid.get(pid)
+            if current:
+                return old_key in current
+            predicted = predicted_species_by_pid.get(pid) or set()
+            return old_key in predicted
+
+        highlight_renames = {}
+        hl_prev_by_pid = {}
+        # Photos that already had a `(species=<target>, photo_id)` row in
+        # species_highlights before the relabel. rename_species_highlights_species
+        # skips inserting a duplicate for these, so the destination row is
+        # pre-existing and undo must not delete it.
+        hl_dst_preexisting = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id, rank FROM species_highlights
+                    WHERE workspace_id = ? AND photo_id IN ({placeholders})""",
+                (ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    hl_dst_preexisting.add(row["photo_id"])
+                    continue
+                if not _accept_curation_source(
+                    row["photo_id"], old_species_name
+                ):
+                    continue
+                highlight_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                # Snapshot the original rank so undo can restore each
+                # highlighted photo at its original position instead of
+                # dumping it at MAX(rank)+1 (see _restore_relabel_curation).
+                hl_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "species": old_species_name,
+                    "rank": row["rank"],
+                })
+        # Backfill dst_existed onto each entry now that the target-species
+        # pass has finished (row order within the query is unspecified).
+        for pid, entries in hl_prev_by_pid.items():
+            dst = pid in hl_dst_preexisting
+            for entry in entries:
+                entry["dst_existed"] = dst
+        preference_renames = {}
+        pref_prev_by_pid = {}
+        # Purposes that already have a row at (new_species, purpose) — for
+        # any photo. rename_photo_preferences_species uses INSERT OR IGNORE,
+        # so when the destination slot is already taken (either by this
+        # photo or a different one), the relabel does not create a new
+        # destination row for this photo and undo must not attempt to
+        # delete it. Un-gating the old-species restore from a destination
+        # row lookup lets undo recover representatives even when the
+        # relabel collided with another photo holding the slot.
+        pref_dst_taken = {
+            r["purpose"] for r in db.conn.execute(
+                """SELECT purpose FROM photo_preferences
+                   WHERE workspace_id = ? AND species = ?
+                     AND purpose IN (
+                         'species_representative', 'life_list', 'highlights'
+                     )""",
+                (ws_id, species),
+            ).fetchall()
+        }
+        # Photos that already had a (species=<target>, photo_id) row in
+        # species_representatives before the relabel.
+        # rename_species_representatives_species uses INSERT OR IGNORE, so
+        # when the destination rep row is already present the relabel does
+        # not create a new one and undo must not delete it. Applies to
+        # both preference-covered moves (via pref_prev.rep_dst_existed
+        # below) and rep-only moves (via rep_prev.dst_existed).
+        rep_dst_preexisting = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT photo_id FROM species_representatives
+                    WHERE species = ? AND photo_id IN ({placeholders})""",
+                (species, *chunk),
+            ).fetchall():
+                rep_dst_preexisting.add(row["photo_id"])
+        # Snapshot the original selected_order for every existing
+        # species_representatives row on the retagged photos. Undo restores
+        # each row at its captured order rather than the fresh MAX+1 that
+        # _set_global_species_representative would assign — so undoing a
+        # relabel of a secondary representative does not promote it above
+        # the pre-existing primary for that species.
+        rep_selected_order_by_pid_species = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            for row in db.conn.execute(
+                f"""SELECT species, photo_id, selected_order
+                    FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall():
+                rep_selected_order_by_pid_species[
+                    (row["photo_id"], row["species"])
+                ] = row["selected_order"]
+        pref_covered_by_pid_species = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id, purpose FROM photo_preferences
+                    WHERE workspace_id = ?
+                      AND photo_id IN ({placeholders})
+                      AND purpose IN (
+                          'species_representative', 'life_list', 'highlights'
+                      )""",
+                (ws_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                if old_species_name == species:
+                    continue
+                if not _accept_curation_source(
+                    row["photo_id"], old_species_name
+                ):
+                    continue
+                preference_renames.setdefault(old_species_name, []).append(
+                    row["photo_id"]
+                )
+                pref_prev_by_pid.setdefault(row["photo_id"], []).append({
+                    "purpose": row["purpose"],
+                    "species": old_species_name,
+                    "dst_existed": row["purpose"] in pref_dst_taken,
+                    "rep_dst_existed": row["photo_id"] in rep_dst_preexisting,
+                    "rep_selected_order": rep_selected_order_by_pid_species.get(
+                        (row["photo_id"], old_species_name)
+                    ),
+                })
+                pref_covered_by_pid_species.add(
+                    (row["photo_id"], old_species_name)
+                )
+        # Global species_representatives moves. Representatives are global
+        # (no workspace column), so a photo can carry a
+        # (species, photo_id) row picked from a different workspace with
+        # no matching photo_preferences row in the active workspace. In
+        # that case the preference-rename pass above would miss it, and
+        # the retag would strand the representative under the old species
+        # name — leaving both species without a representative. Query
+        # species_representatives directly and enqueue any rep-only moves
+        # the preference pass didn't already cover. The same
+        # current-species filter applies here (see the snapshot comment
+        # above).
+        representative_renames = {}
+        rep_prev_by_pid = {}
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT species, photo_id FROM species_representatives
+                    WHERE photo_id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                old_species_name = row["species"]
+                pid = row["photo_id"]
+                if old_species_name == species:
+                    continue
+                # rename_photo_preferences_species already migrates
+                # species_representatives for pids in preference_renames,
+                # so skip anything the preference pass will cover.
+                if (pid, old_species_name) in pref_covered_by_pid_species:
+                    continue
+                if not _accept_curation_source(pid, old_species_name):
+                    continue
+                representative_renames.setdefault(old_species_name, []).append(pid)
+                rep_prev_by_pid.setdefault(pid, []).append({
+                    "species": old_species_name,
+                    "dst_existed": pid in rep_dst_preexisting,
+                    "selected_order": rep_selected_order_by_pid_species.get(
+                        (pid, old_species_name)
+                    ),
+                })
         try:
             kid = db.add_keyword(species, is_species=True, _commit=False)
+            # Use the stored spelling from here on: add_keyword applies the
+            # species casing convention, so it can differ from the request
+            # value, and the queued sidecar changes / curation renames /
+            # history payload must match the row actually tagged.
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored and stored["name"]:
+                species = stored["name"]
             items = []
             rejected_prediction_ids = []
             has_old_species = False
@@ -6822,7 +10632,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     has_old_species = True
                 for old in old_rows:
                     db.untag_photo(pid, old["id"], _commit=False)
-                    if old["name"].strip().lower() != species.lower():
+                    # Compare by keyword id: SQLite's NOCASE is ASCII-only,
+                    # so `Éclair` and `éclair` live as distinct rows with
+                    # distinct ids, but Python `.lower()` folds them equal.
+                    # A name-based skip would suppress the remove for a
+                    # different SQLite row and leave the old spelling in
+                    # the sidecar after the next XMP sync (add_keyword above
+                    # normalized `species` to the row it will tag, so `kid`
+                    # is authoritative).
+                    if old["id"] != kid:
                         _queue_keyword_remove(
                             pid, old["name"], workspace_id=ws_id, _commit=False,
                         )
@@ -6831,7 +10649,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 _queue_keyword_add(pid, species, workspace_id=ws_id, _commit=False)
                 old_value = str(old_primary["id"]) if old_primary else ""
                 old_keyword_ids = [old["id"] for old in old_rows]
-                if pred is not None or len(old_keyword_ids) > 1:
+                hl_prev = hl_prev_by_pid.get(pid) or []
+                pref_prev = pref_prev_by_pid.get(pid) or []
+                rep_prev = rep_prev_by_pid.get(pid) or []
+                needs_payload = (
+                    pred is not None
+                    or len(old_keyword_ids) > 1
+                    or hl_prev
+                    or pref_prev
+                    or rep_prev
+                )
+                if needs_payload:
                     old_payload = {
                         "keyword_id": old_value,
                         "keyword_ids": old_keyword_ids,
@@ -6841,12 +10669,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "prediction_id": pred["id"],
                             "prediction_status": pred["status"],
                         })
+                    if hl_prev or pref_prev or rep_prev:
+                        curation = {
+                            "hl_prev": hl_prev,
+                            "pref_prev": pref_prev,
+                        }
+                        if rep_prev:
+                            curation["rep_prev"] = rep_prev
+                        old_payload["curation"] = curation
                     old_value = json.dumps(old_payload, sort_keys=True)
                 items.append({
                     "photo_id": pid,
                     "old_value": old_value,
                     "new_value": str(kid),
                 })
+
+            for old_species_name, pids in highlight_renames.items():
+                db.rename_species_highlights_species(
+                    old_species_name,
+                    species,
+                    [(pid, ws_id) for pid in pids],
+                    _commit=False,
+                )
+            for old_species_name, pids in preference_renames.items():
+                db.rename_photo_preferences_species(
+                    old_species_name,
+                    species,
+                    [(pid, ws_id) for pid in pids],
+                    _commit=False,
+                )
+            for old_species_name, pids in representative_renames.items():
+                db.rename_species_representatives_species(
+                    old_species_name,
+                    species,
+                    photo_ids=pids,
+                    _commit=False,
+                )
 
             action_type = (
                 "species_replace"
@@ -6905,7 +10763,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         buckets, unidentified_photos = _collect_highlight_buckets(
             candidates, confidence_threshold, confirmation_filter
         )
+        buckets, unidentified_photos = _filter_highlight_sections(
+            buckets,
+            unidentified_photos,
+            request.args.get("q") or "",
+            _request_bool_arg("q_match_case"),
+            _request_bool_arg("q_whole_word"),
+        )
+        _apply_ordered_highlights(db, buckets)
         _apply_highlight_preferences(db, buckets)
+        buckets, unidentified_photos = _filter_highlight_curation_state(
+            buckets,
+            unidentified_photos,
+            request.args.get("highlight_selection") or "all",
+            request.args.get("species_representative") or "all",
+        )
         if species == "__unidentified__":
             photos = unidentified_photos
             label = "Unidentified"
@@ -6918,12 +10790,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         chunk = photos[offset: offset + limit]
         _attach_edit_recipes(db, chunk)
+        # Include the full-bucket ordering keys so a client refetch of a
+        # paged bucket (has_more still true after the loaded window) can
+        # keep bucket.best_score / best_timestamp anchored to the actual
+        # tail. Recomputing them from only the loaded slice would drop
+        # a large species below its true Recommended/Best sort position
+        # when the highest-scored photo lives past the loaded window.
+        top = photos[0] if photos else {}
         return jsonify({
             "species": label,
             "photos": chunk,
             "photo_count": len(photos),
             "loaded_count": min(len(photos), offset + len(chunk)),
             "has_more": offset + len(chunk) < len(photos),
+            "best_score": _bucket_best_score(photos),
+            "best_timestamp": top.get("timestamp") if top else None,
         })
 
     @app.route("/api/highlights/save", methods=["POST"])
@@ -6961,6 +10842,160 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result["folders"] = [dict(f) for f in db.get_workspace_folder_roots(ws["id"])]
         return jsonify(result)
 
+    # ---- Saved processes (user-editable process presets) ----------------
+
+    def _coerce_process_fields(body, *, require_name):
+        """Return ``(kwargs, error_string)`` for create/update.
+
+        Only keys present in ``body`` are returned (so the update path treats
+        an omitted key as "leave unchanged"). Flags must be real booleans and
+        ``review_mode`` must be ``None`` or ``"species"`` — a bad value 400s
+        here rather than being silently coerced.
+        """
+        kwargs = {}
+        if require_name or "name" in body:
+            name = body.get("name")
+            if not isinstance(name, str) or not name.strip():
+                return None, "name is required"
+            kwargs["name"] = name
+        for key in (
+            "skip_classify", "skip_extract_masks", "skip_eye_keypoints",
+            "skip_regroup", "miss_enabled",
+        ):
+            if key in body:
+                if not isinstance(body[key], bool):
+                    return None, f"{key} must be a boolean"
+                kwargs[key] = body[key]
+        if "review_mode" in body:
+            rm = body["review_mode"]
+            if rm is not None and rm != "species":
+                return None, "review_mode must be 'species' or null"
+            kwargs["review_mode"] = rm
+        return kwargs, None
+
+    @app.route("/api/processes")
+    def api_list_processes():
+        """List all saved processes (global; ordered for the pickers)."""
+        db = _get_db()
+        return jsonify(db.get_saved_processes())
+
+    @app.route("/api/processes", methods=["POST"])
+    def api_create_process():
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        kwargs, err = _coerce_process_fields(body, require_name=True)
+        if err is not None:
+            return json_error(err)
+        try:
+            pid = db.create_saved_process(**kwargs)
+        except ValueError as e:
+            return json_error(str(e))
+        return jsonify(db.get_saved_process(pid))
+
+    @app.route("/api/processes/<int:process_id>", methods=["PUT"])
+    def api_update_process(process_id):
+        db = _get_db()
+        body = request.get_json(silent=True) or {}
+        kwargs, err = _coerce_process_fields(body, require_name=False)
+        if err is not None:
+            return json_error(err)
+        try:
+            existed = db.update_saved_process(process_id, **kwargs)
+        except ValueError as e:
+            return json_error(str(e))
+        if not existed:
+            return json_error("process not found", 404)
+        return jsonify(db.get_saved_process(process_id))
+
+    @app.route("/api/processes/<int:process_id>", methods=["DELETE"])
+    def api_delete_process(process_id):
+        db = _get_db()
+        if not db.delete_saved_process(process_id):
+            return json_error("process not found", 404)
+        # Per-workspace default pointers are nulled inside the DB call. Clear
+        # the app-wide default too if it pointed here (config-file I/O the DB
+        # layer intentionally leaves to the caller). Use the *raw* on-disk
+        # config (not ``cfg.load()``) so we don't fossilize every current
+        # DEFAULTS value as an explicit user override — a future change to
+        # DEFAULTS would otherwise be invisible on this install.
+        import config as cfg
+
+        with _settings_write_lock:
+            raw = _read_raw_config_file()
+            pipeline_raw = raw.get("pipeline")
+            if (
+                isinstance(pipeline_raw, dict)
+                and pipeline_raw.get("default_process_id") == process_id
+            ):
+                pipeline_raw["default_process_id"] = None
+                cfg.save(raw)
+        return jsonify({"ok": True})
+
+    def _validate_workspace_config_overrides(overrides, db):
+        """Validate ``config_overrides`` before persist. Returns an error
+        response (from ``json_error``) on rejection, or None on success.
+
+        Shared by POST /api/workspaces and PUT /api/workspaces/<id> so a
+        workspace created with a bogus ``pipeline.default_process_id`` can't
+        later feed the import/process settings or chaining hook a nonexistent
+        process — the update path already rejects it and the create path
+        must too, otherwise the create endpoint becomes a validation bypass.
+        """
+        # Anything else would be persisted as-is and crash the labels
+        # accessors that expect a JSON object (or NULL) in this column.
+        if overrides is not None and not isinstance(overrides, dict):
+            return json_error("config_overrides must be an object or null")
+        pipeline_overrides = (overrides or {}).get("pipeline")
+        # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
+        # name) to ``pipeline.default_process_id`` before existence checks.
+        # An older client (or a workspace payload restored from a pre-migration
+        # backup) that still sends the legacy key would otherwise fall through
+        # this validator — non-schema pipeline keys are stored as-is — and
+        # `get_effective_config()` would then see `default_process_id: null`,
+        # so imports read only the new key and silently run import-only
+        # instead of the requested after-import process. Mirror the
+        # /api/settings/import translation exactly: unknown/removed names map
+        # to null (import only). If both keys are present the new one wins
+        # and the legacy key is dropped so it can't resurface on a later read.
+        if (
+            isinstance(pipeline_overrides, dict)
+            and "default_strategy" in pipeline_overrides
+        ):
+            import process_strategies as ps
+
+            legacy = pipeline_overrides.pop("default_strategy")
+            if "default_process_id" not in pipeline_overrides:
+                seed_name = (
+                    ps.LEGACY_STRATEGY_NAMES.get(legacy)
+                    if isinstance(legacy, str) else None
+                )
+                translated_pid = None
+                if seed_name is not None:
+                    match = next(
+                        (
+                            p for p in db.get_saved_processes()
+                            if p["name"] == seed_name
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        translated_pid = match["id"]
+                pipeline_overrides["default_process_id"] = translated_pid
+        # pipeline.default_process_id: None means "no automatic processing
+        # after import" (the chaining hook short-circuits on it) and is
+        # accepted as-is; a non-null value must name a real saved_processes
+        # row so the chaining hook never fails hours later on a dangling id.
+        if (
+            isinstance(pipeline_overrides, dict)
+            and pipeline_overrides.get("default_process_id") is not None
+        ):
+            pid = pipeline_overrides["default_process_id"]
+            if not isinstance(pid, int) or isinstance(pid, bool):
+                return json_error("default_process_id must be an integer or null")
+            if db.get_saved_process(pid) is None:
+                return json_error(f"unknown process id: {pid}")
+        return None
+
     @app.route("/api/workspaces", methods=["POST"])
     def api_create_workspace():
         db = _get_db()
@@ -6968,21 +11003,50 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         name = body.get("name", "").strip()
         if not name:
             return json_error("Name is required")
+        config_overrides = body.get("config_overrides")
+        err = _validate_workspace_config_overrides(config_overrides, db)
+        if err is not None:
+            return err
+        folder_ids = body.get("folder_ids", [])
+        # A folder already covered by another workspace's
+        # local_workspace_folders row points at that workspace's managed local
+        # copy, not the original NAS path. Silently linking it into a
+        # brand-new workspace would make imports and edits here share the
+        # managed copy, so the owning workspace's later sync could publish
+        # them or discard could delete them. This mirrors the same check that
+        # POST /api/workspaces/<id>/folders already runs; without it, an API
+        # client can bypass the guard by supplying folder_ids at create time.
+        # The check + create + link run under stage_boundary_lock so a stage
+        # claim cannot slip between "guard says free" and add_workspace_folder.
         try:
-            ws_id = db.create_workspace(name, config_overrides=body.get("config_overrides"))
-            # Seed the standard smart collections (All Photos, Flagged, etc.).
-            # Startup only seeds the active workspace, so without this a
-            # workspace created via the API never gets defaults until it's
-            # active during a future Vireo restart — which is how a
-            # workspace in the wild ended up with zero defaults and broke
-            # "All Photos" in the pipeline collection picker.
-            db.create_default_collections(workspace_id=ws_id)
-            # Link selected folders if provided
-            folder_ids = body.get("folder_ids", [])
-            for folder_id in folder_ids:
-                db.add_workspace_folder(ws_id, folder_id)
-            db.mark_workspace_folder_roots(ws_id, folder_ids)
-            ws = db.get_workspace(ws_id)
+            with stage_boundary_lock():
+                for folder_id in folder_ids:
+                    staged_by, owner_ws = folder_has_local_workspace(db, folder_id)
+                    if staged_by:
+                        return json_error(
+                            f"Folder is staged locally by workspace {owner_ws}. "
+                            "Sync or discard that workspace's local copy before linking the folder here.",
+                            409,
+                        )
+                ws_id = db.create_workspace(name, config_overrides=config_overrides)
+                # SQLite can reuse the rowid of a deleted workspace here, so a
+                # ready Missing Originals payload cached under the old
+                # workspace could otherwise be served to this fresh workspace
+                # until its own scan overwrites the entry — mirroring the
+                # new-images cache guard in db.create_workspace.
+                _invalidate_missing_originals_cache(workspace_ids=[ws_id])
+                # Seed the standard smart collections (All Photos, Flagged, etc.).
+                # Startup only seeds the active workspace, so without this a
+                # workspace created via the API never gets defaults until it's
+                # active during a future Vireo restart — which is how a
+                # workspace in the wild ended up with zero defaults and broke
+                # "All Photos" in the pipeline collection picker.
+                db.create_default_collections(workspace_id=ws_id)
+                # Link selected folders if provided
+                for folder_id in folder_ids:
+                    db.add_workspace_folder(ws_id, folder_id)
+                db.mark_workspace_folder_roots(ws_id, folder_ids)
+                ws = db.get_workspace(ws_id)
             return jsonify(dict(ws))
         except Exception as e:
             return json_error(str(e))
@@ -6998,10 +11062,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             kwargs["name"] = body["name"]
         if "config_overrides" in body:
             overrides = body["config_overrides"]
-            # Anything else would be persisted as-is and crash the labels
-            # accessors that expect a JSON object (or NULL) in this column.
-            if overrides is not None and not isinstance(overrides, dict):
-                return json_error("config_overrides must be an object or null")
+            err = _validate_workspace_config_overrides(overrides, db)
+            if err is not None:
+                return err
             kwargs["config_overrides"] = overrides
         if "ui_state" in body:
             kwargs["ui_state"] = body["ui_state"]
@@ -7019,7 +11082,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Prevent deleting the active workspace
         if ws_id == db._active_workspace_id:
             return json_error("Cannot delete the active workspace. Switch first.")
-        db.delete_workspace(ws_id)
+        # Guard and delete run under stage_boundary_lock so a stage claim
+        # cannot commit between the check and the workspace DELETE.
+        with stage_boundary_lock():
+            if has_local_workspace(db, ws_id):
+                return json_error(
+                    "Cannot delete a workspace with local work. Switch to it and sync or discard the local copy first.",
+                    409,
+                )
+            # Only block when this workspace is the last remaining link to a
+            # local root. If other workspaces still share the local copy,
+            # deleting this workspace is equivalent to unlinking one non-final
+            # workspace_folders row — which the folder-unlink route already
+            # permits and delete_workspace cascades the same way.
+            for root_id in workspace_local_root_ids(db, ws_id):
+                if local_folder_workspace_ids(db, root_id) == [ws_id]:
+                    return json_error(
+                        "This workspace is the last one linked to a local folder. "
+                        "Sync or discard its local copy before deleting the workspace.",
+                        409,
+                    )
+            db.delete_workspace(ws_id)
+        # Drop this workspace's cached Missing Originals payload so a
+        # later workspace that reuses this SQLite rowid can't be served
+        # the deleted workspace's ghost photos / folder paths.
+        _invalidate_missing_originals_cache(workspace_ids=[ws_id])
         return jsonify({"ok": True})
 
     @app.route("/api/workspaces/<int:ws_id>/activate", methods=["POST"])
@@ -7095,13 +11182,101 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("Workspace not found", 404)
         if not db.get_folder(folder_id):
             return json_error("Folder not found", 404)
-        db.add_workspace_folder(ws_id, folder_id)
+        # A workspace with active local state has folder paths rebased into
+        # the managed copy and a manifest covering those paths. Silently
+        # adding a folder here would leave the UI showing a folder that the
+        # manifest and local_workspace_folders don't cover, so a later sync
+        # or discard could not act on it consistently. Guards and INSERT run
+        # under stage_boundary_lock so a stage claim cannot commit between
+        # them.
+        with stage_boundary_lock():
+            if has_local_workspace(db, ws_id):
+                return json_error(
+                    "Cannot change folder membership while working locally. Sync or discard the local copy first.",
+                    409,
+                )
+            # A folder already covered by another workspace's
+            # local_workspace_folders points at that workspace's managed copy,
+            # not the original NAS path. Linking it into a second workspace
+            # would silently make edits or imports there share the managed
+            # copy, so the owning workspace's later sync could publish them
+            # to the source and discard could delete them. Refuse until the
+            # owning workspace's local copy is resolved.
+            staged_by, owner_ws = folder_has_local_workspace(db, folder_id)
+            if staged_by:
+                return json_error(
+                    f"Folder is staged locally by workspace {owner_ws}. "
+                    "Sync or discard that workspace's local copy before linking the folder here.",
+                    409,
+                )
+            db.add_workspace_folder(ws_id, folder_id)
+        # A newly linked folder can introduce ghosts (or resolve them if it
+        # was previously offline). The missing-originals cache is keyed by
+        # workspace, so leaving a stale ready payload here would keep serving
+        # the old membership's answer until the next scan.
+        _invalidate_missing_originals_cache()
         return jsonify({"ok": True})
 
     @app.route("/api/workspaces/<int:ws_id>/folders/<int:folder_id>", methods=["DELETE"])
     def api_remove_workspace_folder(ws_id, folder_id):
         db = _get_db()
-        db.remove_workspace_folder_tree(ws_id, folder_id)
+        # Removing a staged root while local work is active would leave
+        # local_workspace_folders and the manifest covering paths the UI no
+        # longer shows, so a later sync could publish/delete files for a
+        # folder the workspace has already dropped. Guard and DELETE run
+        # under stage_boundary_lock so a stage claim cannot commit between
+        # them.
+        with stage_boundary_lock():
+            if has_local_workspace(db, ws_id):
+                return json_error(
+                    "Cannot change folder membership while working locally. Sync or discard the local copy first.",
+                    409,
+                )
+            local_root_id = local_root_for_folder(db, folder_id)
+            if local_root_id is not None:
+                linked_workspaces = local_folder_workspace_ids(db, local_root_id)
+                if linked_workspaces == [ws_id]:
+                    return json_error(
+                        "This is the last workspace linked to a local folder. "
+                        "Sync or discard its local copy before removing it.",
+                        409,
+                    )
+            # Ancestor case: the folder being unlinked is not itself a staged
+            # root, but a descendant local session lives beneath it. Staging
+            # rebased the descendant's folders.path under local-folders/, so
+            # remove_workspace_folder_tree()'s folders.path subtree walk misses
+            # it and would leave a hidden non-root workspace_folders row that
+            # still contributes to affected_workspace_ids. Refuse when this
+            # workspace is the last remaining link (matches the exact-folder
+            # branch above); otherwise sweep the descendant session's rows
+            # ourselves after the standard subtree unlink.
+            descendant_root_ids = local_roots_under_folder(db, folder_id)
+            for descendant_id in descendant_root_ids:
+                linked_workspaces = local_folder_workspace_ids(db, descendant_id)
+                if linked_workspaces == [ws_id]:
+                    return json_error(
+                        "This workspace is the last one linked to a subfolder's "
+                        "local copy. Sync or discard the local copy before "
+                        "removing this folder.",
+                        409,
+                    )
+            db.remove_workspace_folder_tree(ws_id, folder_id)
+            for descendant_id in descendant_root_ids:
+                rows = db.conn.execute(
+                    "SELECT folder_id FROM local_folder_mappings WHERE root_folder_id = ?",
+                    (descendant_id,),
+                ).fetchall()
+                for row in rows:
+                    db.conn.execute(
+                        "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                        (ws_id, int(row["folder_id"])),
+                    )
+            if descendant_root_ids:
+                db.conn.commit()
+        # Unlinking a folder tree removes photos from the workspace's scope;
+        # the cached ready payload would otherwise keep listing ghosts from
+        # the now-detached folders until a manual rescan.
+        _invalidate_missing_originals_cache()
         return jsonify({"ok": True})
 
     @app.route("/api/workspaces/<int:ws_id>/move-folders", methods=["POST"])
@@ -7119,26 +11294,104 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if target_ws_id and new_ws_name:
             return json_error("Provide target_workspace_id or new_workspace_name, not both")
 
-        # Validate source workspace and folder ownership before creating a
-        # new workspace to avoid orphans if the move would fail.
-        if new_ws_name:
-            if not db.get_workspace(ws_id):
-                return json_error(f"Source workspace {ws_id} not found")
-            source_folder_ids = {f["id"] for f in db.get_workspace_folders(ws_id)}
-            for fid in folder_ids:
-                if fid not in source_folder_ids:
-                    return json_error(f"Folder {fid} does not belong to source workspace {ws_id}")
-            try:
-                target_ws_id = db.create_workspace(new_ws_name)
-            except Exception as e:
-                return json_error(f"Failed to create workspace: {e}")
+        # Block folder-membership mutation while either side is working
+        # locally: moving a folder off a staged workspace would leave its
+        # manifest covering a folder the UI no longer shows, and moving one
+        # onto a workspace whose paths are rebased would leave the new folder
+        # untracked by the manifest. Guards and mutation run under
+        # stage_boundary_lock so a stage claim on either side cannot commit
+        # between check and write.
+        with stage_boundary_lock():
+            if has_local_workspace(db, ws_id):
+                return json_error(
+                    "Cannot move folders out of a workspace working locally. Sync or discard the local copy first.",
+                    409,
+                )
+            if target_ws_id and has_local_workspace(db, target_ws_id):
+                return json_error(
+                    "Cannot move folders into a workspace working locally. Sync or discard the local copy first.",
+                    409,
+                )
 
-        try:
-            result = db.move_folders_to_workspace(ws_id, target_ws_id, folder_ids)
-            result["target_workspace_id"] = target_ws_id
-            return jsonify(result)
-        except ValueError as e:
-            return json_error(str(e))
+            # Match the folder-unlink route: block moves that would abandon a
+            # local session and, for the ancestor case, remember descendant
+            # roots so we can sweep their rebased workspace_folders rows over
+            # to the target after the move. move_folders_to_workspace uses a
+            # folders.path subtree walk, so a rebased descendant hides from
+            # it and would otherwise be orphaned on the source workspace.
+            descendant_root_ids_by_folder: dict[int, list[int]] = {}
+            for fid in folder_ids:
+                local_root_id = local_root_for_folder(db, fid)
+                if local_root_id is not None:
+                    linked_workspaces = local_folder_workspace_ids(db, local_root_id)
+                    if linked_workspaces == [ws_id]:
+                        return json_error(
+                            "This is the last workspace linked to a local folder. "
+                            "Sync or discard its local copy before moving it.",
+                            409,
+                        )
+                descendant_ids = local_roots_under_folder(db, fid)
+                descendant_root_ids_by_folder[fid] = descendant_ids
+                for descendant_id in descendant_ids:
+                    linked_workspaces = local_folder_workspace_ids(db, descendant_id)
+                    if linked_workspaces == [ws_id]:
+                        return json_error(
+                            "This workspace is the last one linked to a subfolder's "
+                            "local copy. Sync or discard the local copy before "
+                            "moving this folder.",
+                            409,
+                        )
+
+            # Validate source workspace and folder ownership before creating a
+            # new workspace to avoid orphans if the move would fail.
+            if new_ws_name:
+                if not db.get_workspace(ws_id):
+                    return json_error(f"Source workspace {ws_id} not found")
+                source_folder_ids = {f["id"] for f in db.get_workspace_folders(ws_id)}
+                for fid in folder_ids:
+                    if fid not in source_folder_ids:
+                        return json_error(f"Folder {fid} does not belong to source workspace {ws_id}")
+                try:
+                    target_ws_id = db.create_workspace(new_ws_name)
+                except Exception as e:
+                    return json_error(f"Failed to create workspace: {e}")
+
+            try:
+                result = db.move_folders_to_workspace(ws_id, target_ws_id, folder_ids)
+                result["target_workspace_id"] = target_ws_id
+                # Transfer the rebased descendant rows the subtree walk missed
+                # so the target workspace can reach the shared local session
+                # through its new ancestor root and the source no longer keeps
+                # a hidden link to it.
+                swept = False
+                for descendant_ids in descendant_root_ids_by_folder.values():
+                    for descendant_id in descendant_ids:
+                        rows = db.conn.execute(
+                            "SELECT folder_id FROM local_folder_mappings WHERE root_folder_id = ?",
+                            (descendant_id,),
+                        ).fetchall()
+                        for row in rows:
+                            mapped_fid = int(row["folder_id"])
+                            db.conn.execute(
+                                "DELETE FROM workspace_folders WHERE workspace_id = ? AND folder_id = ?",
+                                (ws_id, mapped_fid),
+                            )
+                            db.conn.execute(
+                                """INSERT OR IGNORE INTO workspace_folders
+                                       (workspace_id, folder_id, is_root)
+                                   VALUES (?, ?, 0)""",
+                                (target_ws_id, mapped_fid),
+                            )
+                            swept = True
+                if swept:
+                    db.conn.commit()
+                # Moving folders changes membership on both source and target
+                # workspaces, so any cached missing-originals payloads for either
+                # side would go stale.
+                _invalidate_missing_originals_cache()
+                return jsonify(result)
+            except ValueError as e:
+                return json_error(str(e))
 
     @app.route("/api/workspaces/active/config")
     def api_workspace_config():
@@ -7243,100 +11496,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.update_workspace(ws_id, config_overrides=existing)
         return jsonify({"types": cleaned})
 
-    @app.route("/api/workspace/tabs/pin", methods=["POST"])
-    def api_pin_tab():
-        from db import ALL_NAV_IDS
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        nav_id = body.get("nav_id")
-        if not isinstance(nav_id, str):
-            return json_error("nav_id must be a string", 400)
-        if nav_id not in ALL_NAV_IDS:
-            return json_error("nav_id is not a known page", 400)
-        tabs = db.pin_tab(nav_id)
-        return jsonify({"ok": True, "tabs": tabs})
+    app.register_blueprint(
+        create_workspace_blueprint(_get_db, json_error, ALL_PAGES)
+    )
+    app.register_blueprint(
+        create_local_workspace_blueprint(
+            _get_db,
+            json_error,
+            lambda: app._job_runner,
+            db_path,
+            os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            invalidate_missing_originals=lambda ws_id: _invalidate_missing_originals_cache(
+                workspace_ids=[ws_id]
+            ),
+        )
+    )
+    app.register_blueprint(
+        create_local_folder_blueprint(
+            _get_db,
+            json_error,
+            lambda: app._job_runner,
+            db_path,
+            os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            invalidate_missing_originals=_invalidate_missing_originals_cache,
+        )
+    )
 
-    @app.route("/api/workspace/tabs/unpin", methods=["POST"])
-    def api_unpin_tab():
-        from db import ALL_NAV_IDS
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        nav_id = body.get("nav_id")
-        if not isinstance(nav_id, str):
-            return json_error("nav_id must be a string", 400)
-        if nav_id not in ALL_NAV_IDS:
-            return json_error("nav_id is not a known page", 400)
-        tabs = db.unpin_tab(nav_id)
-        return jsonify({"ok": True, "tabs": tabs})
+    def _new_images_walk_fns(db, ws_id):
+        """Return ``(compute, on_spawn)`` for a transparent background
+        new-images walk, shared by the navbar probe and the snapshot POST.
 
-    @app.route("/api/workspace/tabs/reorder", methods=["POST"])
-    def api_reorder_tabs():
-        db = _get_db()
-        body = request.get_json(silent=True) or {}
-        tabs = body.get("tabs")
-        if not isinstance(tabs, list):
-            return json_error("tabs must be a list", 400)
-        try:
-            result = db.set_tabs(tabs)
-        except ValueError as e:
-            return json_error(str(e), 400)
-        return jsonify({"ok": True, "tabs": result})
+        The walk always runs with ``sample_limit=None`` so the cached result
+        carries the complete list of new-file paths. That is what lets a
+        banner click turn straight into a snapshot of exactly the files the
+        banner advertised, instead of forcing a second multi-minute re-walk
+        of the whole library. Memory cost is one path string per *new* file,
+        which is small even for a full re-import.
 
-    @app.route("/api/workspace/tabs", methods=["GET"])
-    def api_get_tabs():
-        db = _get_db()
-        try:
-            tabs = db.get_tabs()
-        except Exception:
-            from db import DEFAULT_TABS
-            tabs = list(DEFAULT_TABS)
-        return jsonify({"tabs": tabs, "all_pages": ALL_PAGES})
-
-    @app.route("/api/workspaces/active/new-images")
-    def api_workspace_new_images():
-        db = _get_db()
-        ws_id = db._active_workspace_id
-        if ws_id is None:
-            return jsonify({"workspace_id": None, "new_count": 0, "per_root": [], "sample": []})
-
-        def response_payload(result):
-            """Return a small client payload while keeping full paths in cache."""
-            payload = dict(result)
-            payload["workspace_id"] = ws_id
-            sample = payload.get("sample") or []
-            payload["sample"] = sample[:5]
-            payload.pop("sample_complete", None)
-            return payload
-
-        cache = db._new_images_cache
-        db_path = db._db_path
-        cached = cache.get(db_path, ws_id)
-        if cached is not None:
-            return jsonify(response_payload(cached))
-
-        # If a recent compute failed and we're still inside the backoff
-        # window, surface the error instead of kicking off another walk.
-        # Without this, the navbar's pending re-poll keeps hammering a
-        # broken volume / DB and the UI is stuck "checking" forever.
-        recent_err = cache.get_recent_error(db_path, ws_id)
-        if recent_err is not None:
-            return jsonify({
-                "workspace_id": ws_id,
-                "new_count": None,
-                "per_root": [],
-                "sample": [],
-                "error": recent_err,
-            })
-
-        # Cache cold: run the filesystem walk in a background thread so the
-        # navbar's poll doesn't tie up a Flask worker for seconds while
-        # os.walk grinds through a large library. Wait briefly so small
-        # libraries (and the test suite's tmp_path filesystems) still
-        # observe a real count synchronously; longer walks return
-        # ``pending: true`` and the front-end re-polls.
+        ``on_spawn`` surfaces the walk as an ephemeral job in the bottom
+        panel and mirrors its progress into ``app._new_images_walk_progress``
+        so pending API responses can report live totals.
+        """
         from db import Database
         from new_images import count_new_images_for_workspace
 
+        db_path = db._db_path
         # Shared holder for the cache worker's exception (if any), read by
         # the ephemeral job's work_fn after the cache event fires. Without
         # this, a walk that raises (e.g. unreadable volume, DB error) would
@@ -7346,15 +11550,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         walk_error = {"exc": None}
 
         def compute(progress_callback=None):
+            # Close explicitly: this connection lives for the whole walk
+            # (minutes on large volumes), and connections left to __del__
+            # accumulate and exhaust the per-process fd limit.
             wdb = Database(db_path)
-            wdb.set_active_workspace(ws_id)
             try:
+                wdb.set_active_workspace(ws_id)
                 return count_new_images_for_workspace(
-                    wdb, ws_id, sample_limit=5, progress_callback=progress_callback,
+                    wdb, ws_id, sample_limit=None,
+                    progress_callback=progress_callback,
                 )
             except Exception as e:
                 walk_error["exc"] = e
                 raise
+            finally:
+                wdb.close()
 
         # Surface the walk as an ephemeral job so the user can see it in the
         # bottom panel rather than wondering why their workspace is silent.
@@ -7367,6 +11577,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         def on_spawn(spawn_event):
             progress_state = {"checked": 0, "found": 0}
+            app._new_images_walk_progress[(db_path, ws_id)] = progress_state
 
             def job_work_fn(job):
                 # Mirror the cache worker's lifecycle. ``spawn_event`` fires
@@ -7413,6 +11624,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             return progress_callback
 
+        return compute, on_spawn
+
+    def _new_images_walk_progress_fields(db_path, ws_id):
+        """Live totals of the current/most recent walk for pending payloads."""
+        progress = app._new_images_walk_progress.get((db_path, ws_id)) or {}
+        return {
+            "files_checked": progress.get("checked", 0),
+            "new_count_so_far": progress.get("found", 0),
+        }
+
+    @app.route("/api/workspaces/active/new-images")
+    def api_workspace_new_images():
+        db = _get_db()
+        ws_id = db._active_workspace_id
+        if ws_id is None:
+            return jsonify({"workspace_id": None, "new_count": 0, "per_root": [], "sample": []})
+
+        def response_payload(result):
+            """Return a small client payload while keeping full paths in cache."""
+            payload = dict(result)
+            payload["workspace_id"] = ws_id
+            sample = payload.get("sample") or []
+            payload["sample"] = sample[:5]
+            payload.pop("sample_complete", None)
+            return payload
+
+        cache = db._new_images_cache
+        db_path = db._db_path
+        cached = cache.get(db_path, ws_id)
+        if cached is not None:
+            return jsonify(response_payload(cached))
+
+        # If a recent compute failed and we're still inside the backoff
+        # window, surface the error instead of kicking off another walk.
+        # Without this, the navbar's pending re-poll keeps hammering a
+        # broken volume / DB and the UI is stuck "checking" forever.
+        recent_err = cache.get_recent_error(db_path, ws_id)
+        if recent_err is not None:
+            return jsonify({
+                "workspace_id": ws_id,
+                "new_count": None,
+                "per_root": [],
+                "sample": [],
+                "error": recent_err,
+            })
+
+        # Cache cold: run the filesystem walk in a background thread so the
+        # navbar's poll doesn't tie up a Flask worker for seconds while
+        # os.walk grinds through a large library. Wait briefly so small
+        # libraries (and the test suite's tmp_path filesystems) still
+        # observe a real count synchronously; longer walks return
+        # ``pending: true`` and the front-end re-polls.
+        compute, on_spawn = _new_images_walk_fns(db, ws_id)
         event = cache.kickoff_compute(db_path, ws_id, compute, on_spawn=on_spawn)
         if event.wait(timeout=0.5):
             cached = cache.get(db_path, ws_id)
@@ -7436,6 +11700,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "per_root": [],
             "sample": [],
             "pending": True,
+            **_new_images_walk_progress_fields(db_path, ws_id),
         })
 
     @app.route("/api/workspaces/active/new-images/snapshot", methods=["POST"])
@@ -7446,86 +11711,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"error": "no active workspace"}), 400
         cache = db._new_images_cache
         db_path = db._db_path
-        kickoff_key = (db_path, ws_id)
-        kickoff_at_dict = app._new_images_snapshot_kickoff_at
-        kickoff_at_lock = app._new_images_snapshot_kickoff_lock
 
         def create_snapshot_from_result(result):
             file_paths = list(result.get("sample") or [])
             snap_id = db.create_new_images_snapshot(file_paths)
             folders = sorted({os.path.dirname(p) for p in file_paths})
-            with kickoff_at_lock:
-                kickoff_at_dict.pop(kickoff_key, None)
             return jsonify({
                 "snapshot_id": snap_id,
                 "file_count": len(file_paths),
                 "folders": folders,
             })
 
-        session_ttl_seconds = 120
-        now = time.monotonic()
-        with kickoff_at_lock:
-            request_kickoff_at = kickoff_at_dict.get(kickoff_key)
-            started_snapshot_session = (
-                request_kickoff_at is None
-                or now - request_kickoff_at > session_ttl_seconds
-            )
-            if started_snapshot_session:
-                request_kickoff_at = now
-                kickoff_at_dict[kickoff_key] = request_kickoff_at
+        # Trust a live cached walk. The banner count the user just clicked
+        # came from exactly this cache entry (walks always run with
+        # ``sample_limit=None``), so snapshotting it means the pipeline
+        # covers precisely the set the banner advertised — and the click
+        # resolves instantly instead of forcing a multi-minute re-walk of
+        # the whole library. Files that land on disk after that walk are
+        # simply picked up by a later probe and the banner reappears:
+        # self-healing, and honest about what was processed. Scans and
+        # imports invalidate this cache, so a stale entry can't survive the
+        # very actions that consume new images.
+        cached = cache.get(db_path, ws_id)
+        if cached is not None and cached.get("sample_complete"):
+            return create_snapshot_from_result(cached)
 
         recent_err = cache.get_recent_error(db_path, ws_id)
         if recent_err is not None:
-            with kickoff_at_lock:
-                kickoff_at_dict.pop(kickoff_key, None)
             return jsonify({"error": recent_err}), 500
 
-        # Force the snapshot generation forward before trusting any cache for
-        # a newly-started session. A navbar probe may have begun before the
-        # click but finish after ``request_kickoff_at``; invalidating first
-        # drops that stale write (or makes the in-flight worker stale) before
-        # the cache reuse check below.
-        if started_snapshot_session:
-            cache.invalidate_workspaces(db_path, [ws_id])
-
-        # A cached "sample_complete" result may be there because the navbar
-        # probe ran recently — but the cache is not invalidated when files
-        # are copied into a mapped folder, so ``sample`` can omit images
-        # that arrived after that probe. Only trust the cached sample if
-        # this request's snapshot session already forced a fresh walk and
-        # the entry was written *after* that invalidation.
-        cached = cache.get(db_path, ws_id)
-        entry_set_at = cache.get_entry_set_at(db_path, ws_id)
-        if (cached is not None
-                and cached.get("sample_complete")
-                and entry_set_at is not None
-                and entry_set_at >= request_kickoff_at):
-            return create_snapshot_from_result(cached)
-
-        from new_images import count_new_images_for_workspace
-
-        def compute():
-            from db import Database
-            wdb = Database(db_path)
-            wdb.set_active_workspace(ws_id)
-            return count_new_images_for_workspace(wdb, ws_id, sample_limit=None)
-
-        event = cache.kickoff_compute(db_path, ws_id, compute)
+        # Cache cold (e.g. a scan just invalidated it): kick off — or
+        # coalesce onto — a background walk. ``kickoff_compute`` reuses an
+        # in-flight walk for the current generation, so repeated clicks and
+        # poll loops can never stack walks or restart one mid-flight.
+        # ``on_spawn`` registers the same ephemeral bottom-panel job the
+        # navbar probe gets, so a click-triggered walk is just as visible.
+        compute, on_spawn = _new_images_walk_fns(db, ws_id)
+        event = cache.kickoff_compute(db_path, ws_id, compute, on_spawn=on_spawn)
         if event.wait(timeout=0.5):
             cached = cache.get(db_path, ws_id)
-            entry_set_at = cache.get_entry_set_at(db_path, ws_id)
-            if (cached is not None
-                    and cached.get("sample_complete")
-                    and entry_set_at is not None
-                    and entry_set_at >= request_kickoff_at):
+            if cached is not None and cached.get("sample_complete"):
                 return create_snapshot_from_result(cached)
             recent_err = cache.get_recent_error(db_path, ws_id)
             if recent_err is not None:
-                with kickoff_at_lock:
-                    kickoff_at_dict.pop(kickoff_key, None)
                 return jsonify({"error": recent_err}), 500
 
-        return jsonify({"pending": True}), 202
+        # Still walking. Report live progress so the client can show
+        # "N files checked, M new so far" instead of an opaque spinner.
+        return jsonify({
+            "pending": True,
+            **_new_images_walk_progress_fields(db_path, ws_id),
+        }), 202
 
     @app.route(
         "/api/workspaces/active/new-images/snapshot/<int:snapshot_id>",
@@ -7595,6 +11831,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Enrich predictions and attach alternatives
         results = []
         pred_dicts = [dict(p) for p in preds]
+        _attach_species_representatives(db, pred_dicts)
         recipes_by_photo = db.get_photo_edit_recipes({
             p.get("photo_id") for p in pred_dicts if p.get("photo_id") is not None
         })
@@ -7652,12 +11889,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         taxonomy = load_local_taxonomy()
 
         def summarize_photo(row):
+            row_keys = row.keys()
+            def row_bool(key):
+                return bool(row[key]) if key in row_keys else False
+
             return {
                 "photo_id": row["id"],
                 "filename": row["filename"],
                 "timestamp": row["timestamp"],
                 "rating": row["rating"],
                 "flag": row["flag"],
+                "wildlife_excluded": row_bool("wildlife_excluded"),
+                "miss_no_subject": row_bool("miss_no_subject"),
+                "miss_clipped": row_bool("miss_clipped"),
+                "miss_oof": row_bool("miss_oof"),
                 "width": row["width"],
                 "height": row["height"],
                 "edit_recipe": edit_recipes_by_photo.get(row["id"]),
@@ -7733,7 +11978,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
 
         for photo in by_photo.values():
-            highest_category = "missing_prediction"
+            highest_category = None
             pending_category = None
             for model_preds in photo["predictions"].values():
                 for pred in model_preds:
@@ -7748,7 +11993,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         summary["conflicts"] += 1
                     elif cat == "new":
                         summary["new"] += 1
-                    if priority[cat] > priority[highest_category]:
+                    if (
+                        highest_category is None
+                        or priority[cat] > priority[highest_category]
+                    ):
                         highest_category = cat
                     if pred.get("status") == "pending" and (
                         pending_category is None
@@ -7757,12 +12005,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         pending_category = cat
             if not photo["predictions"]:
                 summary["missing_predictions"] += 1
-            row_category = pending_category or highest_category
+            row_category = pending_category or highest_category or "missing_prediction"
             photo["row_category"] = row_category
             photo["row_label"] = labels[row_category]
-            photo["needs_review"] = row_category in {
-                "conflict", "refinement", "broader", "new",
-            } and pending_category is not None
+            # Any pending prediction means the user hasn't decided yet, so
+            # the photo still needs review — including pending "match"
+            # predictions, which classify_job stores deliberately when a
+            # multi-species sidecar makes a photo-level match ambiguous
+            # (see _store_pending_detection_prediction / auto_accept=False).
+            photo["needs_review"] = pending_category is not None
             if photo["needs_review"]:
                 summary["needs_review"] += 1
 
@@ -8074,6 +12325,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             if species:
                 kid = db.add_keyword(species, is_species=True)
+                # Queue/record the stored spelling (see api_add_keyword).
+                stored = db.conn.execute(
+                    "SELECT name FROM keywords WHERE id = ?", (kid,)
+                ).fetchone()
+                if stored and stored["name"]:
+                    species = stored["name"]
                 for pid in picks:
                     db.update_photo_flag(pid, "flagged")
                     db.tag_photo(pid, kid)
@@ -8241,9 +12498,79 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _attach_miss_edit_recipes(db, grouped):
         for category in ("no_subject", "clipped", "oof"):
             photos = [dict(p) for p in grouped.get(category, [])]
+            _attach_species_representatives(db, photos)
             _attach_edit_recipes(db, photos)
             grouped[category] = photos
         return grouped
+
+    def _miss_filter_photo_ids(db, values):
+        """Resolve Misses-page filters to an intersected workspace photo set."""
+        def value(name):
+            raw = values.get(name)
+            return None if raw in (None, "") else raw
+
+        def integer(name, minimum=None, maximum=None):
+            raw = value(name)
+            if raw is None:
+                return None
+            try:
+                parsed = int(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} must be an integer") from None
+            if minimum is not None and parsed < minimum:
+                raise ValueError(f"{name} must be at least {minimum}")
+            if maximum is not None and parsed > maximum:
+                raise ValueError(f"{name} must be at most {maximum}")
+            return parsed
+
+        collection_id = integer("collection_id", minimum=1)
+        folder_id = integer("folder_id", minimum=1)
+        rating_min = integer("rating_min", minimum=1, maximum=5)
+        keyword = value("keyword")
+        date_from = value("date_from")
+        date_to = value("date_to")
+        color_label = value("color_label")
+        if color_label not in (None, "red", "yellow", "green", "blue", "purple"):
+            raise ValueError("invalid color_label")
+        flag = value("flag")
+        if flag not in (None, "none", "flagged", "rejected"):
+            raise ValueError("invalid flag")
+
+        def boolean(name):
+            raw = value(name)
+            if raw is None:
+                return False
+            if isinstance(raw, bool):
+                return raw
+            return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+        has_browse_filters = any((
+            folder_id, rating_min, keyword, date_from, date_to, color_label, flag,
+        ))
+        photo_ids = None
+        if has_browse_filters:
+            photo_ids = set(db.get_photo_ids(
+                folder_id=folder_id,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                keyword_match_case=boolean("keyword_match_case"),
+                keyword_whole_word=boolean("keyword_whole_word"),
+                color_label=color_label,
+                flag=flag,
+            ))
+        if collection_id is not None:
+            valid_ids = {c["id"] for c in db.get_collections()}
+            if collection_id not in valid_ids:
+                raise ValueError("collection not found")
+            collection_ids = db.collection_photo_ids(collection_id)
+            photo_ids = (
+                collection_ids
+                if photo_ids is None
+                else photo_ids & collection_ids
+            )
+        return photo_ids
 
     @app.route("/api/misses")
     def api_misses():
@@ -8257,16 +12584,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         category = request.args.get("category")
         since = request.args.get("since") or None
+        try:
+            photo_ids = _miss_filter_photo_ids(db, request.args)
+        except ValueError as e:
+            return json_error(str(e), 400)
         if category is not None:
             if category not in ("no_subject", "clipped", "oof"):
                 return jsonify({"error": "invalid category"}), 400
-            photos = [dict(p) for p in db.list_misses(category=category, since=since)]
+            photos = [dict(p) for p in db.list_misses(
+                category=category, since=since, photo_ids=photo_ids
+            )]
+            _attach_species_representatives(db, photos)
             _attach_edit_recipes(db, photos)
             return jsonify({"photos": photos, "category": category})
         grouped = {
-            "no_subject": db.list_misses(category="no_subject", since=since),
-            "clipped":    db.list_misses(category="clipped", since=since),
-            "oof":        db.list_misses(category="oof", since=since),
+            "no_subject": db.list_misses(category="no_subject", since=since, photo_ids=photo_ids),
+            "clipped":    db.list_misses(category="clipped", since=since, photo_ids=photo_ids),
+            "oof":        db.list_misses(category="oof", since=since, photo_ids=photo_ids),
         }
         return jsonify(_attach_miss_edit_recipes(db, grouped))
 
@@ -8283,9 +12617,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         except ValueError as e:
             return json_error(str(e))
+        try:
+            photo_ids = _miss_filter_photo_ids(db, body)
+        except ValueError as e:
+            return json_error(str(e), 400)
         grouped = preview_misses_for_workspace(
             db, pipeline, detector_confidence=detector_confidence,
-            since=body.get("since") or None,
+            since=body.get("since") or None, photo_ids=photo_ids,
         )
         _attach_miss_edit_recipes(db, grouped)
         grouped["config"] = values
@@ -8305,6 +12643,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         except ValueError as e:
             return json_error(str(e))
+        try:
+            photo_ids = _miss_filter_photo_ids(db, body)
+        except ValueError as e:
+            return json_error(str(e), 400)
 
         if body.get("save_defaults") is True:
             _save_miss_threshold_overrides(db, values, pipeline)
@@ -8312,9 +12654,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         since = body.get("since") or None
         updated = compute_misses_for_workspace(
             db, pipeline, detector_confidence=detector_confidence, since=since,
+            photo_ids=photo_ids,
         )
         grouped = preview_misses_for_workspace(
             db, pipeline, detector_confidence=detector_confidence, since=since,
+            photo_ids=photo_ids,
         )
         _attach_miss_edit_recipes(db, grouped)
         grouped["config"] = values
@@ -8343,7 +12687,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         since = body.get("since") or None
         if category not in ("no_subject", "clipped", "oof"):
             return jsonify({"error": "invalid category"}), 400
-        affected = db.bulk_reject_miss_category(category, since=since)
+        try:
+            photo_ids = _miss_filter_photo_ids(db, body)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        affected = db.bulk_reject_miss_category(
+            category, since=since, photo_ids=photo_ids
+        )
         if affected:
             items = [
                 {"photo_id": a["photo_id"],
@@ -8409,8 +12759,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         import shutil
 
+        from metadata import exiftool_status as get_exiftool_status
+
+        exiftool_probe = get_exiftool_status()
         exiftool_status = {
-            "installed": shutil.which("exiftool") is not None,
+            "installed": exiftool_probe["available"],
+            "version": exiftool_probe["version"],
+            "bundled": bool(
+                sys.platform.startswith("win") and exiftool_probe["available"]
+            ),
             "brew_available": shutil.which("brew") is not None,
         }
 
@@ -8538,13 +12895,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/system/install-exiftool", methods=["POST"])
     def api_install_exiftool():
-        """Install exiftool via Homebrew."""
-        import shutil
+        """Install ExifTool where Vireo can safely automate installation."""
         import subprocess
 
-        if shutil.which("exiftool"):
+        from metadata import exiftool_status
+
+        status = exiftool_status()
+        if status["available"]:
             return jsonify({"success": True, "message": "exiftool is already installed"})
 
+        if sys.platform.startswith("win"):
+            return jsonify({
+                "success": False,
+                "error": (
+                    "The Windows desktop build includes ExifTool. Repair or reinstall "
+                    "Vireo if the bundled copy is unavailable."
+                ),
+            })
+        if sys.platform != "darwin":
+            return jsonify({
+                "success": False,
+                "error": "Install ExifTool with your Linux package manager, then restart Vireo.",
+            })
+
+        import shutil
         if not shutil.which("brew"):
             return jsonify({
                 "success": False,
@@ -8555,6 +12929,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             result = subprocess.run(
                 ["brew", "install", "exiftool"],
                 capture_output=True, text=True, timeout=300,
+                **no_window_kwargs(),
             )
             if result.returncode == 0:
                 return jsonify({"success": True, "message": "exiftool installed successfully"})
@@ -8649,7 +13024,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if key in ("keyboard_shortcuts", "remote_targets"):
                     continue
                 if key in cfg.DEFAULTS:
-                    current[key] = body[key]
+                    # Deep-merge for nested-dict config sections so a curated
+                    # payload that only ships a subset of keys (settings.html's
+                    # saveConfig posts a ``pipeline`` block with just the
+                    # weights/miss/eye sliders it renders) doesn't wipe the
+                    # keys it didn't include. Without this, the global
+                    # ``pipeline.default_process_id`` would silently reset to
+                    # null on every autosave and workspaces inheriting it
+                    # would go back to import-only.
+                    if (
+                        isinstance(cfg.DEFAULTS[key], dict)
+                        and isinstance(body[key], dict)
+                        and isinstance(current.get(key), dict)
+                    ):
+                        current[key] = cfg._deep_merge(current[key], body[key])
+                    else:
+                        current[key] = body[key]
+            # default_process_id points into saved_processes; the deep-merge
+            # above can carry a stale or foreign id into the global config.
+            # Reject it here like the settings PATCH/import paths, else
+            # workspaces inheriting this global default hit "unknown process
+            # id" in _validate_after_import on their next import instead of
+            # starting it.
+            pipeline_current = current.get("pipeline")
+            if isinstance(pipeline_current, dict):
+                pid = pipeline_current.get("default_process_id")
+                if pid is not None:
+                    if not isinstance(pid, int) or isinstance(pid, bool):
+                        return json_error(
+                            "pipeline.default_process_id must be an integer "
+                            "or null", status=400,
+                        )
+                    if _get_db().get_saved_process(pid) is None:
+                        return json_error(
+                            f"unknown process id: {pid}", status=400
+                        )
             # Apply HF token to environment immediately
             hf_token = current.get("hf_token", "")
             if hf_token:
@@ -8669,11 +13078,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Return the SCHEMA dict and the ordered category list.
 
         Consumed by the schema-rendered settings UI to generate widgets.
+
+        ``pipeline.default_process_id`` is stored/validated as an ``int``
+        (config_schema is DB-agnostic), but the widget should be a picker over
+        the live saved-process list. Present it here as a dynamic ``enum``
+        without mutating the module-level SCHEMA: shallow-copy the dict, swap
+        that one entry, and inject the current processes as enum/enum_labels.
         """
         import config_schema as schema
 
+        db = _get_db()
+        out = dict(schema.SCHEMA)
+        spec = dict(out.get("pipeline.default_process_id", {}))
+        if spec:
+            procs = db.get_saved_processes()
+            spec["type"] = "enum"
+            # Return numeric ids so the settings renderer, which selects the
+            # active option via strict equality against the effective value,
+            # matches. The stored/effective value is an ``int`` (validated by
+            # the static ``int`` spec), so string-typed enum values would
+            # never match and the picker would silently fall through to the
+            # nullable "Import only" option, misrepresenting an active
+            # default and resetting it on the next save. <option> values in
+            # the DOM still serialize to strings; the PATCH endpoint coerces
+            # them back to int via the static int spec on the way in.
+            spec["enum"] = [p["id"] for p in procs]
+            spec["enum_labels"] = {p["id"]: p["name"] for p in procs}
+            out["pipeline.default_process_id"] = spec
         return jsonify({
-            "schema": schema.SCHEMA,
+            "schema": out,
             "categories": list(schema.CATEGORIES),
         })
 
@@ -8806,6 +13239,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except schema.ValidationError as e:
             return json_error(str(e), status=400)
 
+        # default_process_id points into saved_processes; config_schema only
+        # int-coerces it, so validate existence here too (mirrors the
+        # workspace PATCH and _validate_workspace_config_overrides). Without
+        # this, a stale global default lets workspaces that inherit it hit the
+        # import endpoints' "unknown process id" wall and fail to auto-process.
+        if (
+            key == "pipeline.default_process_id"
+            and value is not None
+            and _get_db().get_saved_process(value) is None
+        ):
+            return json_error(f"unknown process id: {value}", status=400)
+
         with _settings_write_lock:
             raw = _read_raw_config_file()
             schema.set_dotted(raw, key, value)
@@ -8872,6 +13317,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(str(e), status=400)
 
         db = _get_db()
+        # default_process_id is a pointer into saved_processes: config_schema
+        # only coerces it to int/null, so existence is checked here against the
+        # DB (mirrors _validate_workspace_config_overrides).
+        if (
+            key == "pipeline.default_process_id"
+            and value is not None
+            and db.get_saved_process(value) is None
+        ):
+            return json_error(f"unknown process id: {value}", status=400)
         with _settings_write_lock:
             overrides = _read_workspace_overrides(db)
             schema.set_dotted(overrides, key, value)
@@ -8904,6 +13358,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         raw = _read_raw_config_file()
         raw.pop("_migrations_applied", None)
+        # ``pipeline.default_process_id`` points into ``saved_processes``,
+        # whose rows are DB-local — the ids don't transfer across databases.
+        # If the same integer id happens to exist in the target DB it points
+        # at a different process; the seed ids 1-4 make this collision
+        # common. Emit the current process name AND its full flag snapshot
+        # alongside the id as a portable identity so ``/api/settings/import``
+        # can verify the target DB's same-named row means the same thing.
+        # Name alone is not enough — process names are user-editable and two
+        # databases can end up with matching names on rows that differ in
+        # flags (renamed customs, edited seeds, unrelated customs that just
+        # happen to share a label). Importing a foreign backup would then
+        # silently repoint the after-import default at a divergent process.
+        # The extra keys live in the exported JSON only; the raw config file
+        # itself is never rewritten with them.
+        pipeline_raw = raw.get("pipeline")
+        if isinstance(pipeline_raw, dict):
+            pid = pipeline_raw.get("default_process_id")
+            if isinstance(pid, int):
+                match = _get_db().get_saved_process(pid)
+                if match is not None:
+                    import process_strategies as ps
+
+                    pipeline_raw["default_process_name"] = match["name"]
+                    pipeline_raw["default_process_flags"] = {
+                        k: match[k] for k in ps.FLAG_FIELDS
+                    }
         body = json.dumps(raw, indent=2)
         today = _datetime.date.today().isoformat()
         resp = make_response(body)
@@ -8938,6 +13418,88 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(payload, dict):
             return json_error("payload must be a JSON object", status=400)
 
+        # Translate the legacy ``pipeline.default_strategy`` (hardcoded strategy
+        # name) to the current ``pipeline.default_process_id`` before schema
+        # validation runs. Startup migration does the same for
+        # ~/.vireo/config.json, but importing an older settings backup would
+        # otherwise write the legacy key through as a non-schema value (the
+        # import endpoints only read ``default_process_id``) and silently fall
+        # back to import-only until a restart. Mirror the migration's mapping
+        # exactly: unknown/removed legacy names -> null (import only). If both
+        # keys are present (e.g. a hand-edited backup), the new key wins and
+        # the legacy key is dropped so it can't reappear on a later export.
+        pipeline_payload = payload.get("pipeline")
+        if (
+            isinstance(pipeline_payload, dict)
+            and "default_strategy" in pipeline_payload
+        ):
+            import process_strategies as ps
+
+            legacy = pipeline_payload.pop("default_strategy")
+            if "default_process_id" not in pipeline_payload:
+                seed_name = (
+                    ps.LEGACY_STRATEGY_NAMES.get(legacy)
+                    if isinstance(legacy, str) else None
+                )
+                translated_pid = None
+                if seed_name is not None:
+                    match = next(
+                        (
+                            p for p in _get_db().get_saved_processes()
+                            if p["name"] == seed_name
+                        ),
+                        None,
+                    )
+                    if match is not None:
+                        translated_pid = match["id"]
+                pipeline_payload["default_process_id"] = translated_pid
+
+        # Translate the portable ``pipeline.default_process_name`` (emitted by
+        # /api/settings/export alongside the id) to the target DB's id.
+        # ``saved_processes`` rows are DB-local — the raw id doesn't transfer
+        # across databases (seed ids 1-4 collide, custom ids collide by
+        # chance), so a foreign backup that only carried ``default_process_id``
+        # would silently point at whatever unrelated row happens to share that
+        # id. Match by name AND by full flag snapshot when the exporter emits
+        # ``default_process_flags``: the name alone is not a stable identity
+        # (users rename processes, unrelated custom processes across DBs can
+        # share a label, and even a seed named "Full" may have been edited on
+        # one side). If the exporter didn't ship flags (older backup), fall
+        # back to name-only match. Any mismatch — no name row, no flag-equal
+        # row, or the flags entry is malformed — resolves to null (import
+        # only) instead of silently activating a divergent process. The name
+        # and flag fields are stripped from the payload so they don't persist
+        # to ~/.vireo/config.json as non-schema keys.
+        if isinstance(pipeline_payload, dict) and (
+            "default_process_name" in pipeline_payload
+            or "default_process_flags" in pipeline_payload
+        ):
+            import process_strategies as ps
+
+            name_val = pipeline_payload.pop("default_process_name", None)
+            flags_val = pipeline_payload.pop("default_process_flags", None)
+            if name_val is None:
+                pipeline_payload["default_process_id"] = None
+            elif isinstance(name_val, str):
+                candidates = [
+                    p for p in _get_db().get_saved_processes()
+                    if p["name"] == name_val
+                ]
+                translated_pid = None
+                if isinstance(flags_val, dict):
+                    for cand in candidates:
+                        if all(
+                            cand.get(k) == flags_val.get(k)
+                            for k in ps.FLAG_FIELDS
+                        ):
+                            translated_pid = cand["id"]
+                            break
+                elif candidates:
+                    translated_pid = candidates[0]["id"]
+                pipeline_payload["default_process_id"] = translated_pid
+            else:
+                pipeline_payload["default_process_id"] = None
+
         # Iterate the schema directly rather than relying on flatten() — empty
         # objects at schema leaves (e.g. {"classification_threshold": {}}) flatten
         # to nothing and would otherwise be written as-is, replacing a numeric
@@ -8967,6 +13529,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 schema.set_dotted(payload, schema_key, coerced)
             except schema.ValidationError as e:
                 errors[schema_key] = str(e)
+
+        # default_process_id points into saved_processes; config_schema only
+        # coerces it to int/null. An imported config carrying an id from
+        # another DB — or a stale id after a process was deleted — would
+        # silently write through here and then hit the "unknown process id"
+        # 400 at every import that inherits this global default. Mirror the
+        # global PATCH check so the failure surfaces at the import layer.
+        pid_key = "pipeline.default_process_id"
+        if pid_key not in errors:
+            pid_val = schema.get_dotted(payload, pid_key, default=_MISSING)
+            if (
+                pid_val is not _MISSING
+                and pid_val is not None
+                and _get_db().get_saved_process(pid_val) is None
+            ):
+                errors[pid_key] = f"unknown process id: {pid_val}"
 
         # Structured non-schema keys still need shape validation, otherwise a
         # malformed payload would write through to the file and crash
@@ -9143,6 +13721,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not recipe:
                 return fallback_path, None
 
+            import local_masks as _local_masks
             from image_edits import (
                 EDIT_MATH_VERSION,
                 apply_recipe_to_loaded_image,
@@ -9266,6 +13845,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 rendered = apply_recipe_to_loaded_image(
                     img, recipe,
                     native_size=_recipe_source_dimensions(photo),
+                    local_mask=_local_masks.load_snapshot(
+                        vireo_dir, photo["id"], recipe,
+                    ),
                 )
                 quality = cfg.load().get("working_copy_quality", 92)
                 fd, tmp_path = tempfile.mkstemp(
@@ -9429,17 +14011,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 result = subprocess.run(
                     ["open", "-a", app_bundle] + file_paths,
                     capture_output=True, text=True, timeout=30,
+                    **no_window_kwargs(),
                 )
                 if result.returncode != 0:
                     err = (result.stderr or result.stdout or "open failed").strip()
                     log.warning("open -a %s failed: %s", app_bundle, err)
                     return json_error(err, 500)
             elif editor_path:
-                subprocess.Popen([editor_path] + file_paths)
+                subprocess.Popen([editor_path] + file_paths, **no_window_kwargs())
             elif sys.platform == "darwin":
                 result = subprocess.run(
                     ["open"] + file_paths,
                     capture_output=True, text=True, timeout=30,
+                    **no_window_kwargs(),
                 )
                 if result.returncode != 0:
                     err = (result.stderr or result.stdout or "open failed").strip()
@@ -9450,12 +14034,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     os.startfile(fp)
             else:
                 for fp in file_paths:
-                    subprocess.Popen(["xdg-open", fp])
+                    subprocess.Popen(["xdg-open", fp], **no_window_kwargs())
         except Exception as e:
             log.warning("Failed to open external editor: %s", e)
             return json_error(str(e), 500)
 
         return jsonify({"opened": len(file_paths)})
+
+    def _storage_masks_data(db):
+        """Build the shared mask-storage payload once per storage refresh."""
+        import config as cfg
+
+        # This is a global view, so use the most permissive confidence floor
+        # across workspaces. The stale set must not change with active workspace.
+        min_detector_conf = db.min_detector_confidence_across_workspaces(
+            cfg.load()
+        )
+        variants = db.mask_variants_summary()
+        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
+        return {
+            "variants": variants,
+            "total_bytes": sum(v["bytes"] for v in variants),
+            "stale_count": len(stale),
+            "path": os.path.join(os.path.dirname(db_path), "masks"),
+        }
 
     @app.route("/api/storage")
     def api_storage():
@@ -9490,6 +14092,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         preview = _dir_stats(preview_dir)
         emb = _dir_stats(EMB_CACHE_DIR)
         models_size = _dir_size_recursive(DEFAULT_MODELS_DIR)
+        db = _get_db()
+        offline_size = db.offline_original_total_bytes()
+        offline_count_row = db.conn.execute(
+            "SELECT COUNT(*) AS c FROM offline_originals WHERE status='cached'"
+        ).fetchone()
+        masks = _storage_masks_data(db)
+        masks_size = masks["total_bytes"]
 
         # HuggingFace cache — only count Vireo-relevant models
         hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
@@ -9517,17 +14126,103 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             + emb["size"]
             + models_size
             + hf_size
+            + offline_size
+            + masks_size
         )
+        reclaimable = thumb["size"] + preview["size"] + emb["size"]
+
+        storage_root = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def _volume_for_path(path):
+            usage_path = os.path.abspath(path)
+            while not os.path.exists(usage_path):
+                parent = os.path.dirname(usage_path)
+                if parent == usage_path:
+                    break
+                usage_path = parent
+            try:
+                usage = shutil.disk_usage(usage_path)
+                free_bytes = usage.free
+                capacity_bytes = usage.total
+            except OSError:
+                free_bytes = None
+                capacity_bytes = None
+
+            mount_path = usage_path
+            while not os.path.ismount(mount_path):
+                parent = os.path.dirname(mount_path)
+                if parent == mount_path:
+                    break
+                mount_path = parent
+            if sys.platform.startswith("win"):
+                name = os.path.splitdrive(mount_path)[0] or mount_path
+            elif mount_path == os.path.sep:
+                name = "System volume"
+            else:
+                name = os.path.basename(mount_path.rstrip(os.path.sep)) or mount_path
+            return {
+                "name": name,
+                "mount_path": mount_path,
+                "free": free_bytes,
+                "capacity": capacity_bytes,
+            }
+
+        raw_locations = [
+            ("catalog", "Catalog and masks", os.path.dirname(db_path)),
+            (
+                "generated",
+                "Thumbnails, previews, and offline originals",
+                storage_root,
+            ),
+        ]
+        if emb["size"]:
+            raw_locations.append(("embeddings", "Label embeddings", EMB_CACHE_DIR))
+        if models_size:
+            raw_locations.append(("models", "Downloaded models", DEFAULT_MODELS_DIR))
+        if hf_size:
+            raw_locations.append(("hf_cache", "Hugging Face cache", hf_cache))
+
+        locations_by_path = {}
+        for location_id, label, path in raw_locations:
+            normalized = os.path.abspath(path)
+            if normalized not in locations_by_path:
+                locations_by_path[normalized] = {
+                    "id": location_id,
+                    "path": normalized,
+                    "labels": [],
+                    "volume": _volume_for_path(normalized),
+                }
+            locations_by_path[normalized]["labels"].append(label)
+        locations = list(locations_by_path.values())
+
+        volumes_by_mount = {}
+        for location in locations:
+            volume = location["volume"]
+            mount = volume["mount_path"]
+            if mount not in volumes_by_mount:
+                volumes_by_mount[mount] = dict(volume)
+                volumes_by_mount[mount]["location_ids"] = []
+            volumes_by_mount[mount]["location_ids"].append(location["id"])
 
         return jsonify(
             {
                 "total": total,
+                "reclaimable": reclaimable,
+                "storage_root": storage_root,
+                "locations": locations,
+                "volumes": list(volumes_by_mount.values()),
                 "database": {"size": db_size, "path": db_path},
                 "thumbnails": thumb,
                 "previews": preview,
                 "embeddings": emb,
                 "models": {"size": models_size, "path": DEFAULT_MODELS_DIR},
                 "hf_cache": {"size": hf_size, "path": hf_cache, "models": hf_models},
+                "offline_originals": {
+                    "count": offline_count_row["c"],
+                    "size": offline_size,
+                    "path": os.path.join(os.path.dirname(app.config["THUMB_CACHE_DIR"]), "offline"),
+                },
+                "masks": {"size": masks_size, **masks},
             }
         )
 
@@ -9535,28 +14230,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_storage_masks():
         """Per-variant SAM mask summary (counts, bytes, active counts)
         plus stale-mask count for the storage dashboard."""
-        import config as cfg
-
-        db = _get_db()
-        # Storage is global across all workspaces, so the stale floor
-        # must be too. Using the active workspace's detector_confidence
-        # would make stale_count flip when the user switches workspaces
-        # and let masks valid under another workspace's lower floor
-        # show up as stale. The minimum across workspaces is the most
-        # permissive view: only mark a mask stale when no workspace
-        # would still consider it fresh.
-        min_detector_conf = db.min_detector_confidence_across_workspaces(
-            cfg.load()
-        )
-        variants = db.mask_variants_summary()
-        stale = db.find_stale_masks(detector_confidence=min_detector_conf)
-        masks_dir = os.path.join(os.path.dirname(db_path), "masks")
-        return jsonify({
-            "variants": variants,
-            "total_bytes": sum(v["bytes"] for v in variants),
-            "stale_count": len(stale),
-            "path": masks_dir,
-        })
+        return jsonify(_storage_masks_data(_get_db()))
 
     @app.route("/api/storage/masks/delete-variant", methods=["POST"])
     def api_storage_masks_delete_variant():
@@ -9601,7 +14275,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         n = db.delete_stale_masks(detector_confidence=min_detector_conf)
         log.info("Deleted %d stale masks", n)
-        return jsonify({"ok": True, "deleted": n})
+        # Edit-mask snapshots piggyback on the same sweep: unreferenced,
+        # aged-out snapshot files (no current recipe or edit-history entry
+        # points at them) are reclaimed alongside stale live masks.
+        import local_masks
+        # Snapshots live under dirname(THUMB_CACHE_DIR) — the same root the
+        # snapshot POST endpoint writes to and every render call site reads
+        # from — which is not always dirname(db_path) when create_app is
+        # given a custom thumb-dir under a different parent.
+        gc = local_masks.gc_edit_masks(
+            db, os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        )
+        if gc["deleted"]:
+            log.info(
+                "Deleted %d unreferenced edit-mask snapshots", gc["deleted"]
+            )
+        return jsonify({
+            "ok": True, "deleted": n, "snapshots_deleted": gc["deleted"],
+        })
 
     @app.route("/api/storage/files")
     def api_storage_files():
@@ -9620,6 +14311,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not cache_dir:
             return json_error("Unknown cache type")
 
+        raw_limit = request.args.get("limit", type=int)
+        limit = raw_limit if raw_limit and raw_limit > 0 else None
+
         # Load embedding manifest for display names
         manifest = {}
         if cache_type == "embeddings":
@@ -9627,24 +14321,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             manifest = _load_manifest()
 
         files = []
+        truncated = False
         if os.path.isdir(cache_dir):
-            for f in sorted(os.listdir(cache_dir)):
-                fp = os.path.join(cache_dir, f)
-                if os.path.isfile(fp) and f != "manifest.json":
-                    entry = {"name": f, "size": os.path.getsize(fp)}
-                    if f in manifest:
-                        entry["meta"] = manifest[f]
-                    files.append(entry)
-        return jsonify({"type": cache_type, "path": cache_dir, "files": files})
+            if limit is None:
+                names = sorted(os.listdir(cache_dir))
+                for f in names:
+                    fp = os.path.join(cache_dir, f)
+                    if os.path.isfile(fp) and f != "manifest.json":
+                        entry = {"name": f, "size": os.path.getsize(fp)}
+                        if f in manifest:
+                            entry["meta"] = manifest[f]
+                        files.append(entry)
+            else:
+                with os.scandir(cache_dir) as entries:
+                    for entry_info in entries:
+                        if entry_info.name == "manifest.json":
+                            continue
+                        if not entry_info.is_file():
+                            continue
+                        if len(files) >= limit:
+                            truncated = True
+                            break
+                        stat = entry_info.stat()
+                        entry = {"name": entry_info.name, "size": stat.st_size}
+                        if entry_info.name in manifest:
+                            entry["meta"] = manifest[entry_info.name]
+                        files.append(entry)
+        return jsonify({
+            "type": cache_type,
+            "path": cache_dir,
+            "files": files,
+            "truncated": truncated,
+            "limit": limit,
+        })
 
-    @app.route("/api/storage/clear", methods=["POST"])
-    def api_storage_clear():
-        """Clear a specific cache."""
-        import shutil
-
-        body = request.get_json(silent=True) or {}
-        cache_type = body.get("type", "")
-
+    def _clear_storage_cache(cache_type):
         if cache_type == "previews":
             preview_dir = os.path.join(
                 os.path.dirname(app.config["THUMB_CACHE_DIR"]), "previews"
@@ -9687,6 +14398,70 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"ok": True})
         else:
             return json_error("Unknown cache type")
+
+    @app.route("/api/storage/clear", methods=["POST"])
+    def api_storage_clear():
+        """Clear a specific cache."""
+        body = request.get_json(silent=True) or {}
+        return _clear_storage_cache(body.get("type", ""))
+
+    @app.route("/api/storage/clear-safe", methods=["POST"])
+    def api_storage_clear_safe():
+        """Clear every regenerable cache without touching models or originals."""
+        for cache_type in ("thumbnails", "previews", "embeddings"):
+            _clear_storage_cache(cache_type)
+        return jsonify({
+            "ok": True,
+            "cleared": ["thumbnails", "previews", "embeddings"],
+        })
+
+    @app.route("/api/storage/open-folder", methods=["POST"])
+    def api_storage_open_folder():
+        """Open one of Vireo's server-selected storage paths."""
+        from classifier import CACHE_DIR as EMB_CACHE_DIR
+        from models import DEFAULT_MODELS_DIR
+
+        location_id = (request.get_json(silent=True) or {}).get(
+            "location", "generated"
+        )
+        locations = {
+            "catalog": os.path.dirname(db_path),
+            "generated": os.path.dirname(app.config["THUMB_CACHE_DIR"]),
+            "embeddings": EMB_CACHE_DIR,
+            "models": DEFAULT_MODELS_DIR,
+            "hf_cache": os.path.expanduser("~/.cache/huggingface/hub"),
+        }
+        path = locations.get(location_id)
+        if path is None:
+            return json_error("Unknown storage location")
+        path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            return jsonify({"ok": False, "reason": "storage folder not found"})
+        try:
+            if sys.platform == "darwin":
+                proc = subprocess.run(
+                    ["open", "--", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            elif sys.platform.startswith("win"):
+                proc = subprocess.run(
+                    ["explorer", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            else:
+                proc = subprocess.run(
+                    ["xdg-open", path], timeout=5, check=False,
+                    capture_output=True, text=True, **no_window_kwargs(),
+                )
+            if not sys.platform.startswith("win") and proc.returncode != 0:
+                reason = (proc.stderr or proc.stdout or "").strip()
+                return jsonify({
+                    "ok": False,
+                    "reason": reason or f"open command exited {proc.returncode}",
+                })
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            return jsonify({"ok": False, "reason": str(exc)})
+        return jsonify({"ok": True})
 
     @app.route("/api/storage/delete-files", methods=["POST"])
     def api_storage_delete_files():
@@ -10060,20 +14835,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             log.info("Embedding cache cleared")
         return jsonify({"ok": True})
 
-    @app.route("/api/version")
-    def api_version():
-        try:
-            from importlib.metadata import version as pkg_version
-            ver = pkg_version("vireo")
-        except Exception:
-            import tomllib
-            try:
-                with open(os.path.join(os.path.dirname(__file__), "..", "pyproject.toml"), "rb") as f:
-                    ver = tomllib.load(f)["project"]["version"]
-            except Exception:
-                ver = "0.0.0"
-        return jsonify({"version": ver})
-
     @app.route("/api/volumes", methods=["GET"])
     def api_volumes():
         """List mounted volumes (macOS/Windows/Linux) to help find SD cards."""
@@ -10324,12 +15085,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         body = request.get_json(silent=True) or {}
         folders = body.get("folders", [])
         file_types = body.get("file_types", [])
+        summary_only = bool(body.get("summary_only"))
         if not folders:
             return json_error("folders required", 400)
 
         from ingest import discover_source_files
 
         all_files = []
+        type_breakdown = {}
+        total_size = 0
         multi_source = len(folders) > 1
 
         # Compute unique display names for each source folder.
@@ -10354,6 +15118,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             discovered = discover_source_files(folder, file_types=file_types if file_types else "both", recursive=body.get("recursive", True))
             for f in discovered:
                 stat = f.stat()
+                ext = f.suffix.lower()
+                type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
+                total_size += stat.st_size
+                if summary_only:
+                    continue
                 # Determine subfolder relative to the source root
                 try:
                     rel = f.parent.relative_to(folder)
@@ -10370,21 +15139,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "filename": f.name,
                     "subfolder": subfolder,
                     "size": stat.st_size,
-                    "extension": f.suffix.lower(),
+                    "extension": ext,
                     "mtime": stat.st_mtime,
                     "thumb_url": "/api/import/folder-preview/thumbnail?path=" + quote(str(f)),
                 })
 
-        # Build summary
-        type_breakdown = {}
-        total_size = 0
-        for f in all_files:
-            ext = f["extension"]
-            type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
-            total_size += f["size"]
-
         return jsonify({
-            "total_count": len(all_files),
+            "total_count": sum(type_breakdown.values()) if summary_only else len(all_files),
             "total_size": total_size,
             "type_breakdown": type_breakdown,
             "duplicate_count": 0,
@@ -10486,21 +15247,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_import_check_duplicates():
         """Stream duplicate detection results via SSE.
 
-        Accepts {"paths": [...]}, hashes each file, checks against DB,
-        and streams batches of duplicate paths back to the client.
+        Accepts {"paths": [...], "verify_by_hash": bool} and streams
+        batches of duplicate paths back to the client. Uses the same
+        DuplicateChecker as ingest() — metadata-first with a content-hash
+        fallback by default, hash-everything when verify_by_hash — so the
+        preview's DUPLICATE badges and count are exactly the files the
+        import step will skip.
         """
         body = request.get_json(silent=True) or {}
         paths = body.get("paths", [])
+        verify_by_hash = bool(body.get("verify_by_hash"))
         if not paths:
             return json_error("paths required", 400)
 
-        from scanner import EMPTY_FILE_SHA256, compute_file_hash
+        from import_dedup import CatalogIndex, DuplicateChecker
 
         db = _get_db()
-        rows = db.conn.execute(
-            "SELECT file_hash FROM photos WHERE file_hash IS NOT NULL"
-        ).fetchall()
-        known_hashes = {r["file_hash"] for r in rows}
+        checker = DuplicateChecker(
+            CatalogIndex.from_db(db), verify_by_hash=verify_by_hash,
+        )
 
         BATCH_SIZE = 20
 
@@ -10508,30 +15273,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             total = len(paths)
             duplicate_count = 0
             batch_duplicates = []
-            # Also track hashes seen in this run so identical source files
-            # (not yet in DB) are reported as duplicates of each other,
-            # matching the behaviour of the actual import step.
-            seen_hashes = set()
+            # Batch the EXIF header reads once up front (no-op in
+            # verify_by_hash mode). Intra-run duplicate tracking lives in
+            # the checker: identical source files not yet in the DB are
+            # reported as duplicates of each other, matching the actual
+            # import step.
+            checker.prepare([Path(p) for p in paths])
 
             for checked, path in enumerate(paths, 1):
+                # Zero-byte placeholders are non-duplicates (the checker
+                # gives them no identity), and unreadable/missing files
+                # are skipped; both fall through so the batch-yield block
+                # below still runs. A `continue` would swallow any
+                # already-queued `batch_duplicates` whenever such a file
+                # landed on the last path or on a batch boundary, leaving
+                # the UI unable to deselect those known dupes.
                 try:
-                    file_hash = compute_file_hash(path)
-                    # Treat zero-byte placeholders as non-duplicates, but fall
-                    # through so the batch-yield block below still runs.
-                    # A `continue` here would swallow any already-queued
-                    # `batch_duplicates` whenever an empty file landed on the
-                    # last path or on a `checked % BATCH_SIZE == 0` boundary,
-                    # leaving the UI unable to deselect those known dupes.
-                    is_empty_placeholder = (
-                        file_hash == EMPTY_FILE_SHA256
-                        and os.path.getsize(path) == 0
-                    )
-                    if not is_empty_placeholder:
-                        if file_hash in known_hashes or file_hash in seen_hashes:
-                            batch_duplicates.append(path)
-                            duplicate_count += 1
-                        else:
-                            seen_hashes.add(file_hash)
+                    if checker.check_and_record(Path(path)):
+                        batch_duplicates.append(path)
+                        duplicate_count += 1
                 except OSError:
                     pass  # Skip unreadable/missing files
 
@@ -10556,7 +15316,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("collection_id required", 400)
 
         db = _get_db()
-        photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
+        try:
+            photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
+        except ValueError as e:
+            app.logger.exception(
+                "Collection %s has unresolvable rules", collection_id
+            )
+            return json_error(f"collection rules cannot be resolved: {e}", 400)
 
         folder_rows = db.conn.execute("SELECT id, path, name FROM folders").fetchall()
         folder_map = {r["id"]: dict(r) for r in folder_rows}
@@ -10884,6 +15650,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         result = db.delete_photos(photo_ids)
         _cleanup_cached_files_for_deleted_photos(result.get("files", []))
+        if result.get("deleted"):
+            _invalidate_missing_originals_cache()
         return jsonify({"ok": True, "removed": result.get("deleted", 0)})
 
     @app.route("/api/audit/import-untracked", methods=["POST"])
@@ -10894,11 +15662,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from audit import import_untracked
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
-        import_untracked(
-            db, paths,
-            vireo_dir=vireo_dir,
-            thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
-        )
+        try:
+            import_untracked(
+                db, paths,
+                vireo_dir=vireo_dir,
+                thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+            )
+        finally:
+            try:
+                _invalidate_missing_originals_cache()
+            except Exception:
+                log.exception(
+                    "Failed to invalidate missing-originals cache after audit import"
+                )
         # Audit import calls scanner.scan just like the standalone scan/import
         # paths above. Without ExifTool the newly imported photos still lose
         # capture date, GPS, and camera info; the frontend renders any warning
@@ -11367,26 +16143,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         species = pred["species"] if pred else ""
         scientific = pred["scientific_name"] if pred else ""
 
-        # Percent-encode every value: scientific names contain spaces, and an
-        # unencoded space makes the URL invalid, so the desktop opener plugin
-        # rejects it and nothing opens.
-        params = []
-        if scientific:
-            params.append("taxon_name=" + quote(scientific))
-        elif species:
-            params.append("taxon_name=" + quote(species))
-        if photo["timestamp"]:
-            params.append("observed_on=" + quote(photo["timestamp"][:10]))
         loc = db.get_effective_photo_location(photo_id)
         lat = loc["latitude"] if loc else None
         lng = loc["longitude"] if loc else None
-        if lat is not None and lng is not None:
-            params.append("lat=" + quote(str(lat)))
-            params.append("lng=" + quote(str(lng)))
-
+        # The browser uploader does not document query parameters for
+        # pre-filling an observation. In particular, taxon_name is an
+        # observation-search parameter, not an uploader parameter. Open the
+        # generic uploader and keep the prepared metadata in this response for
+        # Vireo's authenticated direct-upload flow.
         upload_url = "https://www.inaturalist.org/observations/upload"
-        if params:
-            upload_url += "?" + "&".join(params)
 
         # Check submission history
         subs = db.get_inat_submissions([photo_id])
@@ -11479,6 +16244,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not recipe:
             return fallback_path, None
 
+        import local_masks as _local_masks
         from image_edits import (
             EDIT_MATH_VERSION,
             apply_recipe_to_loaded_image,
@@ -11594,6 +16360,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             rendered = apply_recipe_to_loaded_image(
                 img, recipe,
                 native_size=_recipe_source_dimensions(photo),
+                local_mask=_local_masks.load_snapshot(
+                    vireo_dir, photo["id"], recipe,
+                ),
             )
             quality = cfg.load().get("working_copy_quality", 92)
             fd, tmp_path = tempfile.mkstemp(
@@ -11711,6 +16480,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         except inat.InatAuthError as e:
             return json_error(str(e), 401)
+        except inat.InatPartialUploadError as e:
+            return jsonify({
+                "error": str(e),
+                "partial": True,
+                "observation_id": e.observation_id,
+                "observation_url": e.observation_url,
+            }), 502
         except inat.InatApiError as e:
             return json_error(str(e), 502)
 
@@ -11799,6 +16575,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 db.record_inat_submission(photo_id, obs_id, obs_url)
                 results.append({"photo_id": photo_id, "observation_id": obs_id, "observation_url": obs_url})
+            except inat.InatPartialUploadError as e:
+                results.append({
+                    "photo_id": photo_id,
+                    "error": str(e),
+                    "partial": True,
+                    "observation_id": e.observation_id,
+                    "observation_url": e.observation_url,
+                })
             except (inat.InatAuthError, inat.InatApiError) as e:
                 results.append({"photo_id": photo_id, "error": str(e)})
 
@@ -11824,6 +16608,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_system_info():
         """Return system information: ONNX Runtime, hardware."""
         info = _runtime_execution_info()
+        import config as cfg
+        from platform_support import platform_support_info
+
+        try:
+            effective = _get_db().get_effective_config(cfg.load())
+        except Exception:
+            effective = cfg.load()
+        info["platform_support"] = platform_support_info(effective)
 
         # "installed" requires both module AND weights — module-only
         # lets classify silently fall back to full-image classification.
@@ -12210,12 +17002,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             roots_list = list(roots)
 
         def work(job):
+            from scanner import ScanCancelled
             from scanner import scan as do_scan
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
             # Check folder health before scanning to prevent duplicate imports
-            thread_db.check_folder_health()
+            if thread_db.check_folder_health():
+                _invalidate_missing_originals_cache()
 
             # Accumulator so multi-root progress doesn't rewind at each
             # root boundary. scanner.scan() reports (current, total) local
@@ -12272,15 +17066,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             effective_cfg = thread_db.get_effective_config(cfg.load())
             pipeline_cfg = effective_cfg.get("pipeline", {})
 
-            def status_cb(message):
-                runner.update_step(job["id"], "scan", current_file=message)
-                runner.push_event(job["id"], "progress", {
-                    "phase": message,
+            def status_cb(message, phase_current=None, phase_total=None, phase_label=None):
+                progress_payload = {
+                    "phase": phase_label or message,
                     "current": job["progress"].get("current", 0),
                     "total": job["progress"].get("total", 0),
                     "current_file": message,
                     "rate": 0,
-                })
+                    "phase_current": phase_current,
+                    "phase_total": phase_total,
+                    "phase_label": phase_label,
+                }
+                runner.update_step(job["id"], "scan", current_file=message)
+                runner.push_event(job["id"], "progress", progress_payload)
+
+            def cancel_check():
+                return runner.is_cancelled(job["id"])
 
             vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
@@ -12299,7 +17100,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             root_errors = []
             scan_failed_roots = set()
             cache_failed_roots = set()
+            cancelled = False
             for idx, root in enumerate(roots_list, 1):
+                if cancel_check():
+                    cancelled = True
+                    break
                 phase = (
                     f"Scanning root {idx} of {len(roots_list)}: {root}"
                     if len(roots_list) > 1
@@ -12321,8 +17126,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         status_callback=status_cb,
                         vireo_dir=vireo_dir,
                         thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+                        cancel_check=cancel_check,
                     )
                 except Exception as exc:
+                    if isinstance(exc, ScanCancelled) and cancel_check():
+                        log.info("Scan job %s cancelled during root %s", job["id"], root)
+                        cancelled = True
+                        break
                     log.exception("Scan failed for root %s", root)
                     scan_failed_roots.add(root)
                     msg = f"[{root}] {exc}"
@@ -12354,7 +17164,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         root_errors.append(cache_msg)
                         if cache_msg not in job["errors"]:
                             job["errors"].append(cache_msg)
+                    # scanner.scan touches disk and may add or remove
+                    # photo rows; a ready Missing Originals payload
+                    # computed before the scan can now be stale (e.g.
+                    # user restored an original before running "Rescan
+                    # this Folder"). The pre-scan health-check
+                    # invalidation only fires when a folder flips
+                    # missing/ok, so also drop the cache once the scan
+                    # itself has run — even on partial failure, since
+                    # rows are committed incrementally.
+                    try:
+                        _invalidate_missing_originals_cache()
+                    except Exception:
+                        log.exception(
+                            "Failed to invalidate missing-originals cache for %s",
+                            root,
+                        )
                     advance_scan_acc()
+
+            if cancelled or cancel_check():
+                photo_count = job["progress"].get("current", 0)
+                runner.update_step(
+                    job["id"], "scan", status="cancelled",
+                    summary=f"{photo_count} photos (cancelled)",
+                )
+                runner.update_step(
+                    job["id"], "thumbnails", status="skipped",
+                    summary="skipped (cancelled)",
+                )
+                return {"photos_indexed": photo_count, "cancelled": True}
 
             # Use cumulative processed count, not planned total — on a
             # clean run they're equal; on mixed-outcome runs "current"
@@ -12541,6 +17379,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
+
+        # A workspace with active local state has its folder paths rebased
+        # into the managed copy; scanner.scan() calls
+        # db.add_folder(link_to_workspace=True) for every folder it discovers,
+        # so any new root scanned here would add folder/workspace_folders rows
+        # that the manifest and local_workspace_folders don't cover — sync and
+        # discard could not rebase or remove them, and the workspace would mix
+        # unmanaged source paths with the managed local copy. Refuse until
+        # the local copy is synced or discarded, mirroring the folder-add,
+        # folder-remove, and move-folders guards. Also refuse when a
+        # stage/sync/discard job is queued or running but hasn't yet touched
+        # local_workspaces — otherwise the scan enqueued in that window
+        # could add unmanaged rows before the transition worker claims the
+        # workspace.
+        if active_ws is not None:
+            with stage_boundary_lock():
+                if has_local_workspace(_get_db(), active_ws):
+                    return json_error(
+                        "Cannot scan folders while working locally. Sync or discard the local copy first.",
+                        409,
+                    )
+                pending = _pending_local_workspace_transition(active_ws)
+                if pending:
+                    return json_error(
+                        f"Wait for the {pending['type']} job to finish before scanning; "
+                        "otherwise the scan would add folder rows the workspace's local "
+                        "manifest doesn't cover.",
+                        409,
+                    )
 
         work = _build_scan_work(roots_list, incremental, active_ws)
 
@@ -12797,12 +17664,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             try:
                 if sys.platform == "darwin":
                     proc = subprocess.run(["open", "-R", "--", path],
-                                          timeout=5, check=False)
+                                          timeout=5, check=False,
+                                          **no_window_kwargs())
                 elif sys.platform.startswith("win"):
                     # Folder reveal opens the folder itself (no /select,)
                     # so the user sees its contents.
                     proc = subprocess.run(["explorer", path],
-                                          timeout=5, check=False)
+                                          timeout=5, check=False,
+                                          **no_window_kwargs())
                 else:
                     # xdg-open doesn't honor `--`; abspath guarantees a
                     # leading slash so a crafted leading-dash path can't
@@ -12810,6 +17679,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     proc = subprocess.run(
                         ["xdg-open", os.path.abspath(path)],
                         timeout=5, check=False,
+                        **no_window_kwargs(),
                     )
                 # check=False returns a CompletedProcess for every exit
                 # code; classify non-zero as failed so the UI doesn't
@@ -13011,10 +17881,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if trashed_pids:
             try:
                 all_files = []
+                deleted_rows = 0
                 for chunk in _chunked(trashed_pids):
                     result = db.delete_photos(chunk)
                     all_files.extend(result.get("files", []))
+                    deleted_rows += result.get("deleted", 0)
                 _cleanup_cached_files_for_deleted_photos(all_files)
+                if deleted_rows:
+                    _invalidate_missing_originals_cache()
             except Exception:
                 # Files are already in Trash; if the row delete fails we
                 # surface a 500 so the caller knows reconciliation is
@@ -13197,10 +18071,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         continue
 
                 if not os.path.exists(cache_path):
-                    canonical, using_working_copy = _recipe_render_source(
-                        detail_photo, recipe, max_size, vireo_dir, folders,
-                    )
                     from image_loader import RAW_EXTENSIONS
+                    folder_path = folders.get(detail_photo["folder_id"])
+                    raw_source_path = None
+                    if (
+                        not recipe
+                        and folder_path
+                        and os.path.splitext(detail_photo["filename"])[1].lower()
+                        in RAW_EXTENSIONS
+                    ):
+                        # Mirror /photos/<id>/preview: an unedited RAW must
+                        # warm from the camera-rendered source, not the
+                        # highlight-preserving working copy. Otherwise the
+                        # precompute job writes flatter/darker bytes into the
+                        # tracked preview cache and _serve_preview returns
+                        # those cache hits before its own RAW-source branch
+                        # ever runs, so the migration's one-time purge is
+                        # undone on the first warmup.
+                        candidate = os.path.join(
+                            folder_path, detail_photo["filename"],
+                        )
+                        if os.path.exists(candidate) and not _has_current_working_copy_failure(
+                            detail_photo,
+                            vireo_dir,
+                            trust_existing_working_copy=False,
+                            live_source_path=candidate,
+                            folder_path=folder_path,
+                        ):
+                            raw_source_path = candidate
+                    if raw_source_path:
+                        canonical = raw_source_path
+                        using_working_copy = False
+                    else:
+                        canonical, using_working_copy = _recipe_render_source(
+                            detail_photo, recipe, max_size, vireo_dir, folders,
+                        )
                     if (
                         not using_working_copy
                         and os.path.splitext(canonical)[1].lower() in RAW_EXTENSIONS
@@ -13326,10 +18231,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                     canonical = companion_abs
                     if img:
                         if recipe:
+                            import local_masks
                             img = apply_recipe_to_loaded_image(
                                 img, recipe, max_size=max_size,
                                 native_size=_recipe_source_dimensions(
                                     detail_photo
+                                ),
+                                local_mask=local_masks.load_snapshot(
+                                    vireo_dir,
+                                    photo["id"], recipe,
                                 ),
                             )
                         img.save(cache_path, format="JPEG", quality=preview_quality)
@@ -13371,6 +18281,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         file_types = body.get("file_types", "both")
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
+        verify_by_hash = bool(body.get("verify_by_hash"))
 
         if not source or not destination:
             return json_error("source and destination are required")
@@ -13425,6 +18336,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 file_types=file_types,
                 folder_template=folder_template,
                 skip_duplicates=skip_duplicates,
+                verify_by_hash=verify_by_hash,
                 progress_callback=progress_cb,
             )
             return result
@@ -13491,6 +18403,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 destination=destination,
                 progress_cb=progress_cb,
             )
+            if int(result.get("moved") or 0) > 0:
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache "
+                        "after move-photos job",
+                    )
 
             if rule_id:
                 thread_db.touch_move_rule(rule_id)
@@ -13885,6 +18805,169 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id})
 
+    @app.route("/api/jobs/prepare-full-resolution", methods=["POST"])
+    def api_job_prepare_full_resolution():
+        """Prepare selected photos for uninterrupted full-resolution review.
+
+        The job first copies source assets into Vireo's managed local cache,
+        then drives the exact /original render path used by the lightbox. RAW
+        working copies and edited full-resolution renders are therefore ready
+        before the user begins inspecting the selection.
+        """
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("request body must be a JSON object")
+        raw_ids = body.get("photo_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return json_error("photo_ids must be a non-empty list of integers")
+
+        photo_ids = []
+        seen = set()
+        for raw_id in raw_ids:
+            if isinstance(raw_id, bool | float):
+                return json_error("photo_ids must contain only integers")
+            try:
+                photo_id = int(raw_id)
+            except (TypeError, ValueError):
+                return json_error("photo_ids must contain only integers")
+            if photo_id not in seen:
+                seen.add(photo_id)
+                photo_ids.append(photo_id)
+
+        db = _get_db()
+        runner = app._job_runner
+        active_ws = db._active_workspace_id
+        visible_set = set()
+        for chunk in _chunked(photo_ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.conn.execute(
+                f"""SELECT p.id FROM photos p
+                    JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+                    WHERE wf.workspace_id = ? AND p.id IN ({placeholders})""",
+                [active_ws, *chunk],
+            ).fetchall()
+            visible_set.update(row["id"] for row in rows)
+        photo_ids = [photo_id for photo_id in photo_ids if photo_id in visible_set]
+        if not photo_ids:
+            return json_error("no photos in the current workspace can be prepared")
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def work(job):
+            from offline_cache import cache_photo_original
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+            try:
+                photos_map = thread_db.get_photos_by_ids(photo_ids)
+                folders = {
+                    folder["id"]: folder["path"]
+                    for folder in thread_db.get_folder_tree()
+                }
+                ready = 0
+                copied = 0
+                reused = 0
+                failed = 0
+                copied_bytes = 0
+                total = len(photo_ids)
+                job["_start_time"] = time.time()
+                job["progress"]["total"] = total
+
+                for index, photo_id in enumerate(photo_ids, start=1):
+                    if runner.is_cancelled(job["id"]):
+                        break
+                    photo = photos_map.get(photo_id)
+                    filename = photo["filename"] if photo else f"Photo {photo_id}"
+                    error = None
+                    if not photo:
+                        error = "photo was not found"
+                    else:
+                        try:
+                            cached = cache_photo_original(
+                                thread_db, photo, vireo_dir, folders,
+                            )
+                            cache_status = cached.get("status")
+                            if cache_status == "cached":
+                                copied += 1
+                                copied_bytes += int(cached.get("bytes") or 0)
+                            elif cache_status == "skipped":
+                                reused += 1
+                            else:
+                                error = cache_status or "source could not be cached"
+
+                            if error is None:
+                                # Execute the canonical renderer inside an
+                                # isolated request context. This avoids a
+                                # second implementation drifting from the
+                                # lightbox's RAW/companion/edit fallbacks.
+                                with app.test_request_context(
+                                    f"/photos/{photo_id}/original"
+                                ):
+                                    request_db = _get_db()
+                                    request_db.set_active_workspace(active_ws)
+                                    response = app.make_response(
+                                        serve_original_photo(photo_id)
+                                    )
+                                    try:
+                                        if not 200 <= response.status_code < 300:
+                                            response.direct_passthrough = False
+                                            detail = response.get_data(
+                                                as_text=True,
+                                            ).strip()
+                                            error = detail or (
+                                                "full-resolution render failed "
+                                                f"with status {response.status_code}"
+                                            )
+                                    finally:
+                                        response.close()
+                        except Exception as exc:
+                            error = str(exc) or exc.__class__.__name__
+                            log.warning(
+                                "Full-resolution preparation failed for %s: %s",
+                                filename, exc, exc_info=True,
+                            )
+
+                    if error is None:
+                        ready += 1
+                    else:
+                        failed += 1
+                        job["errors"].append(f"{filename}: {error}")
+
+                    progress = {
+                        "current": index,
+                        "total": total,
+                        "current_file": filename,
+                        "rate": round(
+                            index
+                            / max(time.time() - job["_start_time"], 0.01),
+                            1,
+                        ),
+                        "phase": "Preparing full-resolution photos",
+                    }
+                    job["progress"].update(progress)
+                    runner.push_event(job["id"], "progress", progress)
+
+                return {
+                    "ok": failed == 0,
+                    "ready": ready,
+                    "copied": copied,
+                    "reused": reused,
+                    "failed": failed,
+                    "total": total,
+                    "bytes": copied_bytes,
+                    "errors": list(job["errors"]),
+                }
+            finally:
+                thread_db.close()
+
+        job_id = runner.start(
+            "prepare-full-resolution",
+            work,
+            config={"photo_ids": photo_ids},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id, "total": len(photo_ids)})
+
     @app.route("/api/jobs/move-folder", methods=["POST"])
     def api_job_move_folder():
         """Move an entire folder to a destination."""
@@ -13902,6 +18985,71 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not folder_id:
             return json_error("folder_id required")
+
+        # A folder covered by any workspace's local_workspace_folders row has
+        # its folders.path rebased into that workspace's managed copy; a
+        # concurrent workspace-membership guard would refuse to touch the
+        # folders row for exactly this reason. Moving it here (via
+        # db.move_folder_path) would move or delete the managed copy and
+        # rewrite the catalog while local_workspace_folders and the manifest
+        # still expect the pre-move layout, so the owning workspace's next
+        # status falls into missing-local recovery and sync/discard can no
+        # longer restore. Reject the job before enqueue.
+        db_for_guard = _get_db()
+        with stage_boundary_lock():
+            local_root_id = local_root_for_folder(db_for_guard, folder_id)
+            if local_root_id is not None:
+                return json_error(
+                    "Cannot move this folder while it has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
+            # A descendant local copy has already had its folders.path rebased
+            # under local-folders/, so a folders.path subtree walk from this
+            # ancestor no longer sees it — but local_folder_mappings.source_path
+            # still records the original location. Without this check the move
+            # job would move/delete the original source directory out from
+            # under the manifest, leaving sync/discard unable to restore.
+            descendant_root_id = local_root_under_folder(db_for_guard, folder_id)
+            if descendant_root_id is not None:
+                return json_error(
+                    "Cannot move this folder while a subfolder has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first.",
+                    409,
+                )
+            staged_here, staged_owner_ws = folder_has_local_workspace(
+                db_for_guard, folder_id,
+            )
+            if staged_here:
+                return json_error(
+                    f"Cannot move this folder — workspace {staged_owner_ws} has it "
+                    "staged locally. Switch to that workspace and sync or discard the "
+                    "local copy first.",
+                    409,
+                )
+            # ``folder_has_local_workspace`` only sees a completed stage
+            # claim. A stage/sync/discard queued or running against a
+            # workspace that contains this folder hasn't yet written
+            # local_workspace_folders, so the read-only guard above passes
+            # even though the transition worker is about to rebase this
+            # folder's paths. Enqueueing the move now would rewrite the
+            # ``folders`` row out from under the pending transition —
+            # missing-local recovery on the next status. Refuse until the
+            # transition finishes.
+            row = db_for_guard.conn.execute(
+                "SELECT workspace_id FROM workspace_folders WHERE folder_id = ?",
+                (folder_id,),
+            ).fetchall()
+            for ws_row in row:
+                pending = _pending_local_workspace_transition(int(ws_row["workspace_id"]))
+                if pending:
+                    return json_error(
+                        f"Wait for the {pending['type']} job on workspace "
+                        f"{int(ws_row['workspace_id'])} to finish before moving this "
+                        "folder; otherwise the move would run on paths that workspace "
+                        "is about to claim.",
+                        409,
+                    )
 
         import config as cfg
         import move as move_mod
@@ -13940,14 +19088,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 effective_cfg.get("rsync_bin", "") or "")
             if not rsync_bin:
                 return json_error(
-                    "No GNU rsync found for remote moves — macOS's "
-                    "built-in rsync can't drive rsync-over-SSH. Install GNU "
-                    "rsync (e.g. `brew install rsync`) or set its path under "
+                    "No usable GNU rsync was found for remote moves. Install "
+                    "GNU rsync for your platform or set its executable under "
                     "Settings → Paths."
+                )
+            ssh_bin = move_mod.resolve_ssh_bin(
+                effective_cfg.get("ssh_bin", "") or "")
+            if not ssh_bin:
+                return json_error(
+                    "OpenSSH Client was not found. Install the Windows "
+                    "OpenSSH Client optional feature or configure ssh.exe in Settings."
                 )
             try:
                 remote = move_mod.build_remote_move_spec(
-                    target, subpath, rsync_bin)
+                    target, subpath, rsync_bin, ssh_bin)
             except ValueError as exc:
                 return json_error(str(exc))
             # Pass the mount path as `destination` for informational use; the
@@ -14037,6 +19191,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             if cleanup_error else ""
                         )
                     )
+            if result.get("ok"):
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache "
+                        "after move-folder job",
+                    )
             return result
 
         job_config = {
@@ -14121,8 +19283,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             target = cfg.get_remote_target(remote_target_id)
             if not target:
                 return json_error("Remote target not found", status=404)
+            effective_cfg = _get_db().get_effective_config(cfg.load())
+            ssh_bin = move_mod.resolve_ssh_bin(
+                effective_cfg.get("ssh_bin", "") or "")
+            if not ssh_bin:
+                return json_error(
+                    "OpenSSH Client was not found. Install it or configure ssh.exe in Settings."
+                )
+            target = dict(target)
+            target["ssh_bin"] = ssh_bin
             try:
-                spec = move_mod.build_remote_move_spec(target, subpath, "")
+                spec = move_mod.build_remote_move_spec(target, subpath, "", ssh_bin)
             except ValueError as exc:
                 return json_error(str(exc))
             # The NAS path is POSIX, so the preview/probe path must join with
@@ -14199,10 +19370,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         rsync_bin = move_mod.resolve_rsync_bin(
             effective_cfg.get("rsync_bin", "") or "")
         usable = bool(rsync_bin and move_mod.is_gnu_rsync(rsync_bin))
+        ssh_bin = move_mod.resolve_ssh_bin(
+            effective_cfg.get("ssh_bin", "") or "")
         return jsonify({
             "targets": cfg.get_remote_targets(),
             "rsync_available": usable,
             "rsync_bin": rsync_bin if usable else None,
+            "ssh_available": bool(ssh_bin),
+            "ssh_bin": ssh_bin,
+            "remote_available": bool(usable and ssh_bin),
         })
 
     @app.route("/api/remote-targets/test", methods=["POST"])
@@ -14224,11 +19400,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Apple openrsync resolves but can't drive SSH — treat as unusable.
         if rsync_bin and not move_mod.is_gnu_rsync(rsync_bin):
             rsync_bin = ""
+        ssh_bin = move_mod.resolve_ssh_bin(
+            effective_cfg.get("ssh_bin", "") or "")
+        target["ssh_bin"] = ssh_bin
         res = move_mod.test_remote_connection(target, rsync_bin)
         mount = target.get("mount_path")
         res["mount_path"] = mount
         res["mount_present"] = bool(mount and os.path.isdir(mount))
         res["rsync_bin"] = rsync_bin or None
+        res["ssh_bin"] = ssh_bin
+        if not ssh_bin:
+            res["ok"] = False
+            res["message"] = (
+                "OpenSSH Client was not found. Install the Windows optional "
+                "feature or configure ssh.exe under Settings → Paths."
+            )
         return jsonify(res)
 
     @app.route("/api/jobs/import-full", methods=["POST"])
@@ -14240,6 +19426,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         file_types = body.get("file_types", "both")
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
         skip_duplicates = body.get("skip_duplicates", True)
+        verify_by_hash = bool(body.get("verify_by_hash"))
         copy = body.get("copy", True)
         exclude_paths = set(body.get("exclude_paths", []))
 
@@ -14273,7 +19460,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
             # Check folder health before scanning to prevent duplicate imports
-            thread_db.check_folder_health()
+            if thread_db.check_folder_health():
+                _invalidate_missing_originals_cache()
             job["_start_time"] = time.time()
 
             scan_target = str(Path(source))  # normalize (strips trailing slash)
@@ -14319,6 +19507,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     file_types=file_types,
                     folder_template=folder_template,
                     skip_duplicates=skip_duplicates,
+                    verify_by_hash=verify_by_hash,
                     progress_callback=ingest_cb,
                     skip_paths=exclude_paths or None,
                 )
@@ -14393,6 +19582,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # scanner.scan commits photo rows incrementally, so even a mid-scan
                 # failure can leave DB state that invalidates cached new-image counts.
                 _invalidate_new_images_after_scan(thread_db, scan_target)
+                # scanner.scan touches disk and may reconcile ghost rows
+                # (e.g. a user restored an original before running import).
+                # The pre-scan health-check invalidation only fires when a
+                # folder flips missing/ok, so also drop the missing-originals
+                # cache once the scan itself has run — even on partial
+                # failure, since rows are committed incrementally.
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache after import scan of %s",
+                        scan_target,
+                    )
             scan_count = job["progress"].get("total", 0)
             scan_summary = f"{scan_count} photos"
             metadata_warning = _scan_metadata_warning()
@@ -14536,6 +19738,864 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             workspace_id=active_ws,
         )
         return jsonify({"job_id": job_id})
+
+    @app.route("/api/import/orphaned-staging", methods=["GET"])
+    def api_import_orphaned_staging():
+        """List old pipeline staging folders that need verified recovery."""
+        from staging_recovery import discover_orphaned_staging
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        return jsonify({"items": discover_orphaned_staging(vireo_dir)})
+
+    @app.route("/api/import/orphaned-staging/verify", methods=["POST"])
+    def api_import_orphaned_staging_verify():
+        """Start a verification job for one old pipeline staging folder."""
+        from staging_recovery import verify_orphaned_staging
+
+        body = request.get_json(silent=True) or {}
+        path = body.get("path")
+        if not isinstance(path, str) or not path:
+            return json_error("path required")
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+
+        def work(job):
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+            return verify_orphaned_staging(thread_db, vireo_dir, path)
+
+        job_id = runner.start(
+            "staging-verify",
+            work,
+            config={"path": path},
+            workspace_id=active_ws,
+        )
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/import/orphaned-staging", methods=["DELETE"])
+    def api_import_orphaned_staging_delete():
+        """Delete old staging only when a fresh verification is fully green."""
+        from staging_recovery import delete_verified_staging
+
+        body = request.get_json(silent=True) or {}
+        path = body.get("path")
+        if not isinstance(path, str) or not path:
+            return json_error("path required")
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        db = _get_db()
+        try:
+            result = delete_verified_staging(db, vireo_dir, path)
+        except ValueError as exc:
+            return json_error(str(exc), status=409)
+        return jsonify(result)
+
+    def _prepare_import_workspace(db, body):
+        """Return the workspace id an import should write to.
+
+        `new_workspace_name` mirrors the normal workspace creation route
+        so import-to-new-workspace jobs get default collections and do not
+        inherit stale per-workspace caches from a reused SQLite rowid.
+        """
+        if "new_workspace_name" not in body:
+            return db._active_workspace_id, None, None
+        raw_name = body.get("new_workspace_name")
+        if not isinstance(raw_name, str):
+            return None, None, json_error("new_workspace_name must be a string")
+        name = raw_name.strip()
+        if not name:
+            return None, None, json_error("new_workspace_name is required")
+        try:
+            from datetime import datetime
+
+            ws_id = db.create_workspace(name)
+            _invalidate_missing_originals_cache(workspace_ids=[ws_id])
+            db.create_default_collections(workspace_id=ws_id)
+            db.set_active_workspace(ws_id)
+            db.update_workspace(ws_id, last_opened_at=datetime.now().isoformat())
+            ws = db.get_workspace(ws_id)
+            return ws_id, dict(ws) if ws else {"id": ws_id, "name": name}, None
+        except Exception as e:
+            return None, None, json_error(str(e))
+
+    def _validate_after_import(value, db):
+        """Return a JSON error response for a bad after_import spec, else None.
+
+        Shared by both import endpoints: null means import-only; a non-null
+        value must be a saved-process id that exists, so chained processing
+        can't fail hours later on a dangling id the enqueue step could have
+        caught.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, int) or isinstance(value, bool):
+            return json_error(
+                "after_import must be a process id or null, got "
+                f"{type(value).__name__}"
+            )
+        if db.get_saved_process(value) is None:
+            return json_error(f"unknown process id: {value}")
+        return None
+
+    def _create_import_collection(thread_db, photo_ids):
+        """Create the static collection that records one completed import.
+
+        Collection creation belongs to the import itself, not to optional
+        after-import processing.  Keeping it separate ensures "Import only"
+        runs remain discoverable in Browse while processed imports can reuse
+        the exact same scope for their chained pipeline job.
+        """
+        collection_name = "Import " + datetime.now().strftime("%Y-%m-%d %H:%M")
+        collection_id = thread_db.add_collection(
+            collection_name,
+            json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+        )
+        return collection_id, collection_name
+
+    def _record_import_collection(result, workspace_id):
+        """Attach a collection to a complete, successful import result."""
+        photo_ids = result.get("photo_ids") or []
+        if not result.get("ok") or result.get("cancelled") or not photo_ids:
+            return None, None
+        try:
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+            collection_id, collection_name = _create_import_collection(
+                thread_db, photo_ids,
+            )
+            result["collection_id"] = collection_id
+            result["collection_name"] = collection_name
+            return thread_db, collection_id
+        except Exception as e:
+            log.exception("import collection creation failed")
+            result["collection_error"] = str(e)
+            return None, None
+
+    @app.route("/api/jobs/import-in-place", methods=["POST"])
+    def api_job_import_in_place():
+        """Import existing folders without copying files.
+
+        This is the in-place companion to ``/api/jobs/import-photos``: scan
+        selected source folders into the active workspace, leave originals at
+        their current paths, and optionally enqueue the same after-import
+        processing strategy used by archive-copy imports.
+        """
+        from image_loader import is_excluded_scan_path
+
+        body = request.get_json(silent=True) or {}
+        sources = body.get("sources")
+        if isinstance(sources, str):
+            sources = [sources]
+        if not sources or not isinstance(sources, list) or not all(
+            isinstance(s, str) and s for s in sources
+        ):
+            return json_error("sources must be a non-empty list of paths")
+        for s in sources:
+            if is_excluded_scan_path(s):
+                return json_error(
+                    f"source is inside a macOS app-managed library and "
+                    f"cannot be imported: {s}"
+                )
+            if not os.path.isdir(s):
+                return json_error(f"source directory not found: {s}")
+
+        recursive = bool(body.get("recursive", True))
+        import_tags, location_from_gps, tag_options_err = (
+            _validate_import_tag_options(body)
+        )
+        if tag_options_err is not None:
+            return tag_options_err
+        db = _get_db()
+        # Preflight an explicit after_import before creating a workspace so
+        # a bad value doesn't leave an orphan Card Import behind. The
+        # omitted branch has to wait until AFTER the workspace switch — see
+        # below.
+        explicit_after_import = "after_import" in body
+        if explicit_after_import:
+            after_import = body.get("after_import")
+            err = _validate_after_import(after_import, db)
+            if err is not None:
+                return err
+
+        active_ws, created_workspace, workspace_err = (
+            _prepare_import_workspace(db, body)
+        )
+        if workspace_err is not None:
+            return workspace_err
+
+        # Resolve the omitted-default AFTER the workspace switch. Reading
+        # pipeline.default_process_id off the previously-active workspace
+        # would leak that workspace's override into a new-workspace import.
+        if not explicit_after_import:
+            import config as cfg
+
+            effective_cfg = db.get_effective_config(cfg.load())
+            after_import = (
+                effective_cfg.get("pipeline", {}).get("default_process_id")
+            )
+            err = _validate_after_import(after_import, db)
+            if err is not None:
+                return err
+
+        # Snapshot the chosen saved process's stage flags at enqueue time
+        # so a mid-import edit or delete can't silently change (or void)
+        # the after-import run the user already accepted. An in-place
+        # import can take many minutes on a full card, and until the
+        # chain hook fires the pipeline_job's actual toggles are still up
+        # for grabs — resolving here freezes them.
+        after_import_snapshot = None
+        if after_import is not None:
+            try:
+                after_import_snapshot = db.resolve_process(after_import)
+            except ValueError as e:
+                return json_error(str(e), 404)
+
+        runner = app._job_runner
+        thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
+        vireo_dir = os.path.dirname(thumb_cache_dir)
+
+        def _chain_after_import(job, result):
+            photo_ids = result.get("photo_ids") or []
+            thread_db, col_id = _record_import_collection(result, active_ws)
+
+            if after_import is None:
+                result["after_import_skipped"] = "import-only"
+                return
+            if not result.get("ok"):
+                result["after_import_skipped"] = "import failed"
+                return
+            if result.get("cancelled"):
+                result["after_import_skipped"] = "import cancelled"
+                return
+            if not photo_ids:
+                result["after_import_skipped"] = "no photos"
+                return
+            if col_id is None:
+                result["after_import_skipped"] = (
+                    "failed to create import collection"
+                )
+                return
+            try:
+                process_job_id, model_warning = _enqueue_process_job(
+                    thread_db, runner, active_ws,
+                    collection_id=col_id,
+                    process_id=after_import,
+                    chained_from=job["id"],
+                    expanded=after_import_snapshot,
+                )
+                result["process_job_id"] = process_job_id
+                if model_warning:
+                    result["model_warning"] = model_warning
+            except Exception as e:
+                log.exception("after-import chaining failed")
+                result["after_import_skipped"] = (
+                    f"failed to enqueue processing: {e}"
+                )
+
+        def work(job):
+            import config as cfg
+            from scanner import ScanCancelled
+            from scanner import scan as do_scan
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(active_ws)
+            if thread_db.check_folder_health():
+                _invalidate_missing_originals_cache()
+            effective_cfg = thread_db.get_effective_config(cfg.load())
+            pipeline_cfg = effective_cfg.get("pipeline", {})
+
+            job["_start_time"] = time.time()
+            runner.set_steps(job["id"], [
+                {"id": "scan", "label": "Import in place"},
+            ])
+            runner.update_step(job["id"], "scan", status="running")
+
+            photo_ids = []
+            seen_photo_ids = set()
+            root_errors = []
+            scan_acc = {"prior": 0, "last_current": 0, "last_total": 0}
+
+            def photo_cb(photo_id, path):
+                if photo_id not in seen_photo_ids:
+                    seen_photo_ids.add(photo_id)
+                    photo_ids.append(photo_id)
+                runner.update_step(
+                    job["id"], "scan", current_file=os.path.basename(path),
+                )
+
+            def progress_cb(current, total):
+                scan_acc["last_current"] = current
+                scan_acc["last_total"] = total
+                cum_current = scan_acc["prior"] + current
+                cum_total = scan_acc["prior"] + total
+                job["progress"]["current"] = cum_current
+                job["progress"]["total"] = cum_total
+                runner.update_step(
+                    job["id"], "scan",
+                    progress={"current": cum_current, "total": cum_total},
+                )
+                runner.push_event(job["id"], "progress", {
+                    "current": cum_current,
+                    "total": cum_total,
+                    "current_file": job["progress"].get("current_file", ""),
+                    "phase": "Importing in place",
+                })
+
+            def status_cb(message, phase_current=None, phase_total=None, phase_label=None):
+                job["progress"]["current_file"] = message
+                runner.update_step(job["id"], "scan", current_file=message)
+                runner.push_event(job["id"], "progress", {
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
+                    "current_file": message,
+                    "phase": phase_label or message,
+                    "phase_current": phase_current,
+                    "phase_total": phase_total,
+                    "phase_label": phase_label,
+                })
+
+            def advance_scan_acc():
+                scan_acc["prior"] += scan_acc["last_current"]
+                scan_acc["last_current"] = 0
+                scan_acc["last_total"] = 0
+
+            def cancel_check():
+                return runner.is_cancelled(job["id"])
+
+            cancelled = False
+            for idx, source in enumerate(sources, 1):
+                if cancel_check():
+                    cancelled = True
+                    break
+                phase = (
+                    f"Importing source {idx} of {len(sources)}: {source}"
+                    if len(sources) > 1 else "Importing in place"
+                )
+                runner.push_event(job["id"], "progress", {
+                    "current": job["progress"].get("current", 0),
+                    "total": job["progress"].get("total", 0),
+                    "current_file": phase,
+                    "phase": phase,
+                })
+                try:
+                    do_scan(
+                        source, thread_db,
+                        progress_callback=progress_cb,
+                        extract_full_metadata=pipeline_cfg.get(
+                            "extract_full_metadata", True,
+                        ),
+                        photo_callback=photo_cb,
+                        status_callback=status_cb,
+                        recursive=recursive,
+                        vireo_dir=vireo_dir,
+                        thumb_cache_dir=thumb_cache_dir,
+                        cancel_check=cancel_check,
+                    )
+                except Exception as exc:
+                    if isinstance(exc, ScanCancelled) and cancel_check():
+                        cancelled = True
+                        break
+                    log.exception("In-place import failed for source %s", source)
+                    msg = f"[{source}] {exc}"
+                    root_errors.append(msg)
+                    if msg not in job["errors"]:
+                        job["errors"].append(msg)
+                finally:
+                    try:
+                        _invalidate_new_images_after_scan(thread_db, source)
+                    except Exception as cache_exc:
+                        log.exception(
+                            "Failed to invalidate new-image cache for %s", source,
+                        )
+                        msg = (
+                            f"[{source}] cache invalidation failed after import: "
+                            f"{cache_exc}"
+                        )
+                        root_errors.append(msg)
+                        if msg not in job["errors"]:
+                            job["errors"].append(msg)
+                    # scanner.scan touches disk and may reconcile ghost rows
+                    # (e.g. a user restored an original before running
+                    # import-in-place). The pre-scan health-check invalidation
+                    # only fires when a folder flips missing/ok, so also drop
+                    # the missing-originals cache once the scan itself has
+                    # run — even on partial failure, since rows are committed
+                    # incrementally.
+                    try:
+                        _invalidate_missing_originals_cache()
+                    except Exception:
+                        log.exception(
+                            "Failed to invalidate missing-originals cache after in-place import scan of %s",
+                            source,
+                        )
+                    advance_scan_acc()
+
+            indexed = len(photo_ids)
+            if cancelled or cancel_check():
+                runner.update_step(
+                    job["id"], "scan", status="cancelled",
+                    summary=f"{indexed} photos (cancelled)",
+                )
+                result = {
+                    "mode": "in_place",
+                    "ok": False,
+                    "cancelled": True,
+                    "discovered": indexed,
+                    "indexed": indexed,
+                    "failed": len(root_errors),
+                    "errors": root_errors,
+                    "photo_ids": photo_ids,
+                }
+                _apply_import_tags(
+                    active_ws, photo_ids, import_tags, location_from_gps,
+                    result, job=job, runner=runner,
+                )
+                return result
+
+            metadata_warning = _scan_metadata_warning()
+            summary = f"{indexed} photos"
+            if metadata_warning:
+                summary += f" — {metadata_warning}"
+            runner.update_step(
+                job["id"], "scan",
+                status="failed" if root_errors else "completed",
+                summary=summary,
+                error=root_errors[0] if root_errors else None,
+                error_count=len(root_errors) if root_errors else None,
+            )
+            result = {
+                "mode": "in_place",
+                "ok": not root_errors,
+                "discovered": indexed,
+                "indexed": indexed,
+                "failed": len(root_errors),
+                "errors": root_errors,
+                "photo_ids": photo_ids,
+            }
+            _apply_import_tags(
+                active_ws, photo_ids, import_tags, location_from_gps, result,
+                job=job, runner=runner,
+            )
+            _chain_after_import(job, result)
+            return result
+
+        job_config = {
+            "sources": sources,
+            "destination": None,
+            "recursive": recursive,
+            "after_import": after_import,
+            "tags": import_tags,
+            "location_from_gps": location_from_gps,
+            "mode": "in_place",
+            "workspace_id": active_ws,
+            "created_workspace": created_workspace,
+        }
+        job_id = runner.start(
+            "import-in-place", work, config=job_config, workspace_id=active_ws,
+        )
+        response = {"job_id": job_id}
+        if created_workspace is not None:
+            response["workspace"] = created_workspace
+        return jsonify(response)
+
+    @app.route("/api/jobs/import-photos", methods=["POST"])
+    def api_job_import_photos():
+        """Photo import job: copy card -> archive, hash-verify, catalog
+        incrementally (import/process split PR 2).
+
+        Distinct from ``POST /api/jobs/import`` (Lightroom catalog import),
+        which keeps its route and shape. No pipeline slot involvement —
+        imports are I/O-bound and must not queue behind a GPU run; that
+        coupling is exactly what the split removes.
+        """
+        from image_loader import is_excluded_scan_path
+        from ingest import _is_unsafe_path
+
+        body = request.get_json(silent=True) or {}
+
+        sources = body.get("sources")
+        if isinstance(sources, str):
+            sources = [sources]
+        if not sources or not isinstance(sources, list) or not all(
+            isinstance(s, str) and s for s in sources
+        ):
+            return json_error("sources must be a non-empty list of paths")
+        for s in sources:
+            # Pre-stat rejection of other-app bundles: os.path.isdir on a
+            # .photoslibrary path itself trips the macOS TCC prompt.
+            if is_excluded_scan_path(s):
+                return json_error(
+                    f"source is inside a macOS app-managed library and "
+                    f"cannot be imported: {s}"
+                )
+            if not os.path.isdir(s):
+                return json_error(f"source directory not found: {s}")
+
+        # Remote (SSH) archive destination — mirrors the pipeline route's
+        # remote-target request shape (remote_target_id + subpath). The card
+        # is rsynced to remote_path/subpath and cataloged at
+        # mount_path/subpath; ``destination`` is set to the resolved local
+        # mount path so every downstream guard (destination-inside-source,
+        # scan, catalog) applies to the mount exactly as for a local import.
+        remote_target_id = (body.get("remote_target_id") or "").strip()
+        remote_subpath = body.get("remote_subpath", "")
+        if remote_subpath and not isinstance(remote_subpath, str):
+            return json_error("remote_subpath must be a string")
+        destination = body.get("destination")
+        remote_archive_config = None
+        if remote_target_id and destination:
+            return json_error(
+                "destination and remote_target_id are mutually exclusive — "
+                "pick a local archive path or a saved remote target, not both"
+            )
+        if remote_subpath and not remote_target_id:
+            return json_error("remote_subpath requires remote_target_id")
+        if remote_target_id:
+            # Refuse at request time when no GNU rsync exists or the
+            # target is unknown/unsafe — starting a job guaranteed to
+            # fail its transfer helps nobody (mirrors the pipeline and
+            # move-folder endpoints).
+            remote_archive_config, rsync_bin, err = (
+                _resolve_remote_archive_target(
+                    remote_target_id, remote_subpath,
+                )
+            )
+            if err is not None:
+                return err
+            # Catalog at the resolved local mount path.
+            destination = remote_archive_config["mount_final"]
+
+        if not destination:
+            return json_error("destination required")
+        if not os.path.isabs(destination):
+            return json_error("destination must be an absolute path")
+
+        # Reject destinations that are equal to, or nested under, any source
+        # (after realpath so a symlink can't slip past). The importer copies
+        # every card file into the destination and marks the card safe to
+        # format once ``copied + skipped_duplicate == discovered``; if the
+        # destination lives inside the card, formatting the card also erases
+        # the supposed archive copy, so allowing this is a data-loss trap.
+        #
+        # macOS's default APFS/HFS+ volumes and Windows NTFS are
+        # case-INSENSITIVE, so ``/Volumes/Card`` and ``/volumes/card`` are
+        # the same directory but ``realpath`` doesn't case-normalize on
+        # POSIX (macOS reports as POSIX). On Linux, a platform-wide
+        # case-sensitivity assumption misses FAT/exFAT/NTFS-mounted
+        # removable media (typical SD-card setup) that sit under a
+        # case-sensitive ext4 parent — the user's real card mount point
+        # can be case-insensitive even when the root filesystem isn't.
+        # Compare case-folded on darwin/win32 unconditionally, and on
+        # Linux probe each source's actual filesystem: if the resolved
+        # path with an alpha character case-swapped still stat's to the
+        # same inode, the mount is case-insensitive and both sides of
+        # the containment comparison need case-folding for that source.
+        _case_insensitive_platform = sys.platform in ("darwin", "win32")
+
+        def _casenorm(p):
+            return p.casefold() if _case_insensitive_platform else p
+
+        def _fs_is_case_insensitive(path):
+            """Probe whether the filesystem at ``path`` treats case as insensitive.
+
+            List an entry inside ``path`` and check whether accessing it
+            under a case-swapped name resolves to the same inode. Probing
+            *inside* the directory (rather than swapping characters in
+            ``path`` itself) is essential when a case-insensitive mount
+            sits under a case-sensitive parent — a FAT/exFAT SD card
+            mounted at ``/mnt/Card`` on Linux under an ext4 root: the
+            ext4 ``/mnt`` cannot resolve ``/Mnt`` or a differently-cased
+            ``Card`` entry (mount-point dentries are stored in the
+            parent FS), so swapping characters in the ``path`` string
+            always reports case-sensitive regardless of the card's own
+            semantics.
+
+            Any inconclusive result (unlistable, empty, no
+            alpha-containing entry, or a stat error while comparing)
+            returns True so the containment check falls back to
+            case-fold — the stricter direction of this safety guard.
+            A false positive on a case-sensitive filesystem can only
+            reject a legitimate destination (recoverable UX error the
+            user immediately sees and fixes by picking a different
+            path), whereas a false negative on a case-insensitive
+            filesystem accepts a case-collision destination inside the
+            card and lets ``safe_to_format`` later green-light
+            formatting while the archive lives on it. The reviewer's
+            example: an SD card whose root contains only numeric
+            top-level directories (Nikon-style ``100``/``101``/``102``)
+            has no alpha-containing entry to probe with. See PR #1107
+            review.
+            """
+            try:
+                entries = os.listdir(path)
+            except OSError:
+                return True
+            for name in entries:
+                for i, c in enumerate(name):
+                    if c.isalpha():
+                        swapped = name[:i] + c.swapcase() + name[i + 1:]
+                        if swapped == name:
+                            continue
+                        original_full = os.path.join(path, name)
+                        probe_full = os.path.join(path, swapped)
+                        if not os.path.exists(probe_full):
+                            # Definitive: case-swap resolves to nothing,
+                            # so the filesystem distinguishes case.
+                            return False
+                        try:
+                            return os.path.samefile(original_full, probe_full)
+                        except OSError:
+                            return True
+            return True
+
+        try:
+            dest_real = os.path.realpath(destination)
+        except OSError as e:
+            return json_error(f"destination cannot be resolved: {e}")
+        for s in sources:
+            try:
+                source_real = os.path.realpath(s)
+            except OSError:
+                # Source unresolvable — the os.path.isdir check above
+                # already handled non-existent sources; nothing more to say.
+                continue
+            # Per-source case-fold decision: platform is enough on
+            # darwin/win32; on Linux, probe the actual source mount.
+            per_source_ci = _case_insensitive_platform or (
+                not _case_insensitive_platform
+                and _fs_is_case_insensitive(source_real)
+            )
+            if per_source_ci:
+                source_cmp = source_real.casefold().rstrip(os.sep)
+                dest_cmp = dest_real.casefold()
+            else:
+                source_cmp = source_real.rstrip(os.sep)
+                dest_cmp = dest_real
+            if dest_cmp == source_cmp or dest_cmp.startswith(
+                source_cmp + os.sep
+            ):
+                return json_error(
+                    f"destination cannot be inside a source directory "
+                    f"(destination={destination!r}, source={s!r}); "
+                    f"formatting the card would erase the archive copy"
+                )
+
+        folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
+        if folder_template and _is_unsafe_path(folder_template):
+            return json_error(
+                "folder_template must be a relative path without '..' or "
+                "backslashes"
+            )
+
+        db = _get_db()
+        # After-import strategy: validated at enqueue (failing the chain
+        # hours later is the old pipeline's mistake). Key present -> null
+        # means import-only, a string must name a real strategy. Key
+        # omitted -> default from the workspace's pipeline.default_process_id
+        # (nullable, same vocabulary). Stored in the job config for the
+        # PR 3 chaining hook; the import job itself never reads it.
+        # Preflight an explicit value before creating a workspace so a bad
+        # string doesn't leave an orphan Archive Import behind.
+        explicit_after_import = "after_import" in body
+        if explicit_after_import:
+            after_import = body.get("after_import")
+            err = _validate_after_import(after_import, db)
+            if err is not None:
+                return err
+
+        file_types = body.get("file_types", "both")
+        skip_duplicates = bool(body.get("skip_duplicates", True))
+        verify_by_hash = bool(body.get("verify_by_hash", False))
+        trust_likely_duplicates = bool(
+            body.get("trust_likely_duplicates", False)
+        ) and not verify_by_hash
+        recursive = bool(body.get("recursive", True))
+        import_tags, location_from_gps, tag_options_err = (
+            _validate_import_tag_options(body)
+        )
+        if tag_options_err is not None:
+            return tag_options_err
+
+        active_ws, created_workspace, workspace_err = (
+            _prepare_import_workspace(db, body)
+        )
+        if workspace_err is not None:
+            return workspace_err
+
+        # Resolve the omitted-default AFTER the workspace switch. Reading
+        # pipeline.default_process_id off the previously-active workspace
+        # would leak that workspace's override into a new-workspace import.
+        if not explicit_after_import:
+            import config as cfg
+
+            effective_cfg = db.get_effective_config(cfg.load())
+            after_import = (
+                effective_cfg.get("pipeline", {}).get("default_process_id")
+            )
+            err = _validate_after_import(after_import, db)
+            if err is not None:
+                return err
+
+        # Snapshot the chosen saved process's stage flags at enqueue time
+        # so a mid-import edit or delete can't silently change (or void)
+        # the after-import run the user already accepted. An archive-copy
+        # import from a full card can take many minutes, and until the
+        # chain hook fires the pipeline_job's actual toggles are still up
+        # for grabs — resolving here freezes them (mirrors the remote-
+        # transport snapshot below).
+        after_import_snapshot = None
+        if after_import is not None:
+            try:
+                after_import_snapshot = db.resolve_process(after_import)
+            except ValueError as e:
+                return json_error(str(e), 404)
+
+        runner = app._job_runner
+        thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
+        vireo_dir = os.path.dirname(thumb_cache_dir)
+
+        # Snapshot the resolved remote transport at enqueue time so a
+        # settings edit between click-Start and job-run can't redirect the
+        # archive to a different host/mount than the panel is showing
+        # (mirrors the pipeline route's remote_target_snapshot).
+        remote_target = None
+        if remote_archive_config is not None:
+            import move as move_mod
+
+            spec = move_mod.build_remote_move_spec(
+                remote_archive_config["target"],
+                remote_archive_config["subpath"],
+                rsync_bin,
+            )
+            remote_target = {
+                "rsync_bin": rsync_bin,
+                "remote": spec,
+                "ssh_base": remote_archive_config["ssh_final"],
+                "mount_base": remote_archive_config["mount_final"],
+            }
+
+        job_config = {
+            "sources": sources,
+            "destination": destination,
+            "folder_template": folder_template,
+            "file_types": file_types,
+            "skip_duplicates": skip_duplicates,
+            "verify_by_hash": verify_by_hash,
+            "trust_likely_duplicates": trust_likely_duplicates,
+            "recursive": recursive,
+            "after_import": after_import,
+            "tags": import_tags,
+            "location_from_gps": location_from_gps,
+            "remote_target_id": remote_target_id or None,
+            "remote_subpath": remote_subpath or None,
+            "workspace_id": active_ws,
+            "created_workspace": created_workspace,
+        }
+
+        def _chain_after_import(job, result):
+            """Create the import collection and optionally enqueue processing.
+
+            Every skip is written to the result as ``after_import_skipped``
+            so the jobs panel shows exactly why processing did not run.  The
+            collection is independent: every successful import with new
+            photos gets one, including the import-only choice.
+            """
+            photo_ids = result.get("photo_ids") or []
+            thread_db, col_id = _record_import_collection(result, active_ws)
+
+            if after_import is None:
+                result["after_import_skipped"] = "import-only"
+                return
+            if not result.get("ok"):
+                result["after_import_skipped"] = "import failed"
+                return
+            if result.get("cancelled"):
+                result["after_import_skipped"] = "import cancelled"
+                return
+            if not photo_ids:
+                result["after_import_skipped"] = "no new photos"
+                return
+            if col_id is None:
+                result["after_import_skipped"] = (
+                    "failed to create import collection"
+                )
+                return
+            try:
+                process_job_id, model_warning = _enqueue_process_job(
+                    thread_db, runner, active_ws,
+                    collection_id=col_id,
+                    process_id=after_import,
+                    chained_from=job["id"],
+                    expanded=after_import_snapshot,
+                )
+                result["process_job_id"] = process_job_id
+                if model_warning:
+                    result["model_warning"] = model_warning
+            except Exception as e:
+                # The import itself succeeded — record the chaining failure
+                # rather than flipping the whole job red, but never
+                # silently: the user asked for processing and must see it
+                # didn't start.
+                log.exception("after-import chaining failed")
+                result["after_import_skipped"] = (
+                    f"failed to enqueue processing: {e}"
+                )
+
+        def work(job):
+            from import_job import ImportParams, run_import_job
+
+            params = ImportParams(
+                sources=sources,
+                destination=destination,
+                folder_template=folder_template,
+                file_types=file_types,
+                skip_duplicates=skip_duplicates,
+                verify_by_hash=verify_by_hash,
+                trust_likely_duplicates=trust_likely_duplicates,
+                recursive=recursive,
+                after_import=after_import,
+                remote_target=remote_target,
+                vireo_dir=vireo_dir,
+                thumb_cache_dir=thumb_cache_dir,
+            )
+            try:
+                result = run_import_job(
+                    job, runner, db_path, active_ws, params,
+                )
+                _apply_import_tags(
+                    active_ws, result.get("photo_ids") or [], import_tags,
+                    location_from_gps, result, job=job, runner=runner,
+                )
+                _chain_after_import(job, result)
+                return result
+            finally:
+                # run_import_job can flip destination folders from
+                # ``missing`` to ``ok`` and re-scans landed files, so a
+                # ready /api/photos/missing cache computed before the
+                # import can now list rows whose originals are back on
+                # disk. The other scan/import paths (rescan-this-folder,
+                # import-in-place) already invalidate the cache after
+                # they touch disk; do the same here so the banner/modal
+                # stop offering ghosts for photos this job just restored,
+                # even if the job failed part-way (rows land
+                # incrementally). Best-effort: never let a cache-drop
+                # failure mask the underlying import result.
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache "
+                        "after import-photos job",
+                    )
+
+        job_id = runner.start(
+            "import", work, config=job_config, workspace_id=active_ws,
+        )
+        response = {"job_id": job_id}
+        if created_workspace is not None:
+            response["workspace"] = created_workspace
+        return jsonify(response)
 
     @app.route("/api/jobs/sync", methods=["POST"])
     def api_job_sync():
@@ -15120,8 +21180,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if isinstance(obj, dict):
                 out = {}
                 for k, v in obj.items():
-                    if any(s in k.lower() for s in ("token", "key", "secret", "password")):
+                    key = k.lower()
+                    if any(s in key for s in ("token", "secret", "password")) or key.endswith("_key"):
                         out[k] = "[REDACTED]"
+                    elif any(s in key for s in ("path", "root", "_bin", "directory", "editor")):
+                        out[k] = "[REDACTED_PATH]" if v else v
                     else:
                         out[k] = _redact(v)
                 return out
@@ -15130,6 +21193,54 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return obj
 
         sanitized_config = _redact(cfg.load())
+
+        # Exact catalog roots are private and can also appear in logs. Issue
+        # reports retain the diagnostic message while replacing those values;
+        # the user can paste a path into the description when it is relevant.
+        private_paths = []
+        if db is not None:
+            with contextlib.suppress(Exception):
+                private_paths = [
+                    row[0] for row in db.conn.execute("SELECT path FROM folders")
+                    if row[0]
+                ]
+
+        def _sanitize_text(value):
+            text = str(value)
+            for private_path in sorted(private_paths, key=len, reverse=True):
+                text = text.replace(private_path, "[PHOTO_PATH]")
+            home = os.path.expanduser("~")
+            if home:
+                text = text.replace(home, "~")
+            return text
+
+        def _sanitize_private_values(value):
+            if isinstance(value, dict):
+                return {key: _sanitize_private_values(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [_sanitize_private_values(item) for item in value]
+            if isinstance(value, str):
+                return _sanitize_text(value)
+            return value
+
+        sanitized_logs = _sanitize_private_values(
+            app._log_broadcaster.get_recent(200)
+        )
+
+        try:
+            from platform_support import filesystem_type, platform_support_info
+
+            filesystems = sorted({
+                kind for path in private_paths
+                if (kind := filesystem_type(path))
+            })
+            support_info = _redact(platform_support_info(cfg.load()))
+        except Exception:
+            filesystems = []
+            support_info = {}
+        execution_info = {}
+        with contextlib.suppress(Exception):
+            execution_info = _runtime_execution_info()
 
         # --- Build the bundle ---
         from datetime import datetime
@@ -15142,15 +21253,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "platform": platform.platform(),
                 "python": sys.version,
                 "architecture": platform.machine(),
+                "inference_device": execution_info.get("device"),
+                "inference_providers": execution_info.get("onnxruntime_providers", []),
+                "platform_support": support_info,
+                "library_filesystems": filesystems,
             },
-            "logs": app._log_broadcaster.get_recent(200),
+            "logs": sanitized_logs,
             "app_state": {
                 "workspace": ws_name,
                 "folders": folder_count,
                 "photos": photo_count,
                 "predictions": pred_count,
             },
-            "recent_jobs": recent_jobs,
+            "recent_jobs": _sanitize_private_values(_redact(recent_jobs)),
             "config": sanitized_config,
         }
 
@@ -15234,7 +21349,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return resp
 
         thumb_dir = app.config["THUMB_CACHE_DIR"]
-        thumb_path = os.path.join(thumb_dir, filename)
 
         try:
             photo_id = int(filename.replace(".jpg", ""))
@@ -15266,6 +21380,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # legitimately own it.
             return "", 404
 
+        folder_row = db.get_folder(photo["folder_id"])
+        if not folder_row:
+            return "", 404
+        pair_source, pair_source_path = _requested_pair_source(
+            photo, folder_row["path"],
+        )
+        if pair_source and not pair_source_path:
+            return "", 404
+        cache_filename = (
+            f"{photo_id}_{pair_source}.jpg" if pair_source else filename
+        )
+        thumb_path = os.path.join(thumb_dir, cache_filename)
+        try:
+            selected_source_mtime = (
+                os.path.getmtime(pair_source_path)
+                if pair_source_path else photo["file_mtime"]
+            )
+        except OSError:
+            selected_source_mtime = photo["file_mtime"]
+
         # Collapse existence + freshness probe into a single ``getmtime``
         # so a concurrent ``Clear cache`` (or parallel regeneration) that
         # unlinks the file between two separate syscalls can't surface as
@@ -15281,15 +21415,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # against, so prefer the fast path over false-positive
             # regeneration).
             fresh = (
-                photo["file_mtime"] is None
-                or cached_mtime >= photo["file_mtime"]
+                selected_source_mtime is None
+                or cached_mtime >= selected_source_mtime
             )
             if fresh:
-                return _send_cached(thumb_dir, filename)
+                return _send_cached(thumb_dir, cache_filename)
             log.info(
                 "Thumbnail for photo %s is stale (cached mtime %.0f < "
                 "source file_mtime %.0f) — regenerating",
-                photo_id, cached_mtime, photo["file_mtime"],
+                photo_id, cached_mtime, selected_source_mtime,
             )
             # ``generate_thumbnail`` short-circuits when the destination
             # file already exists (an "already done" optimization), so a
@@ -15311,13 +21445,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "file once. Next request will retry the unlink.",
                     thumb_path, exc_info=True,
                 )
-                return _send_cached(thumb_dir, filename)
+                return _send_cached(thumb_dir, cache_filename)
 
         # Self-heal path: regenerate on miss (or stale) when the photo
         # still exists.
-        folder_row = db.get_folder(photo["folder_id"])
-        if not folder_row:
-            return "", 404
         live_source = os.path.join(folder_row["path"], photo["filename"])
 
         # Resolve source via the canonical-path helper so we prefer the
@@ -15326,7 +21457,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # decode (the working copy was extracted from the embedded JPEG
         # at scan time).
         import config as cfg
-        from thumbnails import generate_thumbnail
+        from thumbnails import (
+            _retry_thumbnail_with_working_copy,
+            generate_thumbnail,
+        )
         vireo_dir = os.path.dirname(thumb_dir)
         # Look up the photo's folder path directly rather than via
         # ``get_folder_tree()``: the tree filter excludes folders whose
@@ -15343,12 +21477,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         try:
             recipe = db.get_photo_edit_recipe(photo_id)
+            # Edit recipes and local masks are stored in the primary RAW's
+            # coordinate space. A developed companion may already be cropped,
+            # rotated, or resized, so applying that geometry again would render
+            # the selected JPEG incorrectly. JPEG pair views intentionally show
+            # the companion as-authored; RAW pair views retain the catalog edit.
+            render_recipe = None if pair_source == "jpeg" else recipe
             thumb_size = cfg.load().get("thumbnail_size", 400)
-            source, _using_working_copy = _recipe_render_source(
-                photo, recipe, thumb_size, vireo_dir, folders,
-            )
+            if pair_source_path:
+                source = pair_source_path
+                _using_working_copy = False
+            else:
+                source, _using_working_copy = _recipe_render_source(
+                    photo, render_recipe, thumb_size, vireo_dir, folders,
+                )
             if (
                 not _using_working_copy
+                and pair_source != "jpeg"
                 and _has_current_working_copy_failure(
                     photo,
                     vireo_dir,
@@ -15374,13 +21519,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             from image_loader import RAW_DECODE_PRESERVE_HIGHLIGHTS, RAW_EXTENSIONS
             raw_decode = (
                 RAW_DECODE_PRESERVE_HIGHLIGHTS
-                if recipe
-                and os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+                if (
+                    pair_source == "raw"
+                    or (
+                        render_recipe
+                        and os.path.splitext(photo["filename"])[1].lower()
+                        in RAW_EXTENSIONS
+                    )
+                )
                 else None
             )
             min_source_size = None
             if raw_decode and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS:
-                load_max_size = None if recipe and recipe.get("crop") else thumb_size
+                load_max_size = (
+                    None
+                    if render_recipe and render_recipe.get("crop")
+                    else thumb_size
+                )
                 min_source_size = _scaled_recipe_source_dimensions(
                     photo, load_max_size,
                 )
@@ -15389,16 +21544,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 source,
                 thumb_dir,
                 size=thumb_size,
-                recipe=recipe,
+                recipe=render_recipe,
                 raw_decode=raw_decode,
                 min_source_size=min_source_size,
                 native_size=(
-                    _recipe_source_dimensions(photo) if recipe else None
+                    _recipe_source_dimensions(photo) if render_recipe else None
                 ),
+                cache_name=cache_filename,
             )
             if (
                 not result
                 and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS
+                and pair_source != "raw"
             ):
                 # libraw couldn't demosaic the RAW (unsupported variant,
                 # corrupt file, no usable embedded JPEG). Try the companion
@@ -15425,14 +21582,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             companion_abs,
                             thumb_dir,
                             size=thumb_size,
-                            recipe=recipe,
+                            recipe=render_recipe,
                             native_size=(
                                 _recipe_source_dimensions(photo)
-                                if recipe else None
+                                if render_recipe else None
                             ),
                         )
                         if result:
                             source = companion_abs
+            if (
+                not result
+                and render_recipe
+                and os.path.splitext(source)[1].lower() in RAW_EXTENSIONS
+                and pair_source != "raw"
+            ):
+                result = _retry_thumbnail_with_working_copy(
+                    db,
+                    photo,
+                    source,
+                    thumb_dir,
+                    thumb_size,
+                    cfg.load().get("thumbnail_quality", 85),
+                    render_recipe,
+                    vireo_dir,
+                )
+                if result:
+                    source = result
         except Exception:
             log.exception(
                 "Thumbnail self-heal failed for photo %s (source=%s)",
@@ -15456,9 +21631,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # as stale, triggering a regeneration loop on every fetch. The
         # ``photo`` dict was loaded from the row above, so its
         # ``file_mtime`` is the canonical source-of-truth value.
-        if photo["file_mtime"] is not None:
+        if selected_source_mtime is not None:
             try:
-                os.utime(result, (photo["file_mtime"], photo["file_mtime"]))
+                os.utime(result, (selected_source_mtime, selected_source_mtime))
             except OSError:
                 # Best-effort: a touch failure is non-fatal; the worst
                 # case is the next request regenerates again. We don't
@@ -15471,19 +21646,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Persist on-disk presence so the dashboard's coverage query
         # (`thumb_path IS NOT NULL`) reflects this regeneration. Stored
         # value is the bare filename, matching ``thumbnails.generate_all``.
-        try:
-            db.conn.execute(
-                "UPDATE photos SET thumb_path=? WHERE id=?",
-                (f"{photo_id}.jpg", photo_id),
-            )
-            db.conn.commit()
-        except Exception:
-            # Coverage column drift is recoverable via the backfill job;
-            # don't fail the request if the UPDATE racks up a transient
-            # SQLite error.
-            log.exception("Failed to persist thumb_path for photo %s", photo_id)
+        if not pair_source:
+            try:
+                db.conn.execute(
+                    "UPDATE photos SET thumb_path=? WHERE id=?",
+                    (f"{photo_id}.jpg", photo_id),
+                )
+                db.conn.commit()
+            except Exception:
+                # Coverage column drift is recoverable via the backfill job;
+                # don't fail the request if the UPDATE racks up a transient
+                # SQLite error.
+                log.exception("Failed to persist thumb_path for photo %s", photo_id)
 
-        return _send_cached(thumb_dir, filename)
+        return _send_cached(thumb_dir, cache_filename)
 
     @app.route("/api/species/<path:species_name>/clusters")
     def api_species_clusters(species_name):
@@ -15642,7 +21818,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not photo_ids or not label:
             return json_error("photo_ids and label required")
 
-        kid = db.add_keyword(label)
+        try:
+            kid = db.add_keyword(label)
+        except ValueError as exc:
+            return json_error(str(exc))
+        # Queue/record the stored spelling (see api_add_keyword).
+        stored = db.conn.execute(
+            "SELECT name FROM keywords WHERE id = ?", (kid,)
+        ).fetchone()
+        if stored and stored["name"]:
+            label = stored["name"]
         for pid in photo_ids:
             db.tag_photo(pid, kid)
             db.queue_change(pid, "keyword_add", label)
@@ -16323,24 +22508,442 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         job_id = runner.start("regroup", work, config={"pipeline": pipeline_cfg}, workspace_id=active_ws)
         return jsonify({"job_id": job_id})
 
+    def _apply_no_model_auto_skip(params):
+        """Auto-skip classify stages when no model is available.
+
+        Mutates ``params`` (skip_classify/skip_extract_masks/skip_regroup)
+        and returns the user-facing warning string, or None when a model
+        resolved. One implementation shared by ``api_job_pipeline`` and the
+        after-import chaining hook, so chained runs degrade identically to
+        manually-started ones.
+        """
+        if params.skip_classify:
+            return None
+        from models import get_active_model, get_models
+
+        # Resolve the set of requested models. Prefer the explicit list,
+        # fall back to the legacy single id, and finally to whatever is
+        # marked active. Any requested id that isn't downloaded fails the
+        # check, so the user sees the "no model available" warning instead
+        # of a mid-run model_loader crash.
+        requested_ids = list(params.model_ids or [])
+        if not requested_ids and params.model_id:
+            requested_ids = [params.model_id]
+
+        if requested_ids:
+            by_id = {m["id"]: m for m in get_models()}
+            resolved_any = all(
+                by_id.get(mid, {}).get("downloaded") for mid in requested_ids
+            )
+        else:
+            resolved_any = get_active_model() is not None
+
+        if resolved_any:
+            return None
+        params.skip_classify = True
+        params.skip_extract_masks = True
+        params.skip_regroup = True
+        return (
+            "No model available — classification was skipped. "
+            "Download a model in Settings to enable species identification."
+        )
+
+    def _enqueue_process_job(thread_db, runner, workspace_id, *,
+                             collection_id, process_id,
+                             chained_from=None, expanded=None):
+        """Enqueue a collection-scoped process run for a saved-process id.
+
+        The after-import chaining hook's path into the pipeline. Runs on a
+        job thread — no request context: takes an explicit thread-local
+        ``Database`` and never touches ``request``/``_get_db``. Applies the
+        same process expansion and no-model auto-skip as ``api_job_pipeline``
+        so a chained run degrades identically to a manual one. Returns
+        ``(job_id, model_warning)``.
+
+        ``expanded`` is the pre-resolved flag snapshot the import endpoint
+        captured at enqueue-request time. Pass it through so a saved-process
+        edit or delete while the import copies photos (a card copy can take
+        many minutes) can't silently swap in different toggles — or fail
+        the chain outright — after the user has already accepted the choice.
+        Falls back to a live resolve for callers that don't pre-capture.
+        """
+        from pipeline_job import PipelineParams, run_pipeline_job
+
+        if expanded is None:
+            expanded = thread_db.resolve_process(process_id)
+        params = PipelineParams(
+            collection_id=collection_id,
+            skip_classify=expanded["skip_classify"],
+            skip_extract_masks=expanded["skip_extract_masks"],
+            skip_eye_keypoints=expanded["skip_eye_keypoints"],
+            skip_regroup=expanded["skip_regroup"],
+            miss_enabled=expanded["miss_enabled"],
+            review_mode=expanded["review_mode"],
+            # A saved process's Eye Keypoints toggle is an explicit opt-in
+            # (the Process-page checkbox sends eye_detect_override alongside
+            # it). When the process runs the eye stage, opt into eye scoring
+            # too so a chained/by-id run matches running the same toggles on
+            # the page, instead of silently deferring to the workspace's
+            # eye_detect_enabled default and skipping eye detection.
+            eye_detect_override=(
+                None if expanded["skip_eye_keypoints"] else True
+            ),
+        )
+        model_warning = _apply_no_model_auto_skip(params)
+
+        work_units = _runtime_warning_work_units(
+            "pipeline collection",
+            lambda: thread_db.count_collection_photos(collection_id),
+        )
+        runtime_warning = None
+        if not (params.skip_classify and params.skip_extract_masks):
+            runtime_warning = _build_cpu_runtime_warning(
+                "pipeline",
+                work_units=work_units,
+                reason="large_pipeline_ml_job_cpu_only",
+            )
+
+        def work(job):
+            return run_pipeline_job(
+                job, runner, db_path, workspace_id, params,
+                thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+                missing_originals_invalidator=_invalidate_missing_originals_cache,
+            )
+
+        job_config = {
+            "source": None,
+            "sources": None,
+            "collection_id": collection_id,
+            "collection_name": next(
+                (
+                    c["name"]
+                    for c in thread_db.get_collections()
+                    if c["id"] == collection_id
+                ),
+                None,
+            ),
+            "destination": None,
+            "local_processing": False,
+            "process_id": process_id,
+            "skip_classify": params.skip_classify,
+            "skip_extract_masks": params.skip_extract_masks,
+            "skip_regroup": params.skip_regroup,
+            "review_mode": params.review_mode,
+            "miss_enabled": params.miss_enabled,
+            "eye_detect_override": params.eye_detect_override,
+        }
+        if chained_from:
+            # Provenance for the jobs panel: this run was started by an
+            # import's after-import choice, not by hand.
+            job_config["chained_from"] = chained_from
+        job_id = runner.enqueue_pipeline(
+            work,
+            config=job_config,
+            workspace_id=workspace_id,
+            runtime_warning=runtime_warning,
+        )
+        return job_id, model_warning
+
     @app.route("/api/jobs/pipeline", methods=["POST"])
     def api_job_pipeline():
         """Streaming pipeline: scan -> thumbnails -> classify -> extract-masks -> regroup.
 
         Overlaps I/O stages and interleaves detection with classification.
-        Provide either 'source' (for import+scan) or 'collection_id' (skip scan).
+        Imports are handled by /api/jobs/import-photos. This route processes
+        existing workspace photos by folder/snapshot/collection scope.
         """
         from pipeline_job import PipelineParams, run_pipeline_job
 
         body = request.get_json(silent=True) or {}
+
+        # Reject the previous strategy-name shape ({"strategy": "quick_look"},
+        # "identify", "full", "cull_ready"). That vocabulary was replaced by
+        # saved-process ids; without an explicit 400 here, an old caller's
+        # `strategy` field is silently dropped and the request falls through
+        # to a default full-pipeline run — silently reclassifying/regrouping
+        # the whole collection when the caller meant a quick-look scan.
+        if "strategy" in body:
+            return json_error(
+                "strategy is no longer accepted; send process_id (a "
+                "saved_processes id) or explicit stage flags",
+                400,
+            )
+
+        # Saved process: expand a process id server-side into stage flags so
+        # the import page, the process page, and import→process chaining share
+        # one vocabulary (a saved_processes row). Key presence — not
+        # truthiness — decides whether a process was requested: a
+        # present-but-null process_id must 400 rather than silently fall
+        # through to default processing for a caller who thought null meant
+        # "no processing" (that case is expressed by not calling this
+        # endpoint at all). The process page's Run instead sends explicit
+        # stage flags (including miss_enabled/review_mode), so process_id is
+        # optional.
         db = _get_db()
+        process_id = None
+        if "process_id" in body:
+            process_id = body.get("process_id")
+            if not isinstance(process_id, int) or isinstance(process_id, bool):
+                kind = (
+                    "null" if process_id is None
+                    else type(process_id).__name__
+                )
+                return json_error(f"process_id must be an integer, got {kind}")
+            try:
+                expanded = db.resolve_process(process_id)
+            except ValueError as e:
+                return json_error(str(e), 404)
+            # Expansion supplies *defaults*; explicitly-present body keys
+            # win, so a caller can pin one flag on top of a process.
+            body = {**expanded, **body}
+            # The process's Eye Keypoints toggle is an explicit opt-in (the
+            # Process-page checkbox sends eye_detect_override with it). Mirror
+            # that for a by-id run so the eye stage runs instead of deferring
+            # to the workspace eye_detect_enabled default; an explicit caller
+            # override still wins.
+            if (
+                not body.get("skip_eye_keypoints")
+                and body.get("eye_detect_override") is None
+            ):
+                body["eye_detect_override"] = True
+
         source = body.get("source")
         sources = body.get("sources")
         collection_id = body.get("collection_id")
         source_snapshot_id = body.get("source_snapshot_id")
 
-        if not source and not sources and not collection_id and not source_snapshot_id:
-            return json_error("source, sources, collection_id, or source_snapshot_id required")
+        # Folder scope: resolve folder_ids to their active-workspace subtrees
+        # and materialize an ad-hoc collection, then proceed as a collection
+        # run — the same pattern import runs use (see pipeline_job's
+        # collection_stage). The rest of the app treats a folder scope as
+        # its subtree, so a workspace root must include every descendant's
+        # photos, not just the ones hanging directly off the root.
+        #
+        # The ad-hoc collection is *not* inserted here: it is deferred
+        # until after every other request check has passed AND after
+        # ``PipelineParams`` has been fully constructed (see the block
+        # just after the ``PipelineParams(...)`` call below). If we
+        # inserted up front, a later 400 (relative destination,
+        # remote_target_id mismatch, local_processing conflict,
+        # folder_template with '..', or a coercion-time exception inside
+        # PipelineParams) would leave a stray "Process …" collection in
+        # the workspace even though no job was queued.
+        # ``exclude_paths`` / ``exclude_photo_ids`` are validated up front —
+        # before the folder-scope subtree is resolved — so a folder-scoped
+        # request that includes preview deselections can honor them at
+        # collection-materialization time. run_pipeline_job's
+        # ``_filter_excluded`` only checks ``exclude_photo_ids``; without
+        # applying ``exclude_paths`` at the ad-hoc collection boundary, a
+        # deselected path is still thumbnailed, classified, and regrouped
+        # once the folder collection materializes. Early validation also
+        # matches the coercion the PipelineParams constructor would
+        # otherwise perform via ``set(body.get(field, []))``, where a JSON
+        # ``null`` or unhashable list entry would raise TypeError and leave
+        # a stray "Process …" collection behind. Key-presence (not
+        # truthiness) matters: missing keys fall through to the default,
+        # but ``{"exclude_paths": null}`` must 400.
+        excluded_paths_set: set[str] = set()
+        if "exclude_paths" in body:
+            _paths_value = body["exclude_paths"]
+            if not isinstance(_paths_value, list):
+                return json_error(
+                    "exclude_paths must be a list, got "
+                    f"{type(_paths_value).__name__}"
+                )
+            for _entry in _paths_value:
+                if not isinstance(_entry, str):
+                    return json_error(
+                        "exclude_paths entries must be strings, got "
+                        f"{type(_entry).__name__}"
+                    )
+            excluded_paths_set = set(_paths_value)
+        excluded_photo_ids_set: set[int] = set()
+        if "exclude_photo_ids" in body:
+            _ids_value = body["exclude_photo_ids"]
+            if not isinstance(_ids_value, list):
+                return json_error(
+                    "exclude_photo_ids must be a list, got "
+                    f"{type(_ids_value).__name__}"
+                )
+            for _entry in _ids_value:
+                # bool is a subclass of int; exclude it explicitly so the
+                # accepted values stay honest integers.
+                if isinstance(_entry, bool) or not isinstance(_entry, int):
+                    return json_error(
+                        "exclude_photo_ids entries must be integers, got "
+                        f"{type(_entry).__name__}"
+                    )
+            excluded_photo_ids_set = set(_ids_value)
+
+        folder_ids = body.get("folder_ids")
+        pending_folder_collection = None
+        if folder_ids is not None:
+            # A folder scope is itself a scope — combining it with any other
+            # scope selector is ambiguous. Reject *all* other scopes, not
+            # just ``collection_id``: with ``source``/``sources``, later
+            # ``skip_scan`` handling would silently ignore them; with
+            # ``source_snapshot_id``, run_pipeline_job would clear the
+            # folder-derived ``collection_id`` and run the snapshot scope
+            # instead — the job would process a different scope than the
+            # request implies.
+            #
+            # ``source``/``sources`` are checked for truthiness (not just
+            # ``is not None``) because the rest of this endpoint treats
+            # empty string / empty list as omitted (see the required-scope
+            # check below and the ``if sources:`` / ``elif source:``
+            # dispatch above). Otherwise a generic pipeline form that
+            # always emits ``source: ""`` / ``sources: []`` would falsely
+            # 400 every folder-scoped run.
+            other_scopes = []
+            if collection_id is not None:
+                other_scopes.append("collection_id")
+            if source:
+                other_scopes.append("source")
+            if sources:
+                other_scopes.append("sources")
+            if source_snapshot_id is not None:
+                other_scopes.append("source_snapshot_id")
+            if other_scopes:
+                return json_error(
+                    "folder_ids cannot be combined with "
+                    + ", ".join(other_scopes)
+                )
+            if (
+                not isinstance(folder_ids, list)
+                or not folder_ids
+                or any(
+                    isinstance(fid, bool) or not isinstance(fid, int)
+                    for fid in folder_ids
+                )
+            ):
+                return json_error(
+                    "folder_ids must be a non-empty list of integers"
+                )
+            # Range-check each folder id before it ever reaches sqlite3
+            # parameter binding. A JSON payload can carry an integer wider
+            # than SQLite's signed 64-bit column type (e.g. 2**63), which
+            # would raise OverflowError inside the workspace-linked lookup
+            # below and escape as a 500. source_snapshot_id already has the
+            # same guard just below; folder-scoped runs need it too.
+            _SQLITE_INT_MIN = -(1 << 63)
+            _SQLITE_INT_MAX = (1 << 63) - 1
+            if any(
+                fid < _SQLITE_INT_MIN or fid > _SQLITE_INT_MAX
+                for fid in folder_ids
+            ):
+                return json_error(
+                    "folder_ids contains a value outside SQLite's "
+                    "signed 64-bit integer range"
+                )
+            # Reject folders the active workspace has no claim on (mirrors
+            # the rescan guard): a stale UI or crafted request must not
+            # pollute this workspace with another workspace's scan output.
+            # get_folder_subtree_ids itself refuses to walk out of the
+            # active workspace, so unrelated descendants can never leak in.
+            ws_for_folders = db._active_workspace_id
+            subtree_ids = set()
+            # Import _chunks so the path-prefix workspace filter below can
+            # split large legacy subtrees across multiple IN(...) statements.
+            from db import _SQLITE_PARAM_CHUNK_SIZE, _chunks  # noqa: PLC0415
+            for fid in folder_ids:
+                linked = db.conn.execute(
+                    "SELECT 1 FROM workspace_folders "
+                    "WHERE workspace_id = ? AND folder_id = ?",
+                    (ws_for_folders, fid),
+                ).fetchone()
+                if not linked:
+                    return json_error("folder not found", 404)
+                # Union — a workspace can link both a root and a nested
+                # folder, so the same descendant can appear twice.
+                subtree_ids.update(db.get_folder_subtree_ids(fid))
+                # get_folder_subtree_ids walks folders.parent_id only, so
+                # legacy rows whose parent_id is NULL — but whose paths sit
+                # under the requested folder — never appear. Every other
+                # subtree consumer in db.py (folder deletion, rescan,
+                # missing-originals, workspace linking) already reads through
+                # _folder_subtree_ids_by_path for exactly this reason;
+                # without the same fallback here, processing a workspace root
+                # would silently skip legacy descendant photos the rest of
+                # the app still treats as part of that folder. Intersect the
+                # path-based descendants with the workspace's folder set so
+                # nothing leaks in from another workspace that happens to
+                # share a path prefix.
+                for chunk in _chunks(db._folder_subtree_ids_by_path(fid)):
+                    marks = ",".join("?" for _ in chunk)
+                    rows = db.conn.execute(
+                        f"SELECT folder_id FROM workspace_folders "
+                        f"WHERE workspace_id = ? AND folder_id IN ({marks})",
+                        [ws_for_folders] + list(chunk),
+                    )
+                    subtree_ids.update(r["folder_id"] for r in rows)
+            # A large workspace root can expand into thousands of descendant
+            # folder ids — more than SQLite's per-statement bound-parameter
+            # cap on legacy builds (SQLITE_MAX_VARIABLE_NUMBER = 999). Chunk
+            # the IN(...) lookup so a wide folder subtree doesn't blow up as
+            # an OperationalError before the job is even queued. Same pattern
+            # db.py uses for other large id scopes (see _chunks in db.py).
+            subtree_id_list = list(subtree_ids)
+            # Fetch the folder paths for the whole subtree so we can compose
+            # per-photo full paths and honor ``exclude_paths`` at the
+            # collection boundary. Skip the lookup entirely when the user
+            # sent no path exclusions — a workspace-root scope can span
+            # thousands of folders and the join is pointless when nothing
+            # would be filtered.
+            folder_path_by_id: dict[int, str] = {}
+            if excluded_paths_set:
+                for start in range(0, len(subtree_id_list), _SQLITE_PARAM_CHUNK_SIZE):
+                    chunk = subtree_id_list[start:start + _SQLITE_PARAM_CHUNK_SIZE]
+                    marks = ",".join("?" for _ in chunk)
+                    for r in db.conn.execute(
+                        f"SELECT id, path FROM folders WHERE id IN ({marks})",
+                        tuple(chunk),
+                    ):
+                        folder_path_by_id[r["id"]] = r["path"] or ""
+            photo_ids = []
+            for start in range(0, len(subtree_id_list), _SQLITE_PARAM_CHUNK_SIZE):
+                chunk = subtree_id_list[start:start + _SQLITE_PARAM_CHUNK_SIZE]
+                marks = ",".join("?" for _ in chunk)
+                # Select (id, folder_id, filename) so we can compose each
+                # photo's full path in-Python to compare against
+                # ``exclude_paths``. Matching the same os.path.join shape
+                # scanner/ingest use for their ``skip_paths`` sets keeps
+                # deselections consistent across import and process runs.
+                # Filter ``exclude_photo_ids`` here too so the ad-hoc
+                # collection reflects exactly what the user asked to
+                # process; ``_filter_excluded`` would drop them again later
+                # but there is no reason to bake them into the collection
+                # membership.
+                for r in db.conn.execute(
+                    f"SELECT id, folder_id, filename FROM photos "
+                    f"WHERE folder_id IN ({marks})",
+                    tuple(chunk),
+                ):
+                    if r["id"] in excluded_photo_ids_set:
+                        continue
+                    if excluded_paths_set:
+                        full = os.path.join(
+                            folder_path_by_id.get(r["folder_id"], ""),
+                            r["filename"] or "",
+                        )
+                        if full in excluded_paths_set:
+                            continue
+                    photo_ids.append(r["id"])
+            first = db.get_folder(folder_ids[0])
+            leaf = os.path.basename(
+                (first["path"] or "").rstrip("/\\")
+            ) or "folders"
+            pending_folder_collection = {
+                "leaf": leaf, "photo_ids": photo_ids,
+            }
+
+        if (
+            not source and not sources and not collection_id
+            and not source_snapshot_id and pending_folder_collection is None
+        ):
+            return json_error(
+                "source, sources, collection_id, source_snapshot_id, "
+                "or folder_ids required"
+            )
 
         # Validate type before touching SQLite. Non-integer bodies (objects,
         # arrays, non-numeric strings, floats, bools) would otherwise reach
@@ -16395,8 +22998,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if not os.path.isdir(source):
                     return json_error(f"source directory not found: {source}")
 
+        deprecated_import_fields = [
+            key for key in (
+                "destination", "local_processing",
+                "remote_target_id", "remote_subpath",
+            )
+            if body.get(key) not in (None, "", False)
+        ]
+        if deprecated_import_fields:
+            return json_error(
+                "import/archive fields are no longer accepted by "
+                "/api/jobs/pipeline; use /api/jobs/import-photos or the "
+                "Import page for photo imports"
+            )
+
         destination = body.get("destination")
         local_processing = bool(body.get("local_processing"))
+        remote_target_id = (body.get("remote_target_id") or "").strip()
+        remote_subpath = body.get("remote_subpath", "")
+        if remote_subpath and not isinstance(remote_subpath, str):
+            return json_error("remote_subpath must be a string")
         # Copy-ingest ("destination") is incompatible with snapshot runs:
         # ingest would copy entire source folders, then snapshot filtering
         # would drop the destination-scanned photo ids, producing empty
@@ -16405,10 +23026,62 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(
                 "destination is not allowed when source_snapshot_id is set"
             )
+        # Same reasoning for collection- and folder-scope runs: any
+        # ``collection_id`` (whether supplied directly or derived from
+        # ``folder_ids`` below) sets ``skip_scan`` in run_pipeline_job, so
+        # ``scanner_stage`` returns before the ingest block that would copy
+        # to ``destination``. The job's step list still includes ingest for
+        # ``params.destination``, so the user would see a queued process run
+        # that ignores the requested copy target and leaves ingest pending.
+        # Local-processing runs with these scopes are rejected below with a
+        # dedicated message; this guards the plain-``destination`` case that
+        # otherwise slips through when ``local_processing`` is false.
+        if destination and (
+            collection_id is not None or folder_ids is not None
+        ):
+            return json_error(
+                "destination is not allowed with collection_id or folder_ids "
+                "— collection and folder scopes skip ingest, so a copy "
+                "destination would never be written"
+            )
         if destination and not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
-        if local_processing and not destination:
-            return json_error("local_processing requires a destination")
+        # Remote (SSH) archive destination — mirrors the Move page's
+        # remote-target request shape (remote_target_id + subpath). It only
+        # makes sense with local_processing: files must be staged and
+        # processed on local disk, then rsynced to the NAS by the archive
+        # stage; a plain copy-mode ingest writes through the local
+        # filesystem and can't target an SSH path.
+        remote_archive_config = None
+        if remote_target_id and destination:
+            return json_error(
+                "destination and remote_target_id are mutually exclusive — "
+                "pick a local archive path or a saved remote target, not both"
+            )
+        if remote_subpath and not remote_target_id:
+            return json_error("remote_subpath requires remote_target_id")
+        if remote_target_id and not local_processing:
+            return json_error(
+                "remote_target_id requires local_processing — files are "
+                "staged and processed locally, then archived to the remote "
+                "target over SSH"
+            )
+        if remote_target_id:
+            # Refuse at request time when no GNU rsync exists or the
+            # target is unknown/unsafe — starting a job guaranteed to
+            # fail its storage preflight helps nobody (mirrors the
+            # move-folder endpoint).
+            remote_archive_config, _rsync_bin, err = (
+                _resolve_remote_archive_target(
+                    remote_target_id, remote_subpath,
+                )
+            )
+            if err is not None:
+                return err
+        if local_processing and not destination and not remote_target_id:
+            return json_error(
+                "local_processing requires a destination or a remote target"
+            )
         if local_processing and destination:
             from local_processing import final_destination_name
 
@@ -16425,16 +23098,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # photos and then fail in archive_stage with "local staging folder
         # was not indexed". Snapshot-scoped runs are likewise rejected: they
         # also bypass ingest because the snapshot's existing files drive
-        # scan_roots directly. Reject whenever collection_id or
-        # source_snapshot_id is set — a stale source/sources field in the
-        # same request must not slip past, because run_pipeline_job keys
-        # skip_scan off collection_id alone and would still skip ingest.
+        # scan_roots directly. Folder-scope runs materialize a collection
+        # (below) and share the collection contract, so reject them here
+        # too — otherwise the check would fire on the derived collection_id
+        # after we'd already inserted the collection row. Reject whenever
+        # collection_id, source_snapshot_id, or folder_ids is set — a stale
+        # source/sources field in the same request must not slip past,
+        # because run_pipeline_job keys skip_scan off collection_id alone
+        # and would still skip ingest.
         if local_processing and (
-            collection_id is not None or source_snapshot_id is not None
+            collection_id is not None
+            or source_snapshot_id is not None
+            or pending_folder_collection is not None
         ):
             return json_error(
-                "local_processing cannot be combined with collection_id or "
-                "source_snapshot_id — it requires source or sources"
+                "local_processing cannot be combined with collection_id, "
+                "source_snapshot_id, or folder_ids — it requires source "
+                "or sources"
             )
         if local_processing and not source and not sources:
             return json_error(
@@ -16442,11 +23122,83 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
 
         folder_template = body.get("folder_template", "%Y/%Y-%m-%d")
-        if destination and folder_template:
+        # A remote archive still ingests through local staging, so the
+        # template gets applied there too — validate it for both shapes.
+        if (destination or remote_target_id) and folder_template:
             from ingest import _is_unsafe_path
             if _is_unsafe_path(folder_template):
                 return json_error("folder_template must be a relative path without '..' or backslashes")
 
+        # ``miss_enabled`` is tri-state (None / True / False) so ``body.get``
+        # can't apply a default the way boolean skip_* flags do. Validate it
+        # explicitly instead: pipeline_job.py branches on
+        # ``params.miss_enabled is not None`` and then on truthiness, so a
+        # non-bool value like the string "false" would flow through as
+        # truthy — a caller expecting misses off would get them on.
+        #
+        # Validate BEFORE the folder-scope collection is materialized so a
+        # bad value 400s cleanly; otherwise ``db.add_collection`` commits
+        # first and the rejected request leaves a stray "Process …" row.
+        miss_enabled_body = body.get("miss_enabled")
+        if miss_enabled_body is not None and not isinstance(miss_enabled_body, bool):
+            return json_error(
+                f"miss_enabled must be boolean, got "
+                f"{type(miss_enabled_body).__name__}"
+            )
+
+        # ``eye_detect_override`` mirrors ``miss_enabled`` as a tri-state
+        # per-run switch (None = defer to workspace config). Same validation
+        # rationale: a string "false" would flow through as truthy and force
+        # eye detection on for a caller expecting the workspace default.
+        eye_detect_override_body = body.get("eye_detect_override")
+        if (
+            eye_detect_override_body is not None
+            and not isinstance(eye_detect_override_body, bool)
+        ):
+            return json_error(
+                f"eye_detect_override must be boolean, got "
+                f"{type(eye_detect_override_body).__name__}"
+            )
+
+        # Validate ``model_id`` / ``model_ids`` shape BEFORE the folder-scope
+        # collection is materialized. The auto-skip-classify block further
+        # down calls ``list(params.model_ids or [])`` and ``by_id.get(mid, ...)``
+        # in ways that raise TypeError on non-list / non-hashable payloads
+        # (e.g. ``model_ids: 5`` or an entry that's a list/dict). Without
+        # this guard those escape as opaque 500s, and for folder-scoped
+        # runs ``db.add_collection`` has already committed by then, leaving
+        # a stray "Process …" collection in the workspace after the request
+        # fails. Rejecting up front keeps error responses 4xx and prevents
+        # orphaned rows on every scope shape.
+        model_id_body = body.get("model_id")
+        if model_id_body is not None and not isinstance(model_id_body, str):
+            return json_error(
+                f"model_id must be a string, got "
+                f"{type(model_id_body).__name__}"
+            )
+        model_ids_body = body.get("model_ids")
+        if model_ids_body is not None:
+            if not isinstance(model_ids_body, list):
+                return json_error(
+                    f"model_ids must be a list, got "
+                    f"{type(model_ids_body).__name__}"
+                )
+            for _mid in model_ids_body:
+                if not isinstance(_mid, str):
+                    return json_error(
+                        f"model_ids entries must be strings, got "
+                        f"{type(_mid).__name__}"
+                    )
+
+        # Snapshot the resolved target dict so the queued run archives to the
+        # host/mount the user saw at click-Start, not whatever the saved target
+        # gets edited to while another pipeline holds the slot. Mirrors how the
+        # move-folder endpoint captures its remote spec at enqueue rather than
+        # re-reading Settings at execution.
+        remote_target_snapshot = (
+            dict(remote_archive_config["target"])
+            if remote_archive_config is not None else None
+        )
         params = PipelineParams(
             collection_id=collection_id,
             source=source,
@@ -16454,9 +23206,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             source_snapshot_id=source_snapshot_id,
             destination=destination,
             local_processing=local_processing,
+            remote_target_id=remote_target_id or None,
+            remote_subpath=remote_subpath or "",
+            remote_target_snapshot=remote_target_snapshot,
             file_types=body.get("file_types", "both"),
             folder_template=folder_template,
             skip_duplicates=body.get("skip_duplicates", True),
+            verify_by_hash=bool(body.get("verify_by_hash")),
             labels_file=body.get("labels_file"),
             labels_files=body.get("labels_files"),
             model_id=body.get("model_id"),
@@ -16466,43 +23222,60 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             download_taxonomy=body.get("download_taxonomy", True),
             skip_extract_masks=body.get("skip_extract_masks", False),
             skip_eye_keypoints=body.get("skip_eye_keypoints", False),
+            eye_detect_override=eye_detect_override_body,
             skip_regroup=body.get("skip_regroup", False),
+            # ``review_mode`` reaches ``body`` only through the strategy
+            # expansion at the top of this handler (identify sets it to
+            # ``"species"``). Callers who send skip_regroup without a
+            # strategy — Advanced/Custom on the Process page, or API
+            # clients refreshing classifications only — leave it None so
+            # regroup_stage skips instead of overwriting the workspace
+            # cache with all-REVIEW output.
+            review_mode=body.get("review_mode"),
+            miss_enabled=body.get("miss_enabled"),
             preview_max_size=body.get("preview_max_size"),
-            exclude_paths=set(body.get("exclude_paths", [])) or None,
-            exclude_photo_ids=set(body.get("exclude_photo_ids", [])) or None,
+            exclude_paths=excluded_paths_set or None,
+            exclude_photo_ids=excluded_photo_ids_set or None,
             recursive=body.get("recursive", True),
         )
 
-        # Auto-skip classify stages if no model is available
-        model_warning = None
-        if not params.skip_classify:
-            from models import get_active_model, get_models
+        # All request validation and param coercion have passed — safe to
+        # materialize the folder-scope collection row now. Deferring the
+        # insert past PipelineParams construction closes the last window
+        # where a coercion-time exception (e.g. an unhashable exclude
+        # entry that slipped past the guards above) could leave a stray
+        # "Process …" collection behind after the request failed.
+        if pending_folder_collection is not None:
+            from datetime import datetime as _dt
 
-            # Resolve the set of requested models. Prefer the explicit list,
-            # fall back to the legacy single id, and finally to whatever is
-            # marked active. Any requested id that isn't downloaded fails the
-            # check, so the user sees the "no model available" warning instead
-            # of a mid-run model_loader crash.
-            requested_ids = list(params.model_ids or [])
-            if not requested_ids and params.model_id:
-                requested_ids = [params.model_id]
+            collection_name = "Process {} {}".format(
+                pending_folder_collection["leaf"],
+                _dt.now().strftime("%Y-%m-%d %H:%M"),
+            )
+            collection_id = db.add_collection(
+                collection_name,
+                json.dumps([{
+                    "field": "photo_ids",
+                    "value": pending_folder_collection["photo_ids"],
+                }]),
+            )
+            params.collection_id = collection_id
+        elif collection_id is not None:
+            collection_name = next(
+                (
+                    c["name"]
+                    for c in db.get_collections()
+                    if c["id"] == collection_id
+                ),
+                None,
+            )
+        else:
+            collection_name = None
 
-            all_models = None
-            resolved_any = False
-            if requested_ids:
-                all_models = get_models()
-                by_id = {m["id"]: m for m in all_models}
-                resolved_any = all(
-                    by_id.get(mid, {}).get("downloaded") for mid in requested_ids
-                )
-            else:
-                resolved_any = get_active_model() is not None
-
-            if not resolved_any:
-                params.skip_classify = True
-                params.skip_extract_masks = True
-                params.skip_regroup = True
-                model_warning = "No model available \u2014 classification was skipped. Download a model in Settings to enable species identification."
+        # Auto-skip classify stages if no model is available. Shared with
+        # the after-import chaining hook so a chained run and a manually
+        # started one degrade identically.
+        model_warning = _apply_no_model_auto_skip(params)
 
         # Save destination to recent list (best-effort — don't block pipeline)
         if destination:
@@ -16555,6 +23328,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return run_pipeline_job(
                 job, runner, db_path, active_ws, params,
                 thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+                missing_originals_invalidator=_invalidate_missing_originals_cache,
             )
 
         # Enqueue rather than start directly: when SLOT_CAP is 1 and
@@ -16564,18 +23338,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # ``status='queued'`` until the slot opens. Callers receive the
         # same {"job_id": ...} response either way; clients learn about
         # the queued state via /api/jobs/<id> polling or the SSE stream.
+        job_config = {
+            "source": source,
+            "sources": sources,
+            "collection_id": collection_id,
+            "collection_name": collection_name,
+            "destination": destination,
+            "local_processing": local_processing,
+            "process_id": process_id,
+            "skip_classify": params.skip_classify,
+            "skip_extract_masks": params.skip_extract_masks,
+            "skip_regroup": params.skip_regroup,
+            "review_mode": params.review_mode,
+            "miss_enabled": params.miss_enabled,
+            "eye_detect_override": params.eye_detect_override,
+        }
+        # Preserve the caller's original folder_ids alongside the derived
+        # ad-hoc collection_id so the Jobs page can show both what the user
+        # selected (folder subtree) and the collection the run was pinned to
+        # without a secondary collection lookup.
+        if folder_ids is not None:
+            job_config["folder_ids"] = list(folder_ids)
+        if remote_archive_config is not None:
+            # Surface that the archive goes over SSH (and to where) so the
+            # jobs panel can show it, per the UI-transparency rule.
+            target = remote_archive_config["target"]
+            job_config["remote_archive"] = {
+                "target_id": target["id"],
+                "target_name": target["name"],
+                "host": target["host"],
+                "user": target["user"],
+                "subpath": remote_archive_config["subpath"],
+                "ssh_destination": remote_archive_config["ssh_final"],
+                "display": remote_archive_config["display"],
+            }
         job_id = runner.enqueue_pipeline(
             work,
-            config={
-                "source": source,
-                "sources": sources,
-                "collection_id": collection_id,
-                "destination": destination,
-                "local_processing": local_processing,
-                "skip_classify": params.skip_classify,
-                "skip_extract_masks": params.skip_extract_masks,
-                "skip_regroup": params.skip_regroup,
-            },
+            config=job_config,
             workspace_id=active_ws,
             runtime_warning=runtime_warning,
         )
@@ -16603,6 +23402,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_ids = body.get("photo_ids", [])
         burst_index = body.get("burst_index")
 
+        # Normalize up front: this route compares the requested species
+        # against stored keyword rows and previous_species cache values
+        # below, and add_keyword would normalize on insert anyway — keep one
+        # spelling throughout. Rejects quote-only input as empty.
+        species = normalize_keyword_display(species)
         if not species:
             return json_error("species is required")
         if not photo_ids:
@@ -16692,27 +23496,61 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             else:
                 previous_species = target_enc.get("confirmed_species")
 
+        # previous_species comes from the pipeline cache on disk, which the
+        # v5 DB migration does not touch — a pre-normalization cache can
+        # still carry a quoted spelling like `‘Apapane`. Normalize before
+        # comparing/looking up against stored keyword rows, which are always
+        # clean.
+        if previous_species is not None:
+            previous_species = normalize_keyword_display(previous_species)
+            if not previous_species:
+                previous_species = None
+
         ws_id = db._ws_id()
 
         old_kid = None
+        # Compare using the ASCII-only fold SQLite's `COLLATE NOCASE` (which
+        # add_keyword's dedupe relies on) uses — Python's str.lower() folds
+        # non-ASCII letters that SQLite treats as distinct. Without this, a
+        # cache-recorded confirmed species `Éclair` and a user-submitted
+        # `éclair` would match here, the replacement path would be skipped,
+        # yet add_keyword's NOCASE lookup would still create/tag a separate
+        # `éclair` row — leaving the photo with both taxonomy tags and no
+        # remove queued for the old one.
         is_replacement = (
             previous_species is not None
-            and previous_species.strip().lower() != species.lower()
+            and keyword_match_key(previous_species) != keyword_match_key(species)
         )
         if is_replacement:
             # Match add_keyword's write path: species keywords live as root
-            # keywords (parent_id IS NULL) with is_species=1. Looking up by
-            # name alone could collide with a non-species homonym nested under
-            # another keyword (schema allows UNIQUE(name, parent_id)).
+            # keywords (parent_id IS NULL). Looking up by name alone could
+            # collide with a non-species homonym nested under another keyword
+            # (schema allows UNIQUE(name, parent_id)). Accept taxonomy-typed
+            # rows with is_species=0 too: update_keyword with an explicit
+            # type='taxonomy' (the Keywords type dropdown) doesn't set the
+            # legacy is_species column, and the rest of the app treats
+            # (is_species = 1 OR type = 'taxonomy') as species.
             old_kid_row = db.conn.execute(
-                """SELECT id FROM keywords
+                """SELECT id, name FROM keywords
                    WHERE name = ? COLLATE NOCASE
                      AND parent_id IS NULL
-                     AND is_species = 1""",
+                     AND (is_species = 1 OR type = 'taxonomy')""",
                 (previous_species,),
             ).fetchone()
+            # Track the stored keyword row's spelling separately so the
+            # keyword_remove queued below cancels an unsynced keyword_add
+            # written under the DB's canonical case. Cached
+            # confirmed_species can legitimately differ from the stored
+            # row only by case (SQLite NOCASE keeps them together, but
+            # pending_changes.value is exact-match), so queueing the
+            # cache spelling would leave an add(<stored>) alongside a
+            # remove(<cache>) that sync_to_xmp treats as a paired rename
+            # and rewrites the removed spelling back into the sidecar.
+            old_species_stored = previous_species
             if old_kid_row:
                 old_kid = old_kid_row["id"]
+                if old_kid_row["name"]:
+                    old_species_stored = old_kid_row["name"]
 
         # Run all mutations in a single transaction so that a mid-loop failure
         # (SQLite lock, disk error, etc.) can't leave half the photos retagged
@@ -16722,6 +23560,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # which photos already carry it. add_keyword is idempotent and
             # returns the existing id when the species already exists.
             kid = db.add_keyword(species, is_species=True, _commit=False)
+            # Queue/record the stored spelling (see api_add_keyword).
+            stored = db.conn.execute(
+                "SELECT name FROM keywords WHERE id = ?", (kid,)
+            ).fetchone()
+            if stored and stored["name"]:
+                species = stored["name"]
 
             # Precheck which submitted photos already carry the new species
             # keyword. Only photos that get a *new* tag should generate
@@ -16757,7 +23601,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         continue
                     db.untag_photo(pid, old_kid, _commit=False)
                     _queue_keyword_remove(
-                        pid, previous_species,
+                        pid, old_species_stored,
                         workspace_id=ws_id, _commit=False,
                     )
 
@@ -16823,12 +23667,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Auto-detach if burst's confirmed species differs from its
                 # encounter — splits it out and merges into an adjacent
                 # encounter of the same confirmed species when one exists.
+                # Compare with keyword_match_key so a cached pre-normalization
+                # spelling (e.g. ‘Apapane) does not trigger a needless split
+                # against the stored species (Apapane); the DB write already
+                # normalized to the canonical form.
                 enc_species = target_enc.get("confirmed_species") or (
                     target_enc["species"][0] if target_enc.get("species") else None
                 )
                 if (
                     enc_species is not None
-                    and enc_species != species
+                    and keyword_match_key(enc_species) != keyword_match_key(species)
                     and len(target_enc["bursts"]) > 1
                 ):
                     _auto_detach_burst_for_species(
@@ -16839,11 +23687,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 target_enc["confirmed_species"] = species
             save_results_raw(cached, cache_dir, db._active_workspace_id)
 
-        replaced = (
-            previous_species
-            if previous_species and previous_species.strip().lower() != species.lower()
-            else None
-        )
+        # Report `replaced` consistent with the actual replacement decision
+        # (is_replacement, which uses keyword_match_key to match SQLite's
+        # ASCII-only NOCASE). Python's `.lower()` folds non-ASCII pairs like
+        # `Éclair`/`éclair` — which SQLite/add_keyword keep as distinct
+        # keyword rows — so a `.lower()` comparison here would report
+        # replaced=None on a request that actually untagged the previous
+        # species row and tagged a new one.
+        replaced = previous_species if is_replacement else None
         response = {
             "ok": True,
             "species": species,
@@ -16863,7 +23714,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/species/search")
     def api_species_search():
         """Search species names from active label sets for autocomplete."""
-        q = request.args.get("q", "").strip().lower()
+        q = request.args.get("q", "").strip()
+        match_case = _request_bool_arg("match_case")
+        whole_word = _request_bool_arg("whole_word")
         if len(q) < 2:
             return jsonify([])
 
@@ -16881,9 +23734,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         name = line.strip()
                         if not name:
                             continue
-                        name_lower = name.lower()
-                        if q in name_lower and name_lower not in seen:
-                            seen.add(name_lower)
+                        name_key = name.casefold()
+                        if (
+                            text_search_match(name, q, match_case, whole_word)
+                            and name_key not in seen
+                        ):
+                            seen.add(name_key)
                             matches.append(name)
                             if len(matches) >= 20:
                                 break
@@ -16895,12 +23751,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # Also search existing species keywords in the database
         db = _get_db()
         kw_rows = db.conn.execute(
-            "SELECT name FROM keywords WHERE is_species = 1 AND LOWER(name) LIKE ?",
-            (f"%{q}%",),
+            """SELECT name FROM keywords
+               WHERE is_species = 1
+                 AND vireo_keyword_text_match(name, ?, ?, ?)""",
+            (q, 1 if match_case else 0, 1 if whole_word else 0),
         ).fetchall()
         for row in kw_rows:
-            if row["name"].lower() not in seen:
-                seen.add(row["name"].lower())
+            name_key = row["name"].casefold()
+            if name_key not in seen:
+                seen.add(name_key)
                 matches.append(row["name"])
 
         return jsonify(matches[:20])
@@ -17089,6 +23948,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_id = _coerce_collection_id(body.get("collection_id"))
         if collection_id is False:
             return json_error("collection_id must be an integer")
+        photo_ids = body.get("photo_ids")
+        if photo_ids is not None:
+            if not isinstance(photo_ids, list):
+                return json_error("photo_ids must be a list")
+            for pid in photo_ids:
+                if isinstance(pid, bool) or not isinstance(pid, int):
+                    return json_error("photo_ids entries must be integers")
+            if collection_id is not None:
+                return json_error("photo_ids cannot be combined with collection_id")
+        save_cache = body.get("save_cache", True)
+        if not isinstance(save_cache, bool):
+            return json_error("save_cache must be boolean")
 
         import config as cfg
 
@@ -17100,7 +23971,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # We re-group to have the full photo dicts with numpy arrays
         # (the cached JSON doesn't have embeddings)
         photos = load_photo_features(
-            db, collection_id=collection_id, config=effective_cfg
+            db,
+            collection_id=collection_id,
+            config=effective_cfg,
+            photo_ids=photo_ids,
         )
         if not photos:
             return json_error("No photos with pipeline features", 404)
@@ -17120,7 +23994,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if existing and existing.get("miss_computed_at"):
             results["miss_computed_at"] = existing["miss_computed_at"]
 
-        if collection_id is None:
+        if save_cache and collection_id is None and photo_ids is None:
             save_results(results, cache_dir, db._active_workspace_id)
 
         serialized = serialize_results(results)
@@ -17152,6 +24026,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_id = _coerce_collection_id(body.get("collection_id"))
         if collection_id is False:
             return json_error("collection_id must be an integer")
+        photo_ids = body.get("photo_ids")
+        if photo_ids is not None:
+            if not isinstance(photo_ids, list):
+                return json_error("photo_ids must be a list")
+            for pid in photo_ids:
+                if isinstance(pid, bool) or not isinstance(pid, int):
+                    return json_error("photo_ids entries must be integers")
+            if collection_id is not None:
+                return json_error("photo_ids cannot be combined with collection_id")
+        save_cache = body.get("save_cache", True)
+        if not isinstance(save_cache, bool):
+            return json_error("save_cache must be boolean")
 
         import config as cfg
 
@@ -17160,7 +24046,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         pipeline_cfg = {**effective_cfg.get("pipeline", {}), **overrides}
 
         photos = load_photo_features(
-            db, collection_id=collection_id, config=effective_cfg
+            db,
+            collection_id=collection_id,
+            config=effective_cfg,
+            photo_ids=photo_ids,
         )
         if not photos:
             return json_error("No photos with pipeline features", 404)
@@ -17178,7 +24067,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if existing and existing.get("miss_computed_at"):
             results["miss_computed_at"] = existing["miss_computed_at"]
 
-        if collection_id is None:
+        if save_cache and collection_id is None and photo_ids is None:
             save_results(results, cache_dir, db._active_workspace_id)
 
         serialized = serialize_results(results)
@@ -17305,6 +24194,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # too-wide range that would misplace this encounter under time sorts.
             enc["time_range"] = _compute_time_range(photos_by_id, enc["photo_ids"])
             enc["species_predictions"] = rebuild_species_predictions(results, enc["photo_ids"])
+            # No fallback: if the remaining photos have no predictions the
+            # source encounter's stale label was likely inherited from the
+            # burst we just detached, so keeping it would advertise the
+            # detached burst's species as a one-click candidate on an
+            # unrelated group of photos.
+            enc["species"] = _rebuild_encounter_species_label(
+                results, enc["photo_ids"]
+            )
             # Pair indices in trace reference the original photo composition;
             # drop it so the algorithm-trace panel renders an honest "needs
             # recompute" state instead of stale rows.
@@ -17315,13 +24212,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Create new encounter from detached burst
         new_enc_predictions = rebuild_species_predictions(results, detached_ids)
+        # No fallback: predictionless detached photos must not inherit the
+        # parent encounter's species — that is exactly the stale-label bug
+        # the surrounding PR is fixing.
+        new_enc_species = _rebuild_encounter_species_label(
+            results, detached_ids
+        )
         # Also refresh the detached burst's own predictions
         detached["species_predictions"] = new_enc_predictions
+        detached_override = detached.get("species_override") or {}
+        detached_confirmed = bool(detached_override.get("confirmed"))
         new_enc = {
-            "species": enc.get("species"),
-            "confirmed_species": detached.get("species_override", {}).get("species") if detached.get("species_override") else None,
+            "species": new_enc_species,
+            "confirmed_species": detached_override.get("species") if detached_confirmed else None,
             "species_predictions": new_enc_predictions,
-            "species_confirmed": bool(detached.get("species_override", {}).get("confirmed")) if detached.get("species_override") else False,
+            "species_confirmed": detached_confirmed,
             "photo_count": len(detached_ids),
             "burst_count": 1,
             # Compute from the detached photos' timestamps. A [None, None] range
@@ -17375,6 +24280,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         burst = bursts[burst_idx]
         if photo_id not in burst["photo_ids"]:
             return json_error("photo_id not in burst")
+        source_override = burst.get("species_override") or {}
 
         # Remove photo from burst
         burst["photo_ids"].remove(photo_id)
@@ -17387,10 +24293,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             burst["species_predictions"] = rebuild_species_predictions(results, burst["photo_ids"])
 
         # Create new single-photo burst in the same encounter
+        new_burst_predictions = rebuild_species_predictions(results, [photo_id])
+        new_burst_species = _rebuild_encounter_species_label(results, [photo_id])
+        if source_override.get("confirmed") and source_override.get("species"):
+            new_burst_override = {
+                "species": source_override["species"],
+                "confirmed": True,
+            }
+        elif enc.get("confirmed_species"):
+            # Inherit the encounter's prior confirmed species by leaving the
+            # override empty. Also covers the mixed/partial state where
+            # species_confirmed is False but confirmed_species records the
+            # dominant prior species (pipeline.py builds encounter payloads
+            # this way for encounters whose photos disagree on confirmed
+            # species). A classifier-guess override here would mask that
+            # prior tag: the confirm endpoint reads species_override.species
+            # without inspecting the confirmed flag, so a later burst confirm
+            # would target the guess as previous_species instead of the real
+            # prior species and leave both keywords on the photo.
+            new_burst_override = None
+        else:
+            new_burst_override = _candidate_species_override(new_burst_species)
         new_burst = {
             "photo_ids": [photo_id],
-            "species_predictions": rebuild_species_predictions(results, [photo_id]),
-            "species_override": None,
+            "species_predictions": new_burst_predictions,
+            "species_override": new_burst_override,
         }
         bursts.append(new_burst)
         enc["burst_count"] = len(bursts)
@@ -17430,7 +24357,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         consensus species keyword applied.
 
         Body: {photo_ids: [int], species: str}
-        Returns: {photos: {pid: {flag, has_species_keyword}}, species_kid: int|None}
+        Returns: {photos: {pid: {flag, has_species_keyword,
+                  is_species_representative}}, species_kid: int|None}
         """
         db = _get_db()
         body = request.get_json(silent=True) or {}
@@ -17454,6 +24382,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if row:
                 species_kid = row["id"]
 
+        # Gate the badge on the same eligibility rules the shared payload
+        # attachers use, so a stale preference row (photo later rejected or
+        # no longer carrying the species keyword) doesn't light up the modal
+        # while browse/highlights hide it.
+        representatives = db.get_species_representatives(eligible_only=True)
         photos = {}
         for pid in photo_ids:
             # Same workspace guard the apply endpoint uses, so a malicious
@@ -17470,6 +24403,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photos[pid] = {
                 "flag": row["flag"] or "none",
                 "has_species_keyword": has_kw,
+                "is_species_representative": bool(
+                    species and representatives.get(species) == pid
+                ),
             }
         return jsonify({"photos": photos, "species_kid": species_kid})
 
@@ -17761,10 +24697,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
         keyword = request.args.get("keyword", None)
+        keyword_match_case = _request_bool_arg("keyword_match_case")
+        keyword_whole_word = _request_bool_arg("keyword_whole_word")
         color_label = request.args.get("color_label", None)
         collection_id = request.args.get("collection_id", None, type=int)
         try:
             flag = _request_flag_filter()
+            location_status = _request_location_status_filter()
         except ValueError as e:
             return json_error(str(e), 400)
         ids_only = request.args.get("ids_only", "").lower() in ("1", "true", "yes")
@@ -17789,15 +24728,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         candidate_photo_ids = None
         if collection_id is not None:
             candidate_photo_ids = db.get_collection_photo_ids(collection_id)
-        elif any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag]):
+        elif any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
             candidate_photo_ids = db.get_photo_ids(
                 folder_id=folder_id,
                 rating_min=rating_min,
                 date_from=date_from,
                 date_to=date_to,
                 keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
                 color_label=color_label,
                 flag=flag,
+                location_status=location_status,
             )
 
         if candidate_photo_ids == []:
@@ -17864,6 +24806,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo_dicts.append(dict(photos_map[pid]))
                     sims_by_pid[pid] = round(sim, 4)
             _attach_species(db, photo_dicts)
+            _attach_location_statuses(db, photo_dicts)
+            _attach_species_representatives(db, photo_dicts)
             _attach_detections(db, photo_dicts)
             _attach_edit_recipes(db, photo_dicts)
             results = [
@@ -18258,11 +25202,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         preview_dir = os.path.join(vireo_dir, "previews")
         cache_path = os.path.join(preview_dir, f"{photo_id}_{size}.jpg")
         recipe = db.get_photo_edit_recipe(photo_id)
+        folder_row = db.conn.execute(
+            "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
+        ).fetchone()
+        if not folder_row:
+            return "Not found", 404
+        pair_source, pair_source_path = _requested_pair_source(
+            photo, folder_row["path"],
+        )
+        if pair_source and not pair_source_path:
+            return "Not found", 404
+        # Recipes and local masks use primary-RAW coordinates. The selected
+        # developed JPEG may have different geometry and should be displayed
+        # as-authored rather than receiving the RAW edit a second time.
+        render_recipe = None if pair_source == "jpeg" else recipe
+        # The established preview cache is keyed only by (photo_id, size).
+        # Explicit paired-source views bypass it so RAW and JPEG pixels can
+        # never contaminate one another. Browser caching still makes repeated
+        # viewing cheap; the ordinary unpaired path keeps the disk LRU.
+        bypass_cache = pair_source is not None
 
         # Reject corrupt zero-byte cache files (prior write interrupted).
         # Treat them as a miss so the regeneration path below produces a
         # real preview.
-        if os.path.exists(cache_path) and os.path.getsize(cache_path) == 0:
+        if (
+            not bypass_cache
+            and os.path.exists(cache_path)
+            and os.path.getsize(cache_path) == 0
+        ):
             try:
                 os.remove(cache_path)
             except OSError:
@@ -18274,7 +25241,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             cache_path in _invalid_preview_cache_paths
             or _is_preview_cache_invalid(db, photo_id, size)
         )
-        if stale_after_failed_invalidation and os.path.exists(cache_path):
+        if (
+            not bypass_cache
+            and stale_after_failed_invalidation
+            and os.path.exists(cache_path)
+        ):
             try:
                 os.remove(cache_path)
             except OSError:
@@ -18288,13 +25259,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 _clear_preview_cache_invalid(db, photo_id, size)
                 db.preview_cache_delete(photo_id, size)
                 stale_after_failed_invalidation = False
-        elif stale_after_failed_invalidation:
+        elif not bypass_cache and stale_after_failed_invalidation:
             _invalid_preview_cache_paths.discard(cache_path)
             _clear_preview_cache_invalid(db, photo_id, size)
             db.preview_cache_delete(photo_id, size)
             stale_after_failed_invalidation = False
         if (
-            recipe
+            not bypass_cache
+            and recipe
             and os.path.exists(cache_path)
             and not db.preview_cache_get(photo_id, size)
         ):
@@ -18312,7 +25284,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # OperationalError: database is locked, but that shouldn't turn a
         # valid cache hit into a 500 when the JPEG is right there on disk.
         if (
-            not stale_after_failed_invalidation
+            not bypass_cache
+            and not stale_after_failed_invalidation
             and db.preview_cache_get(photo_id, size)
             and os.path.exists(cache_path)
         ):
@@ -18330,7 +25303,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # file we just adopted (e.g. preview_cache_max_mb=0), but we can
         # still serve the response from memory — mirrors the miss path.
         if (
-            not stale_after_failed_invalidation
+            not bypass_cache
+            and not stale_after_failed_invalidation
             and not skip_untracked_preview_adoption
             and os.path.exists(cache_path)
         ):
@@ -18350,16 +25324,49 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             load_image,
         )
 
-        folder_row = db.conn.execute(
-            "SELECT id, path FROM folders WHERE id=?", (photo["folder_id"],)
-        ).fetchone()
-        if not folder_row:
-            return "Not found", 404
         folders = {folder_row["id"]: folder_row["path"]}
 
-        canonical, using_working_copy = _recipe_render_source(
-            photo, recipe, size, vireo_dir, folders,
-        )
+        if pair_source_path:
+            canonical = pair_source_path
+            using_working_copy = False
+        elif (
+            not render_recipe
+            and os.path.splitext(photo["filename"])[1].lower()
+            in RAW_EXTENSIONS
+        ):
+            # An unedited RAW must use the camera-rendered decode for every
+            # lightbox tier.  Its working copy is an edit-quality,
+            # highlight-preserving render that intentionally looks
+            # flatter/darker; treating it as canonical makes the photo appear
+            # to gain a dark overlay when the lightbox swaps from /full to a
+            # sharper preview tier.  Keep the working copy as the offline
+            # fallback when the source itself is unavailable, and defer to it
+            # when the current RAW mtime is already marked as a source-side
+            # extraction failure: the RAW failure gate below returns 500
+            # before the companion/working-copy fallbacks further down can
+            # run, so forcing the RAW here would drop the preview for
+            # RAW+JPEG pairs whose companion or working copy could still
+            # satisfy the request.
+            source_path = os.path.join(
+                folder_row["path"], photo["filename"],
+            )
+            if os.path.exists(source_path) and not _has_current_working_copy_failure(
+                photo,
+                vireo_dir,
+                trust_existing_working_copy=False,
+                live_source_path=source_path,
+                folder_path=folder_row["path"],
+            ):
+                canonical = source_path
+                using_working_copy = False
+            else:
+                canonical, using_working_copy = _recipe_render_source(
+                    photo, render_recipe, size, vireo_dir, folders,
+                )
+        else:
+            canonical, using_working_copy = _recipe_render_source(
+                photo, render_recipe, size, vireo_dir, folders,
+            )
         selected_ext = os.path.splitext(canonical)[1].lower()
         if (
             not using_working_copy
@@ -18378,10 +25385,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo_id,
             )
             return "Could not load image", 500
-        load_max_size = None if recipe and recipe.get("crop") else size
+        load_max_size = (
+            None
+            if render_recipe and render_recipe.get("crop")
+            else size
+        )
         raw_decode = (
             RAW_DECODE_PRESERVE_HIGHLIGHTS
-            if recipe and selected_ext in RAW_EXTENSIONS
+            if (
+                selected_ext in RAW_EXTENSIONS
+                and (render_recipe or pair_source == "raw")
+            )
             else None
         )
         load_kwargs = {"raw_decode": raw_decode} if raw_decode else {}
@@ -18391,6 +25405,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             and selected_ext in RAW_EXTENSIONS
             and photo["width"]
             and photo["height"]
+            and pair_source != "raw"
         ):
             # _load_raw falls back to the embedded camera JPEG when libraw
             # can't demosaic the sensor data, even in preserve-highlights
@@ -18430,7 +25445,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             canonical = companion_abs
                         elif companion_img is not None:
                             companion_img.close()
-        if img is None and selected_ext in RAW_EXTENSIONS:
+        if (
+            img is None
+            and selected_ext in RAW_EXTENSIONS
+            and pair_source != "raw"
+        ):
             # libraw couldn't decode this RAW (unsupported variant, corrupt
             # file, no usable embedded JPEG). Try the companion JPEG before
             # 500ing so a sidecar that can satisfy the preview isn't refused
@@ -18451,14 +25470,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     img = load_image(companion_abs, max_size=load_max_size)
                     if img is not None:
                         canonical = companion_abs
+            if img is None:
+                wc_path = _working_copy_path_if_satisfies(
+                    photo, render_recipe, size, vireo_dir, rel_slack=0.01,
+                )
+                if wc_path and os.path.abspath(wc_path) != os.path.abspath(canonical):
+                    log.info(
+                        "RAW decode failed for photo %s preview at size=%s; "
+                        "falling back to JPEG working copy",
+                        photo_id, size,
+                    )
+                    _record_working_copy_failure(db, photo, canonical)
+                    img = load_image(wc_path, max_size=load_max_size)
+                    if img is not None:
+                        canonical = wc_path
         if img is None:
             _record_working_copy_failure(db, photo, canonical)
             return "Could not load image", 500
-        if recipe:
+        if render_recipe:
+            import local_masks
             from image_edits import apply_recipe_to_loaded_image
             img = apply_recipe_to_loaded_image(
-                img, recipe, max_size=size,
+                img, render_recipe, max_size=size,
                 native_size=_recipe_source_dimensions(photo),
+                local_mask=local_masks.load_snapshot(
+                    vireo_dir, photo_id, render_recipe,
+                ),
             )
 
         preview_quality = cfg.load().get("preview_quality", 90)
@@ -18474,18 +25511,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # lock / FK violations (photo deleted between lookup and insert).
         # The preview bytes are ready in memory — never fail the request
         # over bookkeeping.
-        try:
-            os.makedirs(preview_dir, exist_ok=True)
-            with open(cache_path, "wb") as f:
-                f.write(data)
-            _invalid_preview_cache_paths.discard(cache_path)
-            _clear_preview_cache_invalid(db, photo_id, size)
-            db.preview_cache_insert(photo_id, size, len(data))
-            evict_preview_cache_if_over_quota(db, vireo_dir)
-        except Exception as e:
-            log.warning(
-                "Failed to persist preview cache %s: %s", cache_path, e,
-            )
+        if not bypass_cache:
+            try:
+                os.makedirs(preview_dir, exist_ok=True)
+                with open(cache_path, "wb") as f:
+                    f.write(data)
+                _invalid_preview_cache_paths.discard(cache_path)
+                _clear_preview_cache_invalid(db, photo_id, size)
+                db.preview_cache_insert(photo_id, size, len(data))
+                evict_preview_cache_if_over_quota(db, vireo_dir)
+            except Exception as e:
+                log.warning(
+                    "Failed to persist preview cache %s: %s", cache_path, e,
+                )
 
         return Response(data, mimetype="image/jpeg")
 
@@ -18505,7 +25543,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         effective = _get_db().get_effective_config(cfg.load())
         pm = effective.get("preview_max_size")
         if pm == 0:
-            return redirect(f"/photos/{photo_id}/original")
+            source = (request.args.get("source") or "").strip().lower()
+            suffix = f"?source={source}" if source in {"jpeg", "raw"} else ""
+            return redirect(f"/photos/{photo_id}/original{suffix}")
         return _serve_preview(photo_id, int(pm or 1920))
 
     @app.route("/photos/<int:photo_id>/preview")
@@ -18529,6 +25569,107 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "Unsupported size", 400
         return _serve_preview(photo_id, size)
 
+    @app.route("/photos/<int:photo_id>/edit-mask-preview")
+    def serve_edit_mask_preview(photo_id):
+        """Serve a recipe's transformed, feathered local-weight map as a
+        tinted RGBA PNG aligned with the (uncropped) editor preview.
+
+        The existing lightbox mask endpoint serves the live photo_masks file
+        untouched; this one shows the pixels the renderer actually weights —
+        the recipe's snapshot after geometry and feathering — so the editor
+        overlay can never disagree with the saved render.
+        """
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        db = _get_db()
+        photo = db.get_photo(photo_id, verify_workspace=True)
+        if not photo:
+            return "Not found", 404
+        try:
+            size = int(request.args.get("size", "1920"))
+        except ValueError:
+            return "Invalid size", 400
+        # The overlay is stretched over the displayed editor image, which the
+        # client caps at the overlay-preview size, so allocating a native-res
+        # RGBA buffer here would be hundreds of MB to over 1 GB with no
+        # visible benefit. Keep the mask endpoint at the overlay cap; only
+        # /edit-preview needs the raised limit for true 1:1 zoom.
+        size = max(256, min(3840, size))
+
+        raw_recipe = request.args.get("recipe")
+        if raw_recipe:
+            try:
+                recipe = json.loads(raw_recipe)
+            except (TypeError, ValueError):
+                return "Invalid recipe", 400
+        else:
+            recipe = db.get_photo_edit_recipe(photo_id) or {}
+
+        import local_masks
+        from image_edits import (
+            RecipeError,
+            detail_render_scale,
+            local_weight_map,
+            normalize_recipe,
+        )
+        from render_source import rendered_recipe_long_edge
+        try:
+            normalized = normalize_recipe(recipe) or {}
+        except RecipeError as e:
+            return str(e), 400
+        if not normalized.get("local"):
+            return "Recipe has no local adjustments", 404
+        # The editor preview is uncropped; the overlay must align with it.
+        display_recipe = dict(normalized)
+        display_recipe.pop("crop", None)
+
+        vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
+        snapshot = local_masks.load_snapshot(vireo_dir, photo_id, normalized)
+        if snapshot is None:
+            return "No usable edit-mask snapshot", 404
+        source_dims = _scaled_recipe_source_dimensions(photo, size)
+        if not source_dims[0] or not source_dims[1]:
+            source_dims = snapshot.size
+        # Feather scale must reflect the SAVED (cropped) render even though
+        # the overlay is aligned with the uncropped preview — mirrors what
+        # /edit-preview passes to apply_recipe_to_loaded_image. Otherwise
+        # a cropped recipe's overlay halo drifts from the pixels the saved
+        # render actually weights.
+        native_dims = _recipe_source_dimensions(photo)
+        preview_detail_scale = None
+        if native_dims and native_dims[0] and native_dims[1]:
+            saved_native_long = float(rendered_recipe_long_edge(
+                native_dims[0], native_dims[1], normalized,
+            ))
+            if saved_native_long > 0:
+                saved_rendered_long = min(float(size), saved_native_long)
+                preview_detail_scale = detail_render_scale(
+                    (saved_rendered_long, saved_rendered_long),
+                    native_dims,
+                    normalized,
+                )
+        weight = local_weight_map(
+            snapshot, source_dims, display_recipe,
+            native_size=native_dims,
+            detail_scale=preview_detail_scale,
+        )
+        if weight is None:
+            return "Mask does not fit this photo", 404
+
+        height, width = weight.shape
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        # Accent teal at up to ~60% opacity where the subject weight is 1.
+        rgba[..., 0] = 112
+        rgba[..., 1] = 199
+        rgba[..., 2] = 186
+        rgba[..., 3] = np.clip(weight * 150.0 + 0.5, 0, 255).astype(np.uint8)
+        buf = io.BytesIO()
+        Image.fromarray(rgba, "RGBA").save(buf, format="PNG")
+        return Response(buf.getvalue(), mimetype="image/png")
+
     @app.route("/photos/<int:photo_id>/edit-preview")
     def serve_photo_edit_preview(photo_id):
         """Serve an uncropped preview for an in-progress edit recipe."""
@@ -18544,7 +25685,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             size = int(request.args.get("size", "1920"))
         except ValueError:
             return "Invalid size", 400
-        size = max(256, min(3840, size))
+        # 16384 (not 3840) so the editor's 100% zoom can request a
+        # native-resolution render and be a true 1:1 view.
+        size = max(256, min(16384, size))
 
         raw_recipe = request.args.get("recipe")
         if raw_recipe:
@@ -18592,10 +25735,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # working copy. Pass a sentinel non-empty recipe in that case so
             # the same RAW-primary gating applies and analysis reads the
             # highlight-preserved RAW decode rather than clipped legacy
-            # working-copy bytes.
+            # working-copy bytes. The same sentinel applies when the request
+            # asks for more pixels than the (size-capped) working copy holds —
+            # the editor's 100% zoom requests a native-resolution render, and
+            # short-circuiting to a 4096-capped working copy would silently
+            # serve half-resolution pixels as "1:1".
             source_recipe = recipe
-            if request.args.get("analysis") == "1" and not recipe:
-                source_recipe = {"version": SCHEMA_VERSION}
+            if not recipe:
+                from render_source import working_copy_satisfies_recipe_render
+                undersized_wc = photo["working_copy_path"] and (
+                    not working_copy_satisfies_recipe_render(
+                        photo, recipe, size, vireo_dir,
+                    )
+                )
+                if request.args.get("analysis") == "1" or undersized_wc:
+                    source_recipe = {"version": SCHEMA_VERSION}
             canonical, using_working_copy = _recipe_render_source(
                 photo, source_recipe, size, vireo_dir,
                 {folder_row["id"]: folder_row["path"]},
@@ -18712,10 +25866,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         native_dims,
                         recipe,
                     )
+            import local_masks
             img = apply_recipe_to_loaded_image(
                 img, recipe_json, max_size=size,
                 native_size=native_dims,
                 detail_scale=preview_detail_scale,
+                local_mask=local_masks.load_snapshot(
+                    vireo_dir, photo_id, recipe_json,
+                ),
             )
         except RecipeError as e:
             return str(e), 400
@@ -18740,6 +25898,109 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
         recipe = db.get_photo_edit_recipe(photo_id)
+        from image_loader import RAW_EXTENSIONS
+
+        primary_is_raw = (
+            os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
+        )
+
+        folder = db.conn.execute(
+            "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
+        ).fetchone()
+        if not folder:
+            return "Not found", 404
+
+        pair_source, pair_source_path = _requested_pair_source(
+            photo, folder["path"],
+        )
+        if pair_source and not pair_source_path:
+            return "Not found", 404
+        if pair_source_path:
+            # Explicit pair views bypass the canonical prepared-render cache,
+            # whose key has no RAW/JPEG source dimension.
+            # The companion is already the photographer's developed result.
+            # Its geometry can differ from the RAW, so never apply the RAW's
+            # recipe or local mask in that coordinate space.
+            if pair_source == "jpeg":
+                return send_file(pair_source_path)
+
+            import io
+
+            from image_loader import (
+                RAW_DECODE_PRESERVE_HIGHLIGHTS,
+                load_image,
+            )
+
+            load_kwargs = (
+                {"raw_decode": RAW_DECODE_PRESERVE_HIGHLIGHTS}
+                if pair_source == "raw" else {}
+            )
+            img = load_image(pair_source_path, max_size=None, **load_kwargs)
+            if img is None:
+                return "Could not load image", 500
+            if recipe:
+                import local_masks
+                from image_edits import apply_recipe_to_loaded_image
+
+                img = apply_recipe_to_loaded_image(
+                    img,
+                    recipe,
+                    native_size=_recipe_source_dimensions(photo),
+                    local_mask=local_masks.load_snapshot(
+                        vireo_dir, photo_id, recipe,
+                    ),
+                )
+            buf = io.BytesIO()
+            img.save(
+                buf,
+                format="JPEG",
+                quality=cfg.load().get("working_copy_quality", 92),
+            )
+            img.close()
+            return Response(buf.getvalue(), mimetype="image/jpeg")
+
+        def _file_render_state(path):
+            if not path:
+                return None
+            try:
+                stat = os.stat(path)
+            except OSError:
+                return None
+            return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+        offline_row = db.offline_original_get(photo_id)
+        cached_original = (
+            os.path.join(vireo_dir, offline_row["original_path"])
+            if offline_row and offline_row["original_path"]
+            else None
+        )
+        file_state = {
+            "primary": {
+                "source": _file_render_state(
+                    os.path.join(folder["path"], photo["filename"]),
+                ),
+                "cached": _file_render_state(cached_original),
+            },
+            "companion": None,
+        }
+        if photo["companion_path"]:
+            cached_companion = (
+                os.path.join(vireo_dir, offline_row["companion_path"])
+                if offline_row and offline_row["companion_path"]
+                else None
+            )
+            file_state["companion"] = {
+                "source": _file_render_state(
+                    os.path.join(folder["path"], photo["companion_path"]),
+                ),
+                "cached": _file_render_state(cached_companion),
+            }
+
+        prepared_render = _prepared_full_resolution_render(
+            vireo_dir, photo, recipe, file_state,
+        )
+        if prepared_render:
+            return send_file(prepared_render, mimetype="image/jpeg")
 
         # Decide whether to trust the working copy as the full-res asset
         # by reading its actual on-disk dimensions, NOT the current
@@ -18759,13 +26020,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if not os.path.exists(wc_path):
                 return None
             from PIL import Image as _PILImage
+
             try:
                 with _PILImage.open(wc_path) as _wc_img:
-                    wc_w, wc_h = _wc_img.size
+                    wc_w, wc_h = _image_size_after_exif_orientation(_wc_img)
             except Exception:
                 wc_w = wc_h = 0
-            orig_w = photo["width"] or 0
-            orig_h = photo["height"] or 0
+            # Compare in display-orientation space: ``extract_working_copy``
+            # writes the EXIF-transposed JPEG (e.g. 4000x6000 for a portrait
+            # RAW), while ``photo["width"]/height`` are the sensor axes
+            # (6000x4000). Comparing raw sensor axes rejects a valid
+            # full-resolution WC for portrait RAWs and either 500s or forces
+            # a redundant re-decode. ``_recipe_source_dimensions`` swaps the
+            # sensor axes when EXIF Orientation indicates it, matching what
+            # ``load_image`` returns.
+            orig_w, orig_h = _recipe_source_dimensions(photo)
             # Trust the wc when it meets/exceeds the believed original dims,
             # or when those dims are unknown (no basis to declare the wc stale
             # and a speculative RAW re-extract would just thrash the disk).
@@ -18777,17 +26046,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # this often means rawpy.postprocess() failed and we fell back to
             # the embedded JPEG, which can be a few pixels shy of the full
             # sensor area. Re-extracting would yield the same fallback image,
-            # just slower — so trust the wc when it is within 1% of the
-            # believed dims. This tolerance is RAW-only: for JPEG/PNG/etc.,
-            # the wc being smaller means the cap downsized it, and re-extracting
-            # WILL produce more pixels.
+            # just slower — so trust the wc when BOTH axes are within 1% of
+            # the believed dims. A long-edge-only check would silently accept
+            # an embedded JPEG whose long edge is full but whose short edge is
+            # substantially truncated (e.g. 6000x3376 for a 6000x4000 source),
+            # then apply the edit recipe to a cropped image. This tolerance is
+            # RAW-only: for JPEG/PNG/etc., the wc being smaller means the cap
+            # downsized it, and re-extracting WILL produce more pixels.
             from image_loader import RAW_EXTENSIONS
             ext = os.path.splitext(photo["filename"])[1].lower()
-            if ext in RAW_EXTENSIONS and wc_w and wc_h:
-                wc_long = max(wc_w, wc_h)
-                orig_long = max(orig_w, orig_h)
-                if orig_long and wc_long >= orig_long * 0.99:
-                    return wc_path
+            if (
+                ext in RAW_EXTENSIONS
+                and wc_w and wc_h
+                and orig_w and orig_h
+                and wc_w >= orig_w * 0.99
+                and wc_h >= orig_h * 0.99
+            ):
+                return wc_path
             return None
 
         trusted_wc_path = _trusted_full_res_working_copy_path()
@@ -18817,7 +26092,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     c_w, c_h = _cimg.size
             except Exception:
                 return None
-            if c_w >= orig_w and c_h >= orig_h:
+            # Camera JPEGs commonly omit a narrow sensor border. Match the
+            # tolerance used by camera-rendered RAW loading so a near-full
+            # sidecar remains the preferred tone-consistent display source.
+            if c_w >= orig_w * 0.99 and c_h >= orig_h * 0.99:
                 return companion_abs
             return None
 
@@ -18828,19 +26106,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 load_image,
             )
 
-            folder = db.conn.execute(
-                "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-            ).fetchone()
-            if not folder:
-                return "Not found", 404
             # For edited RAW primaries, a "trusted" working copy can still
             # predate the highlight-preserving RAW decode (the migration
             # purges previews and thumbnails but not working copies). Force
             # the RAW path so the recipe runs over preserve-highlights bytes,
             # not the older clipped-JPEG working copy.
-            primary_is_raw = (
-                os.path.splitext(photo["filename"])[1].lower() in RAW_EXTENSIONS
-            )
             image_path = None if primary_is_raw else trusted_wc_path
             using_offline_cache = False
             if image_path is None:
@@ -18850,22 +26120,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     photo,
                     vireo_dir,
                     {photo["folder_id"]: folder["path"]},
+                    prefer_cached=True,
                 )
                 companion_source = _full_res_companion_path(
                     folder["path"], using_offline_cache,
                 )
                 image_ext = os.path.splitext(image_path)[1].lower()
-                if (
+                source_failure_current = (
                     primary_is_raw
-                    and trusted_wc_path
-                    and not os.path.exists(image_path)
-                ):
-                    image_path = trusted_wc_path
-                elif companion_source and image_ext not in RAW_EXTENSIONS:
-                    image_path = companion_source
-                elif (
-                    primary_is_raw
-                    and companion_source
                     and _has_current_working_copy_failure(
                         photo,
                         vireo_dir,
@@ -18873,6 +26135,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         live_source_path=image_path,
                         folder_path=folder["path"],
                     )
+                )
+                if (
+                    primary_is_raw
+                    and trusted_wc_path
+                    and not companion_source
+                    and (
+                        not os.path.exists(image_path)
+                        or source_failure_current
+                    )
+                ):
+                    image_path = trusted_wc_path
+                elif companion_source and image_ext not in RAW_EXTENSIONS:
+                    image_path = companion_source
+                elif (
+                    primary_is_raw
+                    and companion_source
+                    and source_failure_current
                 ):
                     # Mirror _recipe_render_source: when scanner has marked
                     # this RAW as failed for the current mtime, route the
@@ -18917,7 +26196,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # camera preview rather than full-resolution pixels. For
                 # 1:1 edited views that's the wrong file to cache — try
                 # the full-size companion before saving an undersized
-                # originals/<id>.jpg.
+                # prepared full-resolution render cache.
                 expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
                 if _image_is_smaller_than_expected(img, expected_w, expected_h):
                     companion_fallback = _full_res_companion_path(
@@ -18975,13 +26254,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if img is None:
                 _record_working_copy_failure(db, photo, image_path)
                 return "Could not load image", 500
+            import local_masks
             from image_edits import apply_recipe_to_loaded_image
             img = apply_recipe_to_loaded_image(
                 img, recipe,
                 native_size=_recipe_source_dimensions(photo),
+                local_mask=local_masks.load_snapshot(
+                    vireo_dir, photo_id, recipe,
+                ),
             )
             originals_dir = os.path.join(vireo_dir, "originals")
-            cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
+            cache_path = _full_resolution_render_path(
+                vireo_dir, photo, recipe, file_state,
+            )
             os.makedirs(originals_dir, exist_ok=True)
             quality = cfg.load().get("working_copy_quality", 92)
             fd, tmp_path = tempfile.mkstemp(
@@ -18998,31 +26283,66 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             img.close()
             return send_file(cache_path, mimetype="image/jpeg")
 
-        if trusted_wc_path:
+        # A RAW working copy is an edit-quality, highlight-preserving source.
+        # It deliberately looks flatter/darker than the camera-rendered JPEG
+        # used by thumbnails and previews, so it must not be used as the
+        # unedited lightbox rendition while the source is available.
+        if trusted_wc_path and not primary_is_raw:
             return send_file(trusted_wc_path, mimetype="image/jpeg")
 
         # Resolve original file path
-        folder = db.conn.execute(
-            "SELECT path FROM folders WHERE id=?", (photo["folder_id"],)
-        ).fetchone()
-        if not folder:
-            return "Not found", 404
         from offline_cache import resolve_original_path
         image_path, using_offline_cache = resolve_original_path(
             db,
             photo,
             vireo_dir,
             {photo["folder_id"]: folder["path"]},
+            prefer_cached=True,
         )
 
-        from image_loader import (
-            RAW_DECODE_PRESERVE_HIGHLIGHTS,
-            RAW_EXTENSIONS,
-        )
         resolved_ext = os.path.splitext(image_path)[1].lower()
         companion_for_extraction = _full_res_companion_path(
             folder["path"], using_offline_cache
         )
+
+        # Keep unedited RAW display bytes separate from the edit-quality
+        # working copy. The suffix is intentionally distinct from the legacy
+        # originals/<id>.jpg render cache so an upgrade cannot reuse a dark
+        # highlight-preserving render produced by an older version.
+        display_cache_path = None
+        if primary_is_raw:
+            display_cache_path = os.path.join(
+                vireo_dir, "originals", f"{photo_id}.display.jpg",
+            )
+            if os.path.exists(display_cache_path):
+                try:
+                    source_mtimes = [
+                        os.path.getmtime(path)
+                        for path in (image_path, companion_for_extraction)
+                        if path and os.path.exists(path)
+                    ]
+                    source_is_older = (
+                        not source_mtimes
+                        or os.path.getmtime(display_cache_path)
+                        >= max(source_mtimes)
+                    )
+                except OSError:
+                    source_is_older = False
+                if source_is_older:
+                    return send_file(display_cache_path, mimetype="image/jpeg")
+
+        if (
+            primary_is_raw
+            and trusted_wc_path
+            and not os.path.isfile(image_path)
+            and not companion_for_extraction
+        ):
+            # Preserve offline behavior without repeatedly retrying a missing
+            # RAW. A camera-rendered display cache or companion still wins
+            # above when available; otherwise the edit-quality working copy
+            # is the best usable full-resolution fallback.
+            return send_file(trusted_wc_path, mimetype="image/jpeg")
+
         has_current_raw_failure = (
             (not using_offline_cache or resolved_ext in RAW_EXTENSIONS)
             and _has_current_working_copy_failure(
@@ -19044,6 +26364,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 image_path = companion_for_extraction
                 resolved_ext = os.path.splitext(image_path)[1].lower()
             else:
+                if primary_is_raw and trusted_wc_path:
+                    return send_file(trusted_wc_path, mimetype="image/jpeg")
                 log.info(
                     "Skipping original-image extraction for photo %s; RAW working-copy "
                     "extraction already failed for current source mtime",
@@ -19058,23 +26380,61 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Extract full-res working copy (on-demand upgrade)
         from image_loader import (
+            RAW_DECODE_CAMERA_RENDERED,
             RAW_DECODE_PRESERVE_HIGHLIGHTS,
             RAW_EXTENSIONS,
             extract_working_copy,
             load_image,
         )
-        wc_rel = f"working/{photo_id}.jpg"
-        wc_abs = os.path.join(vireo_dir, wc_rel)
+        if primary_is_raw:
+            wc_rel = None
+            wc_abs = display_cache_path
+            os.makedirs(os.path.dirname(wc_abs), exist_ok=True)
+        else:
+            wc_rel = f"working/{photo_id}.jpg"
+            wc_abs = os.path.join(vireo_dir, wc_rel)
         quality = cfg.load().get("working_copy_quality", 92)
 
-        # Prefer companion JPEG only for non-RAW sources. RAW primaries should
-        # be decoded through extract_working_copy's highlight-preserving RAW
-        # path rather than replaced with a camera-rendered JPEG.
-        source_for_extraction = image_path
-        if resolved_ext not in RAW_EXTENSIONS and companion_for_extraction:
-            source_for_extraction = companion_for_extraction
+        # Unedited RAW primaries use their camera-rendered full-size preview
+        # when available. Edited renders took the recipe branch above and keep
+        # using the highlight-preserving RAW path.
+        source_for_extraction = companion_for_extraction or image_path
 
-        if extract_working_copy(source_for_extraction, wc_abs, max_size=0, quality=quality):
+        extraction_decode = (
+            RAW_DECODE_CAMERA_RENDERED
+            if primary_is_raw
+            else RAW_DECODE_PRESERVE_HIGHLIGHTS
+        )
+
+        def _extract_original_copy(source_path):
+            output_path = wc_abs
+            tmp_path = None
+            if primary_is_raw:
+                fd, tmp_path = tempfile.mkstemp(
+                    prefix=f".{photo_id}.display.",
+                    suffix=".jpg.tmp",
+                    dir=os.path.dirname(wc_abs),
+                )
+                os.close(fd)
+                output_path = tmp_path
+            try:
+                extracted = extract_working_copy(
+                    source_path,
+                    output_path,
+                    max_size=0,
+                    quality=quality,
+                    raw_decode=extraction_decode,
+                )
+                if extracted and tmp_path:
+                    os.replace(tmp_path, wc_abs)
+                    tmp_path = None
+                return extracted
+            finally:
+                if tmp_path:
+                    with contextlib.suppress(OSError):
+                        os.unlink(tmp_path)
+
+        if _extract_original_copy(source_for_extraction):
             # Update DB so future requests are fast; also backfill
             # dimensions if missing so the full-res shortcut works next time
             from PIL import Image as _PILImage
@@ -19109,10 +26469,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "from companion JPEG",
                         photo_id, uw, uh, expected_w, expected_h,
                     )
-                    if extract_working_copy(
-                        companion_for_extraction, wc_abs,
-                        max_size=0, quality=quality,
-                    ):
+                    if _extract_original_copy(companion_for_extraction):
                         with _PILImage.open(wc_abs) as upgraded:
                             uw, uh = upgraded.size
                     else:
@@ -19120,17 +26477,40 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "Companion re-extraction failed for photo %s; "
                             "keeping undersized RAW working copy", photo_id,
                         )
-            updates = ["working_copy_path=?"]
-            params = [wc_rel]
-            if not photo["width"] or not photo["height"]:
-                updates.extend(["width=?", "height=?"])
-                params.extend([uw, uh])
-            params.append(photo_id)
-            db.conn.execute(
-                f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
-                params,
-            )
-            db.conn.commit()
+            if primary_is_raw and trusted_wc_path:
+                expected_w, expected_h = _scaled_recipe_source_dimensions(photo)
+                display_is_near_full = (
+                    expected_w <= 0
+                    or expected_h <= 0
+                    or (
+                        uw >= expected_w * 0.99
+                        and uh >= expected_h * 0.99
+                    )
+                )
+                if not display_is_near_full:
+                    # RAW extraction can report success after falling back to
+                    # a preview-sized embedded JPEG. Do not persist that as
+                    # the 1:1 display cache when a trusted full-res copy is
+                    # already available, and mark the RAW retry so later
+                    # requests take the fast fallback path.
+                    with contextlib.suppress(OSError):
+                        os.unlink(wc_abs)
+                    _record_working_copy_failure(
+                        db, photo, source_for_extraction,
+                    )
+                    return send_file(trusted_wc_path, mimetype="image/jpeg")
+            if not primary_is_raw:
+                updates = ["working_copy_path=?"]
+                params = [wc_rel]
+                if not photo["width"] or not photo["height"]:
+                    updates.extend(["width=?", "height=?"])
+                    params.extend([uw, uh])
+                params.append(photo_id)
+                db.conn.execute(
+                    f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
+                    params,
+                )
+                db.conn.commit()
             return send_file(wc_abs, mimetype="image/jpeg")
 
         # extract_working_copy failed on a RAW source: try the full-res
@@ -19142,24 +26522,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             resolved_ext in RAW_EXTENSIONS
             and companion_for_extraction
             and companion_for_extraction != source_for_extraction
-            and extract_working_copy(
-                companion_for_extraction, wc_abs, max_size=0, quality=quality,
-            )
+            and _extract_original_copy(companion_for_extraction)
         ):
             from PIL import Image as _PILImage
             with _PILImage.open(wc_abs) as upgraded:
                 uw, uh = upgraded.size
-            updates = ["working_copy_path=?"]
-            params = [wc_rel]
-            if not photo["width"] or not photo["height"]:
-                updates.extend(["width=?", "height=?"])
-                params.extend([uw, uh])
-            params.append(photo_id)
-            db.conn.execute(
-                f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
-                params,
-            )
-            db.conn.commit()
+            if not primary_is_raw:
+                updates = ["working_copy_path=?"]
+                params = [wc_rel]
+                if not photo["width"] or not photo["height"]:
+                    updates.extend(["width=?", "height=?"])
+                    params.extend([uw, uh])
+                params.append(photo_id)
+                db.conn.execute(
+                    f"UPDATE photos SET {', '.join(updates)} WHERE id=?",
+                    params,
+                )
+                db.conn.commit()
             log.info(
                 "RAW extraction failed for photo %s original; served "
                 "companion JPEG instead", photo_id,
@@ -19168,7 +26547,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Fallback: serve via load_image
         raw_decode = (
-            RAW_DECODE_PRESERVE_HIGHLIGHTS
+            RAW_DECODE_CAMERA_RENDERED
             if resolved_ext in RAW_EXTENSIONS
             else None
         )
@@ -19220,30 +26599,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 image_path = companion_for_extraction
         if img is None:
             _record_working_copy_failure(db, photo, image_path)
+            if primary_is_raw and trusted_wc_path:
+                # Source/offline bytes are unavailable. A working copy is less
+                # faithful to the camera rendition, but remains the best usable
+                # full-resolution fallback and preserves offline behavior.
+                return send_file(trusted_wc_path, mimetype="image/jpeg")
             return "Could not load image", 500
-        originals_dir = os.path.join(vireo_dir, "originals")
-        cache_path = os.path.join(originals_dir, f"{photo_id}.jpg")
-        os.makedirs(originals_dir, exist_ok=True)
-        img.save(cache_path, format="JPEG", quality=quality)
+        if primary_is_raw:
+            cache_path = display_cache_path
+            cache_dir = os.path.dirname(cache_path)
+            tmp_prefix = f".{photo_id}.display."
+        else:
+            cache_path = _full_resolution_render_path(
+                vireo_dir, photo, recipe, file_state,
+            )
+            cache_dir = os.path.dirname(cache_path)
+            tmp_prefix = f".{photo_id}."
+        os.makedirs(cache_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=tmp_prefix,
+            suffix=".jpg.tmp",
+            dir=cache_dir,
+        )
+        os.close(fd)
+        try:
+            img.save(tmp_path, format="JPEG", quality=quality)
+            os.replace(tmp_path, cache_path)
+        except Exception:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
+        finally:
+            img.close()
         return send_file(cache_path, mimetype="image/jpeg")
 
-    # -- Logs page --
-
-    @app.route("/logs")
-    def logs_page():
-        return render_template("logs.html")
-
-    @app.route("/map")
-    def map_page():
-        return render_template("map.html", active_page="map")
-
-    @app.route("/dashboard")
-    def dashboard_page():
-        return render_template("stats.html")
-
-    @app.route("/stats")
-    def stats_redirect():
-        return redirect("/dashboard")
+    app.register_blueprint(create_photo_labels_blueprint(_get_db, json_error))
+    app.register_blueprint(create_photo_review_blueprint(_get_db, json_error))
 
     # --- /api/v1/* aliases over the stable subset of /api/* ---
     # These are the endpoints advertised to external callers in docs/headless-api.md.
@@ -19480,7 +26871,13 @@ def main():
         token=api_token, mode=mode,
     )
 
-    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+    # Waitress uses a fixed thread pool (default 4). Each open SSE stream
+    # (bottom-panel logs, job progress, import duplicate check) pins one
+    # thread for its whole lifetime, so the pool must be sized well above
+    # the plausible number of concurrent streams or page loads queue
+    # behind them and the app appears frozen.
+    from waitress import serve as waitress_serve
+    waitress_serve(app, host="127.0.0.1", port=port, threads=16)
 
 
 if __name__ == "__main__":
