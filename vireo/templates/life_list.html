@@ -155,6 +155,18 @@
       <option value="most-photos">Most photos</option>
     </select>
   </div>
+  <div class="control-group">
+    <label for="taxonomicGroupSelect">Taxonomic group</label>
+    <select id="taxonomicGroupSelect">
+      <option value="all">All groups</option>
+    </select>
+  </div>
+  <div class="control-group">
+    <label for="identificationRankSelect">Identification level</label>
+    <select id="identificationRankSelect">
+      <option value="all">All levels</option>
+    </select>
+  </div>
   <div class="control-group" title="When enabled, number the visible cards in their current displayed order. Disable it to keep each species' original chronological lifer number.">
     <label for="renumberView">Life List numbering</label>
     <label class="numbering-toggle" for="renumberView">
@@ -304,7 +316,68 @@ async function loadLifeList() {
     meta.textContent = 'Failed to load life list.';
     return;
   }
+  populateLifeListTaxonomyFilters();
   render();
+}
+
+function replaceSelectOptions(select, options) {
+  var previous = select.value;
+  select.innerHTML = options.map(function(option) {
+    return '<option value="' + escapeAttr(option.value) + '">'
+      + escapeAttr(option.label) + '</option>';
+  }).join('');
+  if (options.some(function(option) { return option.value === previous; })) {
+    select.value = previous;
+  }
+}
+
+function populateLifeListTaxonomyFilters() {
+  var entries = (currentData && currentData.species) || [];
+  var classes = {};
+  var hasUnknownClass = false;
+  var hasUnknownRank = false;
+
+  entries.forEach(function(entry) {
+    var taxonomicClass = entry.taxonomic_class;
+    if (taxonomicClass && taxonomicClass.id != null) {
+      classes[String(taxonomicClass.id)] =
+        taxonomicClass.common_name || taxonomicClass.name;
+    } else {
+      hasUnknownClass = true;
+    }
+    if (!entry.taxon_rank) {
+      hasUnknownRank = true;
+    }
+  });
+
+  var groupOptions = [{ value: 'all', label: 'All groups' }];
+  Object.keys(classes).sort(function(a, b) {
+    return classes[a].localeCompare(classes[b]);
+  }).forEach(function(id) {
+    groupOptions.push({ value: id, label: classes[id] });
+  });
+  if (hasUnknownClass) {
+    groupOptions.push({ value: 'unknown', label: 'Unmatched / unknown' });
+  }
+  replaceSelectOptions(document.getElementById('taxonomicGroupSelect'), groupOptions);
+
+  var rankLabels = {
+    species: 'Species only',
+    genus: 'Genus',
+    family: 'Family',
+    order: 'Order',
+    class: 'Class',
+    phylum: 'Phylum',
+    kingdom: 'Kingdom'
+  };
+  var rankOptions = [{ value: 'all', label: 'All levels' }];
+  Object.keys(rankLabels).forEach(function(rank) {
+    rankOptions.push({ value: rank, label: rankLabels[rank] });
+  });
+  if (hasUnknownRank) {
+    rankOptions.push({ value: 'unknown', label: 'Unmatched / unknown' });
+  }
+  replaceSelectOptions(document.getElementById('identificationRankSelect'), rankOptions);
 }
 
 function sortedSpecies() {
@@ -435,6 +508,8 @@ function render() {
   controls.style.display = '';
 
   var search = document.getElementById('speciesSearch').value.trim();
+  var taxonomicGroup = document.getElementById('taxonomicGroupSelect').value;
+  var identificationRank = document.getElementById('identificationRankSelect').value;
   var searchOptions = VireoTextSearch.readOptions('lifeSpecies');
   var list = sortedSpecies();
   if (search) {
@@ -446,16 +521,32 @@ function render() {
       );
     });
   }
+  if (taxonomicGroup !== 'all') {
+    list = list.filter(function(entry) {
+      if (taxonomicGroup === 'unknown') return !entry.taxonomic_class;
+      return entry.taxonomic_class
+        && String(entry.taxonomic_class.id) === taxonomicGroup;
+    });
+  }
+  if (identificationRank !== 'all') {
+    list = list.filter(function(entry) {
+      if (identificationRank === 'unknown') return !entry.taxon_rank;
+      return entry.taxon_rank === identificationRank;
+    });
+  }
 
+  var filtersActive = Boolean(search)
+    || taxonomicGroup !== 'all'
+    || identificationRank !== 'all';
   meta.textContent = currentData.meta.species_count + ' species on your life list · '
     + currentData.meta.photo_count + ' tagged photos'
-    + (search ? ' · ' + list.length + ' matching' : '');
+    + (filtersActive ? ' · ' + list.length + ' shown' : '');
 
   var renumberView = document.getElementById('renumberView').checked;
   content.innerHTML = list.map(function(entry, index) {
     return renderCard(entry, renumberView ? index + 1 : entry.number);
   }).join('')
-    || '<div class="lifelist-empty" style="grid-column:1/-1;"><p>No species match this search.</p></div>';
+    || '<div class="lifelist-empty" style="grid-column:1/-1;"><p>No life-list entries match these filters.</p></div>';
 
   content.querySelectorAll('[data-load-more-species]').forEach(function(button) {
     button.addEventListener('click', function(event) {
@@ -515,6 +606,8 @@ function debounceRender() {
 }
 
 document.getElementById('speciesSearch').addEventListener('input', debounceRender);
+document.getElementById('taxonomicGroupSelect').addEventListener('change', render);
+document.getElementById('identificationRankSelect').addEventListener('change', render);
 document.getElementById('sortSelect').addEventListener('change', function() {
   saveLifeListViewPreference(LIFE_LIST_SORT_STORAGE_KEY, this.value);
   if (currentData) render();

@@ -11949,6 +11949,8 @@ class Database:
                       p.subject_y_median, p.noise_estimate,
                       p.eye_tenengrad,
                       k.name AS species,
+                      t.id AS taxon_id,
+                      t.rank AS taxon_rank,
                       t.name AS scientific_name,
                       t.common_name
                FROM photo_keywords pk
@@ -12075,6 +12077,44 @@ class Database:
                     seen[r["id"]] = dict(r)
         return sorted(seen.values(),
                       key=lambda r: r["common_name"] or r["name"])
+
+    def get_class_ancestors_for_taxa(self, taxon_ids):
+        """Map each taxon id to its class-rank ancestor.
+
+        Life List entries can be linked at any major rank, so preserve the
+        starting taxon id while walking toward the root.  The depth cap mirrors
+        :meth:`get_taxon_subtree` and also prevents malformed cyclic taxonomy
+        data from making the recursive query run forever.
+        """
+        ids = [taxon_id for taxon_id in taxon_ids if taxon_id is not None]
+        if not ids:
+            return {}
+        classes = {}
+        for chunk in _chunks(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""WITH RECURSIVE up(
+                           origin_id, id, parent_id, rank, name, common_name, depth
+                       ) AS (
+                           SELECT id, id, parent_id, rank, name, common_name, 0
+                           FROM taxa WHERE id IN ({placeholders})
+                           UNION ALL
+                           SELECT u.origin_id, t.id, t.parent_id, t.rank,
+                                  t.name, t.common_name, u.depth + 1
+                           FROM up u JOIN taxa t ON t.id = u.parent_id
+                           WHERE u.depth < 12
+                       )
+                       SELECT origin_id, id, name, common_name
+                       FROM up WHERE rank = 'class'""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                classes.setdefault(row["origin_id"], {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "common_name": row["common_name"],
+                })
+        return classes
 
     def get_life_list_best_photo_by_taxon(self, taxon_ids):
         """Map taxon_id -> {id, filename} of a representative (highest quality_score,
