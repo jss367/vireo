@@ -9857,6 +9857,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     ):
         rows = db.get_life_list_candidates(species=species_filter)
         locations_by_species = db.get_life_list_locations(species=species_filter)
+        class_by_taxon = db.get_class_ancestors_for_taxa({
+            row["taxon_id"] for row in rows if row["taxon_id"] is not None
+        })
         photo_offset = max(0, int(photo_offset))
         if photos_per_species is None:
             photo_limit = None
@@ -9871,6 +9874,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             entry = buckets.setdefault(r["species"], {
                 "scientific_name": None,
                 "common_name": None,
+                "taxon_id": None,
+                "taxon_rank": None,
+                "taxonomic_class": None,
                 "photos": [],
                 "seen_ids": set(),
             })
@@ -9880,6 +9886,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 entry["scientific_name"] = r.get("scientific_name")
             if entry["common_name"] is None:
                 entry["common_name"] = r.get("common_name")
+            if entry["taxon_id"] is None and r.get("taxon_id") is not None:
+                entry["taxon_id"] = r["taxon_id"]
+                entry["taxon_rank"] = r.get("taxon_rank")
+                entry["taxonomic_class"] = class_by_taxon.get(r["taxon_id"])
             # A photo tagged with two same-name species keywords would
             # otherwise be appended once per row, inflating photo_count
             # and duplicating cards in the lightbox.
@@ -9975,6 +9985,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "species": species,
                 "scientific_name": entry["scientific_name"],
                 "common_name": entry["common_name"],
+                "taxon_id": entry["taxon_id"],
+                "taxon_rank": entry["taxon_rank"],
+                "taxonomic_class": entry["taxonomic_class"],
                 "photo_count": len(photos),
                 "first_seen": min(timestamps) if timestamps else None,
                 "last_seen": max(timestamps) if timestamps else None,

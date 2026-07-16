@@ -125,6 +125,8 @@ def test_page_renders(life_app):
     assert b"Export Life List" in resp.data
     assert b"Life List numbering" in resp.data
     assert b"Renumber for each view" in resp.data
+    assert b"Taxonomic group" in resp.data
+    assert b"Identification level" in resp.data
 
 
 def test_groups_by_species_and_counts(life_app):
@@ -638,6 +640,34 @@ def test_taxon_names_attached(life_app):
     assert sparrow["common_name"] == "House Sparrow"
     cardinal = _entry(data, "Northern Cardinal")
     assert cardinal["scientific_name"] is None
+
+
+def test_taxonomic_rank_and_class_attached(life_app):
+    app, db, _ = life_app
+    aves = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
+        ("Aves", "Birds", "class"),
+    ).lastrowid
+    db.conn.execute(
+        "UPDATE taxa SET parent_id = ? WHERE name = ?",
+        (aves, "Passer domesticus"),
+    )
+    db.conn.commit()
+
+    data = _get_life_list(app)
+    sparrow = _entry(data, "House Sparrow")
+    assert sparrow["taxon_rank"] == "species"
+    assert sparrow["taxonomic_class"] == {
+        "id": aves,
+        "name": "Aves",
+        "common_name": "Birds",
+    }
+
+    # A legacy species flag without a linked reference taxon remains visible
+    # and is explicitly filterable as unmatched/unknown in the List UI.
+    cardinal = _entry(data, "Northern Cardinal")
+    assert cardinal["taxon_rank"] is None
+    assert cardinal["taxonomic_class"] is None
 
 
 def test_locations_from_location_keywords(life_app):
