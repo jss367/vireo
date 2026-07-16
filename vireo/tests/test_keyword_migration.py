@@ -1521,3 +1521,180 @@ def test_curation_case_alignment_v2_rewrites_history_snapshots(tmp_path):
         assert db.get_meta("curation_species_case_aligned_v2") == "1"
     finally:
         db.close()
+
+
+def test_curation_case_alignment_v2_rekeys_prediction_only_rows(tmp_path, monkeypatch):
+    """A ``species_highlights`` row starred from an unconfirmed prediction
+    before the corresponding keyword row exists must still land on the
+    canonical spelling the bucket-collection path emits — otherwise the
+    star silently disappears from the UI (bucket keyed
+    ``Common waxbill`` vs stored row ``Common Waxbill``) and a DELETE
+    keyed on the bucket label deletes zero rows.
+
+    The v2 sweep therefore falls back to the detected case convention
+    when no keyword row exists for the row's match_key, mirroring
+    ``resolve_species_display_name`` (which is what the bucket path uses
+    to canonicalize prediction labels).
+    """
+    # Isolate config so a real ~/.vireo/config.json `keyword_case`
+    # override can't preempt the auto-detected "lower" convention below.
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    db.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ws_id = conn.execute("SELECT id FROM workspaces LIMIT 1").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/p', 'p', 'ok')"
+    )
+    fid = conn.execute("SELECT id FROM folders WHERE path = '/p'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO photos (folder_id, filename) VALUES (?, 'a.jpg')", (fid,)
+    )
+    pid = conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    # Three lower-convention species keywords establish the convention
+    # detector so the fallback picks "lower" for unseen predictions.
+    # None of them match "Common Waxbill" — the prediction has no keyword
+    # row at all, exercising the no-keyword branch.
+    for name in ("Black phoebe", "Saffron finch", "Anna's hummingbird"):
+        conn.execute(
+            "INSERT INTO keywords (name, type, is_species) "
+            "VALUES (?, 'taxonomy', 1)",
+            (name,),
+        )
+    # Pre-fix state: highlight starred from an unconfirmed prediction
+    # bucket labeled `Common Waxbill`; no `Common waxbill` keyword row
+    # yet because the photo was never accepted.
+    conn.execute(
+        "INSERT INTO species_highlights "
+        "(workspace_id, species, photo_id, rank) VALUES (?, ?, ?, 1)",
+        (ws_id, "Common Waxbill", pid),
+    )
+    # Same state on the two neighbour curation tables.
+    conn.execute(
+        "INSERT INTO photo_preferences "
+        "(workspace_id, purpose, species, photo_id) VALUES (?, 'picked', ?, ?)",
+        (ws_id, "Common Waxbill", pid),
+    )
+    conn.execute(
+        "INSERT INTO species_representatives "
+        "(species, photo_id, selected_order) VALUES (?, ?, 1)",
+        ("Common Waxbill", pid),
+    )
+    # Seed a matching relabel undo snapshot too — the same no-keyword
+    # branch has to run in `_align_curation_history_species` or a later
+    # undo would recreate the orphaned rows.
+    conn.execute(
+        "INSERT INTO edit_history (action_type, description) "
+        "VALUES ('relabel', 't')"
+    )
+    edit_id = conn.execute(
+        "SELECT id FROM edit_history LIMIT 1"
+    ).fetchone()["id"]
+    history_payload = {
+        "curation": {
+            "hl_prev": [{"species": "Common Waxbill", "rank": 1, "photo_id": pid}],
+            "pref_prev": [{"species": "Common Waxbill", "photo_id": pid}],
+            "rep_prev": [{"species": "Common Waxbill", "photo_id": pid}],
+        }
+    }
+    conn.execute(
+        "INSERT INTO edit_history_items "
+        "(edit_id, photo_id, old_value, new_value) VALUES (?, ?, ?, '')",
+        (edit_id, pid, json.dumps(history_payload)),
+    )
+    conn.execute(
+        "DELETE FROM db_meta WHERE key = 'curation_species_case_aligned_v2'"
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    try:
+        highlight_species = [
+            r["species"] for r in db.conn.execute(
+                "SELECT species FROM species_highlights"
+            ).fetchall()
+        ]
+        preference_species = [
+            r["species"] for r in db.conn.execute(
+                "SELECT species FROM photo_preferences"
+            ).fetchall()
+        ]
+        representative_species = [
+            r["species"] for r in db.conn.execute(
+                "SELECT species FROM species_representatives"
+            ).fetchall()
+        ]
+        assert highlight_species == ["Common waxbill"]
+        assert preference_species == ["Common waxbill"]
+        assert representative_species == ["Common waxbill"]
+        # The bucket path uses `resolve_species_display_name` to
+        # canonicalize the raw prediction; storage and bucket agree now.
+        assert db.resolve_species_display_name("Common Waxbill") == "Common waxbill"
+        row = db.conn.execute(
+            "SELECT old_value FROM edit_history_items LIMIT 1"
+        ).fetchone()
+        rewritten = json.loads(row["old_value"])["curation"]
+        assert rewritten["hl_prev"][0]["species"] == "Common waxbill"
+        assert rewritten["pref_prev"][0]["species"] == "Common waxbill"
+        assert rewritten["rep_prev"][0]["species"] == "Common waxbill"
+        assert db.get_meta("curation_species_case_aligned_v2") == "1"
+    finally:
+        db.close()
+
+
+def test_curation_case_alignment_leaves_ambiguous_homonyms_alone(tmp_path):
+    """When the match_key has multiple distinct keyword spellings —
+    intentionally distinct homonyms — the sweep must not silently pick
+    one and rewrite curation across the other. The "no keyword row →
+    case-convert" fallback added for prediction-only rows must not
+    regress this safety.
+    """
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    db.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ws_id = conn.execute("SELECT id FROM workspaces LIMIT 1").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/p', 'p', 'ok')"
+    )
+    fid = conn.execute("SELECT id FROM folders WHERE path = '/p'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO photos (folder_id, filename) VALUES (?, 'a.jpg')", (fid,)
+    )
+    pid = conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    # Two distinct root species keyword spellings for the same match_key.
+    conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('Robin', 'general', 1)"
+    )
+    conn.execute(
+        "INSERT INTO keywords (name, type, is_species) VALUES ('robin', 'taxonomy', 1)"
+    )
+    conn.execute(
+        "INSERT INTO species_highlights "
+        "(workspace_id, species, photo_id, rank) VALUES (?, 'ROBIN', ?, 1)",
+        (ws_id, pid),
+    )
+    conn.execute(
+        "DELETE FROM db_meta WHERE key = 'curation_species_case_aligned_v2'"
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    try:
+        species = [
+            r["species"] for r in db.conn.execute(
+                "SELECT species FROM species_highlights"
+            ).fetchall()
+        ]
+        assert species == ["ROBIN"]
+        assert db.get_meta("curation_species_case_aligned_v2") == "1"
+    finally:
+        db.close()

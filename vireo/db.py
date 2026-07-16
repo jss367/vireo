@@ -10352,8 +10352,8 @@ class Database:
                 raise
 
     def _align_curation_species_case(self):
-        """Re-key curation rows whose species differs from the keyword row
-        only by case.
+        """Re-key curation rows whose species differs from the canonical
+        spelling only by case.
 
         ``normalize_keyword_display()`` preserves case, so the punctuation
         sweep leaves a curation row keyed ``Saffron Finch`` untouched while
@@ -10361,17 +10361,30 @@ class Database:
         highlight/life-list queries compare those strings EXACT against
         ``keywords.name``, so the curated selection silently drops out.
 
-        Restricted to match_keys with a single surviving root species
-        keyword: intentionally-distinct same-key homonyms (e.g. a legacy
-        ``type='general', is_species=1`` ``Robin`` alongside a taxonomy
-        ``robin``) must not have every curation row for the other spelling
-        rewritten onto the picked one — the joined queries would then match
-        a species keyword the photo doesn't carry. Ambiguous case-variant
-        homonyms are left as-is. Returns the number of rows moved; caller
-        commits.
+        Two sources of the canonical spelling, mirroring
+        ``resolve_species_display_name`` (the function
+        ``_collect_highlight_buckets`` uses to canonicalize prediction
+        labels):
+
+        1. A single surviving root species keyword for the match_key.
+           Intentionally-distinct same-key homonyms (e.g. a legacy
+           ``type='general', is_species=1`` ``Robin`` alongside a taxonomy
+           ``robin``) must not have every curation row for the other
+           spelling rewritten onto the picked one — the joined queries
+           would then match a species keyword the photo doesn't carry.
+           Ambiguous case-variant homonyms are left as-is.
+        2. If no keyword row exists at all — e.g. a highlight starred from
+           an unconfirmed prediction bucket before the photo was accepted
+           — apply the detected case convention so the row lands on the
+           string the bucket will produce after this migration. Without
+           this, the bucket-side canonicalization drifts to (say)
+           ``Common waxbill`` while the highlight stays at
+           ``Common Waxbill``, silently un-starring the photo.
+
+        Returns the number of rows moved; caller commits.
         """
         moved = 0
-        unique_species_by_key = self._unique_root_species_by_key()
+        unique_species_by_key, all_species_keys = self._species_keyword_maps()
         for table, rename in (
             ("photo_preferences", self.rename_photo_preferences_species),
             ("species_representatives",
@@ -10384,7 +10397,9 @@ class Database:
                 ).fetchall()
             ]
             for old in names:
-                stored = unique_species_by_key.get(keyword_match_key(old or ""))
+                stored = self._canonical_curation_species(
+                    old, unique_species_by_key, all_species_keys
+                )
                 if not stored or stored == old:
                     continue
                 moved += rename(old, stored, _commit=False) or 0
@@ -10400,21 +10415,22 @@ class Database:
         by species name. Normalizing only the live tables leaves those
         JSON snapshots pointing at the legacy spelling, so a later undo
         would recreate orphaned curation rows that no longer compare
-        equal to ``keywords.name``. Apply the same punctuation
-        normalization + unambiguous stored-species casing to every
-        species value captured by hl_prev/pref_prev/rep_prev. Idempotent
-        on already-normalized rows, so it's safe to re-run in the v2
-        gate after v1 has already normalized the punctuation. Returns
-        the number of history rows rewritten; caller commits.
+        equal to the string the bucket / eligibility queries expect.
+        Route every species value captured by hl_prev/pref_prev/rep_prev
+        through the same canonicalization ``_align_curation_species_case``
+        applies to the live tables (unambiguous stored spelling, ambiguous
+        homonyms left alone, no-keyword predictions case-converted).
+        Idempotent on already-normalized rows, so it's safe to re-run in
+        the v2 gate after v1 has already normalized the punctuation.
+        Returns the number of history rows rewritten; caller commits.
         """
         rewritten = 0
-        unique_species_by_key = self._unique_root_species_by_key()
+        unique_species_by_key, all_species_keys = self._species_keyword_maps()
 
         def _normalized_curation_species(value):
-            clean = normalize_keyword_display(value or "")
-            if not clean:
-                return clean
-            return unique_species_by_key.get(keyword_match_key(clean), clean)
+            return self._canonical_curation_species(
+                value, unique_species_by_key, all_species_keys
+            )
 
         history_rows = self.conn.execute(
             "SELECT id, old_value FROM edit_history_items "
@@ -10469,12 +10485,21 @@ class Database:
                 rewritten += 1
         return rewritten
 
-    def _unique_root_species_by_key(self):
-        """Map match_key → stored root species spelling, unambiguous only.
+    def _species_keyword_maps(self):
+        """Return ``(unique_species_by_key, all_species_keys)`` for
+        curation alignment.
 
-        Keys whose match_key resolves to more than one distinct stored
-        spelling (intentional same-key homonyms) are omitted so callers
-        can't rewrite curation across genuinely different keyword rows.
+        ``unique_species_by_key``: match_key → stored root species
+        spelling, ONLY for keys resolving to a single distinct spelling.
+        Homonyms (multiple distinct spellings for the same key) are
+        omitted so callers can't rewrite curation across genuinely
+        different keyword rows.
+
+        ``all_species_keys``: set of match_keys with any root species
+        keyword row (ambiguous or not). Used to distinguish "no keyword
+        row at all" — safe to canonicalize a curation species via the
+        detected case convention — from "ambiguous homonym", which
+        must be left alone.
         """
         species_by_key = {}
         for row in self.conn.execute(
@@ -10484,10 +10509,41 @@ class Database:
             species_by_key.setdefault(keyword_match_key(row["name"]), []).append(
                 row["name"]
             )
-        return {
+        unique = {
             key: names[0] for key, names in species_by_key.items()
             if len(set(names)) == 1
         }
+        return unique, set(species_by_key.keys())
+
+    def _canonical_curation_species(
+        self, name, unique_species_by_key, all_species_keys,
+    ):
+        """Canonical spelling for a curation species value.
+
+        Agrees with ``_collect_highlight_buckets`` / ``resolve_species_display_name``:
+
+        - Unambiguous keyword match → use the stored spelling.
+        - Ambiguous homonym → leave alone (returns the punctuation-
+          normalized input unchanged).
+        - No keyword row for the match_key → apply the same case
+          convention ``_collect_highlight_buckets`` uses when it
+          canonicalizes predicted species labels, so a highlight starred
+          from a prediction-only bucket (no keyword exists yet because
+          the photo hasn't been accepted) keys on the string the bucket
+          will emit after this migration.
+
+        Empty input returns unchanged.
+        """
+        clean = normalize_keyword_display(name or "")
+        if not clean:
+            return clean
+        key = keyword_match_key(clean)
+        stored = unique_species_by_key.get(key)
+        if stored:
+            return stored
+        if key in all_species_keys:
+            return clean
+        return self.resolve_species_display_name(clean)
 
     def _normalize_keyword_data_once(self):
         """One-shot backfill: normalize every stored keyword/species name.
