@@ -3615,6 +3615,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         return value
 
+    def _collection_rules_state(db, rules_json):
+        """Return parsed collection rules and whether they are degraded."""
+        try:
+            parsed_rules = json.loads(rules_json)
+        except (TypeError, ValueError):
+            return None, True
+        return parsed_rules, not db.rules_resolvable(parsed_rules)
+
     @app.route("/api/browse/init")
     def api_browse_init():
         """Combined endpoint for browse page initial load — one request instead of five."""
@@ -3625,6 +3633,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
+        collection_id = request.args.get("collection_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
@@ -3638,26 +3647,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError as e:
             return json_error(str(e), 400)
 
-        photos = db.get_photos(
-            folder_id=folder_id,
-            page=page,
-            per_page=per_page,
-            sort=sort,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            color_label=color_label,
-            flag=flag,
-            location_status=location_status,
-        )
-        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
-            total = db.count_photos()
-        else:
-            total = db.count_filtered_photos(
+        try:
+            photos = db.get_photos(
                 folder_id=folder_id,
+                collection_id=collection_id,
+                page=page,
+                per_page=per_page,
+                sort=sort,
                 rating_min=rating_min,
                 date_from=date_from,
                 date_to=date_to,
@@ -3668,6 +3664,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 flag=flag,
                 location_status=location_status,
             )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        if not any([folder_id, collection_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
+            total = db.count_photos()
+        else:
+            try:
+                total = db.count_filtered_photos(
+                    folder_id=folder_id,
+                    collection_id=collection_id,
+                    rating_min=rating_min,
+                    date_from=date_from,
+                    date_to=date_to,
+                    keyword=keyword,
+                    keyword_match_case=keyword_match_case,
+                    keyword_whole_word=keyword_whole_word,
+                    color_label=color_label,
+                    flag=flag,
+                    location_status=location_status,
+                )
+            except ValueError as exc:
+                return json_error(str(exc), 400)
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
@@ -3691,24 +3708,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # on every smart-collection query. Malformed JSON is treated
             # as degraded too — those rules would 400 downstream just
             # like an unresolvable rule.
-            try:
-                parsed_rules = json.loads(c["rules"])
-            except (TypeError, ValueError):
+            parsed_rules, degraded = _collection_rules_state(db, c["rules"])
+            if degraded:
                 d["can_add_photos"] = False
                 d["count_error"] = True
                 collection_dicts.append(d)
-                continue
-            if not db.rules_resolvable(parsed_rules):
                 app.logger.warning(
                     "Collection %s (%s) has unresolvable rules; marking degraded",
                     c["id"],
                     c["name"],
                 )
-                d["count_error"] = True
-                # Same reasoning as /api/collections: an unresolvable rule
-                # cannot be safely merged into via add-photos, so keep it
-                # out of the add-to-collection modal.
-                d["can_add_photos"] = False
+                continue
             else:
                 d["can_add_photos"] = _collection_accepts_manual_photos(parsed_rules)
             collection_dicts.append(d)
@@ -5061,6 +5071,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
+        collection_id = request.args.get("collection_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
@@ -5074,28 +5085,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError as e:
             return json_error(str(e), 400)
 
-        photos = db.get_photos(
-            folder_id=folder_id,
-            page=page,
-            per_page=per_page,
-            sort=sort,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            color_label=color_label,
-            flag=flag,
-            location_status=location_status,
-        )
-
-        # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
-        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
-            total = db.count_photos()
-        else:
-            total = db.count_filtered_photos(
+        try:
+            photos = db.get_photos(
                 folder_id=folder_id,
+                collection_id=collection_id,
+                page=page,
+                per_page=per_page,
+                sort=sort,
                 rating_min=rating_min,
                 date_from=date_from,
                 date_to=date_to,
@@ -5106,6 +5102,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 flag=flag,
                 location_status=location_status,
             )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+
+        # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
+        if not any([folder_id, collection_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
+            total = db.count_photos()
+        else:
+            try:
+                total = db.count_filtered_photos(
+                    folder_id=folder_id,
+                    collection_id=collection_id,
+                    rating_min=rating_min,
+                    date_from=date_from,
+                    date_to=date_to,
+                    keyword=keyword,
+                    keyword_match_case=keyword_match_case,
+                    keyword_whole_word=keyword_whole_word,
+                    color_label=color_label,
+                    flag=flag,
+                    location_status=location_status,
+                )
+            except ValueError as exc:
+                return json_error(str(exc), 400)
 
         photo_dicts = [dict(p) for p in photos]
         _attach_location_statuses(db, photo_dicts)
@@ -5129,6 +5148,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
+        collection_id = request.args.get("collection_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
@@ -5142,19 +5162,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError as e:
             return json_error(str(e), 400)
 
-        photo_ids = db.get_photo_ids(
-            folder_id=folder_id,
-            sort=sort,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            color_label=color_label,
-            flag=flag,
-            location_status=location_status,
-        )
+        try:
+            photo_ids = db.get_photo_ids(
+                folder_id=folder_id,
+                collection_id=collection_id,
+                sort=sort,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
+                color_label=color_label,
+                flag=flag,
+                location_status=location_status,
+            )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
         return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
 
     @app.route("/api/photos/calendar")
@@ -8708,18 +8732,48 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Statistics --
 
+    def _dashboard_scope_args():
+        return {
+            "folder_id": request.args.get("folder_id", None, type=int),
+            "collection_id": request.args.get("collection_id", None, type=int),
+            "date_from": request.args.get("date_from", None),
+            "date_to": request.args.get("date_to", None),
+        }
+
+    @app.route("/api/dashboard/options")
+    def api_dashboard_options():
+        """Return lightweight scope choices without running collection counts.
+
+        Collections whose rules can't be compiled (malformed JSON or
+        unresolvable fields) are marked ``degraded`` so the Dashboard scope
+        picker can disable them. Selecting one would 400 both /api/stats and
+        /api/coverage via ``_build_collection_query`` and leave the Dashboard
+        panels wedged until the scope is reset.
+        """
+        db = _get_db()
+        folders = [dict(row) for row in db.get_folder_tree()]
+        collection_rows = db.conn.execute(
+            "SELECT id, name, rules FROM collections "
+            "WHERE workspace_id = ? ORDER BY name COLLATE NOCASE, id",
+            (db._ws_id(),),
+        ).fetchall()
+        collections = []
+        for row in collection_rows:
+            _, degraded = _collection_rules_state(db, row["rules"])
+            collections.append({
+                "id": row["id"],
+                "name": row["name"],
+                "degraded": degraded,
+            })
+        return jsonify({"folders": folders, "collections": collections})
+
     @app.route("/api/stats")
     def api_stats():
         db = _get_db()
-        stats = db.get_dashboard_stats()
-        # ``total_photos`` is the workspace's full inventory (includes photos
-        # whose folders are currently flagged 'missing'), so the dashboard's
-        # headline number stays honest when a drive is unmounted.
-        # ``accessible_photos`` is the subset that's actually reachable right
-        # now — when this is lower, the UI surfaces the gap with a banner.
-        stats["total_photos"] = db.count_photos_in_workspace()
-        stats["accessible_photos"] = db.count_photos()
-        stats["missing_folder_count"] = len(db.get_missing_folders())
+        try:
+            stats = db.get_dashboard_stats(**_dashboard_scope_args())
+        except ValueError as exc:
+            return json_error(str(exc), 400)
         return jsonify(stats)
 
     @app.route("/api/coverage")
@@ -8731,10 +8785,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         linked to the workspace). Both share the same coverage keys.
         """
         db = _get_db()
-        return jsonify({
-            "overall": db.get_coverage_stats(),
-            "folders": db.get_folder_coverage_stats(),
-        })
+        scope = _dashboard_scope_args()
+        try:
+            return jsonify({
+                "overall": db.get_coverage_stats(**scope),
+                "folders": db.get_folder_coverage_stats(**scope),
+            })
+        except ValueError as exc:
+            return json_error(str(exc), 400)
 
     @app.route("/api/workspace/classification-inventory")
     def api_workspace_classification_inventory():

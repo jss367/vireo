@@ -2028,6 +2028,9 @@ var flagFilter = '';
 var activeFolderId = null;
 var activeKeyword = null;
 var activeCollectionId = null;
+// A Dashboard deep link can combine a collection with date/keyword filters.
+// Normal collection clicks keep the historical collection-only behavior.
+var dashboardCollectionScope = false;
 var keywordSearchMatchCase = false;
 var keywordSearchWholeWord = false;
 var timelineMode = false;
@@ -2881,6 +2884,32 @@ async function bootstrapBrowse() {
   try {
     applyBrowseConfig(await _cfgPromise);
     var pageParams = new URLSearchParams(window.location.search);
+    var initialFolderId = parseInt(pageParams.get('folder_id'), 10);
+    if (!isNaN(initialFolderId)) activeFolderId = initialFolderId;
+    var initialCollectionId = parseInt(pageParams.get('collection_id'), 10);
+    if (!isNaN(initialCollectionId)) {
+      activeCollectionId = initialCollectionId;
+      dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
+    }
+    document.getElementById('dateFrom').value = pageParams.get('date_from') || '';
+    document.getElementById('dateTo').value = pageParams.get('date_to') || '';
+    var initialKeyword = pageParams.get('keyword') || '';
+    if (initialKeyword) {
+      document.getElementById('searchInput').value = initialKeyword;
+      appliedKeywordSearch = initialKeyword;
+    }
+    var initialRating = parseInt(pageParams.get('rating_min'), 10);
+    if (!isNaN(initialRating) && initialRating >= 1 && initialRating <= 5) {
+      filterRating = initialRating;
+      document.querySelectorAll('.rating-filter .rating-star').forEach(function(el) {
+        el.classList.toggle('active', parseInt(el.dataset.val, 10) <= filterRating);
+      });
+    }
+    var initialFlag = pageParams.get('flag') || '';
+    if (['none', 'flagged', 'rejected'].indexOf(initialFlag) !== -1) {
+      flagFilter = initialFlag;
+      updateFlagFilterButtons();
+    }
     var initialLocationStatus = pageParams.get('location_status') || '';
     if (!initialLocationStatus && pageParams.get('missing_gps') === '1') {
       initialLocationStatus = 'none';
@@ -2889,6 +2918,11 @@ async function bootstrapBrowse() {
       document.getElementById('locationStatusFilter').value = initialLocationStatus;
     }
     var initParams = buildCurrentBrowseParams();
+    // Collection-only deep links keep their historical endpoint behavior,
+    // while Dashboard links opt into composable filters via dashboard_scope.
+    // The combined init endpoint still needs the collection id for first paint
+    // in either case.
+    if (activeCollectionId) initParams.set('collection_id', activeCollectionId);
     initParams.set('per_page', perPage);
     var data = await safeFetch('/api/browse/init?' + initParams.toString());
 
@@ -3255,6 +3289,7 @@ async function filterByCollection(id, options) {
   activeFolderId = null;
   activeKeyword = null;
   activeCollectionId = id;
+  dashboardCollectionScope = false;
   if (clipSearchActive && getClipSearchQuery()) {
     selectedPhotos.clear();
     selectedPhotoId = null;
@@ -3952,6 +3987,9 @@ function buildCurrentBrowseParams() {
   params.set('sort', document.getElementById('sortSelect').value);
 
   if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (activeCollectionId && dashboardCollectionScope) {
+    params.set('collection_id', activeCollectionId);
+  }
   if (filterRating > 0) params.set('rating_min', filterRating);
   if (flagFilter) params.set('flag', flagFilter);
 
@@ -4029,7 +4067,7 @@ async function loadPhotos(options) {
   var reqPerPage = perPage * chunk;
 
   var url;
-  if (activeCollectionId) {
+  if (activeCollectionId && !dashboardCollectionScope) {
     var cparams = new URLSearchParams();
     cparams.set('page', reqPage);
     cparams.set('per_page', reqPerPage);
@@ -4800,7 +4838,7 @@ async function selectAllMatchingPhotos() {
   }
 
   var url;
-  if (activeCollectionId) {
+  if (activeCollectionId && !dashboardCollectionScope) {
     url = '/api/collections/' + activeCollectionId + '/photo-ids';
   } else {
     url = '/api/photos/ids?' + buildCurrentBrowseParams().toString();

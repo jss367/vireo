@@ -5415,7 +5415,71 @@ class Database:
         ]
         return ",\n                ".join(parts)
 
-    def get_coverage_stats(self):
+    def _dashboard_scope_clause(
+        self,
+        folder_id=None,
+        collection_id=None,
+        date_from=None,
+        date_to=None,
+        table_alias="p",
+    ):
+        """Return an ``AND ...`` clause for Dashboard-scoped photo queries.
+
+        Unlike :meth:`_scope_clause`, this stays composable and does not
+        materialize every matching photo id in Python.  That matters for a
+        date-scoped dashboard over a million-photo workspace.  Collection
+        rules are embedded as a subquery using the same rule compiler as
+        Browse, so Dashboard and Browse agree about collection membership.
+        """
+        conditions = []
+        params = []
+
+        if folder_id is not None:
+            linked = self.conn.execute(
+                "SELECT 1 FROM workspace_folders "
+                "WHERE workspace_id = ? AND folder_id = ?",
+                (self._ws_id(), folder_id),
+            ).fetchone()
+            if not linked:
+                raise ValueError("folder not found in active workspace")
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"{table_alias}.folder_id IN ({placeholders})")
+            params.extend(subtree)
+
+        if collection_id is not None:
+            # Dashboard scope keeps offline photos in totals, so the collection
+            # subquery must not filter them out via the Browse-oriented
+            # ``f.status IN ('ok', 'partial')`` join. Callers that need the
+            # accessible-only view apply that filter in their outer query
+            # (e.g. get_coverage_stats), so it's fine to be permissive here.
+            parts = self._build_collection_query(
+                collection_id, include_offline_folders=True,
+            )
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            folder_join, join_clause, where, collection_params = parts
+            collection_query = (
+                "SELECT DISTINCT p.id FROM photos p "
+                f"{folder_join} {join_clause} {where}"
+            )
+            conditions.append(f"{table_alias}.id IN ({collection_query})")
+            params.extend(collection_params)
+
+        if date_from is not None:
+            conditions.append(f"{table_alias}.timestamp >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            conditions.append(f"{table_alias}.timestamp <= ?")
+            params.append(_inclusive_date_to(date_to))
+
+        if not conditions:
+            return "", []
+        return " AND " + " AND ".join(conditions), params
+
+    def get_coverage_stats(
+        self, folder_id=None, collection_id=None, date_from=None, date_to=None,
+    ):
         """Return per-stage coverage counts for the active workspace.
 
         ``total`` is the number of photos in active (status ``'ok'`` or
@@ -5429,6 +5493,9 @@ class Database:
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
         )
+        scope_sql, scope_params = self._dashboard_scope_clause(
+            folder_id, collection_id, date_from, date_to,
+        )
         photo_row = self.conn.execute(
             f"""SELECT
                 COUNT(*) AS total,
@@ -5436,29 +5503,29 @@ class Database:
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
             JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-            WHERE wf.workspace_id = ?""",
-            (ws,),
+            WHERE wf.workspace_id = ?{scope_sql}""",
+            (ws, *scope_params),
         ).fetchone()
         detected = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
+            f"""SELECT COUNT(DISTINCT d.photo_id)
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?""",
-            (ws, min_conf),
+                 AND d.detector_confidence >= ?{scope_sql}""",
+            (ws, min_conf, *scope_params),
         ).fetchone()[0] or 0
         classified = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
+            f"""SELECT COUNT(DISTINCT d.photo_id)
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?""",
-            (ws, min_conf),
+                 AND d.detector_confidence >= ?{scope_sql}""",
+            (ws, min_conf, *scope_params),
         ).fetchone()[0] or 0
         result = {"total": photo_row["total"] or 0}
         for key, _ in self._COVERAGE_PHOTO_COLUMNS:
@@ -5467,7 +5534,9 @@ class Database:
         result["classified"] = classified
         return result
 
-    def get_folder_coverage_stats(self):
+    def get_folder_coverage_stats(
+        self, folder_id=None, collection_id=None, date_from=None, date_to=None,
+    ):
         """Return a list of per-folder coverage counts for the active workspace.
 
         One row per folder that is linked to the workspace and has
@@ -5482,6 +5551,30 @@ class Database:
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
         )
+        scope_sql, scope_params = self._dashboard_scope_clause(
+            folder_id, collection_id, date_from, date_to,
+        )
+        # Date and collection constraints belong on the LEFT JOIN so folders
+        # with zero matching photos remain visible as 0 / 0. Folder scope is
+        # different: it controls which folder rows are enumerated, so keep it
+        # as an outer WHERE condition on ``f.id``.
+        photo_scope_sql, photo_scope_params = self._dashboard_scope_clause(
+            None, collection_id, date_from, date_to,
+        )
+        folder_filter_sql = ""
+        folder_filter_params = []
+        if folder_id is not None:
+            linked = self.conn.execute(
+                "SELECT 1 FROM workspace_folders "
+                "WHERE workspace_id = ? AND folder_id = ?",
+                (ws, folder_id),
+            ).fetchone()
+            if not linked:
+                raise ValueError("folder not found in active workspace")
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            folder_filter_sql = f" AND f.id IN ({placeholders})"
+            folder_filter_params = subtree
         photo_rows = self.conn.execute(
             f"""SELECT
                 f.id AS folder_id,
@@ -5491,26 +5584,26 @@ class Database:
                 {self._coverage_select_fragment()}
             FROM folders f
             JOIN workspace_folders wf ON wf.folder_id = f.id
-            LEFT JOIN photos p ON p.folder_id = f.id
-            WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')
+            LEFT JOIN photos p ON p.folder_id = f.id{photo_scope_sql}
+            WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial'){folder_filter_sql}
             GROUP BY f.id
             ORDER BY f.path""",
-            (ws,),
+            (*photo_scope_params, ws, *folder_filter_params),
         ).fetchall()
         det_rows = self.conn.execute(
-            """SELECT p.folder_id AS folder_id,
+            f"""SELECT p.folder_id AS folder_id,
                       COUNT(DISTINCT d.photo_id) AS detected
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ?{scope_sql}
                GROUP BY p.folder_id""",
-            (ws, min_conf),
+            (ws, min_conf, *scope_params),
         ).fetchall()
         cls_rows = self.conn.execute(
-            """SELECT p.folder_id AS folder_id,
+            f"""SELECT p.folder_id AS folder_id,
                       COUNT(DISTINCT d.photo_id) AS classified
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
@@ -5518,9 +5611,9 @@ class Database:
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ?{scope_sql}
                GROUP BY p.folder_id""",
-            (ws, min_conf),
+            (ws, min_conf, *scope_params),
         ).fetchall()
         det_by_folder = {r["folder_id"]: r["detected"] for r in det_rows}
         cls_by_folder = {r["folder_id"]: r["classified"] for r in cls_rows}
@@ -6591,16 +6684,46 @@ class Database:
         ).fetchone()
         return row["n"] or 0
 
-    def get_dashboard_stats(self):
-        """Return aggregate statistics for the dashboard."""
+    def get_dashboard_stats(
+        self, folder_id=None, collection_id=None, date_from=None, date_to=None,
+    ):
+        """Return scoped aggregate statistics and actionable gaps.
+
+        Dashboard scope is metadata-only: photos remain countable while their
+        storage is offline.  Signals that require reading source files (such
+        as preview generation) separately restrict themselves to accessible
+        folders and expose that distinction through ``accessible_photos``.
+        """
         ws = self._ws_id()
         # Hoisted: multiple queries below need the workspace-effective
         # detector_confidence to keep classified_count / prediction_status /
         # detected_count in sync as the threshold moves.
         import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
+        effective = self.get_effective_config(cfg.load())
+        min_conf = effective.get("detector_confidence", 0.2)
+        preview_size = effective.get("preview_max_size", 1920)
+        scope_sql, scope_params = self._dashboard_scope_clause(
+            folder_id, collection_id, date_from, date_to,
         )
+
+        overview = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id) AS total_photos,
+                       COUNT(DISTINCT p.folder_id) AS folder_count,
+                       COUNT(DISTINCT pk.keyword_id) AS keyword_count,
+                       COUNT(DISTINCT CASE
+                         WHEN f.status IN ('ok', 'partial') THEN p.id END
+                       ) AS accessible_photos,
+                       COUNT(DISTINCT CASE
+                         WHEN f.status NOT IN ('ok', 'partial') THEN f.id END
+                       ) AS missing_folder_count
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN folders f ON f.id = p.folder_id
+                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
+                WHERE 1=1{scope_sql}""",
+            (ws, *scope_params),
+        ).fetchone()
 
         # The four pure-metadata aggregates below (top_keywords,
         # photos_by_month, rating_dist, flag_dist) intentionally don't filter
@@ -6608,45 +6731,45 @@ class Database:
         # on disk access, so an unmounted drive shouldn't blank the charts —
         # the dashboard should still describe the full workspace inventory.
         top_keywords = self.conn.execute(
-            """SELECT k.name, k.is_species, COUNT(pk.photo_id) as photo_count
+            f"""SELECT k.name, k.is_species, COUNT(pk.photo_id) as photo_count
                FROM keywords k
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ?
+               WHERE wf.workspace_id = ?{scope_sql}
                GROUP BY k.id
                ORDER BY photo_count DESC
                LIMIT 30""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         photos_by_month = self.conn.execute(
-            """SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
+            f"""SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?
+            WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?{scope_sql}
             GROUP BY month
             ORDER BY month""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         rating_dist = self.conn.execute(
-            """SELECT p.rating, COUNT(*) as count
+            f"""SELECT p.rating, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?
+            WHERE wf.workspace_id = ?{scope_sql}
             GROUP BY p.rating
             ORDER BY p.rating""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         flag_dist = self.conn.execute(
-            """SELECT p.flag, COUNT(*) as count
+            f"""SELECT p.flag, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?
+            WHERE wf.workspace_id = ?{scope_sql}
             GROUP BY p.flag""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         # Review status lives in prediction_review (workspace-scoped).
@@ -6659,13 +6782,13 @@ class Database:
         # so stale-label predictions from a prior label set don't drift the
         # totals away from the active labeling context.
         prediction_status = self.conn.execute(
-            """SELECT COALESCE(pr_rev.status, 'pending') AS status,
+            f"""SELECT COALESCE(pr_rev.status, 'pending') AS status,
                       COUNT(*) AS count
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               JOIN photos ph ON ph.id = d.photo_id
+               JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf
-                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                LEFT JOIN prediction_review pr_rev
                  ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                WHERE d.detector_confidence >= ?
@@ -6675,21 +6798,21 @@ class Database:
                       AND pr2.classifier_model = pr.classifier_model
                     ORDER BY pr2.created_at DESC, pr2.id DESC
                     LIMIT 1
-                 )
+                 ){scope_sql}
                GROUP BY COALESCE(pr_rev.status, 'pending')""",
-            (ws, ws, min_conf),
+            (ws, ws, min_conf, *scope_params),
         ).fetchall()
 
         # Same threshold + fingerprint rules as prediction_status above, so
         # classified_count can't drift above detected_count as the threshold
         # moves.
         classified_count = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
+            f"""SELECT COUNT(DISTINCT d.photo_id)
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               JOIN photos ph ON ph.id = d.photo_id
+               JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf
-                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                WHERE d.detector_confidence >= ?
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -6697,24 +6820,48 @@ class Database:
                       AND pr2.classifier_model = pr.classifier_model
                     ORDER BY pr2.created_at DESC, pr2.id DESC
                     LIMIT 1
-                 )""",
-            (ws, min_conf),
+                 ){scope_sql}""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()[0]
+
+        # Needs Attention links only open photos that are currently
+        # accessible. Keep the headline classification aggregate metadata-
+        # complete above, but use this reachable subset for operational work.
+        accessible_classified_count = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT d.photo_id)
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN folders f
+                 ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 ){scope_sql}""",
+            (ws, min_conf, *scope_params),
         ).fetchone()[0]
 
         # photos_by_hour and quality_dist are also pure-metadata aggregates;
         # see the comment above the top_keywords block for the rationale.
         photos_by_hour = self.conn.execute(
-            """SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
+            f"""SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13 AND wf.workspace_id = ?
+            WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13
+              AND wf.workspace_id = ?{scope_sql}
             GROUP BY hour
             ORDER BY hour""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         quality_dist = self.conn.execute(
-            """SELECT
+            f"""SELECT
                 CASE
                     WHEN p.quality_score IS NULL THEN -1
                     ELSE CAST(p.quality_score * 10 AS INTEGER)
@@ -6722,10 +6869,10 @@ class Database:
                 COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?
+            WHERE wf.workspace_id = ?{scope_sql}
             GROUP BY bucket
             ORDER BY bucket""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         # min_conf already hoisted at top of get_dashboard_stats.
@@ -6735,14 +6882,72 @@ class Database:
         # dashboard's classified-vs-detected ratio internally consistent
         # when a folder is offline.
         detected_count = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
+            f"""SELECT COUNT(DISTINCT d.photo_id)
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?""",
-            (ws, min_conf),
+                 AND d.detector_confidence >= ?{scope_sql}""",
+            (ws, min_conf, *scope_params),
         ).fetchone()[0]
+
+        location_conditions = []
+        self._append_location_status_filter(location_conditions, "none")
+        missing_location = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id)
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN folders f
+                  ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+                WHERE {' AND '.join(location_conditions)}{scope_sql}""",
+            (ws, *scope_params),
+        ).fetchone()[0]
+
+        pending_changes = self.conn.execute(
+            f"""SELECT COUNT(*)
+                FROM pending_changes pc
+                JOIN photos p ON p.id = pc.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                WHERE pc.workspace_id = ?{scope_sql}""",
+            (ws, ws, *scope_params),
+        ).fetchone()[0]
+
+        if preview_size:
+            missing_previews = self.conn.execute(
+                f"""SELECT COUNT(DISTINCT p.id)
+                    FROM photos p
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                    JOIN folders f
+                      ON f.id = p.folder_id
+                     AND f.status IN ('ok', 'partial')
+                    LEFT JOIN preview_cache pc
+                      ON pc.photo_id = p.id AND pc.size = ?
+                    WHERE pc.photo_id IS NULL{scope_sql}""",
+                (ws, preview_size, *scope_params),
+            ).fetchone()[0]
+        else:
+            missing_previews = 0
+
+        duplicate_groups = self.conn.execute(
+            f"""SELECT COUNT(*) FROM (
+                  SELECT p.file_hash
+                  FROM photos p
+                  JOIN workspace_folders wf
+                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN folders f
+                    ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+                  WHERE p.file_hash IS NOT NULL
+                    AND COALESCE(p.flag, 'none') != 'rejected'{scope_sql}
+                  GROUP BY p.file_hash
+                  HAVING COUNT(*) > 1
+                )""",
+            (ws, *scope_params),
+        ).fetchone()[0]
+
+        total_photos = overview["total_photos"] or 0
 
         return {
             "top_keywords": [dict(r) for r in top_keywords],
@@ -6754,6 +6959,25 @@ class Database:
             "photos_by_hour": [dict(r) for r in photos_by_hour],
             "quality_distribution": [dict(r) for r in quality_dist],
             "detected_count": detected_count,
+            "total_photos": total_photos,
+            "accessible_photos": overview["accessible_photos"] or 0,
+            "missing_folder_count": overview["missing_folder_count"] or 0,
+            "folder_count": overview["folder_count"] or 0,
+            "keyword_count": overview["keyword_count"] or 0,
+            "pending_changes": pending_changes,
+            "attention": {
+                "unclassified": max(
+                    0,
+                    (overview["accessible_photos"] or 0)
+                    - accessible_classified_count,
+                ),
+                "missing_location": missing_location,
+                "missing_previews": missing_previews,
+                "preview_size": preview_size,
+                "preview_enabled": bool(preview_size),
+                "pending_sync": pending_changes,
+                "duplicate_groups": duplicate_groups,
+            },
         }
 
     @staticmethod
@@ -6904,6 +7128,7 @@ class Database:
     def get_photos(
         self,
         folder_id=None,
+        collection_id=None,
         page=1,
         per_page=50,
         sort="date",
@@ -6927,6 +7152,17 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
+        if collection_id is not None:
+            parts = self._build_collection_query(collection_id)
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+            coll_subquery = (
+                "SELECT DISTINCT p.id FROM photos p "
+                f"{coll_folder_join} {coll_join_clause} {coll_where}"
+            )
+            conditions.append(f"p.id IN ({coll_subquery})")
+            where_params.extend(coll_params)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -6995,6 +7231,7 @@ class Database:
     def get_photo_ids(
         self,
         folder_id=None,
+        collection_id=None,
         sort="date",
         rating_min=None,
         date_from=None,
@@ -7016,6 +7253,17 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
+        if collection_id is not None:
+            parts = self._build_collection_query(collection_id)
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+            coll_subquery = (
+                "SELECT DISTINCT p.id FROM photos p "
+                f"{coll_folder_join} {coll_join_clause} {coll_where}"
+            )
+            conditions.append(f"p.id IN ({coll_subquery})")
+            where_params.extend(coll_params)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -7074,6 +7322,7 @@ class Database:
     def count_filtered_photos(
         self,
         folder_id=None,
+        collection_id=None,
         rating_min=None,
         date_from=None,
         date_to=None,
@@ -7094,6 +7343,17 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
+        if collection_id is not None:
+            parts = self._build_collection_query(collection_id)
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+            coll_subquery = (
+                "SELECT DISTINCT p.id FROM photos p "
+                f"{coll_folder_join} {coll_join_clause} {coll_where}"
+            )
+            conditions.append(f"p.id IN ({coll_subquery})")
+            where_params.extend(coll_params)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -15446,10 +15706,12 @@ class Database:
             "file_paths": paths,
         }
 
-    def _build_collection_query(self, collection_id):
+    def _build_collection_query(self, collection_id, include_offline_folders=False):
         """Build SQL clauses from collection rules.
 
-        Returns (folder_join, join_clause, where, params) or None if collection not found.
+        Returns (folder_join, join_clause, where, params) or None if collection
+        not found. Pass ``include_offline_folders=True`` for metadata-only
+        callers (Dashboard scope) that keep offline photos in their totals.
         """
         row = self.conn.execute(
             "SELECT rules FROM collections WHERE id = ? AND workspace_id = ?",
@@ -15459,14 +15721,22 @@ class Database:
             return None
 
         rules = json.loads(row["rules"])
-        return self._build_query_from_rules(rules)
+        return self._build_query_from_rules(
+            rules, include_offline_folders=include_offline_folders,
+        )
 
-    def _build_query_from_rules(self, rules):
+    def _build_query_from_rules(self, rules, include_offline_folders=False):
         """Build SQL clauses from a smart-collection rule tree.
 
         Returns (folder_join, join_clause, where, params). Raises ValueError on
         malformed input — callers that accept rules from untrusted sources
         (e.g. the live-preview API) should catch and surface a 400.
+
+        By default the folder join filters to accessible folders
+        (``status IN ('ok', 'partial')``), matching what Browse and pipeline
+        callers need. Pass ``include_offline_folders=True`` for metadata-only
+        callers (e.g. Dashboard totals) that count photos even when their
+        storage is currently missing.
 
         Backward compatibility: the original collection format was a flat list
         of rule objects, implicitly combined with AND. Newer collections may use
@@ -15831,8 +16101,15 @@ class Database:
         _validate_node(root)
         condition, params = _build_node(root)
 
-        # Always join folders for folder-under rules, scoped to workspace
-        folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
+        # Always join folders for folder-under rules, scoped to workspace.
+        # For metadata-only callers (Dashboard scope) drop the accessible-
+        # folder filter so photos in an offline folder still count toward
+        # the collection's membership; every other caller keeps the Browse-
+        # oriented ``status IN ('ok', 'partial')`` filter that excludes them.
+        if include_offline_folders:
+            folder_join = " JOIN folders f ON f.id = p.folder_id"
+        else:
+            folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
         folder_join += " JOIN workspace_folders wf ON wf.folder_id = f.id AND wf.workspace_id = ?"
 
         # folder_join comes before join_clause in the query, so its param goes first
