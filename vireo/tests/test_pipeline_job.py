@@ -10876,6 +10876,106 @@ def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
     assert db.preview_cache_get(photo_id, 1920) is None
 
 
+def test_pipeline_previews_warm_unedited_raw_from_camera_rendered_source(
+    tmp_path, monkeypatch,
+):
+    """Pipeline preview stage must warm from the RAW source, not the
+    highlight-preserving working copy. Otherwise the tracked preview cache
+    locks in the dark render and /photos/<id>/preview returns those cache
+    hits before its own RAW-source branch ever runs."""
+    import config as cfg
+    import image_loader
+    import scanner
+    import thumbnails
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw_path = photo_dir / "source.NEF"
+    raw_path.write_bytes(b"raw bytes decoded by the test double")
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="source.NEF",
+        extension=".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=raw_path.stat().st_mtime,
+        width=800,
+        height=600,
+    )
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    working_path = working_dir / f"{photo_id}.jpg"
+    Image.new("RGB", (800, 600), (25, 25, 25)).save(str(working_path))
+    # Setting exif_data non-null keeps _find_broken_metadata_folders from
+    # flagging this row for a repair scan that would otherwise call
+    # extract_working_copy against the placeholder RAW bytes and mark the
+    # source as failed — masking the source-selection behavior we want to
+    # exercise here.
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=?, exif_data='{}' WHERE id=?",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    collection_id = db.add_collection("Test", json.dumps([]))
+
+    def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
+        os.makedirs(cache_dir, exist_ok=True)
+        thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+        Image.new("RGB", (size, size), "green").save(thumb_path)
+        return thumb_path
+
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fake_generate_thumbnail)
+    monkeypatch.setattr(scanner, "extract_working_copy", lambda *args, **kwargs: False)
+
+    loaded = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded.append(os.fspath(file_path))
+        color = (
+            (220, 220, 220)
+            if os.path.abspath(str(file_path)) == os.path.abspath(str(raw_path))
+            else (25, 25, 25)
+        )
+        return Image.new("RGB", (800, 600), color)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    result = run_pipeline_job(
+        _make_job(),
+        FakeRunner(),
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=collection_id,
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+            preview_max_size=1920,
+        ),
+    )
+
+    previews = result["stages"]["previews"]
+    assert previews["failed"] == 0
+    assert previews["generated"] == 1
+    # The warmer decoded the RAW source, not the dark working copy.
+    assert str(raw_path) in loaded
+    assert str(working_path) not in loaded
+    # base_dir = dirname(db_path) when no thumb_cache_dir override; matches
+    # the pipeline's effective_vireo_dir setup at pipeline_job.py:758.
+    preview_path = tmp_path / "previews" / f"{photo_id}_1920.jpg"
+    assert preview_path.exists()
+    with Image.open(preview_path) as warmed:
+        assert warmed.getpixel((400, 300))[0] > 200
+
+
 def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(
     tmp_path, monkeypatch,
 ):

@@ -74,7 +74,9 @@ DEFAULTS = {
     # out of "Needs Identification" and are skipped by the classifier.
     "subject_types": ["taxonomy", "individual", "genre"],
     # --- Display ---
-    "browse_card_fields": ["filename", "rating", "flag", "sharpness"],
+    "browse_card_fields": [
+        "filename", "location_status", "rating", "flag", "sharpness"
+    ],
     "photos_per_page": 50,
     "thumbnail_size": 400,
     "thumbnail_quality": 85,
@@ -300,6 +302,7 @@ MIGRATION_MISS_THRESHOLDS = "miss_thresholds_2026_05"
 MIGRATION_TOGGLE_UI_H_CONFLICT = "toggle_ui_h_conflict_2026_07"
 MIGRATION_EYE_DETECT_DEFAULT_OFF = "eye_detect_default_off_2026_07"
 MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID = "default_strategy_to_process_id_2026_07"
+MIGRATION_BROWSE_LOCATION_STATUS = "browse_location_status_2026_07"
 
 _LEGACY_MISS_DET_CONFIDENCE = 0.25
 _LEGACY_MISS_DET_CONFIDENCE_BURST = 0.15
@@ -406,6 +409,31 @@ def migrate_toggle_ui_h_conflict():
                         rewrote = True
                         break
         applied.append(MIGRATION_TOGGLE_UI_H_CONFLICT)
+        raw["_migrations_applied"] = applied
+        save(raw)
+        return rewrote
+
+
+def migrate_browse_location_status_field():
+    """Add coordinate source to the exact legacy default Browse card fields.
+
+    Customized card-field lists stay untouched. This makes the newly explicit
+    GPS/assigned/none state visible after upgrade for users who were still on
+    the previous default rather than only for fresh installs.
+    """
+    legacy_default = ["filename", "rating", "flag", "sharpness"]
+    new_default = [
+        "filename", "location_status", "rating", "flag", "sharpness"
+    ]
+    with _lock:
+        raw = _read_raw()
+        applied = _migrations_applied(raw)
+        if MIGRATION_BROWSE_LOCATION_STATUS in applied:
+            return False
+        rewrote = raw.get("browse_card_fields") == legacy_default
+        if rewrote:
+            raw["browse_card_fields"] = new_default
+        applied.append(MIGRATION_BROWSE_LOCATION_STATUS)
         raw["_migrations_applied"] = applied
         save(raw)
         return rewrote

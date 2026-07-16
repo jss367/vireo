@@ -6,9 +6,9 @@ const base = import.meta.env.BASE_URL;
 const releaseUrl = (v: string) => `https://github.com/jss367/vireo/releases/download/v${v}`;
 
 // Per-platform versions — updated independently by CI when each platform builds
-const macosArm64Version = '0.22.0';
-const windowsVersion = '0.22.0';
-const linuxVersion = '0.22.0';
+const macosArm64Version = '0.24.1';
+const windowsVersion = '0.24.1';
+const linuxVersion = '0.24.1';
 
 // The Windows 11 public beta ships as the first SignPath-signed build.
 // Until the download link points at that signed build, the older Windows
@@ -61,7 +61,7 @@ const windowsBetaAvailable = windowsVersion !== '0.18.0';
       </p>
 
       <p class="download-hero__privacy">
-        We use cookie-free analytics to count aggregate website visits and download-button clicks.
+        We use cookie-free analytics to count aggregate website visits and GitHub download counts.
         The Vireo app sends no usage telemetry. <a href={`${base}privacy/`}>Privacy details</a>.
       </p>
     </div>

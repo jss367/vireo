@@ -911,6 +911,34 @@ def test_count_photos_for_rules_unsaved(tmp_path):
     assert len(db.get_collections()) == 0
 
 
+def test_smart_collection_can_select_photos_with_jpeg_companions(tmp_path):
+    """Paired JPEG availability is a first-class smart-collection rule even
+    though the pair remains one RAW-primary catalog record."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    paired = db.add_photo(
+        folder_id=fid, filename="paired.nef", extension=".nef",
+        file_size=100, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=fid, filename="raw-only.nef", extension=".nef",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='paired.jpg' WHERE id=?", (paired,),
+    )
+    db.conn.commit()
+
+    yes = [{"field": "has_jpeg_companion", "op": "equals", "value": 1}]
+    no = [{"field": "has_jpeg_companion", "op": "equals", "value": 0}]
+    assert db.count_photos_for_rules(yes) == 1
+    assert db.count_photos_for_rules(no) == 1
+
+
 def test_count_photos_for_rules_rejects_malformed_input(tmp_path):
     """The preview helper raises on input that isn't a list of rule dicts —
     the API route relies on this to return a 400 instead of 500.
@@ -2052,6 +2080,153 @@ def test_get_dashboard_stats_with_data(tmp_path):
     assert hours[8] == 1
 
 
+def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
+    """Dashboard, coverage, and Browse use the same intersected scope."""
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    park = db.add_folder("/photos/park", name="park")
+    yard = db.add_folder("/photos/yard", name="yard")
+    db.add_workspace_folder(ws_id, park)
+    db.add_workspace_folder(ws_id, yard)
+
+    march = db.add_photo(
+        folder_id=park, filename="march.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-03-10T08:00:00",
+    )
+    june_park = db.add_photo(
+        folder_id=park, filename="june-park.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
+    )
+    june_yard = db.add_photo(
+        folder_id=yard, filename="june-yard.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
+    )
+    collection_id = db.add_collection(
+        "June picks",
+        json.dumps([{"field": "photo_ids", "value": [march, june_park, june_yard]}]),
+    )
+
+    scope = {
+        "collection_id": collection_id,
+        "date_from": "2024-06-01",
+        "date_to": "2024-06-30",
+    }
+    stats = db.get_dashboard_stats(**scope)
+    assert stats["total_photos"] == 2
+    assert stats["folder_count"] == 2
+    assert stats["photos_by_month"] == [{"month": "2024-06", "count": 2}]
+    assert db.get_coverage_stats(**scope)["total"] == 2
+    assert {row["path"] for row in db.get_folder_coverage_stats(**scope)} == {
+        "/photos/park", "/photos/yard",
+    }
+
+    browse = db.get_photos(folder_id=yard, **scope)
+    assert [photo["id"] for photo in browse] == [june_yard]
+    assert db.get_photo_ids(folder_id=yard, **scope) == [june_yard]
+    assert db.count_filtered_photos(folder_id=yard, **scope) == 1
+
+
+def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
+    """Dashboard totals for a collection scope keep photos in offline folders.
+
+    The unscoped Dashboard intentionally counts photos in missing folders
+    (metadata-only aggregates like total_photos, photos_by_month, etc.).
+    Scoping by a collection whose rules match those photos must not
+    silently drop them via the collection subquery's folder-status filter.
+    """
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    ok_folder = db.add_folder("/photos/ok", name="ok")
+    gone_folder = db.add_folder("/photos/gone", name="gone")
+    db.add_workspace_folder(ws_id, ok_folder)
+    db.add_workspace_folder(ws_id, gone_folder)
+
+    visible = db.add_photo(
+        folder_id=ok_folder, filename="here.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
+    )
+    offline = db.add_photo(
+        folder_id=gone_folder, filename="offline.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
+    )
+    collection_id = db.add_collection(
+        "All photos",
+        json.dumps([{"field": "photo_ids", "value": [visible, offline]}]),
+    )
+
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (gone_folder,),
+    )
+    db.conn.commit()
+
+    stats = db.get_dashboard_stats(collection_id=collection_id)
+    assert stats["total_photos"] == 2, (
+        "Dashboard totals must count the offline photo when scoped by "
+        f"a collection that matches it; got {stats['total_photos']}"
+    )
+    assert stats["accessible_photos"] == 1
+    assert stats["missing_folder_count"] == 1
+    assert stats["attention"]["unclassified"] == 1
+    assert stats["attention"]["missing_location"] == 1
+    months = {row["month"]: row["count"] for row in stats["photos_by_month"]}
+    assert months.get("2024-06") == 2
+
+    # Coverage still restricts to accessible folders in its outer join, so
+    # the collection scope must not further shrink that count either.
+    assert db.get_coverage_stats(collection_id=collection_id)["total"] == 1
+
+    # Regression guard: Browse and pipeline callers must still filter out
+    # photos in offline folders even when the collection rules match them.
+    assert db.count_collection_photos(collection_id) == 1
+    assert [p["id"] for p in db.get_collection_photos(collection_id)] == [visible]
+
+
+def test_dashboard_attention_counts_actionable_gaps_in_scope(tmp_path):
+    """Needs Attention cards report preview, sync, location, and duplicate work."""
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {"timestamp": "2024-06-01T08:00:00", "file_hash": "same"},
+        {"timestamp": "2024-06-02T08:00:00", "file_hash": "same"},
+        {"timestamp": "2024-07-01T08:00:00", "file_hash": "other"},
+    ])
+    det_ids = db.save_detections(pids[0], [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+        "confidence": 0.9,
+        "category": "animal",
+    }], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "test")
+    db.preview_cache_insert(pids[0], 1920, 100)
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'rating', '4', 'token', ?)",
+        (pids[1], db._ws_id()),
+    )
+    db.conn.commit()
+
+    attention = db.get_dashboard_stats(
+        date_from="2024-06-01", date_to="2024-06-30",
+    )["attention"]
+    assert attention == {
+        "unclassified": 1,
+        "missing_location": 2,
+        "missing_previews": 1,
+        "preview_size": 1920,
+        "preview_enabled": True,
+        "pending_sync": 1,
+        "duplicate_groups": 1,
+    }
+
+
 # --- Cluster 2b: Coverage Stats ---
 
 def test_get_coverage_stats_empty_workspace(tmp_path):
@@ -2163,6 +2338,40 @@ def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
     assert by_path['/B']['total'] == 2
     assert by_path['/B']['thumbnail'] == 0
     assert by_path['/B']['phash'] == 0
+
+
+def test_folder_coverage_keeps_zero_match_folders_with_scopes(tmp_path):
+    """Photo filters keep in-scope folders visible while folder scope narrows rows."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    folder_a = db.add_folder("/A", name="A")
+    folder_b = db.add_folder("/B", name="B")
+    db.add_workspace_folder(ws_id, folder_a)
+    db.add_workspace_folder(ws_id, folder_b)
+    db.add_photo(
+        folder_id=folder_a, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-01-01T00:00:00",
+    )
+    db.add_photo(
+        folder_id=folder_b, filename="b.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-01-02T00:00:00",
+    )
+
+    no_matches = db.get_folder_coverage_stats(date_from="2024-02-01")
+    assert {row["path"]: row["total"] for row in no_matches} == {
+        "/A": 0,
+        "/B": 0,
+    }
+
+    folder_scoped = db.get_folder_coverage_stats(
+        folder_id=folder_a, date_from="2024-02-01",
+    )
+    assert [(row["path"], row["total"]) for row in folder_scoped] == [
+        ("/A", 0),
+    ]
 
 
 # --- Cluster 3: Prediction Management ---

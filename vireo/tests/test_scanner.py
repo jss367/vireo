@@ -1018,6 +1018,43 @@ def test_scan_pairs_raw_and_jpeg(tmp_path):
     assert photo["companion_path"] == "IMG_001.jpg"
 
 
+def test_rescan_changed_companion_invalidates_jpeg_thumbnail_variant(tmp_path):
+    """Re-pairing a changed companion drops its source-specific thumbnail
+    even when the replacement preserves filesystem mtime."""
+    from db import Database
+    from scanner import scan
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+    jpeg_path = img_dir / "IMG_001.jpg"
+    Image.new("RGB", (200, 100), color="green").save(jpeg_path)
+    (img_dir / "IMG_001.cr3").write_bytes(b"\x00" * 200)
+
+    vireo_dir = tmp_path / "vireo"
+    thumb_dir = vireo_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True)
+    db = Database(str(vireo_dir / "test.db"))
+    scan(
+        str(img_dir), db, vireo_dir=str(vireo_dir),
+        thumb_cache_dir=str(thumb_dir),
+    )
+    primary = db.conn.execute(
+        "SELECT id FROM photos WHERE filename='IMG_001.cr3'",
+    ).fetchone()
+    variant = thumb_dir / f"{primary['id']}_jpeg.jpg"
+    variant.write_bytes(b"stale companion pixels")
+
+    original_mtime = jpeg_path.stat().st_mtime
+    Image.new("RGB", (200, 100), color="blue").save(jpeg_path)
+    os.utime(jpeg_path, (original_mtime, original_mtime))
+    scan(
+        str(img_dir), db, vireo_dir=str(vireo_dir),
+        thumb_cache_dir=str(thumb_dir),
+    )
+
+    assert not variant.exists()
+
+
 def test_scan_late_arriving_raw_pairs_with_existing_jpeg(tmp_path):
     """Importing raws after JPEGs matches them to existing photo records."""
     import os
@@ -1128,6 +1165,36 @@ def test_pairing_transfers_edit_recipe_from_companion(tmp_path):
     undone = db.undo_last_edit()
     assert undone is not None
     assert db.get_photo_edit_recipe(photo["id"]) is None
+
+
+def test_pairing_invalidates_existing_raw_display_cache(tmp_path):
+    """A newly paired camera JPEG must replace a pre-pairing RAW rendition."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    img_dir = tmp_path / "photos"
+    img_dir.mkdir()
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(img_dir), name="photos")
+    raw_id = db.add_photo(
+        folder_id=folder_id, filename="IMG_002.cr3", extension=".cr3",
+        file_size=2000, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=folder_id, filename="IMG_002.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0,
+    )
+
+    originals_dir = tmp_path / "originals"
+    originals_dir.mkdir()
+    display_cache = originals_dir / f"{raw_id}.display.jpg"
+    display_cache.write_bytes(b"pre-pairing RAW display")
+
+    _pair_raw_jpeg_companions(db, vireo_dir=str(tmp_path))
+
+    photo = db.get_photo(raw_id)
+    assert photo["companion_path"] == "IMG_002.jpg"
+    assert not display_cache.exists()
 
 
 def test_pairing_transfers_local_mask_snapshot_files(tmp_path):
@@ -2751,6 +2818,10 @@ def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
     thumb_path = str(cache_dir / f"{photo_id}.jpg")
     generate_thumbnail(photo_id, img_path, str(cache_dir))
     assert os.path.exists(thumb_path)
+    raw_variant = cache_dir / f"{photo_id}_raw.jpg"
+    jpeg_variant = cache_dir / f"{photo_id}_jpeg.jpg"
+    raw_variant.write_bytes(b"stale raw thumbnail")
+    jpeg_variant.write_bytes(b"stale jpeg thumbnail")
 
     # Replace file content (same filename, different pixels → new hash + new mtime)
     time.sleep(0.05)
@@ -2774,6 +2845,8 @@ def test_rescan_invalidates_stale_thumbnail_when_file_content_changes(tmp_path):
         "Scanner must invalidate the cached thumbnail when file content changes; "
         "leaving it on disk is how thumbnail/full-image mismatches get baked in."
     )
+    assert not raw_variant.exists()
+    assert not jpeg_variant.exists()
 
 
 def test_rescan_clears_thumb_path_column_when_content_changes(tmp_path):
@@ -2853,6 +2926,10 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     # Seed a preview file + accounting row, as /photos/<id>/preview would.
     preview_file = preview_dir / f"{photo_id}_1920.jpg"
     Image.new("RGB", (1920, 1440), color=(255, 0, 0)).save(str(preview_file), "JPEG")
+    originals_dir = vireo_dir / "originals"
+    originals_dir.mkdir()
+    display_file = originals_dir / f"{photo_id}.display.jpg"
+    Image.new("RGB", (800, 600), color=(255, 0, 0)).save(display_file, "JPEG")
     file_bytes = preview_file.stat().st_size
     db.preview_cache_insert(photo_id, 1920, file_bytes)
     assert db.preview_cache_total_bytes() == file_bytes
@@ -2863,6 +2940,7 @@ def test_rescan_invalidates_preview_cache_rows_when_file_content_changes(tmp_pat
     scan(root, db, incremental=True, vireo_dir=str(vireo_dir))
 
     assert not preview_file.exists(), "preview file should be deleted"
+    assert not display_file.exists(), "RAW display cache should be deleted"
     assert db.preview_cache_get(photo_id, 1920) is None, (
         "preview_cache row must be deleted alongside the file; "
         "leaving it inflates preview_cache_total_bytes and triggers "

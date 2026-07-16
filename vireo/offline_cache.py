@@ -74,21 +74,66 @@ def cached_original_for_photo(db, photo_id, vireo_dir):
     return None
 
 
-def resolve_original_path(db, photo, vireo_dir, folders):
+def resolve_original_path(
+    db, photo, vireo_dir, folders, *, prefer_cached=False,
+):
     """Return (path, used_offline_cache) for a photo's original.
 
-    The source-of-truth file wins when it is available. The offline copy is a
-    fallback for temporarily unavailable volumes.
+    The source-of-truth file wins when it is available unless ``prefer_cached``
+    is true and the managed copy still matches the catalogued source size and
+    mtime. Full-resolution inspection uses that opt-in so a photo explicitly
+    prepared by the user is read from local storage instead of returning to a
+    slow removable or network volume. Other callers retain the historical
+    source-first behavior.
     """
     folder_id = photo["folder_id"]
-    if folder_id in folders:
-        source_path = os.path.join(folders[folder_id], photo["filename"])
-        if os.path.isfile(source_path):
-            return source_path, False
-    else:
-        source_path = ""
-    cached = cached_original_for_photo(db, photo["id"], vireo_dir)
-    if cached:
+    offline_row = db.offline_original_get(photo["id"])
+    cached = offline_original_abs(vireo_dir, offline_row)
+    source_path = (
+        os.path.join(folders[folder_id], photo["filename"])
+        if folder_id in folders
+        else ""
+    )
+    source_is_available = os.path.isfile(source_path)
+    primary_is_current = (
+        _same_file_stat(source_path, cached)
+        if source_is_available
+        else bool(
+            offline_row
+            and offline_row["source_size"] == (photo["file_size"] or 0)
+            and offline_row["source_mtime"] == photo["file_mtime"]
+        )
+    )
+    companion_is_current = True
+    if photo["companion_path"] and folder_id in folders:
+        source_original = os.path.join(
+            folders[folder_id], photo["filename"],
+        )
+        source_companion = os.path.join(
+            folders[folder_id], photo["companion_path"],
+        )
+        if os.path.isfile(source_original):
+            cached_companion = (
+                os.path.join(vireo_dir, offline_row["companion_path"])
+                if offline_row and offline_row["companion_path"]
+                else None
+            )
+            companion_is_current = _same_file_stat(
+                source_companion, cached_companion,
+            )
+    cached_is_current = bool(
+        offline_row
+        and offline_row["status"] == "cached"
+        and cached
+        and os.path.isfile(cached)
+        and primary_is_current
+        and companion_is_current
+    )
+    if prefer_cached and cached_is_current:
+        return cached, True
+    if source_is_available:
+        return source_path, False
+    if cached and os.path.isfile(cached):
         return cached, True
     return source_path, False
 
