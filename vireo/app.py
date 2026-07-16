@@ -5854,6 +5854,271 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error("collection not found", 404)
         return db.get_collection_photo_ids(collection_id), None
 
+    def _location_review_groups(photos, cluster_radius_m=750.0):
+        """Cluster photos by their observed coordinates for human review.
+
+        Reverse-geocoded place ids are deliberately not involved: they are
+        suggestions for the reviewer, not the identity of a coordinate group.
+        A small spatial hash keeps the neighbor search close to O(n) for large
+        libraries while connected components allow a photographed route to
+        remain one reviewable area.
+        """
+        valid = []
+        unresolved = []
+        for order, photo in enumerate(photos):
+            lat = photo["latitude"]
+            lng = photo["longitude"]
+            if lat is None or lng is None:
+                unresolved.append({
+                    "photo_id": photo["id"],
+                    "filename": photo["filename"],
+                    "reason": "missing_gps",
+                })
+                continue
+            try:
+                lat = float(lat)
+                lng = float(lng)
+            except (TypeError, ValueError):
+                lat = lng = math.nan
+            if (
+                not math.isfinite(lat)
+                or not math.isfinite(lng)
+                or not -90 <= lat <= 90
+                or not -180 <= lng <= 180
+            ):
+                unresolved.append({
+                    "photo_id": photo["id"],
+                    "filename": photo["filename"],
+                    "reason": "invalid_gps",
+                })
+                continue
+            valid.append({
+                "photo": photo,
+                "order": order,
+                "lat": lat,
+                "lng": lng,
+            })
+
+        if not valid:
+            return [], unresolved
+
+        earth_radius_m = 6_371_000.0
+        reference_lat = math.radians(
+            sum(item["lat"] for item in valid) / len(valid)
+        )
+        reference_lng = valid[0]["lng"]
+
+        def projected(item):
+            lng_delta = ((item["lng"] - reference_lng + 180.0) % 360.0) - 180.0
+            return (
+                earth_radius_m * math.radians(lng_delta) * math.cos(reference_lat),
+                earth_radius_m * math.radians(item["lat"]),
+            )
+
+        parents = list(range(len(valid)))
+
+        def find(index):
+            while parents[index] != index:
+                parents[index] = parents[parents[index]]
+                index = parents[index]
+            return index
+
+        def union(left, right):
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parents[right_root] = left_root
+
+        buckets = {}
+        radius_sq = cluster_radius_m * cluster_radius_m
+        for index, item in enumerate(valid):
+            x_coord, y_coord = projected(item)
+            item["x"] = x_coord
+            item["y"] = y_coord
+            cell = (
+                math.floor(x_coord / cluster_radius_m),
+                math.floor(y_coord / cluster_radius_m),
+            )
+            for x_offset in (-1, 0, 1):
+                for y_offset in (-1, 0, 1):
+                    for neighbor in buckets.get(
+                        (cell[0] + x_offset, cell[1] + y_offset), []
+                    ):
+                        dx = x_coord - valid[neighbor]["x"]
+                        dy = y_coord - valid[neighbor]["y"]
+                        if dx * dx + dy * dy <= radius_sq:
+                            union(index, neighbor)
+            buckets.setdefault(cell, []).append(index)
+
+        components = {}
+        for index, item in enumerate(valid):
+            components.setdefault(find(index), []).append(item)
+
+        ordered = sorted(
+            components.values(),
+            key=lambda items: min(item["order"] for item in items),
+        )
+        groups = []
+        for group_index, items in enumerate(ordered, start=1):
+            center_lat = sum(item["lat"] for item in items) / len(items)
+            # Longitudes were normalized around the first input point above;
+            # use the same frame so groups around the antimeridian do not get
+            # a center near Greenwich.
+            lng_deltas = [
+                ((item["lng"] - reference_lng + 180.0) % 360.0) - 180.0
+                for item in items
+            ]
+            center_lng = (
+                reference_lng + sum(lng_deltas) / len(lng_deltas) + 180.0
+            ) % 360.0 - 180.0
+            center_x = sum(item["x"] for item in items) / len(items)
+            center_y = sum(item["y"] for item in items) / len(items)
+            spread_m = max(
+                math.hypot(item["x"] - center_x, item["y"] - center_y)
+                for item in items
+            )
+            timestamps = sorted(
+                item["photo"]["timestamp"]
+                for item in items
+                if item["photo"]["timestamp"]
+            )
+            photo_data = [{
+                "id": item["photo"]["id"],
+                "filename": item["photo"]["filename"],
+                "timestamp": item["photo"]["timestamp"],
+                "latitude": item["lat"],
+                "longitude": item["lng"],
+            } for item in sorted(items, key=lambda item: item["order"])]
+            groups.append({
+                "id": f"group-{group_index}",
+                "count": len(photo_data),
+                "photo_ids": [photo["id"] for photo in photo_data],
+                "photos": photo_data,
+                "sample_filenames": [
+                    photo["filename"] for photo in photo_data[:3]
+                ],
+                "center": {"lat": center_lat, "lng": center_lng},
+                "bounds": {
+                    "south": min(item["lat"] for item in items),
+                    "west": min(item["lng"] for item in items),
+                    "north": max(item["lat"] for item in items),
+                    "east": max(item["lng"] for item in items),
+                },
+                "spread_m": round(spread_m, 1),
+                "captured_from": timestamps[0] if timestamps else None,
+                "captured_to": timestamps[-1] if timestamps else None,
+            })
+        return groups, unresolved
+
+    @app.route("/api/location-review/preview", methods=["POST"])
+    def api_location_review_preview():
+        """Return coordinate-derived groups without choosing place names."""
+        body = request.get_json(silent=True) or {}
+        db = _get_db()
+        photo_ids, error = _bulk_gps_location_source_ids(db, body)
+        if error is not None:
+            return error
+        if not photo_ids:
+            return jsonify({
+                "total": 0,
+                "reviewable": 0,
+                "groups": [],
+                "unresolved": [],
+                "skipped": [],
+            })
+
+        photos_map = db.get_photos_by_ids(photo_ids)
+        if len(photos_map) != len(photo_ids):
+            return json_error("One or more photos were not found", 404)
+        for photo_id in photo_ids:
+            edit_error = _photo_location_edit_error(db, photo_id)
+            if edit_error is not None:
+                return edit_error
+
+        assigned_ids = _location_keyword_photo_ids(db, photo_ids)
+        skipped = [{
+            "photo_id": photo_id,
+            "filename": photos_map[photo_id]["filename"],
+            "reason": "already_has_location",
+        } for photo_id in photo_ids if photo_id in assigned_ids]
+        review_photos = [
+            photos_map[photo_id]
+            for photo_id in photo_ids
+            if photo_id not in assigned_ids
+        ]
+        groups, unresolved = _location_review_groups(review_photos)
+        return jsonify({
+            "total": len(photo_ids),
+            "reviewable": sum(group["count"] for group in groups),
+            "groups": groups,
+            "unresolved": unresolved,
+            "skipped": skipped,
+        })
+
+    @app.route("/api/location-review/saved-suggestions")
+    def api_location_review_saved_suggestions():
+        """Return nearby location keywords already used in this workspace."""
+        try:
+            lat = float(request.args.get("lat", ""))
+            lng = float(request.args.get("lng", ""))
+            radius_m = float(request.args.get("radius_m", "25000"))
+        except (TypeError, ValueError):
+            return json_error("invalid coordinates", 400)
+        if (
+            not math.isfinite(lat)
+            or not math.isfinite(lng)
+            or not math.isfinite(radius_m)
+            or not -90 <= lat <= 90
+            or not -180 <= lng <= 180
+            or radius_m <= 0
+        ):
+            return json_error("invalid coordinates", 400)
+        radius_m = min(radius_m, 100_000.0)
+
+        db = _get_db()
+        rows = db.conn.execute(
+            """SELECT k.id, k.name, k.place_id, k.latitude, k.longitude,
+                      k.parent_id, COUNT(DISTINCT pk.photo_id) AS photo_count
+               FROM keywords k
+               JOIN photo_keywords pk ON pk.keyword_id = k.id
+               JOIN photos p ON p.id = pk.photo_id
+               JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+               WHERE wf.workspace_id = ? AND k.type = 'location'
+                 AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL
+               GROUP BY k.id""",
+            (db._ws_id(),),
+        ).fetchall()
+
+        def distance_m(row):
+            lat1 = math.radians(lat)
+            lat2 = math.radians(float(row["latitude"]))
+            delta_lat = lat2 - lat1
+            delta_lng = math.radians(float(row["longitude"]) - lng)
+            value = (
+                math.sin(delta_lat / 2) ** 2
+                + math.cos(lat1) * math.cos(lat2)
+                * math.sin(delta_lng / 2) ** 2
+            )
+            return 2 * 6_371_000.0 * math.asin(min(1.0, math.sqrt(value)))
+
+        suggestions = []
+        for row in rows:
+            distance = distance_m(row)
+            if distance > radius_m:
+                continue
+            suggestions.append({
+                "keyword_id": row["id"],
+                "name": row["name"],
+                "place_id": row["place_id"],
+                "latitude": row["latitude"],
+                "longitude": row["longitude"],
+                "photo_count": row["photo_count"],
+                "distance_m": round(distance, 1),
+                "parent_chain": _walk_parent_chain(db, row["parent_id"]),
+            })
+        suggestions.sort(key=lambda item: (item["distance_m"], -item["photo_count"], item["name"]))
+        return jsonify({"suggestions": suggestions[:8]})
+
     def _bulk_gps_location_payload(db, body, cancel_check=None):
         """Build preview/apply data for resolving locations from EXIF GPS."""
         photo_ids, error = _bulk_gps_location_source_ids(db, body)
@@ -7357,6 +7622,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name.strip():
             return json_error("missing name", 400)
         stripped = name.strip()
+        latitude = body.get("latitude")
+        longitude = body.get("longitude")
+        if (latitude is None) != (longitude is None):
+            return json_error("latitude and longitude must be provided together", 400)
+        if latitude is not None:
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+            except (TypeError, ValueError):
+                return json_error("invalid coordinates", 400)
+            if (
+                not math.isfinite(latitude)
+                or not math.isfinite(longitude)
+                or not -90 <= latitude <= 90
+                or not -180 <= longitude <= 180
+            ):
+                return json_error("invalid coordinates", 400)
 
         db = _get_db()
         edit_error = _photo_location_edit_error(db, photo_id)
@@ -7367,6 +7649,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError:
             # Defensive: validation above should already catch empty input.
             return json_error("missing name", 400)
+        if latitude is not None:
+            db.conn.execute(
+                "UPDATE keywords SET latitude = COALESCE(latitude, ?), "
+                "longitude = COALESCE(longitude, ?) WHERE id = ?",
+                (latitude, longitude, leaf_id),
+            )
+            db.conn.commit()
         db.set_photo_location(photo_id, leaf_id)
         _queue_location_sync_if_enabled(photo_id)
         db.record_edit(
@@ -7402,6 +7691,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not name.strip():
             return json_error("missing name", 400)
         stripped = name.strip()
+        latitude = body.get("latitude")
+        longitude = body.get("longitude")
+        if (latitude is None) != (longitude is None):
+            return json_error("latitude and longitude must be provided together", 400)
+        if latitude is not None:
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+            except (TypeError, ValueError):
+                return json_error("invalid coordinates", 400)
+            if (
+                not math.isfinite(latitude)
+                or not math.isfinite(longitude)
+                or not -90 <= latitude <= 90
+                or not -180 <= longitude <= 180
+            ):
+                return json_error("invalid coordinates", 400)
 
         db = _get_db()
         for pid in photo_ids:
@@ -7413,6 +7719,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             leaf_id = db.get_or_create_text_location(stripped)
         except ValueError:
             return json_error("missing name", 400)
+        if latitude is not None:
+            # A custom name chosen from the map should be available as a
+            # nearby saved suggestion next time. Preserve an existing
+            # location's established map point when the name is reused.
+            db.conn.execute(
+                "UPDATE keywords SET latitude = COALESCE(latitude, ?), "
+                "longitude = COALESCE(longitude, ?) WHERE id = ?",
+                (latitude, longitude, leaf_id),
+            )
+            db.conn.commit()
 
         items = []
         for pid in photo_ids:

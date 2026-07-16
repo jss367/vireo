@@ -1,6 +1,6 @@
 # Privacy Policy
 
-*Effective date: July 12, 2026*
+*Effective date: July 14, 2026*
 
 Vireo is a wildlife photo organizer that runs entirely on your device. This policy explains what data Vireo accesses, what stays on your device, and what leaves it.
 
@@ -27,9 +27,9 @@ Vireo contacts external services in the following ways:
 
 - **iNaturalist Open Data / AWS** — Vireo downloads public taxonomy and species list data. No personal data is sent.
 
-- **Google Maps Platform** — Only if you configure a Google Maps API key, Vireo uses Google's Geocoding, Maps JavaScript, and Places APIs in two ways. First, it turns your photos' GPS coordinates into place names, sending the GPS coordinates of geotagged photos to Google. Second, the browse and keywords pages load Google's Maps JavaScript/Places library so the location search box and the link-place input can autocomplete; as you type, your queries and the details of the place you select are sent to Google. If you do not provide a key, no location data is sent and these features are inactive.
+- **Google Maps Platform** — Only if you configure a Google Maps API key, Vireo uses Google's Geocoding, Maps JavaScript, and Places APIs. It can turn photo coordinates into place names, provide location autocomplete, and show nearby parks, landmarks, and administrative areas while you review photo locations. These features send the relevant photo coordinates, search text, and selected place details to Google. If you do not provide a key, these Google-powered features are inactive.
 
-- **Map tile providers** — When you open the Map page, Vireo loads the Leaflet library from `unpkg.com` and downloads map tiles from third-party providers (OpenStreetMap, Esri/ArcGIS World Imagery, OpenTopoMap) regardless of whether you have a Google Maps API key configured. The map auto-fits to your photos' GPS markers, so the resulting tile requests can reveal the regions of the world where your geotagged photos are located. The marker positions themselves are computed and rendered locally; only the tile-coordinate requests reach those providers.
+- **Map tile providers** — When you open the Map page, or review photo locations without a Google Maps key, Vireo loads the Leaflet library from `unpkg.com` and downloads map tiles from third-party providers (OpenStreetMap, Esri/ArcGIS World Imagery, OpenTopoMap). The map auto-fits to your photos' coordinate markers, so the resulting tile requests can reveal the regions of the world where your geotagged photos are located. The marker positions themselves are computed and rendered locally; only the tile-coordinate requests reach those providers.
 
 - **Bug reports** — Only when you choose to submit an in-app issue report, Vireo sends your description along with diagnostics — recent application logs, photo/folder/prediction counts, system information, recent job history, and your configuration — to a reporting endpoint. By default this is a Google Apps Script endpoint operated by the Vireo project, so the bundle is received and processed on Google's infrastructure. Credentials (tokens, keys, secrets, and passwords) are redacted, but the bundle can still include local file paths, such as the photo folders you have added and the source paths of recent scans or imports. Nothing is sent unless you submit a report.
 
@@ -37,9 +37,9 @@ Beyond the bug reports you choose to submit, the Vireo application has no analyt
 
 ## Website measurement
 
-When you visit `vireo.photo`, we use Plausible Analytics to understand aggregate website traffic and outbound-link clicks, including download-button clicks. The information measured includes the page visited, referring site, campaign parameters included in the URL, outbound-link destination, browser, operating system, device category, and country, region, and city inferred from your network address. We use this information only to understand how people discover Vireo, which downloads they choose, and which external resources they follow.
+When you visit `vireo.photo`, we use Cloudflare Web Analytics to understand aggregate website traffic and performance. The information available to us includes pages visited, referring sites, browser, operating system, country, and page-performance metrics such as page load time and Core Web Vitals. Cloudflare Web Analytics does not record URL query strings. We use this information only to understand how people discover Vireo and how the website performs.
 
-Plausible does not use cookies, browser storage, or persistent identifiers. Plausible briefly processes your IP address and browser user-agent to calculate aggregate statistics using an identifier that changes daily, but does not store the raw values. Vireo does not receive or store your IP address. Learn more in [Plausible's data policy](https://plausible.io/data-policy).
+Cloudflare Web Analytics does not use cookies, browser storage, persistent identifiers, or cross-site tracking. Cloudflare says Web Analytics does not collect or use visitors' personal data and does not track individual end users across customers' websites. Vireo does not receive or store your IP address. Learn more in [Cloudflare's Web Analytics documentation](https://developers.cloudflare.com/web-analytics/).
 
 Installer files are hosted by GitHub. GitHub provides the Vireo project with an aggregate download count for each release file and handles download requests under [GitHub's privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement). These counts are not connected to identifiable website visitors by Vireo.
 

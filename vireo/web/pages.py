@@ -27,6 +27,7 @@ _TEMPLATES = {
     "/move": "move.html",
     "/highlights": "highlights.html",
     "/life-list": "life_list.html",
+    "/locations/review": "location_review.html",
     "/misses": "misses.html",
     "/logs": "logs.html",
     "/import": "import.html",

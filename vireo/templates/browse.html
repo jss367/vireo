@@ -1445,50 +1445,6 @@ body.sidebar-resizing {
 .modal-btn-primary { background: var(--accent); color: var(--bg-primary); }
 .modal-btn-cancel { background: var(--bg-tertiary); color: var(--text-secondary); }
 .modal-preview { font-size: 12px; color: var(--text-dim); margin-top: 8px; }
-.gps-resolve-summary {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 12px;
-  line-height: 1.4;
-}
-.gps-resolve-list {
-  max-height: 280px;
-  overflow-y: auto;
-  border: 1px solid var(--border-primary);
-  border-radius: 4px;
-  margin-bottom: 12px;
-}
-.gps-resolve-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border-primary);
-}
-.gps-resolve-row:last-child { border-bottom: 0; }
-.gps-resolve-place {
-  min-width: 0;
-  color: var(--text-primary);
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.gps-resolve-samples {
-  color: var(--text-dim);
-  font-size: 11px;
-  margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.gps-resolve-count {
-  flex-shrink: 0;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 600;
-}
 .export-var-pill {
   background: var(--bg-tertiary);
   color: var(--text-secondary);
@@ -1667,7 +1623,7 @@ body.sidebar-resizing {
       <button onclick="batchSetFlag('flagged')" style="background:var(--bg-tertiary);color:var(--accent);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Flag</button>
       <button onclick="batchSetFlag('rejected')" style="background:var(--bg-tertiary);color:var(--danger);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Reject</button>
       <button onclick="batchAddKeyword()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Keyword</button>
-      <button id="resolveGpsSelectedBtn" onclick="openGpsResolveForSelection()" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Resolve GPS</button>
+      <button id="resolveGpsSelectedBtn" onclick="reviewLocationsForSelection()" title="Review selected photo coordinates on a map and assign friendly place names" style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Review on Map</button>
       <button onclick="addToCollection()" style="background:var(--bg-tertiary);color:var(--info);border:none;border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">+ Collection</button>
       <button id="compareBtn" onclick="openBrowseCompare()" title="Compare two selected photos side by side" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Compare</button>
       <button id="bestBatchBtn" onclick="openBestBatch()" title="Find and rank neighboring frames around the selected photo" style="display:none;background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:3px;padding:4px 8px;font-size:12px;cursor:pointer;">Best Batch</button>
@@ -1940,20 +1896,6 @@ body.sidebar-resizing {
     <div class="modal-actions">
       <button class="modal-btn modal-btn-primary" onclick="confirmBatchCollection()">Add</button>
       <button class="modal-btn modal-btn-cancel" onclick="hideBatchCollectionModal()">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- Resolve GPS Locations Modal -->
-<div class="modal-overlay" id="gpsResolveModal">
-  <div class="modal" style="width:560px;max-width:calc(100vw - 32px);">
-    <h3>Resolve GPS Locations</h3>
-    <div id="gpsResolveSummary" class="gps-resolve-summary">Loading...</div>
-    <div id="gpsResolveGroups" class="gps-resolve-list"></div>
-    <div class="modal-preview" id="gpsResolveNote"></div>
-    <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" id="gpsResolveApplyBtn" onclick="applyGpsResolve()">Apply</button>
-      <button class="modal-btn modal-btn-cancel" onclick="hideGpsResolveModal()">Cancel</button>
     </div>
   </div>
 </div>
@@ -3023,11 +2965,10 @@ function renderCollectionList(collections) {
     // unavailable (with edit still reachable via right-click) instead of
     // rendering a clickable filter that silently fails.
     var unavailable = !!c.count_error;
-    // Suppress the Resolve GPS shortcut on unavailable collections — it
-    // posts collection_id to /api/batch/location/from-exif, which resolves
-    // the same rules and would repeat the failure inside the modal.
+    // Suppress location review on unavailable collections because the review
+    // page resolves the same collection rules when it builds its queue.
     var resolveBtn = (c.name === 'GPS Without Location Keyword' && !unavailable)
-      ? '<button class="collection-resolve-btn" type="button" title="Resolve locations from GPS" onclick="event.stopPropagation(); openGpsResolveForCollection(' + c.id + ')">Resolve GPS</button>'
+      ? '<button class="collection-resolve-btn" type="button" title="Review photo locations on a map" onclick="event.stopPropagation(); reviewLocationsForCollection(' + c.id + ')">Review on Map</button>'
       : '';
     var itemClass = 'tree-item' + (unavailable ? ' unavailable' : '');
     var titleAttr = unavailable
@@ -5999,91 +5940,9 @@ async function confirmBatchCollection() {
   clearSelection();
 }
 
-var _gpsResolveSource = null;
-var _gpsResolvePreview = null;
-
-function gpsResolveReasonLabel(reason) {
-  var labels = {
-    missing_gps: 'No GPS',
-    invalid_gps: 'Invalid GPS',
-    no_api_key: 'No Google Maps key',
-    no_match: 'No place found',
-    transient_error: 'Temporary lookup failure',
-    already_has_location: 'Already has location',
-  };
-  return labels[reason] || reason || 'Unresolved';
-}
-
-function renderGpsResolvePreview(data) {
-  _gpsResolvePreview = data || {};
-  var total = _gpsResolvePreview.total || 0;
-  var resolvable = _gpsResolvePreview.resolvable || 0;
-  var groups = _gpsResolvePreview.groups || [];
-  var unresolved = _gpsResolvePreview.unresolved || [];
-  var skipped = _gpsResolvePreview.skipped || [];
-  var summary = document.getElementById('gpsResolveSummary');
-  var groupEl = document.getElementById('gpsResolveGroups');
-  var note = document.getElementById('gpsResolveNote');
-  var applyBtn = document.getElementById('gpsResolveApplyBtn');
-
-  summary.textContent = resolvable.toLocaleString() + ' of ' + total.toLocaleString()
-    + ' photos can be assigned across ' + groups.length.toLocaleString()
-    + ' place' + (groups.length === 1 ? '' : 's') + '.';
-
-  groupEl.innerHTML = groups.map(function(g) {
-    var samples = (g.sample_filenames || []).join(', ');
-    return '<div class="gps-resolve-row">' +
-      '<div style="min-width:0;">' +
-        '<div class="gps-resolve-place">' + escapeHtml(g.summary || g.name || g.place_id || 'Unknown place') + '</div>' +
-        (samples ? '<div class="gps-resolve-samples">' + escapeHtml(samples) + '</div>' : '') +
-      '</div>' +
-      '<div class="gps-resolve-count">' + (g.count || 0).toLocaleString() + '</div>' +
-    '</div>';
-  }).join('') || '<div class="gps-resolve-row"><div class="gps-resolve-place">No resolvable GPS locations</div></div>';
-
-  var notes = [];
-  if (unresolved.length) {
-    var reasonCounts = {};
-    unresolved.forEach(function(item) {
-      var reason = item.reason || 'unresolved';
-      reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
-    });
-    var reasonText = Object.keys(reasonCounts).map(function(reason) {
-      return reasonCounts[reason].toLocaleString() + ' ' + gpsResolveReasonLabel(reason);
-    }).join(', ');
-    notes.push(unresolved.length.toLocaleString() + ' unresolved: ' + reasonText);
-  }
-  if (skipped.length) {
-    notes.push(skipped.length.toLocaleString() + ' skipped because they already have a location.');
-  }
-  note.textContent = notes.join(' ');
-  applyBtn.disabled = resolvable === 0;
-  applyBtn.style.opacity = resolvable === 0 ? '0.55' : '';
-}
-
-async function openGpsResolve(source) {
-  _gpsResolveSource = source;
-  _gpsResolvePreview = null;
-  document.getElementById('gpsResolveSummary').textContent = 'Loading...';
-  document.getElementById('gpsResolveGroups').innerHTML = '';
-  document.getElementById('gpsResolveNote').textContent = '';
-  document.getElementById('gpsResolveApplyBtn').disabled = true;
-  document.getElementById('gpsResolveModal').classList.add('open');
-  try {
-    var data = await safeFetch('/api/batch/location/from-exif', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(Object.assign({apply: false}, source)),
-    });
-    renderGpsResolvePreview(data);
-  } catch(e) {
-    hideGpsResolveModal();
-  }
-}
-
-function openGpsResolveForCollection(collectionId) {
+function reviewLocationsForCollection(collectionId) {
   // Same guard as filterByCollection: degraded collections would just
-  // re-hit the unresolvable rules inside /api/batch/location/from-exif.
+  // re-hit the unresolvable rules while building the review queue.
   var collectionMeta = collectionsById[collectionId];
   if (collectionMeta && collectionMeta.count_error) {
     if (typeof showToast === 'function') {
@@ -6095,56 +5954,43 @@ function openGpsResolveForCollection(collectionId) {
     }
     return;
   }
-  openGpsResolve({collection_id: collectionId});
+  sessionStorage.setItem('vireoLocationReviewReturn', window.location.href);
+  sessionStorage.setItem('vireoLocationReviewSource', JSON.stringify({collection_id: collectionId}));
+  window.location.href = '/locations/review?collection_id=' + encodeURIComponent(collectionId);
 }
 
-function openGpsResolveForSelection() {
+function reviewLocationsForSelection() {
   var ids = getActiveSelection();
   if (!ids.length) return;
-  openGpsResolve({photo_ids: ids});
-}
-
-function hideGpsResolveModal() {
-  document.getElementById('gpsResolveModal').classList.remove('open');
-  _gpsResolveSource = null;
-  _gpsResolvePreview = null;
-  window._vireoNativeMenuPhotoIdsOverride = null;
-}
-
-async function applyGpsResolve() {
-  if (!_gpsResolveSource || !_gpsResolvePreview || !_gpsResolvePreview.resolvable) return;
-  var btn = document.getElementById('gpsResolveApplyBtn');
-  btn.disabled = true;
-  btn.textContent = 'Applying...';
+  var payload;
   try {
-    var data = await safeFetch('/api/batch/location/from-exif', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(Object.assign({apply: true}, _gpsResolveSource)),
-    });
-    var updated = data.updated || 0;
-    var updatedIds = [];
-    (data.groups || []).forEach(function(g) {
-      (g.photo_ids || []).forEach(function(id) { updatedIds.push(id); });
-    });
-    hideGpsResolveModal();
-    invalidateKeywordAutocompleteCache();
-    loadKeywords();
-    scheduleCollectionCountsRefresh();
-    refreshPendingSyncBanner();
-    var detailPhotoId = updatedIds.indexOf(selectedPhotoId) !== -1 ? selectedPhotoId : null;
-    await _afterLocationMutation(updatedIds, detailPhotoId);
-    var errors = (data.group_errors || []).length;
-    showToast(
-      'Resolved GPS locations for ' + updated.toLocaleString() + ' photo' + (updated === 1 ? '' : 's')
-      + (errors ? '; ' + errors + ' place group' + (errors === 1 ? '' : 's') + ' failed' : '')
-    );
-    if (updated > 0) showUndoToast();
-  } catch(e) {
-    btn.disabled = false;
-  } finally {
-    btn.textContent = 'Apply';
+    payload = JSON.stringify({photo_ids: ids});
+  } catch (e) {
+    if (typeof showToast === 'function') {
+      showToast('Could not open location review for this selection.', 'error');
+    }
+    return;
   }
+  try {
+    sessionStorage.setItem('vireoLocationReviewSource', payload);
+  } catch (e) {
+    // sessionStorage has a per-origin quota (typically ~5MB). Very large
+    // selections (e.g. "Select all matching photos" on a big library) can
+    // exceed it, in which case setItem throws synchronously. Guide the
+    // user to the collection-based flow, which passes an id in the URL
+    // and never touches sessionStorage for the id list.
+    if (typeof showToast === 'function') {
+      showToast(
+        'Selection is too large to open location review directly (' +
+          ids.length.toLocaleString() +
+          ' photos). Save the selection as a collection first, then use Review on Map from the collection menu.',
+        'error'
+      );
+    }
+    return;
+  }
+  sessionStorage.setItem('vireoLocationReviewReturn', window.location.href);
+  window.location.href = '/locations/review?source=selection';
 }
 
 var captureTimePreviewSeq = 0;
@@ -8388,7 +8234,7 @@ document.addEventListener('contextmenu', function(e) {
   var meta = collectionsById[cid];
   var isUnavailable = !!(meta && meta.count_error);
   // Degraded collections can't be filtered (the /photos endpoint would 400)
-  // and GPS resolve reads from the same collection rules — hide both while
+  // and location review reads from the same collection rules — hide both while
   // keeping the edit/rename/duplicate/delete actions reachable so the user
   // can fix or discard the row.
   var items = [];
@@ -8397,8 +8243,8 @@ document.addEventListener('contextmenu', function(e) {
       onClick: function() { filterByCollection(cid); } });
     if (name === 'GPS Without Location Keyword') {
       items.push({
-        label: 'Resolve GPS Locations',
-        onClick: function() { openGpsResolveForCollection(cid); },
+        label: 'Review Photo Locations',
+        onClick: function() { reviewLocationsForCollection(cid); },
       });
     }
   }
@@ -8413,7 +8259,7 @@ document.addEventListener('contextmenu', function(e) {
     { label: 'Delete Collection',
       onClick: function() { deleteCollectionById(cid, name); } },
   ];
-  // Only emit a leading separator when there are filter/GPS actions above it
+  // Only emit a leading separator when there are filter/review actions above it
   // to divide from — for degraded rows the menu starts at Edit Rules.
   if (items.length) items.push({ separator: true });
   items = items.concat(editActions);
