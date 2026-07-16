@@ -9265,28 +9265,45 @@ class Database:
 
         Species relabel endpoints snapshot curation dst_existed before
         add_keyword actually runs, so they need to know the final stored
-        spelling in advance. Two sources contribute:
+        spelling in advance. Three cases:
 
-        1. If a root taxonomy/general keyword row already matches
-           (SQLite ASCII NOCASE), preserve that stored spelling — the
-           existing curation rows key on it.
-        2. Otherwise apply the same species-casing convention that
-           add_keyword applies for new species keywords, so pre-existing
-           curation from predictions (which inserted `Black Phoebe`) is
-           matched even when the request submits `black phoebe`.
+        1. A single root taxonomy/general keyword row matches (SQLite
+           ASCII NOCASE) → preserve that stored spelling; existing
+           curation rows key on it.
+        2. Multiple distinct stored spellings match the same NOCASE key
+           (intentional homonyms — e.g. legacy general ``Robin`` alongside
+           taxonomy ``robin``) → preserve the caller's spelling. Silently
+           picking one would route bucket/curation writes across
+           genuinely different keyword rows, so the eligibility check
+           (which compares ``bucket["species"]`` to this result exactly)
+           would then reject requests coming from the other homonym's
+           bucket. Bucket collection, API parse, and DB setters all
+           funnel through this call, so preserving keeps them agreeing
+           on the same string.
+        3. No matching root keyword row → apply the same species-casing
+           convention that add_keyword applies for new species keywords,
+           so pre-existing curation from predictions (which inserted
+           `Black Phoebe`) is matched even when the request submits
+           `black phoebe`.
         """
         name = normalize_keyword_display(name)
         if not name:
             return name
-        existing = self.conn.execute(
-            "SELECT name FROM keywords "
+        rows = self.conn.execute(
+            "SELECT DISTINCT name FROM keywords "
             "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
             "AND type IN ('taxonomy', 'general') "
-            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+            "ORDER BY (type = 'taxonomy') DESC, id ASC",
             (name,),
-        ).fetchone()
-        if existing and existing["name"]:
-            return existing["name"]
+        ).fetchall()
+        stored_names = [r["name"] for r in rows if r["name"]]
+        if len(stored_names) == 1:
+            return stored_names[0]
+        if len(stored_names) > 1:
+            for stored in stored_names:
+                if stored == name:
+                    return stored
+            return name
         import config as cfg
         override = cfg.get("keyword_case")
         if override and override != "auto":

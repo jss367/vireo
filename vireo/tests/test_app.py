@@ -10215,6 +10215,60 @@ def test_species_highlights_add_canonicalizes_prediction_cased_label(app_and_db)
     assert resp.get_json()["removed"] == 1
 
 
+def test_species_highlights_add_preserves_ambiguous_homonym_species(app_and_db):
+    """When two intentionally-distinct root species keywords share a
+    NOCASE key (legacy general ``Robin`` alongside taxonomy ``robin``),
+    curation requests from a specific bucket must land on that bucket's
+    exact spelling. Silently collapsing to one canonical spelling would
+    make the eligibility precheck (which compares ``bucket["species"]``
+    exact) reject the request coming from the other homonym's bucket."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/robin', 'robin', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    legacy_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'taxonomy', 1)"
+    )
+    legacy_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'legacy.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (legacy_pid, legacy_kw),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.5")
+    assert resp.status_code == 200
+    buckets = resp.get_json()["buckets"]
+    legacy_bucket = next(b for b in buckets if b["species"] == "Robin")
+    assert legacy_pid in {p["id"] for p in legacy_bucket["photos"]}
+
+    resp = client.post(
+        "/api/species-highlights",
+        json={"species": "Robin", "photo_id": legacy_pid},
+    )
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE photo_id = ?",
+        (legacy_pid,),
+    ).fetchall()
+    assert [r["species"] for r in rows] == ["Robin"]
+
+
 def test_highlights_save(app_and_db):
     """POST /api/highlights/save creates a static collection."""
     app, db = app_and_db
