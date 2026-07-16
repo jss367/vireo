@@ -1383,3 +1383,71 @@ def test_migration_keeps_source_add_when_survivor_was_added_later(tmp_path):
         ).fetchone() is None
     finally:
         db.close()
+
+
+def test_curation_case_alignment_v2_runs_once_by_marker(tmp_path):
+    """The v2 case-alignment sweep runs once per database under its own
+    marker, catching curation rows starred with prediction casing between
+    the v1 repair and the setter canonicalization fix."""
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    db.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ws_id = conn.execute("SELECT id FROM workspaces LIMIT 1").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/p', 'p', 'ok')"
+    )
+    fid = conn.execute("SELECT id FROM folders WHERE path = '/p'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO photos (folder_id, filename) VALUES (?, 'a.jpg')", (fid,)
+    )
+    pid = conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Saffron finch', 'taxonomy', 1)"
+    )
+    # Simulate the pre-fix state: a highlight starred from a
+    # prediction-cased bucket label after the v1 repair already ran.
+    conn.execute(
+        "INSERT INTO species_highlights "
+        "(workspace_id, species, photo_id, rank) VALUES (?, ?, ?, 1)",
+        (ws_id, "Saffron Finch", pid),
+    )
+    conn.execute(
+        "DELETE FROM db_meta WHERE key = 'curation_species_case_aligned_v2'"
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    try:
+        rows = db.conn.execute(
+            "SELECT species FROM species_highlights"
+        ).fetchall()
+        assert [r["species"] for r in rows] == ["Saffron finch"]
+        assert db.get_meta("curation_species_case_aligned_v2") == "1"
+    finally:
+        db.close()
+
+    # Marker present: a raw mismatch seeded now survives reopen untouched
+    # (one-shot semantics — the setters prevent new mismatches instead).
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO species_highlights "
+        "(workspace_id, species, photo_id, rank) "
+        "SELECT workspace_id, 'SAFFRON FINCH', photo_id, 2 "
+        "FROM species_highlights LIMIT 1"
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    try:
+        rows = db.conn.execute(
+            "SELECT species FROM species_highlights ORDER BY rank"
+        ).fetchall()
+        assert [r["species"] for r in rows] == ["Saffron finch", "SAFFRON FINCH"]
+    finally:
+        db.close()

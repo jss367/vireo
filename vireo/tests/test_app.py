@@ -10107,6 +10107,114 @@ def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_
     assert data["buckets"][0]["is_accepted"] is True
 
 
+def _seed_waxbill_casing_scenario(db):
+    """One accepted `Common waxbill` photo plus one photo whose only signal
+    is a raw title-cased prediction `Common Waxbill` (label-file casing —
+    prediction rows are external vocabulary and stay verbatim)."""
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/wax', 'wax', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    waxbill_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    ).lastrowid
+    accepted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'accepted.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (accepted_pid, waxbill_kw),
+    )
+    predicted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'predicted.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (predicted_pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions "
+        "(detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Common Waxbill', 0.95)",
+        (did,),
+    )
+    db.conn.commit()
+    return fid, accepted_pid, predicted_pid
+
+
+def test_highlights_merges_prediction_casing_with_accepted_keyword(app_and_db):
+    """A title-cased classifier label and a sentence-cased accepted keyword
+    are the same species: one Highlights bucket, keyed by the keyword
+    spelling. Prediction rows keep label-file casing (external vocabulary),
+    so the merge must happen at bucket-collection time."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid, accepted_pid, predicted_pid = _seed_waxbill_casing_scenario(db)
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    waxbill_buckets = [
+        b for b in data["buckets"] if b["species"].lower() == "common waxbill"
+    ]
+    assert len(waxbill_buckets) == 1
+    bucket = waxbill_buckets[0]
+    assert bucket["species"] == "Common waxbill"
+    assert {p["id"] for p in bucket["photos"]} == {accepted_pid, predicted_pid}
+
+
+def test_species_highlights_add_canonicalizes_prediction_cased_label(app_and_db):
+    """Starring a photo in a prediction-cased bucket must store and surface
+    the highlight under the keyword spelling.
+
+    Regression for the silently-dropped star: the client sends the bucket
+    label (`Common Waxbill` from the classifier), but the eligibility
+    queries compare species strings exact against `keywords.name`
+    (`Common waxbill`). Without canonicalization at the route/setter, the
+    star writes a `Common Waxbill` row that no query ever matches again."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid, _accepted_pid, predicted_pid = _seed_waxbill_casing_scenario(db)
+
+    resp = client.post(
+        "/api/species-highlights",
+        json={"species": "Common Waxbill", "photo_id": predicted_pid},
+    )
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE photo_id = ?",
+        (predicted_pid,),
+    ).fetchall()
+    assert [r["species"] for r in rows] == ["Common waxbill"]
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    bucket = next(
+        b for b in resp.get_json()["buckets"]
+        if b["species"] == "Common waxbill"
+    )
+    assert bucket["has_highlight_selection"] is True
+    starred = next(p for p in bucket["photos"] if p["id"] == predicted_pid)
+    assert starred["is_highlighted"] is True
+
+    # Un-starring with yet another casing of the same label must find and
+    # remove the canonical row rather than silently deleting nothing.
+    resp = client.delete(
+        "/api/species-highlights",
+        json={"species": "COMMON WAXBILL", "photo_id": predicted_pid},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["removed"] == 1
+
+
 def test_highlights_save(app_and_db):
     """POST /api/highlights/save creates a static collection."""
     app, db = app_and_db
