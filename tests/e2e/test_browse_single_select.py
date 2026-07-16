@@ -378,6 +378,59 @@ def test_add_keyword_input_suggests_existing_keyword(live_server, page):
     expect(page.locator("#detailKeywords")).to_contain_text("Alan's Hummingbird")
 
 
+def test_species_badge_tracks_detail_keyword_edits_without_reload(live_server, page):
+    """The grid's taxonomy badge must stay in sync with detail keyword edits."""
+    db = live_server["db"]
+    source_id = live_server["data"]["photos"][0]
+    target_id = live_server["data"]["photos"][1]
+    old_name = "Hawaii Creeper"
+    new_name = "Hawaii Amakihi"
+    old_id = db.add_keyword(old_name, kw_type="taxonomy")
+    new_id = db.add_keyword(new_name, kw_type="taxonomy")
+    db.tag_photo(target_id, old_id)
+    db.tag_photo(source_id, new_id)
+
+    page.goto(f"{live_server['url']}/browse")
+    card = page.locator(f'.grid-card[data-id="{target_id}"]')
+    expect(card.locator(".grid-card-img-wrap .species-badge")).to_have_text(
+        old_name
+    )
+    card.click()
+
+    old_tag = page.locator("#detailKeywords .keyword-tag", has_text=old_name)
+    expect(old_tag).to_be_visible()
+    with page.expect_response(
+        lambda r: f"/api/photos/{target_id}/keywords/{old_id}" in r.url
+        and r.request.method == "DELETE"
+        and r.status == 200
+    ):
+        old_tag.locator(".remove-kw").click()
+
+    expect(card.locator(".grid-card-img-wrap .species-badge")).to_have_count(0)
+    expect(old_tag).to_have_count(0)
+
+    keyword_input = page.locator("#addKeywordInput")
+    keyword_input.fill(new_name)
+    suggestion = page.locator(
+        "#addKeywordSuggestions .keyword-suggestion-option",
+        has_text=new_name,
+    )
+    expect(suggestion).to_be_visible()
+    with page.expect_response(
+        lambda r: f"/api/photos/{target_id}/keywords" in r.url
+        and r.request.method == "POST"
+        and r.status == 200
+    ):
+        suggestion.click()
+
+    expect(card.locator(".grid-card-img-wrap .species-badge")).to_have_text(
+        new_name
+    )
+    expect(card.locator(".grid-card-img-wrap .species-badge")).not_to_contain_text(
+        old_name
+    )
+
+
 def test_needs_identification_refreshes_after_identification_added(live_server, page):
     """A photo should leave the active Needs Identification grid after tagging."""
     db = live_server["db"]
