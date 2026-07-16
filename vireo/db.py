@@ -10331,9 +10331,17 @@ class Database:
         if self.get_meta("curation_species_case_aligned_v2") != "1":
             try:
                 aligned = self._align_curation_species_case()
-                if aligned:
+                # Edit-history snapshots created after v1 but before the
+                # setter canonicalization fix still carry prediction-cased
+                # species in hl_prev/pref_prev/rep_prev; without this a
+                # later undo would recreate the orphaned curation rows v2
+                # is meant to repair.
+                history_aligned = self._align_curation_history_species()
+                if aligned or history_aligned:
                     log.info(
-                        "curation case alignment v2: moved %d row(s)", aligned
+                        "curation case alignment v2: moved %d row(s), "
+                        "rewrote %d history item(s)",
+                        aligned, history_aligned,
                     )
                 self.set_meta(
                     "curation_species_case_aligned_v2", "1", _commit=False
@@ -10384,6 +10392,82 @@ class Database:
                     f"DELETE FROM {table} WHERE species = ?", (old,)
                 )
         return moved
+
+    def _align_curation_history_species(self):
+        """Rewrite curation species snapshots in edit_history_items.old_value.
+
+        Relabel undo/redo payloads carry snapshots of curation rows keyed
+        by species name. Normalizing only the live tables leaves those
+        JSON snapshots pointing at the legacy spelling, so a later undo
+        would recreate orphaned curation rows that no longer compare
+        equal to ``keywords.name``. Apply the same punctuation
+        normalization + unambiguous stored-species casing to every
+        species value captured by hl_prev/pref_prev/rep_prev. Idempotent
+        on already-normalized rows, so it's safe to re-run in the v2
+        gate after v1 has already normalized the punctuation. Returns
+        the number of history rows rewritten; caller commits.
+        """
+        rewritten = 0
+        unique_species_by_key = self._unique_root_species_by_key()
+
+        def _normalized_curation_species(value):
+            clean = normalize_keyword_display(value or "")
+            if not clean:
+                return clean
+            return unique_species_by_key.get(keyword_match_key(clean), clean)
+
+        history_rows = self.conn.execute(
+            "SELECT id, old_value FROM edit_history_items "
+            "WHERE old_value IS NOT NULL AND old_value LIKE ?",
+            ('{%curation%',),
+        ).fetchall()
+        for row in history_rows:
+            try:
+                payload = json.loads(row["old_value"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            curation = payload.get("curation")
+            if not isinstance(curation, dict):
+                continue
+            dirty = False
+            highlights = curation.get("hl_prev")
+            if isinstance(highlights, list):
+                for index, entry in enumerate(highlights):
+                    if isinstance(entry, str):
+                        normalized = _normalized_curation_species(entry)
+                        if normalized != entry:
+                            highlights[index] = normalized
+                            dirty = True
+                    elif isinstance(entry, dict):
+                        old = entry.get("species")
+                        if isinstance(old, str):
+                            normalized = _normalized_curation_species(old)
+                            if normalized != old:
+                                entry["species"] = normalized
+                                dirty = True
+            for key in ("pref_prev", "rep_prev"):
+                entries = curation.get(key)
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    old = entry.get("species")
+                    if not isinstance(old, str):
+                        continue
+                    normalized = _normalized_curation_species(old)
+                    if normalized != old:
+                        entry["species"] = normalized
+                        dirty = True
+            if dirty:
+                self.conn.execute(
+                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
+                    (json.dumps(payload, sort_keys=True), row["id"]),
+                )
+                rewritten += 1
+        return rewritten
 
     def _unique_root_species_by_key(self):
         """Map match_key → stored root species spelling, unambiguous only.
@@ -10824,73 +10908,7 @@ class Database:
         # homonym-ambiguity rules).
         curation_fixed += self._align_curation_species_case()
 
-        # Relabel undo/redo payloads carry snapshots of the same curation
-        # rows in edit_history_items.old_value. Normalizing only the live
-        # tables above leaves those JSON snapshots pointing at the legacy
-        # spelling; a later undo would then recreate orphaned curation rows
-        # that no longer compare equal to keywords.name. Apply the same
-        # punctuation normalization and unambiguous stored-species casing to
-        # every species value captured by hl_prev/pref_prev/rep_prev.
-        history_curation_fixed = 0
-        unique_species_by_key = self._unique_root_species_by_key()
-
-        def _normalized_curation_species(value):
-            clean = normalize_keyword_display(value or "")
-            if not clean:
-                return clean
-            return unique_species_by_key.get(keyword_match_key(clean), clean)
-
-        history_rows = self.conn.execute(
-            "SELECT id, old_value FROM edit_history_items "
-            "WHERE old_value IS NOT NULL AND old_value LIKE ?",
-            ('{%curation%',),
-        ).fetchall()
-        for row in history_rows:
-            try:
-                payload = json.loads(row["old_value"])
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            curation = payload.get("curation")
-            if not isinstance(curation, dict):
-                continue
-            dirty = False
-            highlights = curation.get("hl_prev")
-            if isinstance(highlights, list):
-                for index, entry in enumerate(highlights):
-                    if isinstance(entry, str):
-                        normalized = _normalized_curation_species(entry)
-                        if normalized != entry:
-                            highlights[index] = normalized
-                            dirty = True
-                    elif isinstance(entry, dict):
-                        old = entry.get("species")
-                        if isinstance(old, str):
-                            normalized = _normalized_curation_species(old)
-                            if normalized != old:
-                                entry["species"] = normalized
-                                dirty = True
-            for key in ("pref_prev", "rep_prev"):
-                entries = curation.get(key)
-                if not isinstance(entries, list):
-                    continue
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    old = entry.get("species")
-                    if not isinstance(old, str):
-                        continue
-                    normalized = _normalized_curation_species(old)
-                    if normalized != old:
-                        entry["species"] = normalized
-                        dirty = True
-            if dirty:
-                self.conn.execute(
-                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
-                    (json.dumps(payload, sort_keys=True), row["id"]),
-                )
-                history_curation_fixed += 1
+        history_curation_fixed = self._align_curation_history_species()
 
         if (
             dropped_empty or merged or renamed or pending_fixed

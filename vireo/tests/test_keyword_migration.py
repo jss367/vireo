@@ -1451,3 +1451,73 @@ def test_curation_case_alignment_v2_runs_once_by_marker(tmp_path):
         assert [r["species"] for r in rows] == ["Saffron finch", "SAFFRON FINCH"]
     finally:
         db.close()
+
+
+def test_curation_case_alignment_v2_rewrites_history_snapshots(tmp_path):
+    """Undo/redo snapshots keyed on prediction casing (created between the
+    v1 sweep and the setter canonicalization fix) get rewritten by the v2
+    gate too, so a later undo can't recreate the orphaned curation rows
+    the v2 sweep is meant to repair."""
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    db.close()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/p', 'p', 'ok')"
+    )
+    fid = conn.execute("SELECT id FROM folders WHERE path = '/p'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO photos (folder_id, filename) VALUES (?, 'a.jpg')", (fid,)
+    )
+    pid = conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Saffron finch', 'taxonomy', 1)"
+    )
+    # Seed a relabel edit_history_item captured with prediction casing.
+    # Both hl_prev entry shapes (bare string and dict) plus pref_prev
+    # and rep_prev cover the branches in _align_curation_history_species.
+    conn.execute(
+        "INSERT INTO edit_history (action_type, description) "
+        "VALUES ('relabel', 't')"
+    )
+    edit_id = conn.execute(
+        "SELECT id FROM edit_history LIMIT 1"
+    ).fetchone()["id"]
+    payload = {
+        "curation": {
+            "hl_prev": [
+                "Saffron Finch",
+                {"species": "Saffron Finch", "rank": 1, "photo_id": pid},
+            ],
+            "pref_prev": [{"species": "Saffron Finch", "photo_id": pid}],
+            "rep_prev": [{"species": "Saffron Finch", "photo_id": pid}],
+        }
+    }
+    conn.execute(
+        "INSERT INTO edit_history_items "
+        "(edit_id, photo_id, old_value, new_value) VALUES (?, ?, ?, '')",
+        (edit_id, pid, json.dumps(payload)),
+    )
+    conn.execute(
+        "DELETE FROM db_meta WHERE key = 'curation_species_case_aligned_v2'"
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    try:
+        row = db.conn.execute(
+            "SELECT old_value FROM edit_history_items LIMIT 1"
+        ).fetchone()
+        rewritten = json.loads(row["old_value"])
+        curation = rewritten["curation"]
+        assert curation["hl_prev"][0] == "Saffron finch"
+        assert curation["hl_prev"][1]["species"] == "Saffron finch"
+        assert curation["pref_prev"][0]["species"] == "Saffron finch"
+        assert curation["rep_prev"][0]["species"] == "Saffron finch"
+        assert db.get_meta("curation_species_case_aligned_v2") == "1"
+    finally:
+        db.close()
