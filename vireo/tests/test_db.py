@@ -2176,6 +2176,8 @@ def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
     )
     assert stats["accessible_photos"] == 1
     assert stats["missing_folder_count"] == 1
+    assert stats["attention"]["unclassified"] == 1
+    assert stats["attention"]["missing_location"] == 1
     months = {row["month"]: row["count"] for row in stats["photos_by_month"]}
     assert months.get("2024-06") == 2
 

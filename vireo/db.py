@@ -6824,6 +6824,29 @@ class Database:
             (ws, min_conf, *scope_params),
         ).fetchone()[0]
 
+        # Needs Attention links only open photos that are currently
+        # accessible. Keep the headline classification aggregate metadata-
+        # complete above, but use this reachable subset for operational work.
+        accessible_classified_count = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT d.photo_id)
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN folders f
+                 ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 ){scope_sql}""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()[0]
+
         # photos_by_hour and quality_dist are also pure-metadata aggregates;
         # see the comment above the top_keywords block for the rationale.
         photos_by_hour = self.conn.execute(
@@ -6875,6 +6898,8 @@ class Database:
                 FROM photos p
                 JOIN workspace_folders wf
                   ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN folders f
+                  ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                 WHERE {' AND '.join(location_conditions)}{scope_sql}""",
             (ws, *scope_params),
         ).fetchone()[0]
@@ -6912,6 +6937,8 @@ class Database:
                   FROM photos p
                   JOIN workspace_folders wf
                     ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN folders f
+                    ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                   WHERE p.file_hash IS NOT NULL
                     AND COALESCE(p.flag, 'none') != 'rejected'{scope_sql}
                   GROUP BY p.file_hash
@@ -6939,7 +6966,11 @@ class Database:
             "keyword_count": overview["keyword_count"] or 0,
             "pending_changes": pending_changes,
             "attention": {
-                "unclassified": max(0, total_photos - classified_count),
+                "unclassified": max(
+                    0,
+                    (overview["accessible_photos"] or 0)
+                    - accessible_classified_count,
+                ),
                 "missing_location": missing_location,
                 "missing_previews": missing_previews,
                 "preview_size": preview_size,

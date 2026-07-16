@@ -1269,6 +1269,9 @@ function renderAttention(attention) {
   var syncBlocked = dashboardScopeIsActive()
     ? 'Metadata sync runs workspace-wide. Reset the Dashboard scope to sync safely from this card.'
     : '';
+  var duplicatesBlocked = dashboardScopeIsActive()
+    ? 'Duplicate review is workspace-wide. Reset the Dashboard scope to review the same groups counted here.'
+    : '';
   var html = '';
   html += attentionCard('Classification', attention.unclassified || 0,
     'Photos without a current classification.', 'Open Process', "openProcess('classify')",
@@ -1283,7 +1286,8 @@ function renderAttention(attention) {
     'startDashboardSync()', {done: 'XMP metadata is up to date.', disabledReason: syncBlocked});
   html += attentionCard('Duplicate groups', attention.duplicate_groups || 0,
     'Possible duplicate groups still needing a decision.', 'Review duplicates',
-    "window.location.href='/duplicates'", {done: 'No unresolved duplicate groups.'});
+    "window.location.href='/duplicates'",
+    {done: 'No unresolved duplicate groups.', disabledReason: duplicatesBlocked});
   document.getElementById('attentionGrid').innerHTML = html;
 }
 

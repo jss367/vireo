@@ -90,8 +90,12 @@ def test_dashboard_rejects_reversed_url_dates_and_labels_open_ranges(live_server
 
 
 def test_scoped_dashboard_disables_workspace_wide_sync(live_server, page):
-    """A scoped pending count cannot trigger an unscoped metadata sync."""
+    """Scoped attention counts cannot trigger workspace-wide actions."""
     db = live_server["db"]
+    db.conn.execute(
+        "UPDATE photos SET file_hash = 'same' WHERE id IN (?, ?)",
+        tuple(live_server["data"]["photos"][:2]),
+    )
     db.conn.execute(
         "INSERT INTO pending_changes "
         "(photo_id, change_type, value, change_token, workspace_id) "
@@ -108,6 +112,13 @@ def test_scoped_dashboard_disables_workspace_wide_sync(live_server, page):
     sync_button = sync_card.get_by_role("button", name="Sync workspace")
     expect(sync_button).to_be_disabled()
     expect(sync_button).to_have_attribute("title", re.compile("workspace-wide"))
+    duplicate_card = page.locator(
+        "#attentionGrid .attention-card", has_text="Duplicate groups"
+    )
+    expect(duplicate_card.locator(".attention-count")).to_have_text("1")
+    duplicate_button = duplicate_card.get_by_role("button", name="Review duplicates")
+    expect(duplicate_button).to_be_disabled()
+    expect(duplicate_button).to_have_attribute("title", re.compile("workspace-wide"))
 
 
 def test_process_blocks_unavailable_dashboard_collection(live_server, page):
