@@ -542,7 +542,8 @@ def _photo_highlight_entries(db, photo_id):
         None, min_quality=0.0, photo_id=photo_id
     )
     buckets, _unidentified = _collect_highlight_buckets(
-        candidates, confidence_threshold=0.0
+        candidates, confidence_threshold=0.0,
+        canonicalize_species=_species_canonicalizer(db),
     )
     entries = []
     for bucket in buckets:
@@ -588,10 +589,27 @@ def _normalize_highlight_presence_filter(value):
     return value
 
 
+def _species_canonicalizer(db):
+    """Memoized wrapper around db.resolve_species_display_name.
+
+    Bucket collection resolves the same handful of species strings for
+    thousands of candidate rows; caching avoids a keyword lookup per row.
+    """
+    cache = {}
+
+    def canonicalize(name):
+        if name not in cache:
+            cache[name] = db.resolve_species_display_name(name)
+        return cache[name]
+
+    return canonicalize
+
+
 def _collect_highlight_buckets(
     candidates,
     confidence_threshold,
     confirmation_filter="all",
+    canonicalize_species=None,
 ):
     confirmation_filter = _normalize_highlight_confirmation_filter(
         confirmation_filter
@@ -615,7 +633,15 @@ def _collect_highlight_buckets(
             and predicted_conf is not None
             and predicted_conf >= confidence_threshold
         ):
+            # Prediction labels are external vocabulary (classifier label
+            # files) with their own casing. Bucket by the spelling
+            # add_keyword would store so a predicted `Common Waxbill` and
+            # photos already accepted as `Common waxbill` land in ONE
+            # bucket, and so curation written from this bucket's label keys
+            # on the string the keyword row and eligibility queries use.
             species = r["predicted_species"]
+            if canonicalize_species is not None:
+                species = canonicalize_species(species) or species
             is_accepted = False
         else:
             species = None
@@ -9465,6 +9491,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         if not species:
             return None, "species required"
+        # Canonicalize to the spelling add_keyword would store (see
+        # _parse_species_highlight_body) so the eligibility prechecks and
+        # the DB setters all key on one string.
+        species = _get_db().resolve_species_display_name(species)
+        if not species:
+            return None, "species required"
 
         photo_id = body.get("photo_id")
         # Ordered highlights are per-photo (multiple photos per species),
@@ -9510,7 +9542,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _photo_can_be_highlights_preference(db, species, photo_id):
         candidates = db.get_highlights_candidates(None, min_quality=0.0)
         buckets, _unidentified = _collect_highlight_buckets(
-            candidates, confidence_threshold=0.0
+            candidates, confidence_threshold=0.0,
+            canonicalize_species=_species_canonicalizer(db),
         )
         for bucket in buckets:
             if bucket["species"] != species:
@@ -9600,6 +9633,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _parse_species_highlight_body(body, require_direction=False):
         species = body.get("species", "")
         species = species.strip() if isinstance(species, str) else ""
+        if not species:
+            return None, "species required"
+        # Canonicalize to the spelling add_keyword would store: the client
+        # sends bucket labels, which for unconfirmed buckets derive from
+        # prediction casing. The eligibility precheck compares against
+        # canonical bucket keys and the DB setters canonicalize on write,
+        # so parse-time canonicalization keeps all three in agreement.
+        species = _get_db().resolve_species_display_name(species)
         if not species:
             return None, "species required"
         photo_id = body.get("photo_id")
@@ -9699,7 +9740,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         total_in_scope = db.count_filtered_photos(folder_id=folder_id)
 
         buckets, unidentified_photos = _collect_highlight_buckets(
-            candidates, confidence_threshold, confirmation_filter
+            candidates, confidence_threshold, confirmation_filter,
+            canonicalize_species=_species_canonicalizer(db),
         )
         eligible_count = sum(b["photo_count"] for b in buckets) + len(
             unidentified_photos
@@ -10348,6 +10390,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # dst_existed=false; undo would then delete the user's
         # pre-existing highlight/preference/rep.
         species = db.resolve_species_display_name(species)
+        # Multi-homonym reconciliation. resolve_species_display_name
+        # preserves the caller's spelling when two intentionally-distinct
+        # root species keywords share a NOCASE key (legacy general
+        # ``Robin`` alongside taxonomy ``robin``) so bucket / parse /
+        # setter paths stay in agreement on one string. add_keyword's
+        # typed lookup below still prefers the taxonomy row, however, so
+        # a request submitted as ``Robin`` would snapshot dst_existed
+        # against ``Robin`` and then rename onto ``robin`` — leaving undo
+        # able to delete pre-existing ``robin`` curation rows it never
+        # created. Mirror add_keyword's ORDER BY here so snapshots and
+        # renames key on the exact spelling add_keyword will store. Rows
+        # with type NOT IN ('taxonomy', 'general') are excluded (matching
+        # add_keyword) so a deliberate individual/location/genre homonym
+        # doesn't misroute the target.
+        target_row = db.conn.execute(
+            "SELECT name FROM keywords WHERE name = ? COLLATE NOCASE "
+            "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
+            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+            (species,),
+        ).fetchone()
+        if target_row and target_row["name"]:
+            species = target_row["name"]
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)
@@ -10761,7 +10825,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
         buckets, unidentified_photos = _collect_highlight_buckets(
-            candidates, confidence_threshold, confirmation_filter
+            candidates, confidence_threshold, confirmation_filter,
+            canonicalize_species=_species_canonicalizer(db),
         )
         buckets, unidentified_photos = _filter_highlight_sections(
             buckets,

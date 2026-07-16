@@ -9231,40 +9231,97 @@ class Database:
             # First word capitalized, rest lowercase: "Black phoebe"
             words = name.split()
             if len(words) > 1:
-                return words[0].capitalize() + " " + " ".join(w.lower() for w in words[1:])
-            return name.capitalize()
+                first = self._sentence_case_first_word(words[0])
+                return first + " " + " ".join(w.lower() for w in words[1:])
+            return self._sentence_case_first_word(name)
         elif convention == "title":
             # Title Case: "Black Phoebe"
             return name.title()
         return name
+
+    @staticmethod
+    def _sentence_case_first_word(word):
+        """Capitalize a first word without mangling mixed-case eponyms.
+
+        ``str.capitalize()`` lowercases everything after the first letter,
+        so a classifier label like ``McKay's bunting`` would come out
+        ``Mckay's bunting``. Preserve existing internal casing unless the
+        word is ALL CAPS (shouty label files), which sentence-cases.
+        """
+        if not word:
+            return word
+        has_case = any(ch.lower() != ch.upper() for ch in word)
+        if has_case and word == word.upper():
+            chars = list(word.lower())
+            for idx, ch in enumerate(chars):
+                if ch.lower() != ch.upper():
+                    chars[idx] = ch.upper()
+                    break
+            return "".join(chars)
+        return word[0].upper() + word[1:]
 
     def resolve_species_display_name(self, name):
         """Predict the stored species name that add_keyword(is_species=True) would use.
 
         Species relabel endpoints snapshot curation dst_existed before
         add_keyword actually runs, so they need to know the final stored
-        spelling in advance. Two sources contribute:
+        spelling in advance. Cases:
 
-        1. If a root taxonomy/general keyword row already matches
-           (SQLite ASCII NOCASE), preserve that stored spelling — the
-           existing curation rows key on it.
-        2. Otherwise apply the same species-casing convention that
-           add_keyword applies for new species keywords, so pre-existing
-           curation from predictions (which inserted `Black Phoebe`) is
-           matched even when the request submits `black phoebe`.
+        1. A single species-bearing root keyword row matches (SQLite
+           ASCII NOCASE) → preserve that stored spelling; existing
+           curation rows key on it. A non-species general homonym with
+           the same NOCASE key (e.g. a hand-tagged ``Common Waxbill``
+           general alongside a taxonomy ``Common waxbill``) is ignored
+           here — add_keyword's typed lookup prefers the taxonomy row,
+           so returning the general's spelling would key curation onto a
+           string add_keyword never stores.
+        2. Multiple species-bearing stored spellings match the same
+           NOCASE key (intentional homonyms — e.g. legacy general
+           ``Robin`` (is_species=1) alongside taxonomy ``robin``) →
+           preserve the caller's spelling. Silently picking one would
+           route bucket/curation writes across genuinely different
+           species rows, so the eligibility check (which compares
+           ``bucket["species"]`` to this result exactly) would then
+           reject requests coming from the other homonym's bucket.
+           Bucket collection, API parse, and DB setters all funnel
+           through this call, so preserving keeps them agreeing on the
+           same string. (Callers that need the exact spelling
+           add_keyword will land on after promotion — e.g. relabel
+           snapshots — apply add_keyword's ORDER BY themselves.)
+        3. No species-bearing row but a non-species general row shares
+           the NOCASE key → return that general's spelling.
+           add_keyword(is_species=True) would find and promote that row
+           in place, keeping its name, so curation must key on the same
+           string.
+        4. No matching root keyword row → apply the same species-casing
+           convention that add_keyword applies for new species keywords,
+           so pre-existing curation from predictions (which inserted
+           `Black Phoebe`) is matched even when the request submits
+           `black phoebe`.
         """
         name = normalize_keyword_display(name)
         if not name:
             return name
-        existing = self.conn.execute(
-            "SELECT name FROM keywords "
+        rows = self.conn.execute(
+            "SELECT name, type, is_species FROM keywords "
             "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
             "AND type IN ('taxonomy', 'general') "
-            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+            "ORDER BY (type = 'taxonomy') DESC, id ASC",
             (name,),
-        ).fetchone()
-        if existing and existing["name"]:
-            return existing["name"]
+        ).fetchall()
+        if rows:
+            species_rows = [
+                r for r in rows
+                if r["is_species"] or r["type"] == "taxonomy"
+            ]
+            if len(species_rows) == 1:
+                return species_rows[0]["name"]
+            if len(species_rows) > 1:
+                for r in species_rows:
+                    if r["name"] == name:
+                        return r["name"]
+                return name
+            return rows[0]["name"]
         import config as cfg
         override = cfg.get("keyword_case")
         if override and override != "auto":
@@ -10290,15 +10347,238 @@ class Database:
         the marker — so a failed run retries on the next open instead of
         leaving a half-normalized keyword table.
         """
-        if self.get_meta("keyword_names_normalized") == "1":
-            return
-        try:
-            self._normalize_keyword_data_once()
-            self.set_meta("keyword_names_normalized", "1", _commit=False)
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        if self.get_meta("keyword_names_normalized") != "1":
+            try:
+                self._normalize_keyword_data_once()
+                self.set_meta("keyword_names_normalized", "1", _commit=False)
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        # Second-generation curation case alignment. The v1 sweep above ran
+        # on databases before curation writes canonicalized their species
+        # input, so highlight/preference rows starred from prediction-cased
+        # bucket labels between the v1 run and that fix are still keyed with
+        # classifier casing (e.g. `Common Waxbill` vs the `Common waxbill`
+        # keyword). Re-run just the case-alignment pass once under its own
+        # marker; with the setters now canonicalizing on write, new
+        # mismatches cannot form afterwards.
+        if self.get_meta("curation_species_case_aligned_v2") != "1":
+            try:
+                aligned = self._align_curation_species_case()
+                # Edit-history snapshots created after v1 but before the
+                # setter canonicalization fix still carry prediction-cased
+                # species in hl_prev/pref_prev/rep_prev; without this a
+                # later undo would recreate the orphaned curation rows v2
+                # is meant to repair.
+                history_aligned = self._align_curation_history_species()
+                if aligned or history_aligned:
+                    log.info(
+                        "curation case alignment v2: moved %d row(s), "
+                        "rewrote %d history item(s)",
+                        aligned, history_aligned,
+                    )
+                self.set_meta(
+                    "curation_species_case_aligned_v2", "1", _commit=False
+                )
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+
+    def _align_curation_species_case(self):
+        """Re-key curation rows whose species differs from the canonical
+        spelling only by case.
+
+        ``normalize_keyword_display()`` preserves case, so the punctuation
+        sweep leaves a curation row keyed ``Saffron Finch`` untouched while
+        the species keyword row is ``Saffron finch`` — and the eligible
+        highlight/life-list queries compare those strings EXACT against
+        ``keywords.name``, so the curated selection silently drops out.
+
+        Two sources of the canonical spelling, mirroring
+        ``resolve_species_display_name`` (the function
+        ``_collect_highlight_buckets`` uses to canonicalize prediction
+        labels):
+
+        1. A single surviving root species keyword for the match_key.
+           Intentionally-distinct same-key homonyms (e.g. a legacy
+           ``type='general', is_species=1`` ``Robin`` alongside a taxonomy
+           ``robin``) must not have every curation row for the other
+           spelling rewritten onto the picked one — the joined queries
+           would then match a species keyword the photo doesn't carry.
+           Ambiguous case-variant homonyms are left as-is.
+        2. If no keyword row exists at all — e.g. a highlight starred from
+           an unconfirmed prediction bucket before the photo was accepted
+           — apply the detected case convention so the row lands on the
+           string the bucket will produce after this migration. Without
+           this, the bucket-side canonicalization drifts to (say)
+           ``Common waxbill`` while the highlight stays at
+           ``Common Waxbill``, silently un-starring the photo.
+
+        Returns the number of rows moved; caller commits.
+        """
+        moved = 0
+        unique_species_by_key, all_species_keys = self._species_keyword_maps()
+        for table, rename in (
+            ("photo_preferences", self.rename_photo_preferences_species),
+            ("species_representatives",
+             self.rename_species_representatives_species),
+            ("species_highlights", self.rename_species_highlights_species),
+        ):
+            names = [
+                r["species"] for r in self.conn.execute(
+                    f"SELECT DISTINCT species FROM {table}"
+                ).fetchall()
+            ]
+            for old in names:
+                stored = self._canonical_curation_species(
+                    old, unique_species_by_key, all_species_keys
+                )
+                if not stored or stored == old:
+                    continue
+                moved += rename(old, stored, _commit=False) or 0
+                self.conn.execute(
+                    f"DELETE FROM {table} WHERE species = ?", (old,)
+                )
+        return moved
+
+    def _align_curation_history_species(self):
+        """Rewrite curation species snapshots in edit_history_items.old_value.
+
+        Relabel undo/redo payloads carry snapshots of curation rows keyed
+        by species name. Normalizing only the live tables leaves those
+        JSON snapshots pointing at the legacy spelling, so a later undo
+        would recreate orphaned curation rows that no longer compare
+        equal to the string the bucket / eligibility queries expect.
+        Route every species value captured by hl_prev/pref_prev/rep_prev
+        through the same canonicalization ``_align_curation_species_case``
+        applies to the live tables (unambiguous stored spelling, ambiguous
+        homonyms left alone, no-keyword predictions case-converted).
+        Idempotent on already-normalized rows, so it's safe to re-run in
+        the v2 gate after v1 has already normalized the punctuation.
+        Returns the number of history rows rewritten; caller commits.
+        """
+        rewritten = 0
+        unique_species_by_key, all_species_keys = self._species_keyword_maps()
+
+        def _normalized_curation_species(value):
+            return self._canonical_curation_species(
+                value, unique_species_by_key, all_species_keys
+            )
+
+        history_rows = self.conn.execute(
+            "SELECT id, old_value FROM edit_history_items "
+            "WHERE old_value IS NOT NULL AND old_value LIKE ?",
+            ('{%curation%',),
+        ).fetchall()
+        for row in history_rows:
+            try:
+                payload = json.loads(row["old_value"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            curation = payload.get("curation")
+            if not isinstance(curation, dict):
+                continue
+            dirty = False
+            highlights = curation.get("hl_prev")
+            if isinstance(highlights, list):
+                for index, entry in enumerate(highlights):
+                    if isinstance(entry, str):
+                        normalized = _normalized_curation_species(entry)
+                        if normalized != entry:
+                            highlights[index] = normalized
+                            dirty = True
+                    elif isinstance(entry, dict):
+                        old = entry.get("species")
+                        if isinstance(old, str):
+                            normalized = _normalized_curation_species(old)
+                            if normalized != old:
+                                entry["species"] = normalized
+                                dirty = True
+            for key in ("pref_prev", "rep_prev"):
+                entries = curation.get(key)
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    old = entry.get("species")
+                    if not isinstance(old, str):
+                        continue
+                    normalized = _normalized_curation_species(old)
+                    if normalized != old:
+                        entry["species"] = normalized
+                        dirty = True
+            if dirty:
+                self.conn.execute(
+                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
+                    (json.dumps(payload, sort_keys=True), row["id"]),
+                )
+                rewritten += 1
+        return rewritten
+
+    def _species_keyword_maps(self):
+        """Return ``(unique_species_by_key, all_species_keys)`` for
+        curation alignment.
+
+        ``unique_species_by_key``: match_key → stored root species
+        spelling, ONLY for keys resolving to a single distinct spelling.
+        Homonyms (multiple distinct spellings for the same key) are
+        omitted so callers can't rewrite curation across genuinely
+        different keyword rows.
+
+        ``all_species_keys``: set of match_keys with any root species
+        keyword row (ambiguous or not). Used to distinguish "no keyword
+        row at all" — safe to canonicalize a curation species via the
+        detected case convention — from "ambiguous homonym", which
+        must be left alone.
+        """
+        species_by_key = {}
+        for row in self.conn.execute(
+            "SELECT name FROM keywords "
+            "WHERE parent_id IS NULL AND (is_species = 1 OR type = 'taxonomy')"
+        ).fetchall():
+            species_by_key.setdefault(keyword_match_key(row["name"]), []).append(
+                row["name"]
+            )
+        unique = {
+            key: names[0] for key, names in species_by_key.items()
+            if len(set(names)) == 1
+        }
+        return unique, set(species_by_key.keys())
+
+    def _canonical_curation_species(
+        self, name, unique_species_by_key, all_species_keys,
+    ):
+        """Canonical spelling for a curation species value.
+
+        Agrees with ``_collect_highlight_buckets`` / ``resolve_species_display_name``:
+
+        - Unambiguous keyword match → use the stored spelling.
+        - Ambiguous homonym → leave alone (returns the punctuation-
+          normalized input unchanged).
+        - No keyword row for the match_key → apply the same case
+          convention ``_collect_highlight_buckets`` uses when it
+          canonicalizes predicted species labels, so a highlight starred
+          from a prediction-only bucket (no keyword exists yet because
+          the photo hasn't been accepted) keys on the string the bucket
+          will emit after this migration.
+
+        Empty input returns unchanged.
+        """
+        clean = normalize_keyword_display(name or "")
+        if not clean:
+            return clean
+        key = keyword_match_key(clean)
+        stored = unique_species_by_key.get(key)
+        if stored:
+            return stored
+        if key in all_species_keys:
+            return clean
+        return self.resolve_species_display_name(clean)
 
     def _normalize_keyword_data_once(self):
         """One-shot backfill: normalize every stored keyword/species name.
@@ -10715,125 +10995,11 @@ class Database:
                 )
 
         # Second curation pass: align case-only mismatches with the stored
-        # keyword spelling. normalize_keyword_display() preserves case, so
-        # the punctuation sweep above leaves a curation row keyed
-        # `Saffron Finch` untouched while the species keyword row is
-        # `Saffron finch` — and the eligible-highlight/life-list queries
-        # compare those strings EXACT against keywords.name, so the curated
-        # selection silently drops out.
-        #
-        # The match-key grouping earlier only merged within
-        # (match_key, parent_id, type), so intentionally-distinct
-        # same-key homonyms across types survive — for example a legacy
-        # `type='general', is_species=1` `Robin` alongside a taxonomy
-        # `robin`. A blind key→first-name map would then rewrite every
-        # curation row for the other spelling to the picked one,
-        # including for photos that carry the other keyword; the joined
-        # highlight/life-list queries then match a species keyword the
-        # photo doesn't have, so that photo's curation silently
-        # disappears. Restrict this pass to match_keys with a single
-        # surviving species keyword. Ambiguous case-variant homonyms are
-        # left as-is; the curation stays exactly where the pre-migration
-        # code had it, which is the same state that survived before the
-        # normalization work.
-        species_by_key = {}
-        for row in self.conn.execute(
-            "SELECT name FROM keywords "
-            "WHERE parent_id IS NULL AND (is_species = 1 OR type = 'taxonomy')"
-        ).fetchall():
-            species_by_key.setdefault(keyword_match_key(row["name"]), []).append(
-                row["name"]
-            )
-        unique_species_by_key = {
-            key: names[0] for key, names in species_by_key.items()
-            if len(set(names)) == 1
-        }
-        for table, rename in (
-            ("photo_preferences", self.rename_photo_preferences_species),
-            ("species_representatives",
-             self.rename_species_representatives_species),
-            ("species_highlights", self.rename_species_highlights_species),
-        ):
-            names = [
-                r["species"] for r in self.conn.execute(
-                    f"SELECT DISTINCT species FROM {table}"
-                ).fetchall()
-            ]
-            for old in names:
-                stored = unique_species_by_key.get(keyword_match_key(old or ""))
-                if not stored or stored == old:
-                    continue
-                curation_fixed += rename(old, stored, _commit=False) or 0
-                self.conn.execute(
-                    f"DELETE FROM {table} WHERE species = ?", (old,)
-                )
+        # keyword spelling (see _align_curation_species_case for the
+        # homonym-ambiguity rules).
+        curation_fixed += self._align_curation_species_case()
 
-        # Relabel undo/redo payloads carry snapshots of the same curation
-        # rows in edit_history_items.old_value. Normalizing only the live
-        # tables above leaves those JSON snapshots pointing at the legacy
-        # spelling; a later undo would then recreate orphaned curation rows
-        # that no longer compare equal to keywords.name. Apply the same
-        # punctuation normalization and unambiguous stored-species casing to
-        # every species value captured by hl_prev/pref_prev/rep_prev.
-        history_curation_fixed = 0
-
-        def _normalized_curation_species(value):
-            clean = normalize_keyword_display(value or "")
-            if not clean:
-                return clean
-            return unique_species_by_key.get(keyword_match_key(clean), clean)
-
-        history_rows = self.conn.execute(
-            "SELECT id, old_value FROM edit_history_items "
-            "WHERE old_value IS NOT NULL AND old_value LIKE ?",
-            ('{%curation%',),
-        ).fetchall()
-        for row in history_rows:
-            try:
-                payload = json.loads(row["old_value"])
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            curation = payload.get("curation")
-            if not isinstance(curation, dict):
-                continue
-            dirty = False
-            highlights = curation.get("hl_prev")
-            if isinstance(highlights, list):
-                for index, entry in enumerate(highlights):
-                    if isinstance(entry, str):
-                        normalized = _normalized_curation_species(entry)
-                        if normalized != entry:
-                            highlights[index] = normalized
-                            dirty = True
-                    elif isinstance(entry, dict):
-                        old = entry.get("species")
-                        if isinstance(old, str):
-                            normalized = _normalized_curation_species(old)
-                            if normalized != old:
-                                entry["species"] = normalized
-                                dirty = True
-            for key in ("pref_prev", "rep_prev"):
-                entries = curation.get(key)
-                if not isinstance(entries, list):
-                    continue
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    old = entry.get("species")
-                    if not isinstance(old, str):
-                        continue
-                    normalized = _normalized_curation_species(old)
-                    if normalized != old:
-                        entry["species"] = normalized
-                        dirty = True
-            if dirty:
-                self.conn.execute(
-                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
-                    (json.dumps(payload, sort_keys=True), row["id"]),
-                )
-                history_curation_fixed += 1
+        history_curation_fixed = self._align_curation_history_species()
 
         if (
             dropped_empty or merged or renamed or pending_fixed
@@ -12044,6 +12210,8 @@ class Database:
         by the single-species Life List paging endpoint so incremental
         loads don't scan every species' representatives.
         """
+        if species is not None:
+            species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         eligibility_filter = ""
         if eligible_only:
@@ -12135,7 +12303,17 @@ class Database:
         )
 
     def set_photo_preference(self, purpose, species, photo_id, _commit=True):
-        """Set the preferred photo for a species/purpose in this workspace."""
+        """Set the preferred photo for a species/purpose in this workspace.
+
+        ``species`` is canonicalized to the spelling ``add_keyword`` would
+        store (existing keyword row first, casing convention otherwise), so
+        curation keys written from prediction-cased bucket labels — e.g.
+        starring a photo in an unconfirmed ``Common Waxbill`` bucket — land
+        on the same key the keyword row will use once the species is
+        accepted. The eligible highlight/life-list queries compare these
+        strings exact against ``keywords.name``.
+        """
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         self.conn.execute(
             """INSERT INTO photo_preferences
@@ -12165,6 +12343,7 @@ class Database:
 
     def clear_photo_preference(self, purpose, species, _commit=True):
         """Clear the preferred photo for a species/purpose in this workspace."""
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         self.conn.execute(
             """DELETE FROM photo_preferences
@@ -12176,6 +12355,7 @@ class Database:
 
     def clear_species_representative(self, species, _commit=True):
         """Clear all representative photos for a species globally."""
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         self.conn.execute(
             "DELETE FROM species_representatives WHERE species = ?",
@@ -12206,6 +12386,8 @@ class Database:
 
         Result shape is ``{species: {photo_id: rank}}``.
         """
+        if species is not None:
+            species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         eligibility_joins = ""
         eligibility_filter = ""
@@ -12216,10 +12398,23 @@ class Database:
                     AND wf.workspace_id = sh.workspace_id
                    JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')"""
+            # Two-branch species eligibility. Accepted keyword compares
+            # exact: same-NOCASE homonyms preserved by the migration
+            # (legacy general ``Robin`` alongside taxonomy ``robin``) are
+            # genuinely different species — a stored highlight for
+            # ``Robin`` must not become eligible for a photo whose
+            # accepted keyword resolves to ``robin``. Prediction fallback
+            # compares NOCASE: the classifier emits an external
+            # vocabulary spelling (e.g. ``Common Waxbill``) while
+            # sh.species stores the canonical keyword spelling
+            # (``Common waxbill``), so an exact compare would drop every
+            # highlight starred from an unconfirmed bucket. Applying
+            # NOCASE only to the fallback keeps the ambiguous-homonym
+            # boundary intact.
             eligibility_filter = """
                  AND COALESCE(p.flag, 'none') != 'rejected'
-                 AND sh.species = COALESCE(
-                     (
+                 AND (
+                     sh.species = (
                          SELECT k.name
                          FROM photo_keywords pk
                          JOIN keywords k ON k.id = pk.keyword_id
@@ -12227,27 +12422,36 @@ class Database:
                          WHERE pk.photo_id = sh.photo_id
                          ORDER BY pk.rowid DESC
                          LIMIT 1
-                     ),
-                     (
-                         SELECT pr.species
-                         FROM detections d
-                         JOIN predictions pr ON pr.detection_id = d.id
-                         LEFT JOIN prediction_review pr_rev
-                          ON pr_rev.prediction_id = pr.id
-                         AND pr_rev.workspace_id = sh.workspace_id
-                         WHERE d.photo_id = sh.photo_id
-                           AND pr.species IS NOT NULL
-                           AND COALESCE(pr_rev.status, 'pending') != 'rejected'
-                           AND pr.labels_fingerprint = (
-                               SELECT pr2.labels_fingerprint
-                               FROM predictions pr2
-                               WHERE pr2.detection_id = pr.detection_id
-                                 AND pr2.classifier_model = pr.classifier_model
-                               ORDER BY pr2.created_at DESC, pr2.id DESC
-                               LIMIT 1
-                           )
-                         ORDER BY pr.confidence DESC, pr.id DESC
-                         LIMIT 1
+                     )
+                     OR (
+                         NOT EXISTS (
+                             SELECT 1
+                             FROM photo_keywords pk
+                             JOIN keywords k ON k.id = pk.keyword_id
+                              AND (k.is_species = 1 OR k.type = 'taxonomy')
+                             WHERE pk.photo_id = sh.photo_id
+                         )
+                         AND sh.species = (
+                             SELECT pr.species
+                             FROM detections d
+                             JOIN predictions pr ON pr.detection_id = d.id
+                             LEFT JOIN prediction_review pr_rev
+                              ON pr_rev.prediction_id = pr.id
+                             AND pr_rev.workspace_id = sh.workspace_id
+                             WHERE d.photo_id = sh.photo_id
+                               AND pr.species IS NOT NULL
+                               AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                               AND pr.labels_fingerprint = (
+                                   SELECT pr2.labels_fingerprint
+                                   FROM predictions pr2
+                                   WHERE pr2.detection_id = pr.detection_id
+                                     AND pr2.classifier_model = pr.classifier_model
+                                   ORDER BY pr2.created_at DESC, pr2.id DESC
+                                   LIMIT 1
+                               )
+                             ORDER BY pr.confidence DESC, pr.id DESC
+                             LIMIT 1
+                         ) COLLATE NOCASE
                      )
                  )"""
         if species:
@@ -12276,7 +12480,14 @@ class Database:
         return result
 
     def add_species_highlight(self, species, photo_id, _commit=True):
-        """Add a photo to a species' ordered highlights, appending if new."""
+        """Add a photo to a species' ordered highlights, appending if new.
+
+        ``species`` is canonicalized to the spelling ``add_keyword`` would
+        store (see :meth:`set_photo_preference`) so highlight rows written
+        from prediction-cased bucket labels key on the same string the
+        keyword row and eligibility queries use.
+        """
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         row = self.conn.execute(
             """SELECT rank FROM species_highlights
@@ -12312,6 +12523,7 @@ class Database:
 
     def promote_species_highlight(self, species, photo_id, _commit=True):
         """Add a photo to a species' ordered highlights at rank 1."""
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         rows = self.conn.execute(
             """SELECT photo_id
@@ -12345,6 +12557,7 @@ class Database:
 
     def remove_species_highlight(self, species, photo_id, _commit=True):
         """Remove a photo from a species' ordered highlights."""
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         cur = self.conn.execute(
             """DELETE FROM species_highlights
@@ -12357,6 +12570,7 @@ class Database:
 
     def move_species_highlight(self, species, photo_id, direction, _commit=True):
         """Move a highlighted photo one step up/down within its species."""
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         rows = self.conn.execute(
             """SELECT photo_id

@@ -10107,6 +10107,400 @@ def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_
     assert data["buckets"][0]["is_accepted"] is True
 
 
+def _seed_waxbill_casing_scenario(db):
+    """One accepted `Common waxbill` photo plus one photo whose only signal
+    is a raw title-cased prediction `Common Waxbill` (label-file casing —
+    prediction rows are external vocabulary and stay verbatim)."""
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/wax', 'wax', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    waxbill_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    ).lastrowid
+    accepted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'accepted.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (accepted_pid, waxbill_kw),
+    )
+    predicted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'predicted.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (predicted_pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions "
+        "(detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Common Waxbill', 0.95)",
+        (did,),
+    )
+    db.conn.commit()
+    return fid, accepted_pid, predicted_pid
+
+
+def test_highlights_merges_prediction_casing_with_accepted_keyword(app_and_db):
+    """A title-cased classifier label and a sentence-cased accepted keyword
+    are the same species: one Highlights bucket, keyed by the keyword
+    spelling. Prediction rows keep label-file casing (external vocabulary),
+    so the merge must happen at bucket-collection time."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid, accepted_pid, predicted_pid = _seed_waxbill_casing_scenario(db)
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    waxbill_buckets = [
+        b for b in data["buckets"] if b["species"].lower() == "common waxbill"
+    ]
+    assert len(waxbill_buckets) == 1
+    bucket = waxbill_buckets[0]
+    assert bucket["species"] == "Common waxbill"
+    assert {p["id"] for p in bucket["photos"]} == {accepted_pid, predicted_pid}
+
+
+def test_species_highlights_add_canonicalizes_prediction_cased_label(app_and_db):
+    """Starring a photo in a prediction-cased bucket must store and surface
+    the highlight under the keyword spelling.
+
+    Regression for the silently-dropped star: the client sends the bucket
+    label (`Common Waxbill` from the classifier), but the eligibility
+    queries compare species strings exact against `keywords.name`
+    (`Common waxbill`). Without canonicalization at the route/setter, the
+    star writes a `Common Waxbill` row that no query ever matches again."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid, _accepted_pid, predicted_pid = _seed_waxbill_casing_scenario(db)
+
+    resp = client.post(
+        "/api/species-highlights",
+        json={"species": "Common Waxbill", "photo_id": predicted_pid},
+    )
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE photo_id = ?",
+        (predicted_pid,),
+    ).fetchall()
+    assert [r["species"] for r in rows] == ["Common waxbill"]
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    bucket = next(
+        b for b in resp.get_json()["buckets"]
+        if b["species"] == "Common waxbill"
+    )
+    assert bucket["has_highlight_selection"] is True
+    starred = next(p for p in bucket["photos"] if p["id"] == predicted_pid)
+    assert starred["is_highlighted"] is True
+
+    # Un-starring with yet another casing of the same label must find and
+    # remove the canonical row rather than silently deleting nothing.
+    resp = client.delete(
+        "/api/species-highlights",
+        json={"species": "COMMON WAXBILL", "photo_id": predicted_pid},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["removed"] == 1
+
+
+def test_species_highlights_add_preserves_ambiguous_homonym_species(app_and_db):
+    """When two intentionally-distinct root species keywords share a
+    NOCASE key (legacy general ``Robin`` alongside taxonomy ``robin``),
+    curation requests from a specific bucket must land on that bucket's
+    exact spelling. Silently collapsing to one canonical spelling would
+    make the eligibility precheck (which compares ``bucket["species"]``
+    exact) reject the request coming from the other homonym's bucket."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/robin', 'robin', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    legacy_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'taxonomy', 1)"
+    )
+    legacy_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'legacy.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (legacy_pid, legacy_kw),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.5")
+    assert resp.status_code == 200
+    buckets = resp.get_json()["buckets"]
+    legacy_bucket = next(b for b in buckets if b["species"] == "Robin")
+    assert legacy_pid in {p["id"] for p in legacy_bucket["photos"]}
+
+    resp = client.post(
+        "/api/species-highlights",
+        json={"species": "Robin", "photo_id": legacy_pid},
+    )
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE photo_id = ?",
+        (legacy_pid,),
+    ).fetchall()
+    assert [r["species"] for r in rows] == ["Robin"]
+
+
+def test_highlights_relabel_snapshots_match_add_keyword_pick_for_homonyms(
+    app_and_db,
+):
+    """When two intentionally-distinct species keywords share a NOCASE key
+    (legacy general ``Robin`` alongside taxonomy ``robin``), the relabel
+    snapshots must key on the SAME spelling ``add_keyword`` will store.
+    ``resolve_species_display_name`` preserves the caller spelling
+    (``Robin``) for bucket/parse/setter symmetry, but ``add_keyword``'s
+    typed lookup picks the taxonomy row (``robin``); before the fix the
+    snapshot compared destination curation against ``Robin`` while the
+    rename actually landed on ``robin``, so undo would delete a pre-existing
+    ``robin`` highlight it never created."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrhom', 'hrhom', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Legacy Species", is_species=True)
+    # Legacy general row with is_species=1 (a pre-migration state that
+    # the v2 sweep intentionally preserves for ambiguous homonyms), plus
+    # the taxonomy row add_keyword's typed lookup will pick.
+    legacy_robin = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    taxonomy_robin = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'taxonomy', 1)"
+    ).lastrowid
+    # The photo being relabelled currently carries the "Legacy Species"
+    # tag; the relabel will move it to whichever Robin row add_keyword
+    # picks (the taxonomy row).
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'moving.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.add_species_highlight("Legacy Species", pid)
+    # Pre-existing destination highlight, keyed on the taxonomy spelling
+    # (which is what add_keyword would store for a "Robin" request).
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'robin', ?, 0)",
+        (db._ws_id(), pid),
+    )
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Robin"},
+    )
+    assert resp.status_code == 200
+    # add_keyword's typed lookup returns the taxonomy row, so the tag
+    # lands on `robin`. The pre-existing `robin` highlight survives.
+    tagged = db.conn.execute(
+        "SELECT k.name FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND (k.is_species = 1 OR k.type = 'taxonomy')",
+        (pid,),
+    ).fetchall()
+    assert [r["name"] for r in tagged] == ["robin"]
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("robin") or {})
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    hl_after_undo = db.get_species_highlights()
+    # The pre-existing `robin` highlight must survive the undo — before
+    # the fix the snapshot recorded dst_existed=False (compared against
+    # "Robin") and undo deleted the user's pre-existing row.
+    assert pid in (hl_after_undo.get("robin") or {}), (
+        "Undo deleted pre-existing robin highlight because snapshots keyed "
+        "on the wrong spelling"
+    )
+    # And the original bucket is restored.
+    assert pid in (hl_after_undo.get("Legacy Species") or {})
+    # Silence the unused-variable warnings on the setup rows: keeping
+    # them named documents the two homonym roles.
+    assert legacy_robin != taxonomy_robin
+
+
+def test_species_highlight_eligibility_accepted_species_exact_match(app_and_db):
+    """When a photo's accepted keyword resolves to one specific spelling of
+    an ambiguous homonym, a stored highlight for the OTHER homonym must
+    stay ineligible. Applying COLLATE NOCASE across the whole eligibility
+    COALESCE relaxed the accepted-keyword branch too: a stored highlight
+    keyed ``Robin`` would then match a photo whose accepted keyword
+    subquery returned ``robin``, silently making the wrong species bucket
+    appear to have a highlight."""
+    app, db = app_and_db
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/elig', 'elig', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    # Two intentionally-distinct root species keywords sharing a NOCASE
+    # key — the migration explicitly preserves this shape.
+    legacy_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    taxonomy_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'taxonomy', 1)"
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'elig.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # The photo's accepted keyword is the TAXONOMY row (lowercase
+    # ``robin``); the accepted-branch of the eligibility COALESCE
+    # returns exactly ``robin``.
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, taxonomy_kid),
+    )
+    # Stored highlight keyed on the OTHER homonym's spelling
+    # (uppercase ``Robin``, the general row) — a plausible remnant when
+    # ambiguous-homonym curation is left alone by the v2 sweep.
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Robin', ?, 0)",
+        (db._ws_id(), pid),
+    )
+    db.conn.commit()
+
+    eligible = db.get_species_highlights("Robin", eligible_only=True)
+    # Before the fix the whole-COALESCE NOCASE would match ``Robin`` to
+    # the accepted ``robin`` and mark the highlight eligible. With the
+    # branch-specific NOCASE, the accepted keyword compares EXACT.
+    assert eligible == {}, (
+        "Cross-homonym match: stored 'Robin' highlight should NOT be "
+        "eligible for a photo whose accepted keyword is 'robin'"
+    )
+    # The same-spelling case still passes (sanity check the accepted
+    # branch still resolves an exact match).
+    db.conn.execute(
+        "DELETE FROM photo_keywords WHERE photo_id = ?", (pid,)
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, legacy_kid),
+    )
+    db.conn.commit()
+    same_spelling = db.get_species_highlights("Robin", eligible_only=True)
+    assert pid in (same_spelling.get("Robin") or {})
+
+
+def test_resolve_species_display_name_prefers_taxonomy_over_general_homonym(
+    app_and_db,
+):
+    """When a taxonomy species row and a non-species general row share a
+    NOCASE key (e.g. taxonomy ``Common waxbill`` alongside a hand-tagged
+    ``Common Waxbill`` general), ``add_keyword(is_species=True)`` picks
+    the taxonomy row. ``resolve_species_display_name`` must mirror that
+    pick — otherwise the bucket collection keys prediction-only photos
+    under ``Common Waxbill``, curation setters store rows under the
+    non-taxonomy spelling, and once the prediction is accepted the
+    stored highlight no longer matches the accepted keyword spelling
+    (``Common waxbill``) and silently disappears from the bucket."""
+    _, db = app_and_db
+    # Taxonomy species row (the one add_keyword prefers).
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    )
+    # Separate non-species general row with classifier casing —
+    # someone hand-tagged the same spelling as a plain keyword.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common Waxbill', 'general', 0)"
+    )
+    db.conn.commit()
+
+    # Every caller spelling must land on the taxonomy row's stored
+    # spelling: that's what add_keyword(is_species=True) will pick, and
+    # bucket / parse / setter paths all agree on the same string.
+    assert db.resolve_species_display_name("Common Waxbill") == "Common waxbill"
+    assert db.resolve_species_display_name("common waxbill") == "Common waxbill"
+    assert db.resolve_species_display_name("COMMON WAXBILL") == "Common waxbill"
+
+    # Cross-check the invariant: add_keyword(is_species=True) actually
+    # returns the taxonomy row — otherwise the resolve fix would be
+    # tracking a different behavior than reality.
+    picked_id = db.add_keyword("Common Waxbill", is_species=True)
+    picked_name = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (picked_id,)
+    ).fetchone()["name"]
+    assert picked_name == "Common waxbill"
+
+
+def test_resolve_species_display_name_promotes_non_species_general_alone(
+    app_and_db,
+):
+    """When only a non-species general row shares the NOCASE key,
+    ``add_keyword(is_species=True)`` finds and promotes it in place —
+    is_species/type flip but the stored name is untouched. Resolve must
+    return that stored name so curation keys on the string the promoted
+    row will carry, not on a case-convention-derived spelling that
+    doesn't exist."""
+    _, db = app_and_db
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common Waxbill', 'general', 0)"
+    )
+    db.conn.commit()
+
+    # No taxonomy candidate for this NOCASE key, so add_keyword will
+    # promote the general row rather than insert a fresh taxonomy row.
+    # Resolve returns the general's stored spelling — the string
+    # curation setters must key on.
+    assert db.resolve_species_display_name("common waxbill") == "Common Waxbill"
+
+    # add_keyword promotes in place; the row's name doesn't change.
+    picked_id = db.add_keyword("common waxbill", is_species=True)
+    row = db.conn.execute(
+        "SELECT name, type, is_species FROM keywords WHERE id = ?",
+        (picked_id,),
+    ).fetchone()
+    assert row["name"] == "Common Waxbill"
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+
+
 def test_highlights_save(app_and_db):
     """POST /api/highlights/save creates a static collection."""
     app, db = app_and_db

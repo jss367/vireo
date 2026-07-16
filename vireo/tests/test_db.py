@@ -16311,3 +16311,61 @@ def test_best_photo_by_taxon(db):
     db.conn.commit()
     best = db.get_life_list_best_photo_by_taxon([ids['Melospiza melodia']])
     assert best[ids['Melospiza melodia']]['filename'] == 'high.jpg'
+
+
+def test_apply_case_convention_preserves_mixed_case_eponym(tmp_path):
+    """The 'lower' convention must not mangle mixed-case first words:
+    `McKay's bunting` keeps its internal capital, ALL-CAPS label-file
+    spellings sentence-case, plain words capitalize as before."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        conv = db._apply_case_convention
+        assert conv("McKay's bunting", "lower") == "McKay's bunting"
+        assert conv("MALLARD DUCK", "lower") == "Mallard duck"
+        assert conv("black phoebe", "lower") == "Black phoebe"
+        assert conv("mallard", "lower") == "Mallard"
+    finally:
+        db.close()
+
+
+def test_curation_setters_canonicalize_species_casing(tmp_path):
+    """Curation writes with a prediction-cased label key on the stored
+    keyword spelling, and removal finds the row under any casing."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws_id = db.ensure_default_workspace()
+        db.set_active_workspace(ws_id)
+        fid = db.add_folder('/photos', name='photos')
+        pid = db.add_photo(
+            folder_id=fid, filename='a.jpg', extension='.jpg',
+            file_size=100, file_mtime=1.0,
+        )
+        db.conn.execute(
+            "INSERT INTO keywords (name, type, is_species) "
+            "VALUES ('Common waxbill', 'taxonomy', 1)"
+        )
+        db.conn.commit()
+
+        db.set_photo_preference("life_list", "Common Waxbill", pid)
+        prefs = db.conn.execute(
+            "SELECT DISTINCT species FROM photo_preferences"
+        ).fetchall()
+        assert {r["species"] for r in prefs} == {"Common waxbill"}
+
+        rank = db.add_species_highlight("Common Waxbill", pid)
+        assert rank == 1
+        rows = db.conn.execute(
+            "SELECT species FROM species_highlights"
+        ).fetchall()
+        assert [r["species"] for r in rows] == ["Common waxbill"]
+
+        # Re-adding under yet another casing reuses the canonical row
+        # instead of appending a second rank.
+        assert db.add_species_highlight("COMMON WAXBILL", pid) == 1
+
+        removed = db.remove_species_highlight("Common Waxbill", pid)
+        assert removed == 1
+    finally:
+        db.close()
