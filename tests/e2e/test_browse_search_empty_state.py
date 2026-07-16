@@ -15,13 +15,21 @@ def test_keyword_search_empty_state_and_clear(live_server, page):
     expect(search).to_have_attribute("autocapitalize", "none")
     expect(search).to_have_attribute("spellcheck", "false")
 
-    search.fill("definitely-no-such-photo")
+    with page.expect_response(
+        lambda response: "/api/photos?" in response.url
+        and "keyword=definitely-no-such-photo" in response.url
+    ):
+        search.fill("definitely-no-such-photo")
 
     expect(page.locator("#emptyState")).to_be_visible()
     expect(page.locator("#welcomeState")).to_be_hidden()
     expect(page.locator("#emptyState")).to_contain_text("No photos match")
 
-    search.fill("")
+    with page.expect_response(
+        lambda response: "/api/photos?" in response.url
+        and "keyword=" not in response.url
+    ):
+        search.fill("")
 
     cards.first.wait_for(state="visible")
     expect(page.locator("#emptyState")).to_be_hidden()
