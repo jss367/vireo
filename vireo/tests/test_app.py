@@ -5576,8 +5576,8 @@ def test_batch_keyword_route_queues_stored_name_after_normalization(app_and_db):
     assert remaining == []
 
 
-def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
-    """Multi-select suggestions should offer keywords present on only some photos."""
+def test_selection_keyword_suggestions_return_partial_and_shared_keywords(app_and_db):
+    """Multi-select keyword data includes both partial and shared keywords."""
     app, db = app_and_db
     ids = [
         row["id"]
@@ -5602,10 +5602,29 @@ def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     assert by_name["Sparrow"]["count"] == 1
     assert by_name["Sparrow"]["missing_count"] == 2
 
+    shared_id = db.add_keyword("Shared selection keyword")
+    for photo_id in ids:
+        db.tag_photo(photo_id, shared_id)
+    resp = client.post(
+        "/api/selection/keyword-suggestions",
+        json={"photo_ids": ids},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
     keywords_by_name = {item["name"]: item for item in data["keywords"]}
     assert keywords_by_name["Cardinal"]["present_photo_ids"] == [ids[0]]
     assert sorted(keywords_by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
     assert keywords_by_name["Sparrow"]["present_photo_ids"] == [ids[1]]
+    assert keywords_by_name["Shared selection keyword"] == {
+        "id": shared_id,
+        "name": "Shared selection keyword",
+        "type": "general",
+        "count": len(ids),
+        "missing_count": 0,
+        "present_photo_ids": ids,
+        "missing_photo_ids": [],
+    }
 
 
 def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
