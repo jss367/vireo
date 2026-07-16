@@ -334,6 +334,14 @@ def test_highlights_lightbox_pick_hidden_photo_promotes_to_visible(live_server, 
         arg=hidden_pid,
         timeout=3000,
     )
+    # openLightbox updates its internal navigation target before the incoming
+    # image has replaced the outgoing bitmap. Photo-targeted shortcuts are
+    # intentionally suppressed during that handoff, so wait until the visible
+    # identity commits (the missing fixture source settles via the error path).
+    page.wait_for_function(
+        "() => _lbVisualTransitionPending === false",
+        timeout=3000,
+    )
 
     page.keyboard.press("p")
 
