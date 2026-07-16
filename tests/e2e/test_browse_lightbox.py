@@ -2491,6 +2491,11 @@ def test_browse_lightbox_ignores_stale_original_failure_after_nav(live_server, p
 
     first_card = page.locator(".grid-card").first
     first_card.wait_for(state="visible")
+    # This test needs to own the one /original request it later aborts. The
+    # normal fit-view warmup can otherwise win the route race under a slow CI
+    # runner, leaving the actual source-swap request to fail immediately and
+    # turning the final abort into an unrelated preload failure.
+    page.evaluate("window._lbScheduleOriginalPreload = function() {}")
     first_card.dblclick()
 
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
@@ -2526,14 +2531,23 @@ def test_browse_lightbox_ignores_stale_original_failure_after_nav(live_server, p
         }"""
     )
     page.wait_for_function("window._lightboxCurrentId === window._lightboxPhotoList[1].id")
-    held_original.pop("route").abort()
-    page.wait_for_timeout(100)
+    with page.expect_event(
+        "requestfailed",
+        predicate=lambda request: "/original" in request.url,
+    ):
+        held_original.pop("route").abort()
 
     assert page.evaluate("window._lbOriginalUnavailable") is False
 
 
 def test_browse_e_f_g_keyboard_modes(live_server, page):
     """Browse grid shortcuts open the image, request fullscreen, and return to grid."""
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
     url = live_server["url"]
     page.goto(f"{url}/browse")
 
@@ -2547,6 +2561,12 @@ def test_browse_e_f_g_keyboard_modes(live_server, page):
     page.keyboard.press("e")
     expect(overlay).to_have_class("lightbox-overlay active")
     expect(filename_display).to_have_text(first_filename)
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth > 0;
+        }"""
+    )
 
     page.keyboard.press("g")
     expect(overlay).to_have_class("lightbox-overlay")
@@ -2670,13 +2690,23 @@ def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallba
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     page.route("**/photos/*/original", lambda route: route.abort())
+    held_fallback = {}
+
+    def hold_fallback(route):
+        if held_fallback.get("released"):
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+        elif "route" not in held_fallback:
+            held_fallback["route"] = route
+        else:
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+
     page.route(
         "**/photos/*/preview?size=2560",
-        lambda route: route.fulfill(body=fallback_svg, content_type="image/svg+xml"),
+        hold_fallback,
     )
     page.route(
         "**/photos/*/preview?size=3840",
-        lambda route: route.fulfill(body=fallback_svg, content_type="image/svg+xml"),
+        hold_fallback,
     )
 
     url = live_server["url"]
@@ -2730,6 +2760,17 @@ def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallba
         timeout=6000,
     )
     assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+
+    # The queued state above is intentionally transient in production. Keep
+    # the fallback decode parked until after it has been observed so a fast
+    # runner cannot complete the swap and clear _lbPending1To1 first.
+    deadline = time.time() + 8
+    while "route" not in held_fallback and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_fallback
+    fallback_route = held_fallback.pop("route")
+    held_fallback["released"] = True
+    fallback_route.fulfill(body=fallback_svg, content_type="image/svg+xml")
 
     # Once the fallback tier becomes the current source the deferred snap
     # completes at true 1:1 on that tier — never stranded on the upscaled /full.
