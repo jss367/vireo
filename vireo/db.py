@@ -12380,17 +12380,23 @@ class Database:
                     AND wf.workspace_id = sh.workspace_id
                    JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')"""
-            # NOCASE on the species comparison: the prediction fallback
-            # below yields the raw classifier label (external vocabulary,
-            # e.g. `Common Waxbill`), while sh.species is stored in the
-            # canonical keyword spelling (`Common waxbill`). An exact
-            # compare would mark every highlight starred from an
-            # unconfirmed bucket ineligible. Case-insensitive matches the
-            # dedupe rule used everywhere else (add_keyword COLLATE NOCASE).
+            # Two-branch species eligibility. Accepted keyword compares
+            # exact: same-NOCASE homonyms preserved by the migration
+            # (legacy general ``Robin`` alongside taxonomy ``robin``) are
+            # genuinely different species — a stored highlight for
+            # ``Robin`` must not become eligible for a photo whose
+            # accepted keyword resolves to ``robin``. Prediction fallback
+            # compares NOCASE: the classifier emits an external
+            # vocabulary spelling (e.g. ``Common Waxbill``) while
+            # sh.species stores the canonical keyword spelling
+            # (``Common waxbill``), so an exact compare would drop every
+            # highlight starred from an unconfirmed bucket. Applying
+            # NOCASE only to the fallback keeps the ambiguous-homonym
+            # boundary intact.
             eligibility_filter = """
                  AND COALESCE(p.flag, 'none') != 'rejected'
-                 AND sh.species = COALESCE(
-                     (
+                 AND (
+                     sh.species = (
                          SELECT k.name
                          FROM photo_keywords pk
                          JOIN keywords k ON k.id = pk.keyword_id
@@ -12398,29 +12404,38 @@ class Database:
                          WHERE pk.photo_id = sh.photo_id
                          ORDER BY pk.rowid DESC
                          LIMIT 1
-                     ),
-                     (
-                         SELECT pr.species
-                         FROM detections d
-                         JOIN predictions pr ON pr.detection_id = d.id
-                         LEFT JOIN prediction_review pr_rev
-                          ON pr_rev.prediction_id = pr.id
-                         AND pr_rev.workspace_id = sh.workspace_id
-                         WHERE d.photo_id = sh.photo_id
-                           AND pr.species IS NOT NULL
-                           AND COALESCE(pr_rev.status, 'pending') != 'rejected'
-                           AND pr.labels_fingerprint = (
-                               SELECT pr2.labels_fingerprint
-                               FROM predictions pr2
-                               WHERE pr2.detection_id = pr.detection_id
-                                 AND pr2.classifier_model = pr.classifier_model
-                               ORDER BY pr2.created_at DESC, pr2.id DESC
-                               LIMIT 1
-                           )
-                         ORDER BY pr.confidence DESC, pr.id DESC
-                         LIMIT 1
                      )
-                 ) COLLATE NOCASE"""
+                     OR (
+                         NOT EXISTS (
+                             SELECT 1
+                             FROM photo_keywords pk
+                             JOIN keywords k ON k.id = pk.keyword_id
+                              AND (k.is_species = 1 OR k.type = 'taxonomy')
+                             WHERE pk.photo_id = sh.photo_id
+                         )
+                         AND sh.species = (
+                             SELECT pr.species
+                             FROM detections d
+                             JOIN predictions pr ON pr.detection_id = d.id
+                             LEFT JOIN prediction_review pr_rev
+                              ON pr_rev.prediction_id = pr.id
+                             AND pr_rev.workspace_id = sh.workspace_id
+                             WHERE d.photo_id = sh.photo_id
+                               AND pr.species IS NOT NULL
+                               AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                               AND pr.labels_fingerprint = (
+                                   SELECT pr2.labels_fingerprint
+                                   FROM predictions pr2
+                                   WHERE pr2.detection_id = pr.detection_id
+                                     AND pr2.classifier_model = pr.classifier_model
+                                   ORDER BY pr2.created_at DESC, pr2.id DESC
+                                   LIMIT 1
+                               )
+                             ORDER BY pr.confidence DESC, pr.id DESC
+                             LIMIT 1
+                         ) COLLATE NOCASE
+                     )
+                 )"""
         if species:
             rows = self.conn.execute(
                 f"""SELECT sh.species, sh.photo_id, sh.rank

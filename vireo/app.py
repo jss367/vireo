@@ -10390,6 +10390,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # dst_existed=false; undo would then delete the user's
         # pre-existing highlight/preference/rep.
         species = db.resolve_species_display_name(species)
+        # Multi-homonym reconciliation. resolve_species_display_name
+        # preserves the caller's spelling when two intentionally-distinct
+        # root species keywords share a NOCASE key (legacy general
+        # ``Robin`` alongside taxonomy ``robin``) so bucket / parse /
+        # setter paths stay in agreement on one string. add_keyword's
+        # typed lookup below still prefers the taxonomy row, however, so
+        # a request submitted as ``Robin`` would snapshot dst_existed
+        # against ``Robin`` and then rename onto ``robin`` — leaving undo
+        # able to delete pre-existing ``robin`` curation rows it never
+        # created. Mirror add_keyword's ORDER BY here so snapshots and
+        # renames key on the exact spelling add_keyword will store. Rows
+        # with type NOT IN ('taxonomy', 'general') are excluded (matching
+        # add_keyword) so a deliberate individual/location/genre homonym
+        # doesn't misroute the target.
+        target_row = db.conn.execute(
+            "SELECT name FROM keywords WHERE name = ? COLLATE NOCASE "
+            "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
+            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+            (species,),
+        ).fetchone()
+        if target_row and target_row["name"]:
+            species = target_row["name"]
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)
