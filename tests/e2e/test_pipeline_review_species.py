@@ -294,6 +294,27 @@ def test_predictionless_pipeline_encounter_can_add_species(live_server, page):
     assert {r["id"] for r in rows} == set(photo_ids)
 
 
+def test_pipeline_review_search_matches_filename_without_species_predictions(
+    live_server, page
+):
+    photo_ids = live_server["data"]["photos"][1:3]
+    _write_predictionless_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    search = page.locator("#speciesFilterInput")
+    expect(search).to_have_attribute("placeholder", "Search species or filename...")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search.fill("hawk2.jpg")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (2)")
+
+    search.fill("not-a-photo.jpg")
+    expect(page.locator(".encounter-card")).to_have_count(0)
+    expect(page.locator("#countAll")).to_have_text(" (0)")
+
+
 def test_pipeline_review_species_confirm_ignores_duplicate_inflight_clicks(live_server, page):
     photo_ids = live_server["data"]["photos"][:2]
     _write_confirmation_pipeline_cache(live_server, photo_ids)
