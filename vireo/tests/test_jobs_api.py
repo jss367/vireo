@@ -3430,6 +3430,84 @@ def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
         assert {"Kenya trip", "Portfolio"} <= names
 
 
+def test_import_pause_waits_for_tag_transaction_to_commit(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Tag writes reach a transaction boundary before honoring Pause."""
+    import import_job
+    from db import Database
+
+    app, db = app_and_db
+    runner = app._job_runner
+    client = app.test_client()
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    tag_written = threading.Event()
+    release_tag_write = threading.Event()
+    pause_requested = threading.Event()
+
+    def imported_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": True,
+            "cancelled": False,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 1,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": True,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    original_tag_photo = Database.tag_photo
+
+    def pause_after_uncommitted_tag(self, tagged_photo_id, keyword_id, _commit=True):
+        original_tag_photo(self, tagged_photo_id, keyword_id, _commit=_commit)
+        if not pause_requested.is_set():
+            job_id = next(
+                job_id for job_id, job in runner._jobs.items()
+                if job["type"] == "import" and job["status"] == "running"
+            )
+            assert runner.pause_job(job_id) is True
+            pause_requested.set()
+            tag_written.set()
+            assert release_tag_write.wait(timeout=2)
+
+    monkeypatch.setattr(import_job, "run_import_job", imported_result)
+    monkeypatch.setattr(Database, "tag_photo", pause_after_uncommitted_tag)
+    response = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["First import tag", "Second import tag"],
+    })
+    assert response.status_code == 200, response.get_json()
+    job_id = response.get_json()["job_id"]
+    assert tag_written.wait(timeout=2)
+    assert runner.get(job_id)["status"] == "pausing"
+
+    release_tag_write.set()
+    _wait_for_runner_status(runner, job_id, "paused")
+
+    # Reaching paused means the first tag transaction has committed; a pause
+    # can no longer pin an uncommitted SQLite write lock indefinitely.
+    first_tag = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("First import tag",),
+    ).fetchone()
+    assert first_tag is not None
+    assert db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (photo_id, first_tag["id"]),
+    ).fetchone() is not None
+
+    assert runner.resume_job(job_id) is True
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job["status"] == "completed", job
+    assert job["result"]["tagging"]["tagged_photos"] == 1
+
+
 def test_import_tag_reuses_keyword_repaired_from_legacy_peer(
     app_and_db, tmp_path, monkeypatch,
 ):

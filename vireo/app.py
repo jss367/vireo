@@ -6332,10 +6332,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
         result["tagging"] = summary
 
-        def cancel_requested():
+        def cancel_requested(*, pause_safe=True):
+            runner_check = None
+            if job is not None and runner is not None:
+                runner_check = (
+                    runner.is_cancelled
+                    if pause_safe
+                    else runner.cancellation_requested
+                )
             cancelled = result.get("cancelled") or (
-                job is not None and runner is not None
-                and runner.is_cancelled(job["id"])
+                runner_check is not None and runner_check(job["id"])
             )
             if cancelled:
                 # The cancellation may arrive after the importer itself has
@@ -6388,7 +6394,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 items = []
                 for photo_id in photo_ids:
-                    if cancel_requested():
+                    if cancel_requested(pause_safe=False):
                         break
                     exists = thread_db.conn.execute(
                         "SELECT 1 FROM photo_keywords "
@@ -6406,7 +6412,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "old_value": "",
                         "new_value": str(keyword_id),
                     })
-                if cancel_requested():
+                if cancel_requested(pause_safe=False):
                     thread_db.conn.rollback()
                     summary["skipped"] = "import cancelled"
                     break
@@ -6426,8 +6432,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     f'Could not add tag "{requested_name}": {exc}'
                 )
         summary["tagged_photos"] = len(tagged_photo_ids)
+        tagging_cancelled = cancel_requested()
 
-        if location_from_gps and not cancel_requested():
+        if location_from_gps and not tagging_cancelled:
             unresolved = 0
             skipped = 0
             added = 0
@@ -6455,7 +6462,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     unresolved += len(payload["unresolved"])
                     skipped += len(payload["skipped"])
                     for group in payload["groups"]:
-                        if cancel_requested():
+                        if cancel_requested(pause_safe=False):
                             cancelled_during_gps = True
                             break
                         details = details_by_place_id.get(group["place_id"])
@@ -6478,7 +6485,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             continue
                         location_items = []
                         for photo_id in group["photo_ids"]:
-                            if cancel_requested():
+                            if cancel_requested(pause_safe=False):
                                 cancelled_during_gps = True
                                 break
                             thread_db.set_photo_location(photo_id, leaf_id)
@@ -6500,6 +6507,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 is_batch=True, _commit=False,
                             )
                     thread_db.conn.commit()
+                    if cancel_requested():
+                        cancelled_during_gps = True
                     if cancelled_during_gps:
                         break
                 except Exception as exc:

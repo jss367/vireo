@@ -1169,6 +1169,16 @@ class JobRunner:
                     return False
                 self._pause_condition.wait()
 
+    def cancellation_requested(self, job_id):
+        """Report cancellation without waiting on a pause request.
+
+        Transactional loops use this only after their pause-safe boundary.
+        They can still roll back promptly on Cancel without sleeping while a
+        database write transaction is open.
+        """
+        with self._lock:
+            return job_id in self._cancelled
+
     def begin_uncancellable(self, job_id):
         """Atomically enter an uninterruptible phase if not cancelled.
 
