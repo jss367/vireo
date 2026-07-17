@@ -2331,23 +2331,36 @@ function encounterMatchesSearch(enc, photoMap) {
   var threshold = minConfidence / 100;
   var fields = [];
 
-  // Manually assigned species (confirmed encounter label and per-burst
-  // overrides) are not classifier output, so they always match regardless
-  // of the confidence slider.
+  // Manually assigned species (confirmed encounter label and confirmed
+  // per-burst overrides) are not classifier output, so they always match
+  // regardless of the confidence slider. Unconfirmed burst overrides are
+  // classifier-derived candidates (e.g. from detach-photo or group-review)
+  // and must go through the threshold-gated prediction paths below —
+  // otherwise raising the slider would fail to hide low-confidence matches.
   fields.push(enc.confirmed_species);
   (enc.bursts || []).forEach(function(burst) {
-    if (burst.species_override) fields.push(burst.species_override.species);
+    if (burst.species_override && burst.species_override.confirmed === true) {
+      fields.push(burst.species_override.species);
+    }
   });
 
   // Classifier-derived species — including the encounter consensus label in
-  // enc.species — flow through species_predictions with per-model confidence,
-  // so gate them behind the min-confidence slider. Adding enc.species[0]
-  // separately would bypass that gate and let low-confidence matches survive
-  // even after the user raised the threshold.
+  // enc.species and burst-level predictions that back unconfirmed overrides —
+  // flow through species_predictions with per-model confidence, so gate them
+  // behind the min-confidence slider. Adding enc.species[0] separately would
+  // bypass that gate and let low-confidence matches survive even after the
+  // user raised the threshold.
   (enc.species_predictions || []).forEach(function(sp) {
     if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
       fields.push(sp.species);
     }
+  });
+  (enc.bursts || []).forEach(function(burst) {
+    (burst.species_predictions || []).forEach(function(sp) {
+      if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
+        fields.push(sp.species);
+      }
+    });
   });
 
   // Filename search remains encounter-level: finding one photo keeps its

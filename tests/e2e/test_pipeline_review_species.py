@@ -415,6 +415,183 @@ def test_pipeline_review_search_respects_min_confidence_for_consensus_label(
     expect(page.locator("#countAll")).to_have_text(" (2)")
 
 
+def _write_unconfirmed_burst_override_pipeline_cache(live_server, photo_ids):
+    """Cache an encounter whose burst carries an unconfirmed classifier-derived
+    override (as `detach-photo` and group-review paths stamp them). The override
+    species also has a burst-level prediction with confidence 0.35 — below the
+    default 40% slider — so searching that species must NOT match through the
+    unconfirmed override; only the threshold-gated prediction path applies.
+    """
+    db = live_server["db"]
+    placeholders = ",".join("?" for _ in photo_ids)
+    rows = db.conn.execute(
+        f"SELECT id, filename, timestamp FROM photos WHERE id IN ({placeholders}) ORDER BY id",
+        photo_ids,
+    ).fetchall()
+    photos = [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "timestamp": row["timestamp"],
+            "label": "REVIEW",
+            "quality_composite": 0.5,
+            "flag": "none",
+            "rating": 0,
+        }
+        for row in rows
+    ]
+    ids = [p["id"] for p in photos]
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": ids,
+                "photo_count": len(ids),
+                "burst_count": 1,
+                "time_range": [photos[0]["timestamp"], photos[-1]["timestamp"]],
+                "species": [],
+                "species_predictions": [],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                "bursts": [
+                    {
+                        "photo_ids": ids,
+                        "species_predictions": [
+                            {
+                                "species": "Mute Swan",
+                                "count": len(ids),
+                                "avg_confidence": 0.35,
+                                "models": [{"model": "Bird model", "confidence": 0.35}],
+                            }
+                        ],
+                        "species_override": {"species": "Mute Swan", "confirmed": False},
+                    }
+                ],
+            }
+        ],
+        "summary": {
+            "total_photos": len(ids),
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": 0,
+            "review_count": len(ids),
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
+def test_pipeline_review_search_gates_unconfirmed_burst_override(live_server, page):
+    photo_ids = live_server["data"]["photos"][1:3]
+    _write_unconfirmed_burst_override_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search = page.locator("#speciesFilterInput")
+    search.fill("Mute Swan")
+
+    # The burst override is unconfirmed (classifier-derived) and its backing
+    # prediction sits at 0.35 — below the default 40% slider — so the search
+    # must not surface it via the override bypass.
+    expect(page.locator(".encounter-card")).to_have_count(0)
+    expect(page.locator("#countAll")).to_have_text(" (0)")
+
+    # Dropping the slider below the prediction's confidence brings the
+    # encounter back through the gated burst prediction path.
+    page.evaluate("setMinConfidence(30)")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (2)")
+
+
+def _write_confirmed_burst_override_pipeline_cache(live_server, photo_ids):
+    """Cache an encounter whose burst carries a *confirmed* override for a
+    species with no supporting predictions. Confirmed overrides are manual
+    labels, so they must bypass the confidence slider regardless of any
+    classifier prediction (or lack thereof).
+    """
+    db = live_server["db"]
+    placeholders = ",".join("?" for _ in photo_ids)
+    rows = db.conn.execute(
+        f"SELECT id, filename, timestamp FROM photos WHERE id IN ({placeholders}) ORDER BY id",
+        photo_ids,
+    ).fetchall()
+    photos = [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "timestamp": row["timestamp"],
+            "label": "REVIEW",
+            "quality_composite": 0.5,
+            "flag": "none",
+            "rating": 0,
+        }
+        for row in rows
+    ]
+    ids = [p["id"] for p in photos]
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": ids,
+                "photo_count": len(ids),
+                "burst_count": 1,
+                "time_range": [photos[0]["timestamp"], photos[-1]["timestamp"]],
+                "species": [],
+                "species_predictions": [],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                "bursts": [
+                    {
+                        "photo_ids": ids,
+                        "species_predictions": [],
+                        "species_override": {"species": "Mute Swan", "confirmed": True},
+                    }
+                ],
+            }
+        ],
+        "summary": {
+            "total_photos": len(ids),
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": 0,
+            "review_count": len(ids),
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
+def test_pipeline_review_search_matches_confirmed_burst_override(live_server, page):
+    photo_ids = live_server["data"]["photos"][1:3]
+    _write_confirmed_burst_override_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search = page.locator("#speciesFilterInput")
+    search.fill("Mute Swan")
+
+    # Confirmed manual overrides bypass the slider — the encounter must match
+    # even at the default threshold with no classifier predictions.
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (2)")
+
+
 def test_pipeline_review_species_confirm_ignores_duplicate_inflight_clicks(live_server, page):
     photo_ids = live_server["data"]["photos"][:2]
     _write_confirmation_pipeline_cache(live_server, photo_ids)
