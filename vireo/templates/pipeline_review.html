@@ -2369,7 +2369,25 @@ function encounterMatchesSearch(enc, photoMap) {
   // behind the min-confidence slider. Adding enc.species[0] separately would
   // bypass that gate and let low-confidence matches survive even after the
   // user raised the threshold.
+  //
+  // The encounter-level aggregate is rolled up from every photo in the
+  // encounter, so under Hide confirmed it can carry a species contributed
+  // only by a hidden confirmed burst. Restrict aggregate species to those
+  // that at least one visible burst also predicts, so searching a species
+  // whose only evidence is inside a hidden burst can't surface an unrelated
+  // visible burst.
+  var visibleBurstSpecies = null;
+  if (hideConfirmed && bursts.length > 0) {
+    visibleBurstSpecies = new Set();
+    bursts.forEach(function(burst) {
+      if (!burstVisible(burst)) return;
+      (burst.species_predictions || []).forEach(function(sp) {
+        if (sp && sp.species) visibleBurstSpecies.add(sp.species);
+      });
+    });
+  }
   (enc.species_predictions || []).forEach(function(sp) {
+    if (visibleBurstSpecies && !visibleBurstSpecies.has(sp.species)) return;
     if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
       fields.push(sp.species);
     }
