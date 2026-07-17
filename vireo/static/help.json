@@ -72,6 +72,12 @@
     "answer": "Open the Keywords page to manage your keyword hierarchy. You can add keywords to individual photos or in bulk. Keywords are global \u2014 they're shared across all workspaces."
   },
   {
+    "question": "Can I import keywords from Lightroom?",
+    "category": "Keywords",
+    "keywords": ["lightroom", "import", "lrcat", "catalog", "keyword", "hierarchy"],
+    "answer": "Yes. Vireo can import keyword hierarchies from Lightroom catalog files (.lrcat). Your XMP sidecars are also compatible with Lightroom, so you can use both tools on the same library."
+  },
+  {
     "question": "What are collections?",
     "category": "Collections",
     "keywords": ["collection", "group", "album", "organize", "set"],

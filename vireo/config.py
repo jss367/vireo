@@ -176,6 +176,7 @@ DEFAULTS = {
             "shortcuts": "",
             "settings": "",
             "keywords": "",
+            "lightroom": "",
         },
         "review": {
             "accept": "a",
