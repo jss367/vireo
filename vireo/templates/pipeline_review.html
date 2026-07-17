@@ -2356,9 +2356,12 @@ function encounterMatchesSearch(enc, photoMap) {
       if (b && b.species_override && b.species_override.confirmed === true) {
         return b.species_override.species === enc.confirmed_species;
       }
-      // Bursts without an override inherit the encounter-level label only
-      // when the encounter itself is confirmed.
-      return !(b && b.species_override) && enc.species_confirmed;
+      // Bursts without an override inherit and display `enc.confirmed_species`
+      // whenever it is set (see renderSpeciesWidget's burst branch), including
+      // mixed encounters where the encounter itself is unconfirmed. Requiring
+      // `species_confirmed` here would hide the label from search even though
+      // the visible burst is still showing it as its own label.
+      return !(b && b.species_override);
     });
   }
   if (confirmedLabelHasVisibleBurst) fields.push(enc.confirmed_species);
@@ -2392,16 +2395,26 @@ function encounterMatchesSearch(enc, photoMap) {
   // species regardless of confidence would let a hidden burst's high-confidence
   // prediction push the aggregate over the threshold while a below-threshold
   // sighting on the visible burst quietly keeps the encounter searchable.
+  // Legacy raw bursts store `bursts` as arrays of photo IDs with no
+  // per-burst prediction data. Gating the encounter aggregate against a
+  // visible-burst set built from that shape would drop every
+  // encounter-level prediction whenever Hide confirmed is on — even
+  // though nothing is actually hidden. Only apply the visible-support
+  // gate when at least one burst on the encounter carries per-burst
+  // prediction data; otherwise trust the aggregate.
+  var burstsCarryPredictions = bursts.some(function(burst) {
+    return burst && Array.isArray(burst.species_predictions);
+  });
   var visibleBurstSpecies = null;
-  if (hideConfirmed && bursts.length > 0) {
+  if (hideConfirmed && bursts.length > 0 && burstsCarryPredictions) {
     visibleBurstSpecies = new Set();
     bursts.forEach(function(burst) {
       if (!burstVisible(burst)) return;
-      if (burst.species_override && burst.species_override.confirmed === true
+      if (burst && burst.species_override && burst.species_override.confirmed === true
           && burst.species_override.species) {
         visibleBurstSpecies.add(burst.species_override.species);
       }
-      (burst.species_predictions || []).forEach(function(sp) {
+      (burst && burst.species_predictions || []).forEach(function(sp) {
         if (!sp || !sp.species) return;
         if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
           visibleBurstSpecies.add(sp.species);

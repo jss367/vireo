@@ -953,12 +953,15 @@ def test_pipeline_review_search_scopes_mixed_encounter_prior_label(
     expect(page.locator(".burst-strip")).to_have_count(1)
 
     # With Hide confirmed on, only the robin burst renders. The encounter is
-    # unconfirmed at the encounter level, so the surviving prior label is
-    # backed exclusively by the now-hidden confirmed hawk override. Searching
-    # 'Red-tailed Hawk' must not surface the encounter.
+    # unconfirmed, but renderSpeciesWidget still inherits and displays
+    # `enc.confirmed_species` on the no-override robin burst, so the visible
+    # burst-level widget reads 'Red-tailed Hawk'. Searching that label must
+    # therefore surface the encounter — the visible burst is displaying it.
+    # Only the robin photo is counted because the confirmed hawk burst
+    # remains hidden.
     search.fill("Red-tailed Hawk")
-    expect(page.locator(".encounter-card")).to_have_count(0)
-    expect(page.locator("#countAll")).to_have_text(" (0)")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (1)")
 
     # The visible burst's species still matches.
     search.fill("American Robin")
@@ -1116,6 +1119,102 @@ def test_pipeline_review_search_matches_confirmed_burst_override(live_server, pa
     # even at the default threshold with no classifier predictions.
     expect(page.locator(".encounter-card")).to_have_count(1)
     expect(page.locator("#countAll")).to_have_text(" (2)")
+
+
+def _write_legacy_raw_burst_pipeline_cache(live_server, photo_ids):
+    """Cache an unconfirmed encounter whose ``bursts`` entries are the
+    legacy raw photo-id array shape this page still supports — no
+    per-burst ``species_predictions`` or ``species_override``. The
+    encounter-level aggregate carries the classifier prediction. Under
+    Hide confirmed, the search must still match the aggregate species
+    even though no burst carries per-burst prediction evidence.
+    """
+    db = live_server["db"]
+    placeholders = ",".join("?" for _ in photo_ids)
+    rows = db.conn.execute(
+        f"SELECT id, filename, timestamp FROM photos WHERE id IN ({placeholders}) ORDER BY id",
+        photo_ids,
+    ).fetchall()
+    photos = [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "timestamp": row["timestamp"],
+            "label": "REVIEW",
+            "quality_composite": 0.5,
+            "flag": "none",
+            "rating": 0,
+        }
+        for row in rows
+    ]
+    ids = [p["id"] for p in photos]
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": ids,
+                "photo_count": len(ids),
+                "burst_count": 1,
+                "time_range": [photos[0]["timestamp"], photos[-1]["timestamp"]],
+                "species": [],
+                "species_predictions": [
+                    {
+                        "species": "Mute Swan",
+                        "count": len(ids),
+                        "avg_confidence": 0.9,
+                        "models": [{"model": "Bird model", "confidence": 0.9}],
+                    }
+                ],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                # Legacy raw shape: burst is the photo-id array itself,
+                # not an object with species_predictions/species_override.
+                "bursts": [ids],
+            }
+        ],
+        "summary": {
+            "total_photos": len(ids),
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": 0,
+            "review_count": len(ids),
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
+def test_pipeline_review_search_falls_back_to_aggregate_for_legacy_bursts(
+    live_server, page
+):
+    photo_ids = live_server["data"]["photos"][1:3]
+    _write_legacy_raw_burst_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search = page.locator("#speciesFilterInput")
+
+    # Baseline: aggregate prediction matches.
+    search.fill("Mute Swan")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search.fill("")
+    page.locator("#hideConfirmedBtn").click()
+
+    # None of the legacy bursts are confirmed, so the encounter is still
+    # entirely visible. Because the bursts don't carry per-burst
+    # prediction data, the visible-burst gate must fall back to the
+    # aggregate — searching the aggregate species must still match.
+    search.fill("Mute Swan")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(f" ({len(photo_ids)})")
 
 
 def _write_cross_field_pipeline_cache(live_server, photo_ids):
