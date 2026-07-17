@@ -2399,17 +2399,24 @@ function encounterMatchesSearch(enc, photoMap) {
   // per-burst prediction data. Gating the encounter aggregate against a
   // visible-burst set built from that shape would drop every
   // encounter-level prediction whenever Hide confirmed is on — even
-  // though nothing is actually hidden. Only apply the visible-support
-  // gate when at least one burst on the encounter carries per-burst
-  // prediction data; otherwise trust the aggregate.
-  var burstsCarryPredictions = bursts.some(function(burst) {
-    return burst && Array.isArray(burst.species_predictions);
-  });
+  // though nothing is actually hidden. The gate is only sound when we
+  // can fully account for what every visible burst contributes to the
+  // aggregate, so require every VISIBLE burst to carry per-burst
+  // predictions before enabling it. Otherwise (all-raw, or a mix where
+  // a visible raw burst sits alongside an object burst — the GRM detach
+  // flow leaves the source burst as a raw array while appending a new
+  // object burst) at least one visible burst is opaque to us and could
+  // be the source of an aggregate species we would otherwise drop, so
+  // trust the aggregate.
+  var visibleBursts = bursts.filter(burstVisible);
+  var visibleBurstsAllCarryPredictions = visibleBursts.length > 0
+    && visibleBursts.every(function(burst) {
+      return burst && Array.isArray(burst.species_predictions);
+    });
   var visibleBurstSpecies = null;
-  if (hideConfirmed && bursts.length > 0 && burstsCarryPredictions) {
+  if (hideConfirmed && visibleBurstsAllCarryPredictions) {
     visibleBurstSpecies = new Set();
-    bursts.forEach(function(burst) {
-      if (!burstVisible(burst)) return;
+    visibleBursts.forEach(function(burst) {
       if (burst && burst.species_override && burst.species_override.confirmed === true
           && burst.species_override.species) {
         visibleBurstSpecies.add(burst.species_override.species);

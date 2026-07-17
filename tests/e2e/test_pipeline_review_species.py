@@ -1217,6 +1217,132 @@ def test_pipeline_review_search_falls_back_to_aggregate_for_legacy_bursts(
     expect(page.locator("#countAll")).to_have_text(f" ({len(photo_ids)})")
 
 
+def _write_mixed_legacy_and_object_burst_pipeline_cache(live_server, photo_ids):
+    """Cache an unconfirmed encounter whose ``bursts`` mix the legacy raw
+    photo-id array shape (no per-burst predictions) with an object burst
+    that carries its own ``species_predictions``. The GRM detach flow
+    can leave the source burst as a raw array while appending a new
+    object burst, so search under Hide confirmed must still match the
+    encounter aggregate species — the raw burst is opaque to the visible-
+    burst gate and might well be the source of the aggregate species.
+    """
+    assert len(photo_ids) >= 2, "need at least two photos to split into two bursts"
+    db = live_server["db"]
+    placeholders = ",".join("?" for _ in photo_ids)
+    rows = db.conn.execute(
+        f"SELECT id, filename, timestamp FROM photos WHERE id IN ({placeholders}) ORDER BY id",
+        photo_ids,
+    ).fetchall()
+    photos = [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "timestamp": row["timestamp"],
+            "label": "REVIEW",
+            "quality_composite": 0.5,
+            "flag": "none",
+            "rating": 0,
+        }
+        for row in rows
+    ]
+    ids = [p["id"] for p in photos]
+    raw_ids = ids[:1]
+    object_ids = ids[1:]
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": ids,
+                "photo_count": len(ids),
+                "burst_count": 2,
+                "time_range": [photos[0]["timestamp"], photos[-1]["timestamp"]],
+                "species": [],
+                # Aggregate carries a species that only the opaque raw
+                # burst could source (the object burst below predicts a
+                # different species).
+                "species_predictions": [
+                    {
+                        "species": "Mute Swan",
+                        "count": len(ids),
+                        "avg_confidence": 0.9,
+                        "models": [{"model": "Bird model", "confidence": 0.9}],
+                    }
+                ],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                "bursts": [
+                    # Legacy raw shape — no per-burst prediction data.
+                    raw_ids,
+                    # Object burst that predicts a different species than
+                    # the aggregate. It stays visible under Hide confirmed
+                    # (no override), so the visible-burst gate must not
+                    # exclude the aggregate species just because this
+                    # burst doesn't back it.
+                    {
+                        "photo_ids": object_ids,
+                        "species_predictions": [
+                            {
+                                "species": "Trumpeter Swan",
+                                "count": len(object_ids),
+                                "avg_confidence": 0.85,
+                                "models": [
+                                    {"model": "Bird model", "confidence": 0.85}
+                                ],
+                            }
+                        ],
+                        "species_override": None,
+                    },
+                ],
+            }
+        ],
+        "summary": {
+            "total_photos": len(ids),
+            "encounter_count": 1,
+            "burst_count": 2,
+            "keep_count": 0,
+            "review_count": len(ids),
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
+def test_pipeline_review_search_falls_back_to_aggregate_for_mixed_legacy_bursts(
+    live_server, page
+):
+    photo_ids = live_server["data"]["photos"][1:4]
+    _write_mixed_legacy_and_object_burst_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search = page.locator("#speciesFilterInput")
+
+    # Baseline: aggregate prediction matches without any filtering.
+    search.fill("Mute Swan")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search.fill("")
+    page.locator("#hideConfirmedBtn").click()
+
+    # No burst is confirmed, so the whole encounter is still visible.
+    # The visible bursts are mixed (one raw legacy array, one object).
+    # Because the raw burst is opaque to the visible-burst gate — it
+    # cannot report which species it contributes to the aggregate — the
+    # gate must fall back to trusting the aggregate. Searching the
+    # aggregate species must therefore still match, even though the
+    # object visible burst predicts a different species.
+    search.fill("Mute Swan")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(f" ({len(photo_ids)})")
+
+
 def _write_cross_field_pipeline_cache(live_server, photo_ids):
     """Cache an encounter whose eligible predictions are 'Mute Grouse' and
     'Trumpeter Swan'. A multi-token search for 'Mute Swan' shouldn't match:
