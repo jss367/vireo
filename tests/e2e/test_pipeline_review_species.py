@@ -1343,6 +1343,152 @@ def test_pipeline_review_search_falls_back_to_aggregate_for_mixed_legacy_bursts(
     expect(page.locator("#countAll")).to_have_text(f" ({len(photo_ids)})")
 
 
+def _write_mixed_shape_hidden_object_burst_pipeline_cache(
+    live_server, raw_id, hidden_id
+):
+    """Cache an encounter with a visible legacy raw burst alongside a hidden
+    object burst that carries a confirmed override. The aggregate carries the
+    hidden burst's confirmed species — the GRM detach flow can leave the raw
+    source burst opaque while the detached object burst is confirmed away —
+    so searching that species must not surface the encounter and render only
+    the unrelated raw visible burst.
+    """
+    db = live_server["db"]
+    rows = db.conn.execute(
+        "SELECT id, filename, timestamp FROM photos WHERE id IN (?, ?) ORDER BY id",
+        (raw_id, hidden_id),
+    ).fetchall()
+    photos = [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "timestamp": row["timestamp"],
+            "label": "REVIEW",
+            "quality_composite": 0.5,
+            "flag": "none",
+            "rating": 0,
+        }
+        for row in rows
+    ]
+    raw_photo = next(p for p in photos if p["id"] == raw_id)
+    hidden_photo = next(p for p in photos if p["id"] == hidden_id)
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": [raw_photo["id"], hidden_photo["id"]],
+                "photo_count": 2,
+                "burst_count": 2,
+                "time_range": [raw_photo["timestamp"], hidden_photo["timestamp"]],
+                "species": [],
+                # Aggregate carries the hidden burst's species — it was rolled
+                # up from every photo in the encounter, including the ones in
+                # the object burst that ended up confirmed.
+                "species_predictions": [
+                    {
+                        "species": "Red-tailed Hawk",
+                        "count": 1,
+                        "avg_confidence": 0.9,
+                        "models": [{"model": "Bird model", "confidence": 0.9}],
+                    }
+                ],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                "bursts": [
+                    # Legacy raw burst — no per-burst predictions to consult.
+                    [raw_photo["id"]],
+                    # Object burst confirmed to Red-tailed Hawk — Hide confirmed
+                    # will hide this burst and its filename.
+                    {
+                        "photo_ids": [hidden_photo["id"]],
+                        "species_predictions": [
+                            {
+                                "species": "Red-tailed Hawk",
+                                "count": 1,
+                                "avg_confidence": 0.9,
+                                "models": [
+                                    {"model": "Bird model", "confidence": 0.9}
+                                ],
+                            }
+                        ],
+                        "species_override": {
+                            "species": "Red-tailed Hawk",
+                            "confirmed": True,
+                        },
+                    },
+                ],
+            }
+        ],
+        "summary": {
+            "total_photos": 2,
+            "encounter_count": 1,
+            "burst_count": 2,
+            "keep_count": 0,
+            "review_count": 2,
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
+def test_pipeline_review_search_blocks_hidden_only_aggregate_species_in_mixed_shape(
+    live_server, page
+):
+    photos = live_server["data"]["photos"]
+    # photos[3]=robin1 (raw visible burst); photos[0]=hawk1 (object hidden burst
+    # confirmed to Red-tailed Hawk).
+    _write_mixed_shape_hidden_object_burst_pipeline_cache(
+        live_server, photos[3], photos[0]
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator(".burst-strip")).to_have_count(2)
+
+    search = page.locator("#speciesFilterInput")
+
+    # Baseline (Hide confirmed off): the aggregate species matches; both
+    # bursts render, and the raw burst's filename still matches too.
+    search.fill("Red-tailed Hawk")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    search.fill("robin1.jpg")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search.fill("")
+    page.locator("#hideConfirmedBtn").click()
+    expect(page.locator(".burst-strip")).to_have_count(1)
+
+    # With Hide confirmed on, searching the hidden burst's confirmed species
+    # must NOT match: the aggregate species is only sourced from the hidden
+    # object burst (no visible object burst backs it), so surfacing the
+    # encounter would render only the unrelated raw burst.
+    search.fill("Red-tailed Hawk")
+    expect(page.locator(".encounter-card")).to_have_count(0)
+    expect(page.locator("#countAll")).to_have_text(" (0)")
+
+    # The hidden burst's filename must not match either.
+    search.fill("hawk1.jpg")
+    expect(page.locator(".encounter-card")).to_have_count(0)
+    expect(page.locator("#countAll")).to_have_text(" (0)")
+
+    # The visible raw burst's filename still matches — its photo is what
+    # actually renders under Hide confirmed.
+    search.fill("robin1.jpg")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (1)")
+
+    # Toggling Hide confirmed back off restores the aggregate species match.
+    page.locator("#hideConfirmedBtn").click()
+    search.fill("Red-tailed Hawk")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+
 def _write_cross_field_pipeline_cache(live_server, photo_ids):
     """Cache an encounter whose eligible predictions are 'Mute Grouse' and
     'Trumpeter Swan'. A multi-token search for 'Mute Swan' shouldn't match:

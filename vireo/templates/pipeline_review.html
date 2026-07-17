@@ -2399,15 +2399,14 @@ function encounterMatchesSearch(enc, photoMap) {
   // per-burst prediction data. Gating the encounter aggregate against a
   // visible-burst set built from that shape would drop every
   // encounter-level prediction whenever Hide confirmed is on — even
-  // though nothing is actually hidden. The gate is only sound when we
-  // can fully account for what every visible burst contributes to the
-  // aggregate, so require every VISIBLE burst to carry per-burst
+  // though nothing is actually hidden. The strict gate is only sound
+  // when we can fully account for what every visible burst contributes
+  // to the aggregate, so require every VISIBLE burst to carry per-burst
   // predictions before enabling it. Otherwise (all-raw, or a mix where
   // a visible raw burst sits alongside an object burst — the GRM detach
   // flow leaves the source burst as a raw array while appending a new
-  // object burst) at least one visible burst is opaque to us and could
-  // be the source of an aggregate species we would otherwise drop, so
-  // trust the aggregate.
+  // object burst) at least one visible burst is opaque and could be the
+  // source of an aggregate species we would otherwise drop.
   var visibleBursts = bursts.filter(burstVisible);
   var visibleBurstsAllCarryPredictions = visibleBursts.length > 0
     && visibleBursts.every(function(burst) {
@@ -2429,8 +2428,46 @@ function encounterMatchesSearch(enc, photoMap) {
       });
     });
   }
+  // Even in the fallback path — mixed shapes where the visible-burst gate is
+  // disabled — hidden object bursts can leak their classifier evidence into
+  // the encounter aggregate. Collect species that only hidden object bursts
+  // source (confirmed override or threshold-passing prediction) and no
+  // visible object burst backs, and drop those from the aggregate. The
+  // visible raw burst stays opaque, so we accept a small false-negative
+  // risk on legitimate raw-burst matches to avoid the more confusing false
+  // positive of surfacing an unrelated visible raw burst when the user
+  // searches for a species that only a hidden confirmed burst carries.
+  var hiddenBurstOnlySpecies = null;
+  if (hideConfirmed && !visibleBurstsAllCarryPredictions) {
+    var hiddenObjectSpecies = new Set();
+    var visibleObjectSpecies = new Set();
+    bursts.forEach(function(burst) {
+      if (!burst) return;
+      var target = burstVisible(burst) ? visibleObjectSpecies : hiddenObjectSpecies;
+      if (burst.species_override && burst.species_override.confirmed === true
+          && burst.species_override.species) {
+        target.add(burst.species_override.species);
+      }
+      if (Array.isArray(burst.species_predictions)) {
+        burst.species_predictions.forEach(function(sp) {
+          if (!sp || !sp.species) return;
+          if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
+            target.add(sp.species);
+          }
+        });
+      }
+    });
+    if (hiddenObjectSpecies.size > 0) {
+      hiddenBurstOnlySpecies = new Set();
+      hiddenObjectSpecies.forEach(function(species) {
+        if (!visibleObjectSpecies.has(species)) hiddenBurstOnlySpecies.add(species);
+      });
+      if (hiddenBurstOnlySpecies.size === 0) hiddenBurstOnlySpecies = null;
+    }
+  }
   (enc.species_predictions || []).forEach(function(sp) {
     if (visibleBurstSpecies && !visibleBurstSpecies.has(sp.species)) return;
+    if (hiddenBurstOnlySpecies && hiddenBurstOnlySpecies.has(sp.species)) return;
     if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
       fields.push(sp.species);
     }
