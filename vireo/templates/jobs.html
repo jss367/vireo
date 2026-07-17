@@ -412,11 +412,11 @@
     html += '<span class="job-detail-status ' + job.status + '">' + job.status + '</span>';
     if (isLive) {
       if (job.pausable && job.status === 'running') {
-        html += '<button class="btn-pause" data-pause-job="' + esc(job.id) + '">Pause</button>';
+        html += '<button class="btn-pause" data-pause-job="' + escapeAttr(job.id) + '">Pause</button>';
       } else if (job.pausable && job.status === 'pausing') {
         html += '<button class="btn-pause" disabled>Pausing…</button>';
       } else if (job.pausable && job.status === 'paused') {
-        html += '<button class="btn-pause" data-resume-job="' + esc(job.id) + '">Resume</button>';
+        html += '<button class="btn-pause" data-resume-job="' + escapeAttr(job.id) + '">Resume</button>';
       }
       if (cancellingJobIds[job.id]) {
         html += '<button class="btn-cancel cancelling" disabled>Cancelling…</button>';

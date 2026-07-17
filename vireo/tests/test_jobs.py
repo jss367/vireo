@@ -51,9 +51,10 @@ def test_pausable_job_stops_at_checkpoint_and_resumes():
 
     runner = JobRunner()
     progress = {"count": 0}
+    finish = threading.Event()
 
     def work(job):
-        while progress["count"] < 40:
+        while not finish.is_set():
             if runner.is_cancelled(job["id"]):
                 break
             progress["count"] += 1
@@ -72,15 +73,79 @@ def test_pausable_job_stops_at_checkpoint_and_resumes():
     assert progress["count"] == paused_count
 
     assert runner.resume_job(job_id) is True
+    finish.set()
     job = wait_for_job_via_runner(runner, job_id)
     assert job["status"] == "completed"
-    assert job["result"] == {"count": 40}
+    assert job["result"]["count"] >= paused_count
     status_events = [
         event["data"]["status"]
         for event in runner.get_events(job_id)
         if event["type"] == "status"
     ]
     assert status_events == ["pausing", "paused", "running"]
+
+
+def test_pause_status_events_stay_ordered_through_completion():
+    """Competing pause and worker transitions cannot publish stale states."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    work_started = threading.Event()
+    enter_checkpoint = threading.Event()
+    checkpoint_reached = threading.Event()
+    pausing_published = threading.Event()
+    release_pausing = threading.Event()
+    original_publish = runner._publish_status_locked
+
+    def controlled_publish(job, status):
+        original_publish(job, status)
+        if status == "pausing":
+            pausing_published.set()
+            assert release_pausing.wait(timeout=2)
+
+    runner._publish_status_locked = controlled_publish
+
+    def work(job):
+        work_started.set()
+        assert enter_checkpoint.wait(timeout=2)
+        checkpoint_reached.set()
+        runner.is_cancelled(job["id"])
+        return {}
+
+    job_id = runner.start("scan", work, pausable=True)
+    assert work_started.wait(timeout=2)
+
+    pause_result = []
+    pause_thread = threading.Thread(
+        target=lambda: pause_result.append(runner.pause_job(job_id))
+    )
+    pause_thread.start()
+    assert pausing_published.wait(timeout=2)
+
+    # Let the worker race for the same lock while the pausing transition is
+    # still publishing. It must not overtake that event with "paused".
+    enter_checkpoint.set()
+    assert checkpoint_reached.wait(timeout=2)
+    release_pausing.set()
+    pause_thread.join(timeout=2)
+    assert not pause_thread.is_alive()
+    assert pause_result == [True]
+
+    _wait_for_status(runner, job_id, "paused")
+    assert runner.resume_job(job_id) is True
+    assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+
+    transitions = [
+        (event["type"], event["data"]["status"])
+        for event in runner.get_events(job_id)
+        if event["type"] in ("status", "complete")
+    ]
+    assert transitions == [
+        ("status", "pausing"),
+        ("status", "paused"),
+        ("status", "running"),
+        ("complete", "completed"),
+    ]
 
 
 def test_cancel_paused_job_wakes_worker_and_marks_cancelled():

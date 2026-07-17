@@ -853,6 +853,33 @@ class JobRunner:
                         event_type, job_id,
                     )
 
+    def _publish_status_locked(self, job, status):
+        """Change *job* status and publish its event as one locked action.
+
+        The caller must hold ``self._lock`` (directly or through
+        ``self._pause_condition``). Keeping the state change, buffered event,
+        and non-blocking subscriber delivery under that same lock prevents
+        competing pause, resume, and completion paths from publishing stale
+        status events out of order.
+        """
+        job_id = job["id"]
+        job["status"] = status
+        event = {
+            "type": "status",
+            "data": {"job_id": job_id, "status": status},
+            "time": time.time(),
+        }
+        if job_id in self._events:
+            self._events[job_id].append(event)
+        for subscriber in self._subscribers.get(job_id, []):
+            try:
+                subscriber.put_nowait(event)
+            except queue.Full:
+                log.debug(
+                    "Dropped 'status' event for job %s — subscriber queue full",
+                    job_id,
+                )
+
     def get_events(self, job_id):
         """Get all buffered events for a job."""
         with self._lock:
@@ -1096,12 +1123,7 @@ class JobRunner:
             ):
                 return False
             self._pause_requested.add(job_id)
-            job["status"] = "pausing"
-
-        self.push_event(job_id, "status", {
-            "job_id": job_id,
-            "status": "pausing",
-        })
+            self._publish_status_locked(job, "pausing")
         return True
 
     def resume_job(self, job_id):
@@ -1116,13 +1138,8 @@ class JobRunner:
             ):
                 return False
             self._pause_requested.discard(job_id)
-            job["status"] = "running"
+            self._publish_status_locked(job, "running")
             self._pause_condition.notify_all()
-
-        self.push_event(job_id, "status", {
-            "job_id": job_id,
-            "status": "running",
-        })
         return True
 
     def is_cancelled(self, job_id):
@@ -1134,7 +1151,6 @@ class JobRunner:
         the work function's in-memory state.
         """
         while True:
-            emit_paused = False
             with self._pause_condition:
                 if job_id in self._cancelled:
                     return True
@@ -1146,16 +1162,7 @@ class JobRunner:
                 ):
                     return False
                 if job.get("status") != "paused":
-                    job["status"] = "paused"
-                    emit_paused = True
-
-            if emit_paused:
-                self.push_event(job_id, "status", {
-                    "job_id": job_id,
-                    "status": "paused",
-                })
-
-            with self._pause_condition:
+                    self._publish_status_locked(job, "paused")
                 if job_id in self._cancelled:
                     return True
                 if job_id not in self._pause_requested:

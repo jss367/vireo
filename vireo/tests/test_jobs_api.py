@@ -1125,9 +1125,10 @@ def test_job_pause_and_resume_api(app_and_db):
     app, _ = app_and_db
     runner = app._job_runner
     progress = {"count": 0}
+    finish = threading.Event()
 
     def work(job):
-        while progress["count"] < 40:
+        while not finish.is_set():
             if runner.is_cancelled(job["id"]):
                 break
             progress["count"] += 1
@@ -1149,6 +1150,7 @@ def test_job_pause_and_resume_api(app_and_db):
         resumed = c.post(f"/api/jobs/{job_id}/resume")
         assert resumed.status_code == 200
         assert resumed.get_json()["status"] == "running"
+        finish.set()
 
     assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
 
