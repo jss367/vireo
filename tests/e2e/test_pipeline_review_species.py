@@ -1437,7 +1437,7 @@ def _write_mixed_shape_hidden_object_burst_pipeline_cache(
         json.dump(cache, f)
 
 
-def test_pipeline_review_search_blocks_hidden_only_aggregate_species_in_mixed_shape(
+def test_pipeline_review_search_preserves_aggregate_species_for_raw_bursts_alongside_hidden(
     live_server, page
 ):
     photos = live_server["data"]["photos"]
@@ -1464,15 +1464,21 @@ def test_pipeline_review_search_blocks_hidden_only_aggregate_species_in_mixed_sh
     page.locator("#hideConfirmedBtn").click()
     expect(page.locator(".burst-strip")).to_have_count(1)
 
-    # With Hide confirmed on, searching the hidden burst's confirmed species
-    # must NOT match: the aggregate species is only sourced from the hidden
-    # object burst (no visible object burst backs it), so surfacing the
-    # encounter would render only the unrelated raw burst.
+    # With Hide confirmed on, the raw visible burst is opaque — we can't tell
+    # which species it contributes to the aggregate. The GRM detach flow can
+    # leave the source raw burst carrying unconfirmed Red-tailed Hawk photos
+    # while its detached sibling is confirmed to Red-tailed Hawk, so the raw
+    # burst may well share the hidden burst's species. Keep the aggregate
+    # species searchable so those legitimate matches aren't dropped; the
+    # tradeoff is that the encounter also surfaces for the rare case where
+    # the raw burst genuinely has no such species, and only the raw burst's
+    # own photo renders.
     search.fill("Red-tailed Hawk")
-    expect(page.locator(".encounter-card")).to_have_count(0)
-    expect(page.locator("#countAll")).to_have_text(" (0)")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (1)")
 
-    # The hidden burst's filename must not match either.
+    # The hidden burst's filename must not match — filenames are scoped to
+    # photos in visible bursts, so nothing from the hidden burst leaks in.
     search.fill("hawk1.jpg")
     expect(page.locator(".encounter-card")).to_have_count(0)
     expect(page.locator("#countAll")).to_have_text(" (0)")
@@ -1483,7 +1489,7 @@ def test_pipeline_review_search_blocks_hidden_only_aggregate_species_in_mixed_sh
     expect(page.locator(".encounter-card")).to_have_count(1)
     expect(page.locator("#countAll")).to_have_text(" (1)")
 
-    # Toggling Hide confirmed back off restores the aggregate species match.
+    # Toggling Hide confirmed back off keeps the aggregate species match.
     page.locator("#hideConfirmedBtn").click()
     search.fill("Red-tailed Hawk")
     expect(page.locator(".encounter-card")).to_have_count(1)
