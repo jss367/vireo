@@ -22,6 +22,7 @@ pub mod ids {
     pub const NAV_COMPARE: &str = "nav_compare";
     pub const NAV_JOBS: &str = "nav_jobs";
     pub const NAV_DUPLICATES: &str = "nav_duplicates";
+    pub const NAV_LIGHTROOM: &str = "nav_lightroom";
     pub const NAV_SHORTCUTS: &str = "nav_shortcuts";
     pub const NAV_DASHBOARD: &str = "nav_dashboard";
     pub const NAV_WORKSPACE: &str = "nav_workspace";
@@ -36,6 +37,7 @@ pub mod ids {
     pub const FILE_OPEN_WORKSPACE: &str = "file_open_workspace";
     pub const FILE_IMPORT_PHOTOS: &str = "file_import_photos";
     pub const FILE_IMPORT_FOLDER: &str = "file_import_folder";
+    pub const FILE_IMPORT_LIGHTROOM: &str = "file_import_lightroom";
     pub const FILE_EXPORT_SELECTED: &str = "file_export_selected";
 
     pub const PHOTO_OPEN_LIGHTBOX: &str = "photo_open_lightbox";
@@ -100,6 +102,7 @@ pub fn route_for_id(id: &str) -> Option<&'static str> {
         ids::NAV_COMPARE => Some("/compare"),
         ids::NAV_JOBS => Some("/jobs"),
         ids::NAV_DUPLICATES => Some("/duplicates"),
+        ids::NAV_LIGHTROOM => Some("/lightroom"),
         ids::NAV_SHORTCUTS => Some("/shortcuts"),
         ids::NAV_DASHBOARD => Some("/dashboard"),
         ids::NAV_WORKSPACE => Some("/workspace"),
@@ -119,6 +122,7 @@ pub fn command_for_id(id: &str) -> Option<&'static str> {
         ids::FILE_OPEN_WORKSPACE => Some("open_workspace"),
         ids::FILE_IMPORT_PHOTOS => Some("import_photos"),
         ids::FILE_IMPORT_FOLDER => Some("import_folder"),
+        ids::FILE_IMPORT_LIGHTROOM => Some("import_lightroom"),
         ids::FILE_EXPORT_SELECTED => Some("export_selected"),
         ids::PHOTO_OPEN_LIGHTBOX => Some("photo_open_lightbox"),
         ids::PHOTO_OPEN_BROWSE => Some("photo_open_browse"),
@@ -215,6 +219,10 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
         .item(
             &MenuItemBuilder::with_id(ids::FILE_IMPORT_FOLDER, "Import Folder...")
                 .accelerator("CmdOrCtrl+Shift+I")
+                .build(app)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id(ids::FILE_IMPORT_LIGHTROOM, "Import Lightroom Catalog...")
                 .build(app)?,
         )
         .item(
@@ -318,7 +326,8 @@ pub fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry
                 .accelerator("CmdOrCtrl+Shift+L")
                 .build(app)?,
         )
-        .item(&MenuItemBuilder::with_id(ids::NAV_SHORTCUTS, "Shortcuts").build(app)?);
+        .item(&MenuItemBuilder::with_id(ids::NAV_SHORTCUTS, "Shortcuts").build(app)?)
+        .item(&MenuItemBuilder::with_id(ids::NAV_LIGHTROOM, "Lightroom").build(app)?);
 
     // Settings in View menu only on non-macOS (it is in the app submenu on macOS)
     #[cfg(not(target_os = "macos"))]

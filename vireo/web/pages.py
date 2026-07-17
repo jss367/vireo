@@ -10,6 +10,7 @@ _TEMPLATES = {
     "/best-batch": "best_batch.html",
     "/review": "review.html",
     "/edit": "photo_editor.html",
+    "/lightroom": "lightroom.html",
     "/audit": "audit.html",
     "/cull": "cull.html",
     "/pipeline": "pipeline.html",

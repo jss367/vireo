@@ -1720,7 +1720,7 @@ def test_pages_link_base_css(app_and_db):
     """Every page includes a <link> to vireo-base.css."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/pipeline/review', '/map', '/shortcuts']
     for page in pages:
@@ -2429,7 +2429,7 @@ def test_pages_include_vireo_utils(app_and_db):
     """Every page includes vireo-utils.js via _navbar.html."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:
@@ -2451,7 +2451,7 @@ def test_pages_no_inline_escapeHtml(app_and_db):
     """No page template should still define escapeHtml inline."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:
@@ -12407,7 +12407,11 @@ def test_native_import_commands_route_to_import_page():
         menu = f.read()
 
     assert "ids::NAV_IMPORT => Some(\"/import\")" in menu
+    assert "ids::NAV_LIGHTROOM => Some(\"/lightroom\")" in menu
+    assert "ids::FILE_IMPORT_LIGHTROOM => Some(\"import_lightroom\")" in menu
     assert "case 'import_photos':\n        nativeMenuRoute('/import');" in navbar
+    assert "case 'import_lightroom':\n        nativeMenuRoute('/lightroom');" in navbar
+    assert '"Import Lightroom Catalog..."' in menu
     # Import Folder... must stay a distinct action from Import Photos...:
     # it deep-links into Copy-to-archive with the source picker open.
     assert (

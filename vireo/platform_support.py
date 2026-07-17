@@ -156,6 +156,7 @@ def dependency_readiness(config: dict | None = None) -> dict:
     exif = exiftool_status()
     darktable = find_darktable(config.get("darktable_bin", ""))
     dng = find_dng_converter(config.get("dng_converter_bin", ""))
+    lightroom = find_lightroom()
     ssh = find_ssh(config.get("ssh_bin", ""))
     ssh_ok, ssh_detail = _probe(ssh, ["-V"])
     rsync = resolve_rsync_bin(config.get("rsync_bin", ""))
@@ -179,6 +180,12 @@ def dependency_readiness(config: dict | None = None) -> dict:
             "state": "ready" if dng else "missing",
             "path": dng,
             "hint": "Install Adobe DNG Converter or configure its executable under Settings → Paths.",
+        },
+        "lightroom": {
+            "required": False,
+            "state": "ready" if lightroom else "missing",
+            "path": lightroom,
+            "hint": "Lightroom Classic is optional; catalog import remains available when installed.",
         },
         "openssh": {
             "required": False,
