@@ -24184,6 +24184,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "hard_cut_time": ("seconds", 0.0, 86400.0),
             "hard_cut_score": ("score", 0.0, 1.0),
             "soft_cut_score": ("score", 0.0, 1.0),
+            "species_hard_cut_confidence": ("score", 0.0, 1.0),
+            "species_hard_cut_margin": ("score", 0.0, 1.0),
             "merge_score": ("score", 0.0, 1.0),
             "merge_max_gap": ("seconds", 0.0, 86400.0),
             "merge_tau": ("seconds", 1.0, 86400.0),

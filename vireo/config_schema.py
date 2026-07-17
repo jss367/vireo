@@ -646,6 +646,18 @@ SCHEMA = {
         "label": "Encounter: soft-cut score",
         "desc": "Similarity below which encounters are likely to split.",
     },
+    "pipeline.species_hard_cut_confidence": {
+        "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
+        "category": "Pipeline", "scope": "both",
+        "label": "Encounter: species split confidence",
+        "desc": "Minimum mean classifier confidence required to split adjacent photos that strongly indicate different species.",
+    },
+    "pipeline.species_hard_cut_margin": {
+        "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
+        "category": "Pipeline", "scope": "both",
+        "label": "Encounter: species split margin",
+        "desc": "Minimum confidence lead over the runner-up species required for an automatic species boundary.",
+    },
     "pipeline.merge_score": {
         "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
         "category": "Pipeline", "scope": "both",

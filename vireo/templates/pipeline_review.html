@@ -2405,6 +2405,12 @@ function renderAlgorithmTrace() {
     var thrParts = [];
     if (typeof thr.hard_cut_score === 'number') thrParts.push('hard_cut_score=' + thr.hard_cut_score.toFixed(2));
     if (typeof thr.soft_cut_score === 'number') thrParts.push('soft_cut_score=' + thr.soft_cut_score.toFixed(2));
+    if (typeof thr.species_hard_cut_confidence === 'number') {
+      thrParts.push('species_confidence=' + thr.species_hard_cut_confidence.toFixed(2));
+    }
+    if (typeof thr.species_hard_cut_margin === 'number') {
+      thrParts.push('species_margin=' + thr.species_hard_cut_margin.toFixed(2));
+    }
     if (typeof thr.hard_cut_time === 'number') thrParts.push('hard_cut_time=' + thr.hard_cut_time + 's');
     if (thrParts.length) {
       html += '<div class="trace-thresholds">cut if: ' + thrParts.join(' · ') + '</div>';
