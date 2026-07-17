@@ -149,6 +149,7 @@ ALL_PAGES = [
     {"id": "compare",         "label": "Compare",         "href": "/compare"},
     {"id": "settings",        "label": "Settings",        "href": "/settings"},
     {"id": "workspace",       "label": "Workspace",       "href": "/workspace"},
+    {"id": "lightroom",       "label": "Lightroom",       "href": "/lightroom"},
     {"id": "shortcuts",       "label": "Shortcuts",       "href": "/shortcuts"},
     {"id": "keywords",        "label": "Keywords",        "href": "/keywords"},
     {"id": "duplicates",      "label": "Duplicates",      "href": "/duplicates"},

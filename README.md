@@ -22,13 +22,14 @@ Vireo helps wildlife photographers triage thousands of photos using machine lear
 - **Browse, review, and cull** — Filter, search, rate, keyword, and flag photos in a responsive web UI
 - **Map view** — Geographic visualization of geotagged photos
 - **Workspaces** — Isolated projects with independent predictions, collections, and settings
+- **Lightroom migration** — Import keyword hierarchies from `.lrcat` catalogs via XMP sidecars
 - **Transparent by design** — Live log panel, job progress streaming, pipeline inspector, and full audit system
 
 ## Philosophy
 
 - **XMP is truth, the database is a cache.** The SQLite database can be rebuilt from your filesystem at any time.
 - **Show the user what's happening.** No black boxes — every scan, download, classification, and failure is visible.
-- **Work with the ecosystem.** Sync to XMP, submit to iNaturalist, open in your editor of choice. Vireo orchestrates; it doesn't try to own the pipeline.
+- **Work with the ecosystem.** Import from Lightroom, sync to XMP, submit to iNaturalist. Vireo orchestrates; it doesn't try to own the pipeline.
 
 See [CORE_PHILOSOPHY.md](CORE_PHILOSOPHY.md) for more.
 
