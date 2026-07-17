@@ -141,6 +141,78 @@ def _write_confirmation_pipeline_cache(live_server, photo_ids):
         json.dump(cache, f)
 
 
+def _write_species_conflict_pipeline_cache(live_server, photo_ids):
+    db = live_server["db"]
+    placeholders = ",".join("?" for _ in photo_ids)
+    rows = db.conn.execute(
+        f"SELECT id, filename, timestamp FROM photos WHERE id IN ({placeholders}) ORDER BY id",
+        photo_ids,
+    ).fetchall()
+    photos = []
+    predictions = [
+        [("Mute Swan", 0.93, "Bird model"), ("Little Grebe", 0.04, "Bird model")],
+        [("Little Grebe", 0.96, "Bird model"), ("Mute Swan", 0.04, "Bird model")],
+        [("Little Grebe", 0.88, "Bird model"), ("Mute Swan", 0.09, "Bird model")],
+    ]
+    for row, species_top5 in zip(rows, predictions, strict=True):
+        photos.append(
+            {
+                "id": row["id"],
+                "filename": row["filename"],
+                "timestamp": row["timestamp"],
+                "label": "REVIEW",
+                "quality_composite": 0.5,
+                "flag": "none",
+                "rating": 0,
+                "species_top5": species_top5,
+            }
+        )
+
+    ids = [photo["id"] for photo in photos]
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": ids,
+                "photo_count": len(ids),
+                "burst_count": 2,
+                "time_range": [photos[0]["timestamp"], photos[-1]["timestamp"]],
+                "species": ["Mute Swan", 0.35],
+                "species_predictions": [],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                "bursts": [
+                    {
+                        "photo_ids": ids[:1],
+                        "species_predictions": [],
+                        "species_override": None,
+                    },
+                    {
+                        "photo_ids": ids[1:],
+                        "species_predictions": [],
+                        "species_override": None,
+                    },
+                ],
+            }
+        ],
+        "summary": {
+            "total_photos": len(ids),
+            "encounter_count": 1,
+            "burst_count": 2,
+            "keep_count": 0,
+            "review_count": len(ids),
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
 def _review_result_for_ids(live_server, photo_ids):
     db = live_server["db"]
     placeholders = ",".join("?" for _ in photo_ids)
@@ -442,3 +514,181 @@ def test_pipeline_review_view_settings_persist(live_server, page):
     page.locator("#speciesFilterClear").click()
     expect(page.locator("#speciesFilterInput")).to_have_value("")
     expect(page.locator(".encounter-card")).to_have_count(1)
+
+
+def test_pipeline_review_marks_photo_and_burst_species_conflicts(live_server, page):
+    photo_ids = live_server["data"]["photos"][:3]
+    _write_species_conflict_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    conflicts = page.locator("[data-species-conflict]")
+    expect(conflicts).to_have_count(2)
+    expect(conflicts.first).to_contain_text("Little Grebe 96%")
+    expect(conflicts.first).to_have_attribute(
+        "title",
+        re.compile(r"Strong classification conflict: 1 classifier averages Little Grebe at 96%.*Mute Swan averages 4%"),
+    )
+    expect(page.locator(".burst-species-conflict")).to_contain_text(
+        "2 suggest Little Grebe"
+    )
+    expect(page.locator(".encounter-species-conflict").first).to_contain_text(
+        "2 species conflicts"
+    )
+    expect(page.locator("#countSpeciesConflict")).to_have_text(" (2)")
+
+    threshold_examples = page.evaluate(
+        """
+        () => ({
+          possible: analyzePhotoSpeciesConflict({
+            species_top5: [
+              ['Little Grebe', 0.62, 'Bird model'],
+              ['Mute Swan', 0.31, 'Bird model'],
+            ],
+          }, 'Mute Swan').severity,
+          matching: analyzePhotoSpeciesConflict({
+            species_top5: [
+              ['Mute Swan', 0.94, 'Bird model'],
+              ['Little Grebe', 0.03, 'Bird model'],
+            ],
+          }, 'Mute Swan').severity,
+        })
+        """
+    )
+    assert threshold_examples == {"possible": "possible", "matching": None}
+
+    page.locator('[data-filter="SPECIES_CONFLICT"]').click()
+    expect(page.locator(".photo-card")).to_have_count(2)
+    expect(page.locator(".photo-card").filter(has_text="Little Grebe")).to_have_count(2)
+
+    conflicts.first.click()
+    expect(page.locator(".inspect-species-conflict")).to_be_visible()
+    expect(page.locator(".inspect-species-conflict")).to_contain_text(
+        "This photo averages Little Grebe at 96%"
+    )
+
+
+def _write_confirmed_burst_conflict_pipeline_cache(live_server, photo_ids):
+    """A single encounter with two bursts: the first (confirmed) burst holds
+    the only conflicting frame; the second is clean and unconfirmed so the
+    encounter stays visible when hide-confirmed is on."""
+    db = live_server["db"]
+    placeholders = ",".join("?" for _ in photo_ids)
+    rows = db.conn.execute(
+        f"SELECT id, filename, timestamp FROM photos WHERE id IN ({placeholders}) ORDER BY id",
+        photo_ids,
+    ).fetchall()
+    predictions = [
+        [("Little Grebe", 0.96, "Bird model"), ("Mute Swan", 0.04, "Bird model")],
+        [("Mute Swan", 0.92, "Bird model"), ("Little Grebe", 0.05, "Bird model")],
+        [("Mute Swan", 0.9, "Bird model"), ("Little Grebe", 0.06, "Bird model")],
+    ]
+    photos = []
+    for row, species_top5 in zip(rows, predictions, strict=True):
+        photos.append(
+            {
+                "id": row["id"],
+                "filename": row["filename"],
+                "timestamp": row["timestamp"],
+                "label": "REVIEW",
+                "quality_composite": 0.5,
+                "flag": "none",
+                "rating": 0,
+                "species_top5": species_top5,
+            }
+        )
+    ids = [photo["id"] for photo in photos]
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": ids,
+                "photo_count": len(ids),
+                "burst_count": 2,
+                "time_range": [photos[0]["timestamp"], photos[-1]["timestamp"]],
+                "species": ["Mute Swan", 0.35],
+                "species_predictions": [],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                "bursts": [
+                    {
+                        "photo_ids": ids[:1],
+                        "species_predictions": [],
+                        "species_override": {"species": "Mute Swan", "confirmed": True},
+                    },
+                    {
+                        "photo_ids": ids[1:],
+                        "species_predictions": [],
+                        "species_override": None,
+                    },
+                ],
+            }
+        ],
+        "summary": {
+            "total_photos": len(ids),
+            "encounter_count": 1,
+            "burst_count": 2,
+            "keep_count": 0,
+            "review_count": len(ids),
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
+def test_pipeline_review_encounter_conflict_summary_respects_hide_confirmed(
+    live_server, page
+):
+    photo_ids = live_server["data"]["photos"][:3]
+    _write_confirmed_burst_conflict_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    # Baseline: the conflict in the confirmed burst is counted at the
+    # encounter level and in the SPECIES_CONFLICT filter.
+    expect(page.locator(".encounter-species-conflict").first).to_contain_text(
+        "1 species conflict"
+    )
+    expect(page.locator("#countSpeciesConflict")).to_have_text(" (1)")
+
+    # Turn on Hide confirmed. The confirmed burst (which carries the only
+    # conflicting frame) is no longer rendered, so the encounter header/footer
+    # badges must disappear too — they used to keep counting hidden photos.
+    page.locator("#hideConfirmedBtn").click()
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator(".burst-strip")).to_have_count(1)
+    expect(page.locator(".encounter-species-conflict")).to_have_count(0)
+    expect(page.locator("#countSpeciesConflict")).to_have_text(" (0)")
+
+    # Toggling it back off should bring the badge back.
+    page.locator("#hideConfirmedBtn").click()
+    expect(page.locator(".encounter-species-conflict").first).to_contain_text(
+        "1 species conflict"
+    )
+    expect(page.locator("#countSpeciesConflict")).to_have_text(" (1)")
+
+
+def test_pipeline_review_conflicting_burst_can_split_and_undo(live_server, page):
+    photo_ids = live_server["data"]["photos"][:3]
+    _write_species_conflict_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    split = page.locator(".burst-conflict-split")
+    expect(split).to_have_count(1)
+    split.click()
+
+    expect(page.locator(".encounter-card")).to_have_count(2)
+    expect(page.locator("[data-species-conflict]")).to_have_count(0)
+    expect(page.locator("#undoToast")).to_be_visible()
+    expect(page.locator("#undoMsg")).to_have_text("Burst detached from encounter")
+
+    page.locator("#undoToast button").click()
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("[data-species-conflict]")).to_have_count(2)
