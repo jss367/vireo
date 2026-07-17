@@ -326,6 +326,35 @@ def test_same_confident_species_with_different_case_stays_together():
     assert [encounter["photo_count"] for encounter in encounters] == [2]
 
 
+def test_default_species_weight_penalizes_species_mismatch():
+    """The 0.40 default w_species makes a species mismatch drag S_enc down
+    harder than the old 0.10 default would — so a lone bird of a different
+    species (the mallard-among-gulls case) resists merging into a neighbor.
+
+    Confidences are moderate on purpose: a confident species change is already
+    a hard encounter boundary, so this exercises the weighted-score regime
+    where the weight is what actually decides.
+    """
+    from encounters import compute_s_enc
+
+    emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    # Same time and same look — only the predicted species differs.
+    a = _make_photo(ts_offset_s=0, subj_emb=emb, global_emb=emb,
+                    species=[("Mallard", 0.6, "classifier-a")], focal_length=600)
+    b = _make_photo(ts_offset_s=1, subj_emb=emb, global_emb=emb,
+                    species=[("California Gull", 0.6, "classifier-a")], focal_length=600)
+
+    _, components = compute_s_enc(a, b, return_components=True)
+    assert components["species"]["weight"] == 0.40  # new default is in effect
+    assert components["species"]["value"] == 0.0     # disjoint top-5 → no overlap
+
+    score_new = compute_s_enc(a, b)
+    score_old = compute_s_enc(a, b, config={"w_species": 0.10})
+    # Heavier species vote pushes a mismatched pair's score lower, closer to
+    # (and, in the real pipeline, below) the merge/cut thresholds.
+    assert score_new < score_old
+
+
 # -- sim_meta --
 
 
