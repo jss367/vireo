@@ -841,6 +841,266 @@ def test_pipeline_review_search_scopes_aggregate_predictions_to_visible_bursts(
     expect(page.locator("#countAll")).to_have_text(" (1)")
 
 
+def _write_mixed_encounter_prior_label_pipeline_cache(
+    live_server, hawk_id, robin_id
+):
+    """Cache a mixed encounter where the encounter-level confirmation was
+    withdrawn (species_confirmed=False) but the serializer keeps the prior
+    'Red-tailed Hawk' label in enc.confirmed_species for replacement flows.
+    The only burst still carrying that label is a confirmed override on the
+    hawk burst (which Hide confirmed will hide); the visible robin burst has
+    no override. Searching the prior label under Hide confirmed must not
+    surface the encounter.
+    """
+    db = live_server["db"]
+    rows = db.conn.execute(
+        "SELECT id, filename, timestamp FROM photos WHERE id IN (?, ?) ORDER BY id",
+        (hawk_id, robin_id),
+    ).fetchall()
+    photos = [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "timestamp": row["timestamp"],
+            "label": "REVIEW",
+            "quality_composite": 0.5,
+            "flag": "none",
+            "rating": 0,
+        }
+        for row in rows
+    ]
+    hawk_photo = next(p for p in photos if p["id"] == hawk_id)
+    robin_photo = next(p for p in photos if p["id"] == robin_id)
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": [hawk_photo["id"], robin_photo["id"]],
+                "photo_count": 2,
+                "burst_count": 2,
+                "time_range": [hawk_photo["timestamp"], robin_photo["timestamp"]],
+                "species": [],
+                "species_predictions": [],
+                # Mixed encounter: the encounter itself is unconfirmed, but a
+                # prior label survives (serializer keeps it for replacement).
+                "species_confirmed": False,
+                "confirmed_species": "Red-tailed Hawk",
+                "bursts": [
+                    {
+                        "photo_ids": [hawk_photo["id"]],
+                        "species_predictions": [],
+                        "species_override": {
+                            "species": "Red-tailed Hawk",
+                            "confirmed": True,
+                        },
+                    },
+                    {
+                        "photo_ids": [robin_photo["id"]],
+                        "species_predictions": [
+                            {
+                                "species": "American Robin",
+                                "count": 1,
+                                "avg_confidence": 0.92,
+                                "models": [
+                                    {"model": "Bird model", "confidence": 0.92}
+                                ],
+                            }
+                        ],
+                        "species_override": None,
+                    },
+                ],
+            }
+        ],
+        "summary": {
+            "total_photos": 2,
+            "encounter_count": 1,
+            "burst_count": 2,
+            "keep_count": 0,
+            "review_count": 2,
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
+def test_pipeline_review_search_scopes_mixed_encounter_prior_label(
+    live_server, page
+):
+    photos = live_server["data"]["photos"]
+    _write_mixed_encounter_prior_label_pipeline_cache(
+        live_server, photos[0], photos[3]
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator(".burst-strip")).to_have_count(2)
+
+    search = page.locator("#speciesFilterInput")
+
+    # Baseline (Hide confirmed off): the prior encounter label is still
+    # searchable because the confirmed burst carrying it is visible.
+    search.fill("Red-tailed Hawk")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search.fill("")
+    page.locator("#hideConfirmedBtn").click()
+    expect(page.locator(".burst-strip")).to_have_count(1)
+
+    # With Hide confirmed on, only the robin burst renders. The encounter is
+    # unconfirmed at the encounter level, so the surviving prior label is
+    # backed exclusively by the now-hidden confirmed hawk override. Searching
+    # 'Red-tailed Hawk' must not surface the encounter.
+    search.fill("Red-tailed Hawk")
+    expect(page.locator(".encounter-card")).to_have_count(0)
+    expect(page.locator("#countAll")).to_have_text(" (0)")
+
+    # The visible burst's species still matches.
+    search.fill("American Robin")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (1)")
+
+
+def _write_visible_burst_below_threshold_pipeline_cache(
+    live_server, hawk_id, robin_id
+):
+    """Cache an encounter whose encounter-level aggregate carries 'Peregrine
+    Falcon' at high confidence (rolled up from the hidden confirmed hawk
+    burst), while the visible robin burst only has a below-threshold Falcon
+    prediction. Under Hide confirmed at the default 40% slider, the aggregate
+    passes the threshold gate but the visible burst's own Falcon evidence is
+    below it — searching 'Peregrine Falcon' must not surface the encounter.
+    """
+    db = live_server["db"]
+    rows = db.conn.execute(
+        "SELECT id, filename, timestamp FROM photos WHERE id IN (?, ?) ORDER BY id",
+        (hawk_id, robin_id),
+    ).fetchall()
+    photos = [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "timestamp": row["timestamp"],
+            "label": "REVIEW",
+            "quality_composite": 0.5,
+            "flag": "none",
+            "rating": 0,
+        }
+        for row in rows
+    ]
+    hawk_photo = next(p for p in photos if p["id"] == hawk_id)
+    robin_photo = next(p for p in photos if p["id"] == robin_id)
+    hidden_pred = {
+        "species": "Peregrine Falcon",
+        "count": 1,
+        "avg_confidence": 0.9,
+        "models": [{"model": "Bird model", "confidence": 0.9}],
+    }
+    visible_pred = {
+        "species": "Peregrine Falcon",
+        "count": 1,
+        "avg_confidence": 0.1,
+        "models": [{"model": "Bird model", "confidence": 0.1}],
+    }
+    # Aggregate carries a Falcon entry whose top model confidence passes
+    # the default slider — but that evidence comes from the hidden burst.
+    aggregate_pred = {
+        "species": "Peregrine Falcon",
+        "count": 2,
+        "avg_confidence": 0.5,
+        "models": [{"model": "Bird model", "confidence": 0.9}],
+    }
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": [hawk_photo["id"], robin_photo["id"]],
+                "photo_count": 2,
+                "burst_count": 2,
+                "time_range": [hawk_photo["timestamp"], robin_photo["timestamp"]],
+                "species": [],
+                "species_predictions": [aggregate_pred],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                "bursts": [
+                    {
+                        "photo_ids": [hawk_photo["id"]],
+                        "species_predictions": [hidden_pred],
+                        "species_override": {
+                            "species": "Red-tailed Hawk",
+                            "confirmed": True,
+                        },
+                    },
+                    {
+                        "photo_ids": [robin_photo["id"]],
+                        "species_predictions": [visible_pred],
+                        "species_override": None,
+                    },
+                ],
+            }
+        ],
+        "summary": {
+            "total_photos": 2,
+            "encounter_count": 1,
+            "burst_count": 2,
+            "keep_count": 0,
+            "review_count": 2,
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
+def test_pipeline_review_search_gates_visible_burst_support_by_confidence(
+    live_server, page
+):
+    photos = live_server["data"]["photos"]
+    _write_visible_burst_below_threshold_pipeline_cache(
+        live_server, photos[0], photos[3]
+    )
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator(".burst-strip")).to_have_count(2)
+
+    search = page.locator("#speciesFilterInput")
+
+    # Baseline (Hide confirmed off): the aggregate Falcon prediction passes
+    # the slider and matches.
+    search.fill("Peregrine Falcon")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search.fill("")
+    page.locator("#hideConfirmedBtn").click()
+    expect(page.locator(".burst-strip")).to_have_count(1)
+
+    # With Hide confirmed on, the aggregate still passes threshold, but the
+    # only visible burst has Falcon at 0.1 — below the 40% default. Aggregate
+    # search must require threshold-passing visible-burst support, so it
+    # does not surface the encounter.
+    search.fill("Peregrine Falcon")
+    expect(page.locator(".encounter-card")).to_have_count(0)
+    expect(page.locator("#countAll")).to_have_text(" (0)")
+
+    # Dropping the slider so the visible burst's Falcon prediction meets the
+    # threshold brings the encounter back — visible-burst support is now real.
+    page.evaluate("setMinConfidence(5)")
+    search.fill("Peregrine Falcon")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (1)")
+
+
 def test_pipeline_review_search_matches_confirmed_burst_override(live_server, page):
     photo_ids = live_server["data"]["photos"][1:3]
     _write_confirmed_burst_override_pipeline_cache(live_server, photo_ids)

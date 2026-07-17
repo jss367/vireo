@@ -2344,12 +2344,21 @@ function encounterMatchesSearch(enc, photoMap) {
 
   // Manually assigned encounter label. The encounter widget still renders
   // (even when some bursts hide), so it stays searchable — unless every burst
-  // that inherits the encounter-level confirmation is hidden, which would tie
-  // the label exclusively to hidden content.
+  // that carries the label is hidden. For mixed/partial encounters the
+  // serializer keeps `confirmed_species` even when `species_confirmed` is
+  // false (for replacement flows), so the label may only be backed by a
+  // per-burst confirmed override; if that override is on a hidden burst the
+  // label must not surface the encounter.
   var confirmedLabelHasVisibleBurst = true;
-  if (hideConfirmed && enc.species_confirmed && bursts.length > 0) {
+  if (hideConfirmed && enc.confirmed_species && bursts.length > 0) {
     confirmedLabelHasVisibleBurst = bursts.some(function(b) {
-      return !(b && b.species_override) && burstVisible(b);
+      if (!burstVisible(b)) return false;
+      if (b && b.species_override && b.species_override.confirmed === true) {
+        return b.species_override.species === enc.confirmed_species;
+      }
+      // Bursts without an override inherit the encounter-level label only
+      // when the encounter itself is confirmed.
+      return !(b && b.species_override) && enc.species_confirmed;
     });
   }
   if (confirmedLabelHasVisibleBurst) fields.push(enc.confirmed_species);
@@ -2376,13 +2385,27 @@ function encounterMatchesSearch(enc, photoMap) {
   // that at least one visible burst also predicts, so searching a species
   // whose only evidence is inside a hidden burst can't surface an unrelated
   // visible burst.
+  // Support means: a visible burst has evidence the search should follow. A
+  // confirmed burst override qualifies (manual label always counts), and so
+  // does a burst-level prediction whose confidence meets the slider — matching
+  // the gate applied to the aggregate below. Recording every visible burst
+  // species regardless of confidence would let a hidden burst's high-confidence
+  // prediction push the aggregate over the threshold while a below-threshold
+  // sighting on the visible burst quietly keeps the encounter searchable.
   var visibleBurstSpecies = null;
   if (hideConfirmed && bursts.length > 0) {
     visibleBurstSpecies = new Set();
     bursts.forEach(function(burst) {
       if (!burstVisible(burst)) return;
+      if (burst.species_override && burst.species_override.confirmed === true
+          && burst.species_override.species) {
+        visibleBurstSpecies.add(burst.species_override.species);
+      }
       (burst.species_predictions || []).forEach(function(sp) {
-        if (sp && sp.species) visibleBurstSpecies.add(sp.species);
+        if (!sp || !sp.species) return;
+        if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
+          visibleBurstSpecies.add(sp.species);
+        }
       });
     });
   }
