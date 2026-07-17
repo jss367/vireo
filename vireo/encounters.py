@@ -23,7 +23,11 @@ DEFAULTS = {
     "w_time": 0.35,
     "w_subj": 0.35,
     "w_global": 0.15,
-    "w_species": 0.10,
+    # Raised from the design-doc 0.10: at 0.10 a species mismatch barely dented
+    # the score, so a lone bird got merged into a neighboring encounter of a
+    # different species (and inherited its majority-vote label). A heavier
+    # species vote lets a disjoint top-5 (sim_species == 0) resist the merge.
+    "w_species": 0.40,
     "w_meta": 0.05,
     # Similarity parameters
     "tau_enc": 40.0,  # time constant for sim_time (seconds)

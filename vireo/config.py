@@ -140,7 +140,10 @@ DEFAULTS = {
         "w_time": 0.35,
         "w_subj": 0.35,
         "w_global": 0.15,
-        "w_species": 0.10,
+        # Kept in sync with encounters.DEFAULTS["w_species"]; raised from 0.10
+        # so a species mismatch resists merging distinct species into one
+        # encounter. See the note in encounters.py for the rationale.
+        "w_species": 0.40,
         "w_meta": 0.05,
         "tau_enc": 40.0,
         "hard_cut_time": 180.0,
