@@ -96,7 +96,12 @@ def create_local_folder_blueprint(
             workspace_ids.update(affected_workspace_ids(db, root_id))
             workspace_ids.update(workspace_ids_for_folder_tree(db, root_id))
         for job in get_runner().list_jobs():
-            if job.get("status") not in {"queued", "running"}:
+            # ``pausing``/``paused`` jobs still hold their original workspace
+            # and root assumptions in the worker's memory. A stage/sync/discard
+            # starting under them would race the paused work when it resumes,
+            # leaving catalog rows written against paths the folder manifest
+            # does not cover.
+            if job.get("status") not in {"queued", "running", "pausing", "paused"}:
                 continue
             config = job.get("config") or {}
             job_roots = set(config.get("root_folder_ids") or []) if isinstance(config, dict) else set()

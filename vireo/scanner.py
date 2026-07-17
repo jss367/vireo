@@ -1858,7 +1858,11 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         )
 
     metadata_map = (
-        extract_metadata(paths_to_extract, progress_callback=_metadata_progress)
+        extract_metadata(
+            paths_to_extract,
+            progress_callback=_metadata_progress,
+            checkpoint=_check_cancelled,
+        )
         if paths_to_extract else {}
     )
     _check_cancelled()
