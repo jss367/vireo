@@ -146,6 +146,8 @@ DEFAULTS = {
         "hard_cut_time": 180.0,
         "hard_cut_score": 0.42,
         "soft_cut_score": 0.52,
+        "species_hard_cut_confidence": 0.80,
+        "species_hard_cut_margin": 0.60,
         "merge_score": 0.62,
         "merge_max_gap": 60.0,
         "merge_tau": 20.0,

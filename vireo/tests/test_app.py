@@ -11504,7 +11504,13 @@ def test_save_grouping_defaults_persists_to_config(tmp_path, monkeypatch):
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
     client = app.test_client()
 
-    payload = {"pipeline": {"w_species": 0.40, "hard_cut_score": 0.55, "tau_enc": 30.0}}
+    payload = {"pipeline": {
+        "w_species": 0.40,
+        "hard_cut_score": 0.55,
+        "species_hard_cut_confidence": 0.85,
+        "species_hard_cut_margin": 0.65,
+        "tau_enc": 30.0,
+    }}
     resp = client.post("/api/pipeline/save-grouping-defaults", json=payload)
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
@@ -11513,6 +11519,8 @@ def test_save_grouping_defaults_persists_to_config(tmp_path, monkeypatch):
     saved = cfg.load()
     assert saved["pipeline"]["w_species"] == 0.40
     assert saved["pipeline"]["hard_cut_score"] == 0.55
+    assert saved["pipeline"]["species_hard_cut_confidence"] == 0.85
+    assert saved["pipeline"]["species_hard_cut_margin"] == 0.65
     assert saved["pipeline"]["tau_enc"] == 30.0
 
 
