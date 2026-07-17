@@ -2370,7 +2370,13 @@ function encounterMatchesSearch(enc, photoMap) {
     if (photo) fields.push(photo.filename);
   });
 
-  return VireoTextSearch.matchesFields(fields, speciesFilter, speciesFilterSearchOptions);
+  // Match the full query against each candidate field independently so a
+  // multi-token query like "Mute Swan" can't be satisfied by pairing "Mute"
+  // from one field (e.g. "Mute Grouse") with "Swan" from another (e.g.
+  // "Trumpeter Swan"). A single field must contain every token to match.
+  return fields.some(function(field) {
+    return VireoTextSearch.matchesFields(field, speciesFilter, speciesFilterSearchOptions);
+  });
 }
 
 // -- Rendering --

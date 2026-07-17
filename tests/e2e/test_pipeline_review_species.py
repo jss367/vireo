@@ -592,6 +592,107 @@ def test_pipeline_review_search_matches_confirmed_burst_override(live_server, pa
     expect(page.locator("#countAll")).to_have_text(" (2)")
 
 
+def _write_cross_field_pipeline_cache(live_server, photo_ids):
+    """Cache an encounter whose eligible predictions are 'Mute Grouse' and
+    'Trumpeter Swan'. A multi-token search for 'Mute Swan' shouldn't match:
+    no single field contains both tokens, even though 'Mute' appears in one
+    prediction and 'Swan' in another.
+    """
+    db = live_server["db"]
+    placeholders = ",".join("?" for _ in photo_ids)
+    rows = db.conn.execute(
+        f"SELECT id, filename, timestamp FROM photos WHERE id IN ({placeholders}) ORDER BY id",
+        photo_ids,
+    ).fetchall()
+    photos = [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "timestamp": row["timestamp"],
+            "label": "REVIEW",
+            "quality_composite": 0.5,
+            "flag": "none",
+            "rating": 0,
+        }
+        for row in rows
+    ]
+    ids = [p["id"] for p in photos]
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": ids,
+                "photo_count": len(ids),
+                "burst_count": 1,
+                "time_range": [photos[0]["timestamp"], photos[-1]["timestamp"]],
+                "species": [],
+                "species_predictions": [
+                    {
+                        "species": "Mute Grouse",
+                        "count": len(ids),
+                        "avg_confidence": 0.9,
+                        "models": [{"model": "Bird model", "confidence": 0.9}],
+                    },
+                    {
+                        "species": "Trumpeter Swan",
+                        "count": len(ids),
+                        "avg_confidence": 0.85,
+                        "models": [{"model": "Bird model", "confidence": 0.85}],
+                    },
+                ],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                "bursts": [
+                    {
+                        "photo_ids": ids,
+                        "species_predictions": [],
+                        "species_override": None,
+                    }
+                ],
+            }
+        ],
+        "summary": {
+            "total_photos": len(ids),
+            "encounter_count": 1,
+            "burst_count": 1,
+            "keep_count": 0,
+            "review_count": len(ids),
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
+def test_pipeline_review_search_rejects_cross_field_token_split(live_server, page):
+    photo_ids = live_server["data"]["photos"][1:3]
+    _write_cross_field_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search = page.locator("#speciesFilterInput")
+    search.fill("Mute Swan")
+
+    # Neither 'Mute Grouse' nor 'Trumpeter Swan' contains the full query, so
+    # the encounter must not match — even though each token appears once
+    # across the two prediction fields.
+    expect(page.locator(".encounter-card")).to_have_count(0)
+    expect(page.locator("#countAll")).to_have_text(" (0)")
+
+    # Searching a single prediction verbatim still matches, proving the
+    # threshold-gated prediction path is unaffected.
+    search.fill("Trumpeter Swan")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (2)")
+
+
 def test_pipeline_review_species_confirm_ignores_duplicate_inflight_clicks(live_server, page):
     photo_ids = live_server["data"]["photos"][:2]
     _write_confirmation_pipeline_cache(live_server, photo_ids)
