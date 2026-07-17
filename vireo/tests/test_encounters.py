@@ -194,6 +194,138 @@ def test_sim_species_empty():
     assert sim_species(None, None) == 0.0
 
 
+def _strong_species(name):
+    return [
+        (name, 0.94, "classifier-a"),
+        (name, 0.90, "classifier-b"),
+    ]
+
+
+def test_confident_species_prediction_requires_model_consensus():
+    from encounters import _confident_species_prediction
+
+    photo = _make_photo(species=[
+        ("Verdin", 0.96, "classifier-a"),
+        ("Costa's Hummingbird", 0.95, "classifier-b"),
+    ])
+
+    assert _confident_species_prediction(photo) is None
+
+
+def test_confident_species_prediction_requires_decisive_margin():
+    from encounters import _confident_species_prediction
+
+    photo = _make_photo(species=[
+        ("Verdin", 0.90, "classifier-a"),
+        ("Costa's Hummingbird", 0.40, "classifier-a"),
+    ])
+
+    assert _confident_species_prediction(photo) is None
+
+
+def test_confident_species_prediction_ignores_stale_absent_subject():
+    from encounters import _confident_species_prediction
+
+    photo = _make_photo(species=_strong_species("Verdin"))
+    photo["subject_absent"] = True
+
+    assert _confident_species_prediction(photo) is None
+
+
+def test_confident_species_change_is_hard_encounter_boundary():
+    """Strong classifier disagreement wins over time, embeddings, and a
+    shared camera burst id, and pass 2 must not stitch the cut back together.
+    """
+    from encounters import cut_microsegments, segment_encounters
+
+    emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    photos = [
+        _make_photo(
+            ts_offset_s=0,
+            subj_emb=emb,
+            global_emb=emb,
+            species=_strong_species("Verdin"),
+            focal_length=600,
+            burst_id="camera-burst-1",
+            photo_id=1,
+        ),
+        _make_photo(
+            ts_offset_s=0.05,
+            subj_emb=emb,
+            global_emb=emb,
+            species=_strong_species("Costa's Hummingbird"),
+            focal_length=600,
+            burst_id="camera-burst-1",
+            photo_id=2,
+        ),
+    ]
+
+    microsegments, trace = cut_microsegments(photos, emit_trace=True)
+    assert [len(segment) for segment in microsegments] == [1, 1]
+    assert trace[0]["decision"] == "cut_species"
+    conflict = trace[0]["species_conflict"]
+    assert conflict["photo_a_species"] == "Verdin"
+    assert conflict["photo_b_species"] == "Costa's Hummingbird"
+    for field in (
+        "photo_a_confidence",
+        "photo_a_margin",
+        "photo_b_confidence",
+        "photo_b_margin",
+    ):
+        assert math.isclose(conflict[field], 0.92)
+
+    encounters = segment_encounters(photos)
+    assert [encounter["photo_count"] for encounter in encounters] == [1, 1]
+
+
+def test_weak_species_change_does_not_force_encounter_boundary():
+    from encounters import segment_encounters
+
+    emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    photos = [
+        _make_photo(
+            ts_offset_s=0,
+            subj_emb=emb,
+            global_emb=emb,
+            species=[("Verdin", 0.79, "classifier-a")],
+            focal_length=600,
+        ),
+        _make_photo(
+            ts_offset_s=0.05,
+            subj_emb=emb,
+            global_emb=emb,
+            species=[("Costa's Hummingbird", 0.79, "classifier-a")],
+            focal_length=600,
+        ),
+    ]
+
+    encounters = segment_encounters(photos)
+    assert [encounter["photo_count"] for encounter in encounters] == [2]
+
+
+def test_same_confident_species_with_different_case_stays_together():
+    from encounters import segment_encounters
+
+    emb = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    photos = [
+        _make_photo(
+            ts_offset_s=0,
+            subj_emb=emb,
+            global_emb=emb,
+            species=_strong_species("Costa's Hummingbird"),
+        ),
+        _make_photo(
+            ts_offset_s=0.05,
+            subj_emb=emb,
+            global_emb=emb,
+            species=_strong_species("  costa's   hummingbird "),
+        ),
+    ]
+
+    encounters = segment_encounters(photos)
+    assert [encounter["photo_count"] for encounter in encounters] == [2]
+
+
 # -- sim_meta --
 
 
@@ -338,17 +470,20 @@ def test_cut_empty():
 
 
 def test_burst_id_prevents_cut():
-    """Photos sharing a camera burst ID should not be cut apart."""
+    """A camera burst still overrides ordinary score dissimilarity when the
+    classifier evidence is too weak to assert a species change.
+    """
     from encounters import cut_microsegments
 
     emb_a = np.array([1, 0, 0] * 256, dtype=np.float32)
     emb_b = np.array([0, 1, 0] * 256, dtype=np.float32)
     photos = [
-        _make_photo(0, subj_emb=emb_a, species=[("robin", 0.9)], burst_id="B001"),
-        _make_photo(10, subj_emb=emb_b, species=[("eagle", 0.9)], burst_id="B001"),
+        _make_photo(0, subj_emb=emb_a, species=[("robin", 0.7)], burst_id="B001"),
+        _make_photo(10, subj_emb=emb_b, species=[("eagle", 0.7)], burst_id="B001"),
     ]
     segments = cut_microsegments(photos)
-    # Despite different embeddings/species, shared burst_id keeps them together
+    # Despite different embeddings and weak species predictions, the shared
+    # burst id keeps them together. Strong species evidence is tested above.
     assert len(segments) == 1
 
 
