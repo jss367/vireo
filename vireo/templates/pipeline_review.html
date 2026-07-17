@@ -2331,15 +2331,19 @@ function encounterMatchesSearch(enc, photoMap) {
   var threshold = minConfidence / 100;
   var fields = [];
 
-  // Include species names that are shown as the encounter/burst label even
-  // when they were manually assigned and do not occur in classifier output.
+  // Manually assigned species (confirmed encounter label and per-burst
+  // overrides) are not classifier output, so they always match regardless
+  // of the confidence slider.
   fields.push(enc.confirmed_species);
-  if (enc.species) fields.push(enc.species[0]);
   (enc.bursts || []).forEach(function(burst) {
     if (burst.species_override) fields.push(burst.species_override.species);
   });
 
-  // Preserve the confidence-slider behavior for classifier suggestions.
+  // Classifier-derived species — including the encounter consensus label in
+  // enc.species — flow through species_predictions with per-model confidence,
+  // so gate them behind the min-confidence slider. Adding enc.species[0]
+  // separately would bypass that gate and let low-confidence matches survive
+  // even after the user raised the threshold.
   (enc.species_predictions || []).forEach(function(sp) {
     if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
       fields.push(sp.species);
