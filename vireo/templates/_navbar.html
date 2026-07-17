@@ -370,6 +370,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .bp-job-type { color: var(--text-secondary); font-weight: 600; text-transform: capitalize; }
 .bp-job-status { font-size: 11px; }
 .bp-job-status.running { color: var(--accent); }
+.bp-job-status.pausing, .bp-job-status.paused { color: var(--warning, #d99a24); }
 .bp-job-status.completed { color: var(--text-ghost); }
 .bp-job-status.failed { color: var(--danger); }
 .bp-job-elapsed { font-size: 11px; color: var(--text-invisible); margin-left: auto; font-variant-numeric: tabular-nums; }
@@ -9558,6 +9559,8 @@ async function nativeMenuJob(endpoint, body, label) {
 function isLiveJob(job) {
   return !!job && (
     job.status === 'running' ||
+    job.status === 'pausing' ||
+    job.status === 'paused' ||
     job.status === 'queued' ||
     job.status === 'pending'
   );
@@ -10619,12 +10622,14 @@ function formatDuration(seconds) {
       // Queued/pending work gets a muted dot so the user can tell it apart
       // from jobs actually consuming the GPU.
       var isWaiting = isWaitingJob(j);
-      var waitingLabel = 'queued';
-      var dotBg = isWaiting ? 'var(--text-muted)' : 'var(--accent)';
+      var isPaused = j.status === 'pausing' || j.status === 'paused';
+      var waitingLabel = isPaused ? j.status : 'queued';
+      var dotBg = isPaused ? 'var(--warning, #d99a24)' :
+        (isWaiting ? 'var(--text-muted)' : 'var(--accent)');
       html += '<div class="bp-compact-job" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">';
       html += '<span style="width:6px;height:6px;border-radius:50%;background:' + dotBg + ';flex-shrink:0;"></span>';
       html += '<span style="font-weight:600;">' + bpEscape(window.formatJobType(j.type)) + '</span>';
-      if (isWaiting) html += '<span style="color:var(--text-muted);">(' + waitingLabel + ')</span>';
+      if (isWaiting || isPaused) html += '<span style="color:var(--text-muted);">(' + waitingLabel + ')</span>';
       if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
       if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
       html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
@@ -10639,6 +10644,18 @@ function formatDuration(seconds) {
     var attentionJobs = liveJobs.filter(countsForBadge);
     var running = attentionJobs.filter(function(j) { return j.status === 'running'; });
     var waiting = attentionJobs.filter(isWaitingJob);
+    var paused = attentionJobs.filter(function(j) {
+      return j.status === 'pausing' || j.status === 'paused';
+    });
+
+    if (running.length === 0 && waiting.length === 0 && paused.length > 0) {
+      summary.textContent = paused.length === 1
+        ? window.formatJobType(paused[0].type) + ' ' + paused[0].status
+        : paused.length + ' jobs paused';
+      summary.classList.add('idle');
+      summary.classList.remove('active');
+      return;
+    }
 
     if (running.length === 0 && waiting.length === 0) {
       if (liveJobs.length > 0) {

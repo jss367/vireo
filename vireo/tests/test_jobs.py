@@ -33,6 +33,96 @@ def test_job_runner_starts_and_completes(tmp_path):
     assert job['progress']['current'] == 3
 
 
+def _wait_for_status(runner, job_id, status, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = runner.get(job_id)
+        if job and job.get("status") == status:
+            return job
+        time.sleep(0.01)
+    raise AssertionError(
+        f"job {job_id} did not reach {status}; last={runner.get(job_id)!r}"
+    )
+
+
+def test_pausable_job_stops_at_checkpoint_and_resumes():
+    """Paused work retains its local state and continues after Resume."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    progress = {"count": 0}
+
+    def work(job):
+        while progress["count"] < 40:
+            if runner.is_cancelled(job["id"]):
+                break
+            progress["count"] += 1
+            time.sleep(0.01)
+        return {"count": progress["count"]}
+
+    job_id = runner.start("scan", work, pausable=True)
+    deadline = time.monotonic() + 2
+    while progress["count"] < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert runner.pause_job(job_id) is True
+    _wait_for_status(runner, job_id, "paused")
+    paused_count = progress["count"]
+    time.sleep(0.1)
+    assert progress["count"] == paused_count
+
+    assert runner.resume_job(job_id) is True
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job["status"] == "completed"
+    assert job["result"] == {"count": 40}
+    status_events = [
+        event["data"]["status"]
+        for event in runner.get_events(job_id)
+        if event["type"] == "status"
+    ]
+    assert status_events == ["pausing", "paused", "running"]
+
+
+def test_cancel_paused_job_wakes_worker_and_marks_cancelled():
+    """Cancel must not leave a paused worker sleeping forever."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+
+    def work(job):
+        while True:
+            if runner.is_cancelled(job["id"]):
+                return {"stopped": True}
+            time.sleep(0.01)
+
+    job_id = runner.start("import", work, pausable=True)
+    assert runner.pause_job(job_id) is True
+    _wait_for_status(runner, job_id, "paused")
+    assert runner.cancel_job(job_id) is True
+
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job["status"] == "cancelled"
+    assert job["result"] == {"stopped": True}
+
+
+def test_non_pausable_job_rejects_pause():
+    """The UI capability flag is backed by runner enforcement."""
+    from jobs import JobRunner
+
+    runner = JobRunner()
+    release = threading.Event()
+
+    def work(_job):
+        release.wait(timeout=2)
+        return {}
+
+    job_id = runner.start("test", work)
+    assert runner.pause_job(job_id) is False
+    assert runner.get(job_id)["pausable"] is False
+    release.set()
+    assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+
+
 def test_job_runner_tracks_failure(tmp_path):
     """JobRunner marks job as failed when work function raises."""
     from jobs import JobRunner

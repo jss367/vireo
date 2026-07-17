@@ -1,10 +1,23 @@
 import json
 import os
+import threading
 import time
 
 import pytest
 from PIL import Image
 from wait import wait_for_job_via_client, wait_for_job_via_runner
+
+
+def _wait_for_runner_status(runner, job_id, status, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = runner.get(job_id)
+        if job and job.get("status") == status:
+            return job
+        time.sleep(0.01)
+    raise AssertionError(
+        f"job {job_id} did not reach {status}; last={runner.get(job_id)!r}"
+    )
 
 
 def test_job_scan_returns_job_id(app_and_db, tmp_path):
@@ -525,6 +538,8 @@ def test_jobs_page_returns_200(app_and_db):
     resp = client.get('/jobs')
     assert resp.status_code == 200
     assert b'Jobs' in resp.data
+    assert b'data-pause-job' in resp.data
+    assert b'data-resume-job' in resp.data
 
 
 def test_navbar_has_jobs_link(app_and_db):
@@ -1105,6 +1120,57 @@ def test_job_cancel_finished_job_returns_404(app_and_db):
         assert resp.status_code == 404
 
 
+def test_job_pause_and_resume_api(app_and_db):
+    """The Jobs API exposes cooperative pause/resume state transitions."""
+    app, _ = app_and_db
+    runner = app._job_runner
+    progress = {"count": 0}
+
+    def work(job):
+        while progress["count"] < 40:
+            if runner.is_cancelled(job["id"]):
+                break
+            progress["count"] += 1
+            time.sleep(0.01)
+        return {"count": progress["count"]}
+
+    job_id = runner.start("scan", work, pausable=True)
+
+    with app.test_client() as c:
+        paused = c.post(f"/api/jobs/{job_id}/pause")
+        assert paused.status_code == 200
+        assert paused.get_json()["status"] == "pausing"
+        _wait_for_runner_status(runner, job_id, "paused")
+
+        before = progress["count"]
+        time.sleep(0.08)
+        assert progress["count"] == before
+
+        resumed = c.post(f"/api/jobs/{job_id}/resume")
+        assert resumed.status_code == 200
+        assert resumed.get_json()["status"] == "running"
+
+    assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+
+
+def test_job_pause_api_rejects_unsupported_job(app_and_db):
+    app, _ = app_and_db
+    runner = app._job_runner
+    release = threading.Event()
+
+    def work(_job):
+        release.wait(timeout=2)
+        return {}
+
+    job_id = runner.start("test", work)
+    with app.test_client() as c:
+        resp = c.post(f"/api/jobs/{job_id}/pause")
+        assert resp.status_code == 409
+        assert "does not support" in resp.get_json()["error"]
+    release.set()
+    wait_for_job_via_runner(runner, job_id)
+
+
 # --- Pipeline metadata auto-repair tests ---
 
 def test_find_broken_metadata_folders_returns_empty_when_healthy(app_and_db):
@@ -1400,7 +1466,8 @@ def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, 
 
     # Mock ExifTool so the test doesn't depend on the binary.
     import scanner
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
@@ -1473,7 +1540,8 @@ def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, m
     db.conn.commit()
 
     import scanner
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
@@ -1597,7 +1665,8 @@ def test_pipeline_repair_does_not_double_process_thumbnails(
     db.conn.commit()
 
     import scanner
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}

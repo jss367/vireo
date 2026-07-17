@@ -41,7 +41,13 @@ class JobRunner:
         self._events = {}  # job_id -> deque of events
         self._subscribers = {}  # job_id -> list of queues
         self._lock = threading.Lock()
+        self._pause_condition = threading.Condition(self._lock)
         self._cancelled = set()  # job ids that have been cancelled
+        # Cooperative pause requests. Pausable work reaches these through
+        # is_cancelled(), which doubles as its existing safe-point callback.
+        # Keeping the wait in the runner means scan/import call sites do not
+        # need a second callback threaded through every layer.
+        self._pause_requested = set()
         # job ids past an uninterruptible commit point (e.g. the
         # local-processing archive move). Once a job is in here, any
         # late ``cancel_job`` call is a no-op so the terminal status can
@@ -275,6 +281,7 @@ class JobRunner:
                         "steps": [],
                         "ephemeral": False,
                         "counts_for_badge": True,
+                        "pausable": False,
                         "runtime_warning": ctx["runtime_warning"],
                         # Pre-seeded for iteration safety — see start().
                         "_start_time": time.time(),
@@ -352,6 +359,7 @@ class JobRunner:
             "steps": [],
             "ephemeral": False,
             "counts_for_badge": True,
+            "pausable": False,
             "runtime_warning": ctx.get("runtime_warning"),
             "_ended_at": time.time(),
             "_persisted": True,
@@ -363,7 +371,8 @@ class JobRunner:
             self._subscribers.setdefault(job_id, [])
 
     def start(self, job_type, work_fn, config=None, workspace_id=None,
-              ephemeral=False, runtime_warning=None, counts_for_badge=True):
+              ephemeral=False, runtime_warning=None, counts_for_badge=True,
+              pausable=False):
         """Start a background job.
 
         Args:
@@ -382,6 +391,9 @@ class JobRunner:
                        while the job is running.
             counts_for_badge: if False, the job remains visible in job lists
                        but does not contribute to app/Dock attention badges.
+            pausable: if True, pause_job() may suspend the worker the next
+                       time it calls is_cancelled(). Only set this for work
+                       that checks cancellation at safe boundaries.
 
         Returns:
             job_id string
@@ -410,6 +422,7 @@ class JobRunner:
             "steps": [],
             "ephemeral": ephemeral,
             "counts_for_badge": counts_for_badge,
+            "pausable": bool(pausable),
             "runtime_warning": runtime_warning,
             # Pre-seeded so later writes from worker threads update an
             # existing key instead of inserting a new one: key insertion
@@ -454,6 +467,7 @@ class JobRunner:
             self._events.pop(jid, None)
             self._subscribers.pop(jid, None)
             self._cancelled.discard(jid)
+            self._pause_requested.discard(jid)
             self._uncancellable.discard(jid)
 
     def _run_job(self, job, work_fn):
@@ -465,6 +479,7 @@ class JobRunner:
             # returns True but the job still finishes as "completed".
             with self._lock:
                 job_id = job["id"]
+                self._pause_requested.discard(job_id)
                 if job_id in self._cancelled:
                     job["status"] = "cancelled"
                     self._cancelled.discard(job_id)
@@ -498,6 +513,7 @@ class JobRunner:
             # misleading "failed" status.
             with self._lock:
                 job_id = job["id"]
+                self._pause_requested.discard(job_id)
                 if job_id in self._cancelled:
                     job["status"] = "cancelled"
                     self._cancelled.discard(job_id)
@@ -698,6 +714,7 @@ class JobRunner:
             "steps": [],
             "ephemeral": False,
             "counts_for_badge": True,
+            "pausable": False,
             "runtime_warning": ctx.get("runtime_warning"),
         }
 
@@ -940,8 +957,10 @@ class JobRunner:
         queued_cancel = None
         with self._lock:
             job = self._jobs.get(job_id)
-            if job is not None and job["status"] == "running":
-                if expected_status and expected_status != "running":
+            if job is not None and job["status"] in (
+                "running", "pausing", "paused",
+            ):
+                if expected_status and expected_status != job["status"]:
                     return False
                 # Stop is a no-op once the job has entered an
                 # uninterruptible commit step (e.g. the local-processing
@@ -953,6 +972,10 @@ class JobRunner:
                 if job_id in self._uncancellable:
                     return False
                 self._cancelled.add(job_id)
+                self._pause_requested.discard(job_id)
+                # A paused worker is sleeping on this condition. Wake it so
+                # its checkpoint can observe cancellation and return.
+                self._pause_condition.notify_all()
                 return True
             if job is not None:
                 return False
@@ -988,8 +1011,11 @@ class JobRunner:
                 job = self._jobs.get(job_id)
                 if (
                     job is not None
-                    and job["status"] == "running"
-                    and (expected_status is None or expected_status == "running")
+                    and job["status"] in ("running", "pausing", "paused")
+                    and (
+                        expected_status is None
+                        or expected_status == job["status"]
+                    )
                 ):
                     # Same uncancellable guard as the first running-job
                     # branch above; the post-commit Stop race exists on
@@ -998,6 +1024,8 @@ class JobRunner:
                     if job_id in self._uncancellable:
                         return False
                     self._cancelled.add(job_id)
+                    self._pause_requested.discard(job_id)
+                    self._pause_condition.notify_all()
                     return True
                 if self._queued_pipelines.get(job_id) is queued_cancel:
                     self._cancelled.add(job_id)
@@ -1050,10 +1078,89 @@ class JobRunner:
             self._try_promote_queued()
         return cancelled
 
+    def pause_job(self, job_id):
+        """Request a cooperative pause at the job's next safe checkpoint.
+
+        The public state moves to ``pausing`` immediately. The worker changes
+        it to ``paused`` only after it reaches :meth:`is_cancelled`, so the UI
+        never claims an in-flight ExifTool/copy batch has already stopped.
+        """
+        with self._pause_condition:
+            job = self._jobs.get(job_id)
+            if (
+                job is None
+                or job.get("status") != "running"
+                or not job.get("pausable")
+                or job_id in self._uncancellable
+                or job_id in self._cancelled
+            ):
+                return False
+            self._pause_requested.add(job_id)
+            job["status"] = "pausing"
+
+        self.push_event(job_id, "status", {
+            "job_id": job_id,
+            "status": "pausing",
+        })
+        return True
+
+    def resume_job(self, job_id):
+        """Resume a pausing or paused job."""
+        with self._pause_condition:
+            job = self._jobs.get(job_id)
+            if (
+                job is None
+                or job.get("status") not in ("pausing", "paused")
+                or job_id not in self._pause_requested
+                or job_id in self._cancelled
+            ):
+                return False
+            self._pause_requested.discard(job_id)
+            job["status"] = "running"
+            self._pause_condition.notify_all()
+
+        self.push_event(job_id, "status", {
+            "job_id": job_id,
+            "status": "running",
+        })
+        return True
+
     def is_cancelled(self, job_id):
-        """Check whether a job has been marked for cancellation."""
-        with self._lock:
-            return job_id in self._cancelled
+        """Wait through a cooperative pause, then report cancellation.
+
+        Existing scan/import work already calls this method at boundaries
+        where it is safe to stop. For jobs explicitly started as pausable,
+        those same boundaries are also safe places to sleep without losing
+        the work function's in-memory state.
+        """
+        while True:
+            emit_paused = False
+            with self._pause_condition:
+                if job_id in self._cancelled:
+                    return True
+                job = self._jobs.get(job_id)
+                if (
+                    job is None
+                    or not job.get("pausable")
+                    or job_id not in self._pause_requested
+                ):
+                    return False
+                if job.get("status") != "paused":
+                    job["status"] = "paused"
+                    emit_paused = True
+
+            if emit_paused:
+                self.push_event(job_id, "status", {
+                    "job_id": job_id,
+                    "status": "paused",
+                })
+
+            with self._pause_condition:
+                if job_id in self._cancelled:
+                    return True
+                if job_id not in self._pause_requested:
+                    return False
+                self._pause_condition.wait()
 
     def begin_uncancellable(self, job_id):
         """Atomically enter an uninterruptible phase if not cancelled.

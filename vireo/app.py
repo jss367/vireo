@@ -4384,7 +4384,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _missing_originals_heavy_job_active():
         for job in app._job_runner.list_jobs():
-            if job.get("status") not in ("running", "queued"):
+            if job.get("status") not in (
+                "running", "pausing", "paused", "queued",
+            ):
                 continue
             if job.get("type") in _MISSING_ORIGINALS_HEAVY_JOB_TYPES:
                 return True
@@ -4403,7 +4405,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if workspace_id is None:
             return None
         for job in app._job_runner.list_jobs():
-            if job.get("status") not in ("queued", "running"):
+            if job.get("status") not in (
+                "queued", "running", "pausing", "paused",
+            ):
                 continue
             job_type = job.get("type")
             if job_type in LOCAL_WORKSPACE_JOB_TYPES and job.get("workspace_id") == workspace_id:
@@ -17497,6 +17501,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         job_id = runner.start(
             "scan", work, config=job_config, workspace_id=active_ws,
+            pausable=True,
         )
         return jsonify({"job_id": job_id})
 
@@ -17548,6 +17553,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "folder_id": folder_id,
             },
             workspace_id=active_ws,
+            pausable=True,
         )
         return jsonify({"job_id": job_id})
 
@@ -17582,6 +17588,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             job_config["root"] = existing[0]
         job_id = runner.start(
             "scan", work, config=job_config, workspace_id=active_ws,
+            pausable=True,
         )
         return jsonify({"job_id": job_id, "roots": existing, "skipped": skipped})
 
@@ -20271,6 +20278,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
         job_id = runner.start(
             "import-in-place", work, config=job_config, workspace_id=active_ws,
+            pausable=True,
         )
         response = {"job_id": job_id}
         if created_workspace is not None:
@@ -20669,6 +20677,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         job_id = runner.start(
             "import", work, config=job_config, workspace_id=active_ws,
+            pausable=True,
         )
         response = {"job_id": job_id}
         if created_workspace is not None:
@@ -21055,10 +21064,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
     def api_job_cancel(job_id):
-        """Request cancellation of a running job.
+        """Request cancellation of a running, pausing, paused, or queued job.
 
-        Returns 200 if the job was found running and marked for cancellation,
-        404 if the job does not exist or is no longer running.
+        Returns 200 if the live job accepted cancellation, or 404 if the job
+        does not exist or has already reached a terminal state.
         """
         runner = app._job_runner
         if runner.cancel_job(job_id):
@@ -21067,6 +21076,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if job is None:
             return json_error("job not found", 404)
         return json_error(f"job is not running (status={job['status']})", 404)
+
+    @app.route("/api/jobs/<job_id>/pause", methods=["POST"])
+    def api_job_pause(job_id):
+        """Pause supported work at its next safe checkpoint."""
+        runner = app._job_runner
+        if runner.pause_job(job_id):
+            return jsonify({
+                "pause_requested": True,
+                "job_id": job_id,
+                "status": "pausing",
+            })
+        job = runner.get(job_id)
+        if job is None:
+            return json_error("job not found", 404)
+        if not job.get("pausable"):
+            return json_error("job does not support pausing", 409)
+        return json_error(
+            f"job cannot be paused (status={job['status']})", 409,
+        )
+
+    @app.route("/api/jobs/<job_id>/resume", methods=["POST"])
+    def api_job_resume(job_id):
+        """Resume a pausing or paused job."""
+        runner = app._job_runner
+        if runner.resume_job(job_id):
+            return jsonify({
+                "resumed": True,
+                "job_id": job_id,
+                "status": "running",
+            })
+        job = runner.get(job_id)
+        if job is None:
+            return json_error("job not found", 404)
+        return json_error(
+            f"job cannot be resumed (status={job['status']})", 409,
+        )
 
     @app.route("/api/jobs/cancel-queued", methods=["POST"])
     def api_jobs_cancel_queued():
