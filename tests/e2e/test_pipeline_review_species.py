@@ -575,6 +575,141 @@ def _write_confirmed_burst_override_pipeline_cache(live_server, photo_ids):
         json.dump(cache, f)
 
 
+def _write_mixed_confirmed_burst_pipeline_cache(live_server, hawk_id, robin_id):
+    """Cache an encounter with two bursts: the first (confirmed) burst carries
+    a confirmed override for 'Red-tailed Hawk' with filename hawk1.jpg; the
+    second (unconfirmed) burst has no override and holds robin1.jpg. When Hide
+    confirmed is on, the confirmed burst should not contribute its species or
+    filename to the search — otherwise queries for the hidden burst's content
+    would surface the unrelated visible burst.
+    """
+    db = live_server["db"]
+    rows = db.conn.execute(
+        "SELECT id, filename, timestamp FROM photos WHERE id IN (?, ?) ORDER BY id",
+        (hawk_id, robin_id),
+    ).fetchall()
+    photos = [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "timestamp": row["timestamp"],
+            "label": "REVIEW",
+            "quality_composite": 0.5,
+            "flag": "none",
+            "rating": 0,
+        }
+        for row in rows
+    ]
+    hawk_photo = next(p for p in photos if p["id"] == hawk_id)
+    robin_photo = next(p for p in photos if p["id"] == robin_id)
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": [hawk_photo["id"], robin_photo["id"]],
+                "photo_count": 2,
+                "burst_count": 2,
+                "time_range": [hawk_photo["timestamp"], robin_photo["timestamp"]],
+                "species": [],
+                "species_predictions": [],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                "bursts": [
+                    {
+                        "photo_ids": [hawk_photo["id"]],
+                        "species_predictions": [],
+                        "species_override": {
+                            "species": "Red-tailed Hawk",
+                            "confirmed": True,
+                        },
+                    },
+                    {
+                        "photo_ids": [robin_photo["id"]],
+                        "species_predictions": [
+                            {
+                                "species": "American Robin",
+                                "count": 1,
+                                "avg_confidence": 0.92,
+                                "models": [
+                                    {"model": "Bird model", "confidence": 0.92}
+                                ],
+                            }
+                        ],
+                        "species_override": None,
+                    },
+                ],
+            }
+        ],
+        "summary": {
+            "total_photos": 2,
+            "encounter_count": 1,
+            "burst_count": 2,
+            "keep_count": 0,
+            "review_count": 2,
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
+def test_pipeline_review_search_scopes_to_visible_bursts_with_hide_confirmed(
+    live_server, page
+):
+    photos = live_server["data"]["photos"]
+    # hawk1.jpg (index 0) goes in the confirmed burst; robin1.jpg (index 3) is
+    # the visible unconfirmed burst.
+    _write_mixed_confirmed_burst_pipeline_cache(live_server, photos[0], photos[3])
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator(".burst-strip")).to_have_count(2)
+
+    # Baseline (Hide confirmed off): both burst species and filenames match.
+    search = page.locator("#speciesFilterInput")
+    search.fill("Red-tailed Hawk")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    search.fill("hawk1.jpg")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+
+    search.fill("")
+    page.locator("#hideConfirmedBtn").click()
+    expect(page.locator(".burst-strip")).to_have_count(1)
+
+    # With Hide confirmed on, searching the hidden burst's confirmed override
+    # species must NOT match — otherwise the encounter would surface with only
+    # its unrelated visible burst rendered.
+    search.fill("Red-tailed Hawk")
+    expect(page.locator(".encounter-card")).to_have_count(0)
+    expect(page.locator("#countAll")).to_have_text(" (0)")
+
+    # Same for the hidden burst's filename.
+    search.fill("hawk1.jpg")
+    expect(page.locator(".encounter-card")).to_have_count(0)
+    expect(page.locator("#countAll")).to_have_text(" (0)")
+
+    # The visible burst's species and filename still match.
+    search.fill("American Robin")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (1)")
+
+    search.fill("robin1.jpg")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (1)")
+
+    # Toggling Hide confirmed back off restores matches on the confirmed
+    # burst's species/filename.
+    page.locator("#hideConfirmedBtn").click()
+    search.fill("Red-tailed Hawk")
+    expect(page.locator(".encounter-card")).to_have_count(1)
+    expect(page.locator("#countAll")).to_have_text(" (2)")
+
+
 def test_pipeline_review_search_matches_confirmed_burst_override(live_server, page):
     photo_ids = live_server["data"]["photos"][1:3]
     _write_confirmed_burst_override_pipeline_cache(live_server, photo_ids)

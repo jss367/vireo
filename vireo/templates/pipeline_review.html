@@ -2331,14 +2331,33 @@ function encounterMatchesSearch(enc, photoMap) {
   var threshold = minConfidence / 100;
   var fields = [];
 
-  // Manually assigned species (confirmed encounter label and confirmed
-  // per-burst overrides) are not classifier output, so they always match
-  // regardless of the confidence slider. Unconfirmed burst overrides are
-  // classifier-derived candidates (e.g. from detach-photo or group-review)
-  // and must go through the threshold-gated prediction paths below —
-  // otherwise raising the slider would fail to hide low-confidence matches.
-  fields.push(enc.confirmed_species);
-  (enc.bursts || []).forEach(function(burst) {
+  // When Hide confirmed is on, the render loop below skips confirmed bursts
+  // (and their photos). Search must scope its burst-level fields — per-burst
+  // confirmed overrides, per-burst predictions, and per-photo filenames — to
+  // only the bursts that will actually render. Otherwise a query matching a
+  // hidden confirmed burst's species or filename surfaces the encounter and
+  // shows only the unrelated unconfirmed burst's content.
+  var bursts = enc.bursts || [];
+  function burstVisible(burst) {
+    return !hideConfirmed || !isBurstConfirmed(enc, burst);
+  }
+
+  // Manually assigned encounter label. The encounter widget still renders
+  // (even when some bursts hide), so it stays searchable — unless every burst
+  // that inherits the encounter-level confirmation is hidden, which would tie
+  // the label exclusively to hidden content.
+  var confirmedLabelHasVisibleBurst = true;
+  if (hideConfirmed && enc.species_confirmed && bursts.length > 0) {
+    confirmedLabelHasVisibleBurst = bursts.some(function(b) {
+      return !(b && b.species_override) && burstVisible(b);
+    });
+  }
+  if (confirmedLabelHasVisibleBurst) fields.push(enc.confirmed_species);
+
+  // Confirmed per-burst overrides — manual labels that always bypass the
+  // slider, but only from bursts that will render.
+  bursts.forEach(function(burst) {
+    if (!burstVisible(burst)) return;
     if (burst.species_override && burst.species_override.confirmed === true) {
       fields.push(burst.species_override.species);
     }
@@ -2355,7 +2374,8 @@ function encounterMatchesSearch(enc, photoMap) {
       fields.push(sp.species);
     }
   });
-  (enc.bursts || []).forEach(function(burst) {
+  bursts.forEach(function(burst) {
+    if (!burstVisible(burst)) return;
     (burst.species_predictions || []).forEach(function(sp) {
       if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
         fields.push(sp.species);
@@ -2365,7 +2385,22 @@ function encounterMatchesSearch(enc, photoMap) {
 
   // Filename search remains encounter-level: finding one photo keeps its
   // whole encounter visible so the surrounding burst context is not lost.
-  (enc.photo_ids || []).forEach(function(pid) {
+  // Under Hide confirmed, restrict to photos in bursts that will render.
+  var filenamePids;
+  if (bursts.length > 0) {
+    filenamePids = [];
+    bursts.forEach(function(burst) {
+      if (!burstVisible(burst)) return;
+      (burst.photo_ids || burst || []).forEach(function(pid) {
+        filenamePids.push(pid);
+      });
+    });
+  } else if (hideConfirmed && enc.species_confirmed) {
+    filenamePids = [];
+  } else {
+    filenamePids = enc.photo_ids || [];
+  }
+  filenamePids.forEach(function(pid) {
     var photo = photoMap && photoMap[pid];
     if (photo) fields.push(photo.filename);
   });
