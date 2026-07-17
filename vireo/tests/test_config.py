@@ -591,6 +591,100 @@ def test_migrate_legacy_miss_thresholds_rewrites_workspace_overrides(
     assert custom_overrides["pipeline"]["miss_det_confidence_burst"] == 0.18
 
 
+def test_migrate_legacy_w_species_default_rewrites_exact_value(
+    tmp_path, monkeypatch
+):
+    """An install with the previous default (0.10) persisted gets rewritten
+    to the new default (0.40)."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"w_species": 0.10}})
+
+    assert cfg.migrate_legacy_w_species_default() is True
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["w_species"] == 0.40
+    assert cfg.MIGRATION_W_SPECIES_DEFAULT in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_w_species_default_preserves_customized(
+    tmp_path, monkeypatch
+):
+    """A user who tuned w_species to something other than the legacy default
+    is left alone."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"w_species": 0.25}})
+
+    assert cfg.migrate_legacy_w_species_default() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["w_species"] == 0.25
+    assert cfg.MIGRATION_W_SPECIES_DEFAULT in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_w_species_default_is_one_time(tmp_path, monkeypatch):
+    """Once the marker is set, a user who explicitly re-saves 0.10 via the
+    slider is NOT silently rewritten on next load."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"w_species": 0.10}})
+    cfg.migrate_legacy_w_species_default()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    raw["pipeline"]["w_species"] = 0.10
+    _write_raw(cfg.CONFIG_PATH, raw)
+
+    assert cfg.migrate_legacy_w_species_default() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["w_species"] == 0.10
+
+
+def test_migrate_legacy_w_species_default_no_config_file(tmp_path, monkeypatch):
+    """No config.json yet — migration stamps the marker and returns False."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    assert cfg.migrate_legacy_w_species_default() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert cfg.MIGRATION_W_SPECIES_DEFAULT in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_w_species_default_rewrites_workspace_overrides(
+    tmp_path, monkeypatch
+):
+    """Workspace overrides carrying the exact legacy value are rewritten;
+    customized workspace overrides are left alone."""
+    import json as _json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    ws_id = db.create_workspace(
+        "Legacy",
+        config_overrides={"pipeline": {"w_species": 0.10}},
+    )
+    db.create_workspace(
+        "Customized",
+        config_overrides={"pipeline": {"w_species": 0.25}},
+    )
+
+    cfg.migrate_legacy_w_species_default(db)
+
+    legacy_overrides = _json.loads(
+        db.get_workspace(ws_id)["config_overrides"]
+    )
+    assert legacy_overrides["pipeline"]["w_species"] == 0.40
+
+    custom_ws_id = next(
+        w["id"] for w in db.get_workspaces() if w["name"] == "Customized"
+    )
+    custom_overrides = _json.loads(
+        db.get_workspace(custom_ws_id)["config_overrides"]
+    )
+    assert custom_overrides["pipeline"]["w_species"] == 0.25
+
+
 def test_migrate_toggle_ui_h_conflict_blanks_when_h_taken(tmp_path, monkeypatch):
     """A user upgrading with `browse.flag` already bound to `h` gets
     `browse.toggle_ui` blanked to `""` so the newly added default doesn't

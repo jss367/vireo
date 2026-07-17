@@ -3065,6 +3065,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # verbatim. Add the new coordinate-source field only for that exact legacy
     # list; customized card layouts remain unchanged.
     cfg.migrate_browse_location_status_field()
+    # One-time rewrite of the previous encounter-grouping species weight
+    # (0.10) to the new default (0.40) in both ~/.vireo/config.json and
+    # workspace overrides. Without this, upgraded installs that had the
+    # pipeline block persisted verbatim keep grouping distinct species into
+    # one encounter — the intended split behavior only reaches fresh
+    # configs. Only the exact legacy value is rewritten; re-saved values
+    # are preserved on subsequent boots.
+    cfg.migrate_legacy_w_species_default(init_db)
     # One-time rewrite of the global pipeline.default_strategy (legacy
     # hardcoded strategy name) to pipeline.default_process_id (saved_processes
     # id). The workspace-side rewrite happens inside Database(); this covers

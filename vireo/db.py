@@ -16764,6 +16764,48 @@ class Database:
             self.conn.commit()
         return updated
 
+    def rewrite_legacy_w_species_default_in_workspaces(self, legacy, new):
+        """Rewrite the exact legacy ``pipeline.w_species`` default in every
+        workspace's ``config_overrides``. Customized values are left alone.
+
+        Called from ``config.migrate_legacy_w_species_default``, which gates
+        the whole migration behind a one-time marker so this only runs once
+        per install — a user who later explicitly re-saves the legacy value
+        via the algorithm slider keeps that setting.
+
+        Fingerprint invalidation isn't needed: ``compute_group_fingerprint``
+        reads the effective ``w_species``, so any rewritten workspace's
+        ``last_group_fingerprint`` will already stop matching on the next
+        Process-page load.
+        """
+        rows = self.conn.execute(
+            "SELECT id, config_overrides FROM workspaces "
+            "WHERE config_overrides IS NOT NULL"
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            raw = row["config_overrides"]
+            try:
+                overrides = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(overrides, dict):
+                continue
+            pipeline = overrides.get("pipeline")
+            if not isinstance(pipeline, dict):
+                continue
+            if pipeline.get("w_species") != legacy:
+                continue
+            pipeline["w_species"] = new
+            self.conn.execute(
+                "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
+                (json.dumps(overrides), row["id"]),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
+
     def rewrite_legacy_eye_detect_default_in_workspaces(self):
         """Rewrite the exact legacy eye-detection default in workspace overrides.
 
