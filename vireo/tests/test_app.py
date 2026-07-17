@@ -12408,9 +12408,12 @@ def test_native_import_commands_route_to_import_page():
 
     assert "ids::NAV_IMPORT => Some(\"/import\")" in menu
     assert "ids::NAV_LIGHTROOM => Some(\"/lightroom\")" in menu
-    assert "ids::FILE_IMPORT_LIGHTROOM => Some(\"import_lightroom\")" in menu
+    # File → Import Lightroom Catalog must be a route (not a command) so it
+    # still works after Open in Browser — command dispatch is a no-op in
+    # browser mode, but route_for_id opens the URL in the user's browser.
+    assert "ids::FILE_IMPORT_LIGHTROOM => Some(\"/lightroom\")" in menu
+    assert "FILE_IMPORT_LIGHTROOM => Some(\"import_lightroom\")" not in menu
     assert "case 'import_photos':\n        nativeMenuRoute('/import');" in navbar
-    assert "case 'import_lightroom':\n        nativeMenuRoute('/lightroom');" in navbar
     assert '"Import Lightroom Catalog..."' in menu
     # Import Folder... must stay a distinct action from Import Photos...:
     # it deep-links into Copy-to-archive with the source picker open.

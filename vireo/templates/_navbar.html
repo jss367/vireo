@@ -9628,9 +9628,6 @@ window.handleNativeMenuCommand = async function(command) {
         // distinct actions.
         nativeMenuRoute('/import?mode=copy&pick=source');
         break;
-      case 'import_lightroom':
-        nativeMenuRoute('/lightroom');
-        break;
       case 'export_selected':
         if (typeof openExportModal === 'function') openExportModal();
         else nativeMenuError('Export is available from Browse after selecting photos.');
