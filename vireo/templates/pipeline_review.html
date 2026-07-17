@@ -2710,8 +2710,16 @@ function summarizeSpeciesConflicts(photoIds, evidence) {
   };
 }
 
-function renderEncounterSpeciesConflict(enc, evidence) {
-  var summary = summarizeSpeciesConflicts(enc.photo_ids || [], evidence);
+function renderEncounterSpeciesConflict(enc, evidence, hiddenIds) {
+  // Match the set of photos that renderResults() will actually draw for this
+  // encounter: when hide-confirmed is on, confirmed bursts are skipped, so a
+  // conflict living only in a confirmed burst shouldn't be tallied here (the
+  // SPECIES_CONFLICT count already filters the same way).
+  var ids = enc.photo_ids || [];
+  if (hiddenIds && hiddenIds.size) {
+    ids = ids.filter(function(pid) { return !hiddenIds.has(pid); });
+  }
+  var summary = summarizeSpeciesConflicts(ids, evidence);
   if (!summary) return '';
   var mostPhotosConflict = summary.classifiedCount > 0 &&
     summary.issueCount >= Math.ceil(summary.classifiedCount * 0.6) &&
@@ -2862,7 +2870,7 @@ function renderResults() {
     if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
     if (timeRange) html += '<span>' + timeRange + '</span>';
     html += missingTimestampBadge(enc);
-    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence);
+    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
     html += '</span></div>';
     html += '<div class="encounter-body" id="encBody' + ei + '"' + (isCollapsed ? ' style="display:none;"' : '') + '>';
 
@@ -2912,7 +2920,7 @@ function renderResults() {
     if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
     if (timeRange) html += '<span>' + timeRange + '</span>';
     html += missingTimestampBadge(enc);
-    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence);
+    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
     html += '</span></div>';
 
     html += '</div></div>';
