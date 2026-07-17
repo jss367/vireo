@@ -1536,15 +1536,10 @@ function applyProcessToToggles(proc) {
     document.getElementById('enableMisses').checked = !!proc.miss_enabled;
     document.getElementById('enableSpeciesReview').checked =
       (proc.review_mode === 'species');
-    // Re-run the cascade so downstream enable/disable state is consistent,
-    // then force back on any stage the process says should run (the cascade
-    // would otherwise disable e.g. Group when Extract is off).
+    // Re-run the dependency handling so enabled/disabled state is consistent.
     ['classify', 'extract', 'eyekeypoints', 'group'].forEach(function(st) {
       try { onStageToggle(st); } catch (e) {}
     });
-    if (!proc.skip_regroup) {
-      var g = document.getElementById('enableGroup'); g.checked = true; g.disabled = false;
-    }
     if (!proc.skip_eye_keypoints) {
       var ek = document.getElementById('enableEyeKeypoints'); ek.checked = true; ek.disabled = false;
     }
@@ -2225,11 +2220,11 @@ function updateStartButton() {
   }
 }
 
-// -- Stage enable/disable dependency chain --
-// Eye keypoints sits off the linear chain: it depends on extract (needs masks)
-// but is not a prerequisite for group, so toggling it alone affects only itself.
+// -- Stage enable/disable dependencies --
+// Extract depends on Classify, and Eye Keypoints depends on Extract (needs
+// masks). Group is independent because it can regroup from cached features.
 function onStageToggle(stage) {
-  var chain = ['classify', 'extract', 'group'];
+  var chain = ['classify', 'extract'];
   var idx = chain.indexOf(stage);
 
   if (idx >= 0) {
@@ -2252,7 +2247,7 @@ function onStageToggle(stage) {
 
   // Sync eye keypoints to extract: if extract is off, eye keypoints can't
   // run (no masks); when extract comes back on, leave eye keypoints
-  // unchecked so user must opt in again, matching how group behaves.
+  // unchecked so the user must opt in again.
   var extCb = document.getElementById('enableExtract');
   var ekCb = document.getElementById('enableEyeKeypoints');
   if (extCb && ekCb && stage !== 'eyekeypoints') {
