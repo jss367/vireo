@@ -205,6 +205,11 @@ def test_move_folder_can_rename_during_move(move_env):
     assert folder["name"] == "2026-07-12"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows strips trailing spaces from path components, so a ' shoot ' "
+    "directory can't exist on disk — the untrimmed-name invariant is a POSIX concern.",
+)
 def test_move_folder_no_op_rename_preserves_untrimmed_source_name(tmp_path):
     """A no-op rename lands at the source's raw name — spaces and all.
 
