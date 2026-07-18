@@ -14099,6 +14099,24 @@ class Database:
                         (this_pred_id,),
                     ).fetchone()
                     this_det_id = this_det["detection_id"] if this_det else None
+                    # Mirror Compare's visibility filter when picking which
+                    # neighbouring predictions may protect a species keyword:
+                    #   * skip 'alternative' rows (Compare drops them at
+                    #     app.py's api_predictions_compare, alongside
+                    #     'rejected');
+                    #   * skip detections below the workspace's effective
+                    #     detector_confidence — Compare marks those "dormant"
+                    #     and excludes their subjects entirely.
+                    # Without this, a below-threshold neighbour or an
+                    # alternative row on a real neighbour would keep an
+                    # already-stale species keyword on the photo — replace
+                    # would leave it in place and never queue a
+                    # keyword_remove, so the sidecar would still list the
+                    # dead species.
+                    import config as _cfg
+                    _det_threshold = self.get_effective_config(
+                        _cfg.load()
+                    ).get("detector_confidence", 0.2)
                     # Restrict to the latest labels_fingerprint per
                     # (detection, classifier_model) — mirrors get_predictions
                     # and the review/summary paths so stale rows from a prior
@@ -14121,7 +14139,8 @@ class Database:
                                WHERE d.photo_id = ?
                                  AND pr.detection_id IS NOT ?
                                  AND COALESCE(pr_rev.status, 'pending')
-                                     != 'rejected'
+                                     NOT IN ('rejected', 'alternative')
+                                 AND d.detector_confidence >= ?
                                  AND pr.labels_fingerprint = (
                                      SELECT pr2.labels_fingerprint
                                      FROM predictions pr2
@@ -14131,7 +14150,7 @@ class Database:
                                      ORDER BY pr2.created_at DESC, pr2.id DESC
                                      LIMIT 1
                                  )""",
-                            (ws, photo_id, this_det_id),
+                            (ws, photo_id, this_det_id, _det_threshold),
                         ).fetchall()
                         if row["species"]
                     }

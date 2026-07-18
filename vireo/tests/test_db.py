@@ -5578,6 +5578,176 @@ def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
     assert (pid, "apapane") not in removed
 
 
+def test_replace_species_ignores_alternative_prediction_on_neighbour(tmp_path):
+    """The protected set must exclude neighbour predictions whose review
+    status is ``'alternative'`` — Compare drops those rows explicitly, so a
+    stale species keyword that only survives via an alternative row is not
+    "still tagged by another subject", it's just an out-of-band species
+    tag that replace should strip.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries a stale species tag whose only backing on the neighbour
+    # is an 'alternative' prediction row.
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, stale)
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # Neighbour: primary picks a wigeon, alternative names the stale teal.
+    db.add_prediction(
+        d_neighbour, "American Wigeon", 0.95, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_neighbour, "Green-winged Teal", 0.40, "bioclip",
+        status="alternative", labels_fingerprint="fp",
+    )
+    # Target box: wrong teal, needs correction to Blue-winged Teal.
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target and r["status"] != "alternative"
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "Green-winged Teal" not in names    # alternative must not protect it
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+
+
+def test_replace_species_ignores_below_threshold_neighbour(tmp_path):
+    """The protected set must exclude neighbour predictions whose detection
+    sits below the workspace's ``detector_confidence`` threshold — Compare
+    treats those as dormant and hides them, so a stale species keyword that
+    only survives via a below-threshold neighbour is not "another visible
+    subject" and replace must strip it.
+    """
+    import config as cfg
+    from db import Database
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"detector_confidence": 0.5})
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries a stale species tag whose only backing on the neighbour
+    # is a below-threshold detection.
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, stale)
+
+    d_target, d_dormant = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        # Below the 0.5 workspace threshold — Compare treats as dormant.
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.2, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(
+        d_dormant, "Green-winged Teal", 0.95, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    # Dormant (below-threshold) neighbour must not protect the stale tag.
+    assert "Green-winged Teal" not in names
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+
+
+def test_replace_species_preserves_neighbour_above_threshold(tmp_path):
+    """Companion to the below-threshold test: an above-threshold neighbour
+    with a non-alternative prediction MUST still protect its species even
+    when the workspace's detector_confidence is set high enough that the
+    default 0.2 would have hidden neighbours in the earlier test. This
+    guards against the visibility filter accidentally protecting nothing.
+    """
+    import config as cfg
+    from db import Database
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"detector_confidence": 0.5})
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    wigeon = db.add_keyword("American Wigeon", is_species=True)
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, wigeon)
+    db.tag_photo(pid, stale)
+
+    d_target, d_wigeon = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        # Comfortably above the 0.5 workspace threshold.
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(
+        d_wigeon, "American Wigeon", 0.99, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "American Wigeon" in names          # visible neighbour still protects
+    assert "Green-winged Teal" not in names
+
+
 def test_accept_prediction_queues_normalized_species(tmp_path):
     """When the prediction's species carries stray edge quotes (e.g.
     `‘apapane`), accept_prediction must tag the photo with the normalized
