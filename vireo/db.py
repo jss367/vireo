@@ -14187,6 +14187,75 @@ class Database:
                 self.conn.rollback()
             raise
 
+    def accept_subject_species(self, prediction_id):
+        """Accept agreeing model predictions for one detected subject.
+
+        Compare uses this for an additional-species suggestion: the species
+        keyword is added once to the photo, the existing species keywords are
+        preserved, and every current-model prediction that names the same
+        species on the same detection is resolved together. Grouped
+        predictions are explicitly limited to this photo so accepting a
+        subject in Compare cannot silently tag the rest of a burst.
+        """
+        ws = self._ws_id()
+        target = self.conn.execute(
+            """SELECT pr.id, pr.detection_id, pr.species, d.photo_id
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos ph ON ph.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+               WHERE pr.id = ?""",
+            (ws, prediction_id),
+        ).fetchone()
+        if target is None:
+            return None
+
+        agreeing = self.conn.execute(
+            """SELECT pr.id
+               FROM predictions pr
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               WHERE pr.detection_id = ?
+                 AND lower(trim(pr.species)) = lower(trim(?))
+                 AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                 AND pr.labels_fingerprint = (
+                     SELECT pr2.labels_fingerprint FROM predictions pr2
+                     WHERE pr2.detection_id = pr.detection_id
+                       AND pr2.classifier_model = pr.classifier_model
+                     ORDER BY pr2.created_at DESC, pr2.id DESC
+                     LIMIT 1
+                 )
+               ORDER BY pr.confidence DESC, pr.id ASC""",
+            (ws, target["detection_id"], target["species"]),
+        ).fetchall()
+
+        accepted_ids = []
+        result = None
+        try:
+            for row in agreeing:
+                accepted = self.accept_prediction(
+                    row["id"],
+                    photo_ids=[target["photo_id"]],
+                    _commit=False,
+                )
+                if accepted is not None:
+                    result = accepted
+                    accepted_ids.append(row["id"])
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        if result is None:
+            return None
+        return {
+            "species": result["species"],
+            "keyword_id": result["keyword_id"],
+            "photo_id": target["photo_id"],
+            "prediction_ids": accepted_ids,
+        }
+
     # -- Detections --
 
     def record_detector_run(self, photo_id, detector_model, box_count):
@@ -14588,10 +14657,10 @@ class Database:
                                   detector_model=None):
         """Return {photo_id: [det_dict, ...]} for a batch of photos.
 
-        Each det_dict has keys: x, y, w, h, confidence, category. Lists are
-        ordered by confidence DESC. The detections table is global — threshold
-        filtering happens at read time. Photos with no detections above
-        ``min_conf`` are omitted from the result.
+        Each det_dict has keys: id, x, y, w, h, confidence, category, and
+        detector_model. Lists are ordered by confidence DESC. The detections
+        table is global — threshold filtering happens at read time. Photos
+        with no detections above ``min_conf`` are omitted from the result.
 
         Args:
             photo_ids: iterable of photo ids
@@ -14613,8 +14682,8 @@ class Database:
         for chunk in _chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             q = (
-                f"SELECT photo_id, box_x, box_y, box_w, box_h, "
-                f"       detector_confidence, category "
+                f"SELECT id, photo_id, box_x, box_y, box_w, box_h, "
+                f"       detector_confidence, category, detector_model "
                 f"FROM detections "
                 f"WHERE photo_id IN ({placeholders}) "
                 f"  AND detector_confidence >= ?"
@@ -14627,12 +14696,14 @@ class Database:
             rows = self.conn.execute(q, params).fetchall()
             for r in rows:
                 result.setdefault(r["photo_id"], []).append({
+                    "id": r["id"],
                     "x": r["box_x"],
                     "y": r["box_y"],
                     "w": r["box_w"],
                     "h": r["box_h"],
                     "confidence": r["detector_confidence"],
                     "category": r["category"],
+                    "detector_model": r["detector_model"],
                 })
         return result
 

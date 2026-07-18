@@ -5339,6 +5339,58 @@ def test_accept_prediction_tags_photo(tmp_path):
     assert any(k["name"] == "Elk" for k in kws)
 
 
+def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_path):
+    """An additional subject species is added without replacing the original.
+
+    Agreeing predictions from different models on the same detection are
+    resolved together.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    wigeon_id = db.add_keyword("American Wigeon", is_species=True)
+    db.tag_photo(photo_id, wigeon_id)
+    detection_id = db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.5, "y": 0.4, "w": 0.2, "h": 0.2},
+            "confidence": 0.6,
+            "category": "animal",
+        }],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(
+        detection_id, "Blue-winged Teal", 0.91, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        detection_id, "Blue-winged Teal", 0.87, "inat",
+        labels_fingerprint="fp",
+    )
+    target = next(
+        row for row in db.get_predictions()
+        if row["classifier_model"] == "bioclip"
+    )
+
+    result = db.accept_subject_species(target["id"])
+
+    assert result["species"] == "Blue-winged Teal"
+    assert len(result["prediction_ids"]) == 2
+    assert {row["name"] for row in db.get_photo_keywords(photo_id)} >= {
+        "American Wigeon", "Blue-winged Teal",
+    }
+    statuses = {
+        row["classifier_model"]: row["status"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+    }
+    assert statuses == {"bioclip": "accepted", "inat": "accepted"}
+
+
 def test_accept_prediction_queues_normalized_species(tmp_path):
     """When the prediction's species carries stray edge quotes (e.g.
     `‘apapane`), accept_prediction must tag the photo with the normalized

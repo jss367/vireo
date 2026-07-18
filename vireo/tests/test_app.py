@@ -1783,17 +1783,60 @@ def test_compare_predictions_api(app_and_db):
     assert len(data["photos"]) >= 2
 
     # Check structure of a photo entry
-    photo = data["photos"][0]
+    photo = next(
+        item for item in data["photos"]
+        if item["photo_id"] == photo_ids[0]
+    )
     assert "photo_id" in photo
     assert "filename" in photo
     assert "predictions" in photo
     assert isinstance(photo["predictions"], dict)  # keyed by model name
+    assert "subjects" in photo
+    subject = next(
+        item for item in photo["subjects"]
+        if item["detection_id"] == det_ids_0[0]
+    )
+    assert subject["box"] == {
+        "x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3,
+    }
+    assert set(subject["predictions"]) == {"model-a", "model-b"}
     # Each model maps to a list of predictions (multi-detection support)
     for model_preds in photo["predictions"].values():
         assert isinstance(model_preds, list)
         assert len(model_preds) >= 1
         assert "species" in model_preds[0]
         assert "confidence" in model_preds[0]
+        assert "detection_id" in model_preds[0]
+
+
+def test_compare_predictions_api_preserves_unclassified_subject(app_and_db):
+    """A qualifying box remains visible when no classifier prediction exists."""
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    det_id = db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.55, "y": 0.4, "w": 0.2, "h": 0.2},
+            "confidence": 0.45,
+            "category": "animal",
+        }],
+        detector_model="MDV6",
+    )[0]
+    cid = db.add_collection(
+        "Unclassified Subject",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    response = app.test_client().get(
+        f"/api/predictions/compare?collection_id={cid}"
+    )
+
+    assert response.status_code == 200
+    subjects = response.get_json()["photos"][0]["subjects"]
+    subject = next(item for item in subjects if item["detection_id"] == det_id)
+    assert subject["predictions"] == {}
 
 
 def test_compare_predictions_api_exposes_miss_flags(app_and_db):
