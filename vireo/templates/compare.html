@@ -976,8 +976,17 @@ function bestSubjectPredictionForModel(subject, model) {
   })[0];
 }
 
-function subjectSignal(subject) {
-  var cacheKey = 'subject|' + String(subject.detection_id) + '|' + visibleModels().join('|');
+function subjectSignal(subject, photoId, subjectIndex) {
+  // Legacy / full-image subjects can carry a null ``detection_id``. Keying
+  // the cache only on ``detection_id`` would collapse every such subject
+  // across the whole page into a single entry, so later photos would
+  // inherit an earlier photo's category, filter state, summary, and
+  // action type. Fall back to (photoId, subjectIndex) whenever the
+  // detection identity isn't stable so per-photo state stays per-photo.
+  var identity = subject.detection_id == null
+    ? 'photo|' + String(photoId) + '|subject|' + String(subjectIndex)
+    : 'detection|' + String(subject.detection_id);
+  var cacheKey = 'subject|' + identity + '|' + visibleModels().join('|');
   if (signalCache.has(cacheKey)) return signalCache.get(cacheKey);
   var models = visibleModels();
   var topPreds = [];
@@ -1073,7 +1082,9 @@ function photoSubjectAssessment(photo) {
   var cacheKey = 'assessment|' + photo.photo_id + '|' + visibleModels().join('|');
   if (signalCache.has(cacheKey)) return signalCache.get(cacheKey);
   var subjects = photoSubjects(photo);
-  var signals = subjects.map(subjectSignal);
+  var signals = subjects.map(function(subject, index) {
+    return subjectSignal(subject, photo.photo_id, index);
+  });
   var detectedCount = subjects.filter(function(subject) { return subject.kind !== 'full_image'; }).length;
   var supporting = signals.map(function(signal) { return signal.keyword_support_count > 0; });
   var statuses = subjects.map(function(subject, index) {

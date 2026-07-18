@@ -4132,9 +4132,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                                     )
                                             embedding = None
                                             if model_type != "timm":
+                                                # Prefer the per-detection
+                                                # embedding so multi-subject
+                                                # cache reruns don't reuse a
+                                                # single last-wins photo-level
+                                                # vector for every detection.
+                                                # Fall back to the photo-level
+                                                # entry only when the photo has
+                                                # a single qualifying detection
+                                                # — there the photo-level row
+                                                # unambiguously belongs to it,
+                                                # so legacy data (classified
+                                                # before per-detection variants
+                                                # were written) still refines
+                                                # correctly.
                                                 emb_blob = thread_db.get_photo_embedding(
                                                     photo["id"], model_name,
+                                                    variant=f"det:{detection['id']}",
                                                 )
+                                                if not emb_blob and len(
+                                                    detections_to_classify
+                                                ) == 1:
+                                                    emb_blob = thread_db.get_photo_embedding(
+                                                        photo["id"], model_name,
+                                                    )
                                                 if emb_blob:
                                                     embedding = np.frombuffer(
                                                         emb_blob, dtype=np.float32,
