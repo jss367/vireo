@@ -421,14 +421,18 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   inset: 0;
   z-index: 9999;
   background: rgba(0,0,0,0.92);
-  align-items: center;
-  justify-content: center;
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-items: stretch;
+  justify-items: center;
+  gap: 12px;
+  padding: 4vh 24px 16px;
+  box-sizing: border-box;
   cursor: zoom-out;
 }
-.lightbox-overlay.active { display: flex; }
+.lightbox-overlay.active { display: grid; }
 .lightbox-img-wrap {
-  width: 95vw;
-  height: 92vh;
+  width: min(95vw, 100%);
+  height: 100%;
   overflow: hidden;
   position: relative;
 }
@@ -528,10 +532,8 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   display: none !important;
 }
 .lightbox-bottom-bar {
-  position: absolute;
-  left: 24px;
-  right: 24px;
-  bottom: 16px;
+  position: relative;
+  width: 100%;
   z-index: 10000;
   display: flex;
   align-items: flex-end;
@@ -7358,16 +7360,21 @@ function toggleLightboxZoom(e) {
   }, { passive: false });
 })();
 
-// Viewport resize: recompute nativeZoom while lightbox is open so fit ratio
-// stays accurate after window/devicePixelRatio changes.
+// Viewport and chrome resize: recompute nativeZoom while lightbox is open so
+// the fit ratio stays accurate after window/devicePixelRatio changes or the
+// bottom bar wraps, grows, or is hidden.
 (function() {
   var resizeTimer = null;
-  window.addEventListener('resize', function() {
+  var refreshSourceTier = false;
+  function scheduleLightboxLayoutRefresh(updateSourceTier) {
     var overlay = document.getElementById('lightboxOverlay');
     if (!overlay || !overlay.classList.contains('active')) return;
+    refreshSourceTier = refreshSourceTier || !!updateSourceTier;
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(function() {
       resizeTimer = null;
+      var shouldUpdateSourceTier = refreshSourceTier;
+      refreshSourceTier = false;
       _lbRecomputeNativeZoom();
       // A deferred 1:1 keeps _lbZoom at fit while the high-res source loads.
       // _lbSetZoom clears _lbPending1To1 (and its trailing reschedule retargets
@@ -7383,20 +7390,44 @@ function toggleLightboxZoom(e) {
         _lbPending1To1Anchor = pendingAnchor;
         _lbClampPan();
         _lbApplyTransform();
-        if (!pendingDesiredSource || pendingDesiredSource === _lbCurrentSrcKey) {
-          _lbScheduleSourceSwap(_lbNativeZoom || 4);
-        } else {
-          _lbDesiredSrcKey = pendingDesiredSource;
-        }
-        if (_lbDesiredSrcKey === _lbCurrentSrcKey) {
-          _lbApplyPendingOneToOneZoom();
+        if (shouldUpdateSourceTier) {
+          if (!pendingDesiredSource || pendingDesiredSource === _lbCurrentSrcKey) {
+            _lbScheduleSourceSwap(_lbNativeZoom || 4);
+          } else {
+            _lbDesiredSrcKey = pendingDesiredSource;
+          }
+          if (_lbDesiredSrcKey === _lbCurrentSrcKey) {
+            _lbApplyPendingOneToOneZoom();
+          }
         }
         return;
       }
-      // Current zoom may now violate clamps; re-run through _lbSetZoom to re-clamp & re-apply.
-      _lbSetZoom(_lbZoom, null, null);
+      if (shouldUpdateSourceTier) {
+        // Current zoom may now violate clamps; re-run through _lbSetZoom to
+        // re-clamp, apply, and select the best source for a new viewport size.
+        _lbSetZoom(_lbZoom, null, null);
+      } else {
+        // A chrome-only resize changes the fit box but must not cancel a
+        // source swap or preload that is already in flight.
+        _lbClampPan();
+        _lbApplyTransform();
+        _lbSaveViewportState(_lightboxCurrentId);
+      }
     }, 100);
+  }
+
+  window.addEventListener('resize', function() {
+    scheduleLightboxLayoutRefresh(true);
   });
+  if (window.ResizeObserver) {
+    var wrap = document.getElementById('lightboxWrap');
+    if (wrap) {
+      var lightboxLayoutObserver = new ResizeObserver(function() {
+        scheduleLightboxLayoutRefresh(false);
+      });
+      lightboxLayoutObserver.observe(wrap);
+    }
+  }
 })();
 
 // Drag to pan when zoomed; single click (no drag) zooms out
