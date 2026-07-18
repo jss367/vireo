@@ -57,6 +57,20 @@ def test_move_page_browser_stamps_requests(app_and_db):
     assert "if (seq !== browseSeq) return;" in html
 
 
+def test_move_page_loads_every_photo_page_for_selection(app_and_db):
+    """Photo Move must not stop at the API's 500-photo per-request cap."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/move")
+    html = resp.data.decode()
+
+    assert "var photoLoadSeq = 0;" in html
+    assert "while (total === null || loadedPhotos.length < total)" in html
+    assert "&per_page=500&page=' + page" in html
+    assert "loadedPhotos = loadedPhotos.concat(pagePhotos);" in html
+    assert "if (seq !== photoLoadSeq) return;" in html
+
+
 def test_move_page_pictures_shortcut_resolves_home_on_demand(app_and_db):
     """The Pictures shortcut must resolve the user's home directory before
     composing the path. Otherwise, opening the modal with a prefilled

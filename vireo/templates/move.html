@@ -536,6 +536,7 @@ var allFolders = [];
 var photoList = [];
 var selectedPhotos = new Set();
 var lastSelectedIdx = -1;
+var photoLoadSeq = 0;
 var browserTargetInput = null;
 var browserPath = '';
 var browserHomePath = '';
@@ -1125,6 +1126,8 @@ async function loadPhotosForFolder() {
   var sel = document.getElementById('photoFolderSelect');
   var fid = parseInt(sel.value);
   var container = document.getElementById('photoGridContainer');
+  var seq = ++photoLoadSeq;
+  photoList = [];
   selectedPhotos.clear();
   lastSelectedIdx = -1;
   updatePhotoSelectionUI();
@@ -1137,14 +1140,35 @@ async function loadPhotosForFolder() {
   container.innerHTML = '<div class="loading">Loading photos...</div>';
 
   try {
-    var data = await safeFetch('/api/photos?folder_id=' + fid + '&per_page=500');
-    photoList = data.photos || [];
+    var page = 1;
+    var total = null;
+    var loadedPhotos = [];
+    while (total === null || loadedPhotos.length < total) {
+      var data = await safeFetch(
+        '/api/photos?folder_id=' + encodeURIComponent(fid) +
+        '&per_page=500&page=' + page
+      );
+      if (seq !== photoLoadSeq) return;
+
+      var pagePhotos = data.photos || [];
+      loadedPhotos = loadedPhotos.concat(pagePhotos);
+      if (typeof data.total === 'number') total = data.total;
+
+      if (pagePhotos.length < 500 || (total !== null && loadedPhotos.length >= total)) break;
+      page += 1;
+      var totalText = total !== null ? ' of ' + total.toLocaleString() : '';
+      container.innerHTML = '<div class="loading">Loading photos... ' +
+        loadedPhotos.length.toLocaleString() + totalText + '</div>';
+    }
+
+    photoList = loadedPhotos;
     if (photoList.length === 0) {
       container.innerHTML = '<div class="empty-state">No photos in this folder</div>';
       return;
     }
     renderPhotoGrid();
   } catch (e) {
+    if (seq !== photoLoadSeq) return;
     container.innerHTML = '<div class="empty-state">Failed to load photos</div>';
   }
 }
