@@ -14013,6 +14013,23 @@ class Database:
         limited_photo_ids = None
         if photo_ids is not None:
             limited_photo_ids = {int(pid) for pid in photo_ids}
+        # Load taxonomy once for the whole call so replace_species can protect
+        # keywords whose relationship to a neighbouring subject's prediction is
+        # broader/same/narrower — not just exact-text matches. Loaded here
+        # rather than inside _accept_for_photo so grouped accepts don't repeat
+        # the JSON parse per photo. None (missing/corrupt file, or unrelated
+        # import failure) cleanly degrades to exact-text protection.
+        _replace_taxonomy = None
+        _compare_pred_to_kws = None
+        if replace_species:
+            try:
+                from compare import compare_prediction_to_keywords as _cpk
+                from taxonomy import load_local_taxonomy as _llt
+                _replace_taxonomy = _llt()
+                _compare_pred_to_kws = _cpk
+            except Exception:
+                _replace_taxonomy = None
+                _compare_pred_to_kws = None
         pred = self.conn.execute(
             """SELECT pr.*,
                       pr.classifier_model AS model,
@@ -14094,25 +14111,126 @@ class Database:
                 self.update_prediction_status(this_pred_id, "accepted", _commit=False)
                 old_species = []
                 if replace_species:
-                    old_species = [
-                        row["name"] for row in self.conn.execute(
-                            """SELECT k.name
-                               FROM photo_keywords pk
-                               JOIN keywords k ON k.id = pk.keyword_id
-                               WHERE pk.photo_id = ?
-                                 AND (k.is_species = 1 OR k.type = 'taxonomy')""",
-                            (photo_id,),
+                    # Replace corrects *this subject's* identity, so it must
+                    # not strip a species that belongs to a different detection
+                    # (another subject) on the same photo. Any species named by
+                    # a live prediction on another box is protected; without
+                    # this, correcting the teal's ID wiped the American Wigeon
+                    # confirmed on the neighbouring box. On a single-detection
+                    # photo no box is protected, so every species keyword is
+                    # replaced exactly as before.
+                    this_det = self.conn.execute(
+                        "SELECT detection_id FROM predictions WHERE id = ?",
+                        (this_pred_id,),
+                    ).fetchone()
+                    this_det_id = this_det["detection_id"] if this_det else None
+                    # Mirror Compare's visibility filter when picking which
+                    # neighbouring predictions may protect a species keyword:
+                    #   * skip 'alternative' rows (Compare drops them at
+                    #     app.py's api_predictions_compare, alongside
+                    #     'rejected');
+                    #   * skip detections below the workspace's effective
+                    #     detector_confidence — Compare marks those "dormant"
+                    #     and excludes their subjects entirely.
+                    # Without this, a below-threshold neighbour or an
+                    # alternative row on a real neighbour would keep an
+                    # already-stale species keyword on the photo — replace
+                    # would leave it in place and never queue a
+                    # keyword_remove, so the sidecar would still list the
+                    # dead species.
+                    import config as _cfg
+                    _det_threshold = self.get_effective_config(
+                        _cfg.load()
+                    ).get("detector_confidence", 0.2)
+                    # Restrict to the latest labels_fingerprint per
+                    # (detection, classifier_model) — mirrors get_predictions
+                    # and the review/summary paths so stale rows from a prior
+                    # label set on a re-classified neighbouring detection do
+                    # not spuriously protect an obsolete species keyword.
+                    # Fold both sides through keyword_match_key so a raw
+                    # prediction species like `‘apapane` matches the stored
+                    # keyword `apapane` (add_keyword normalizes on write, so
+                    # a lower(trim(species)) SQL fold would otherwise miss
+                    # the still-live neighbour and queue its removal).
+                    neighbour_species = [
+                        row["species"] for row in self.conn.execute(
+                            """SELECT DISTINCT pr.species AS species
+                               FROM predictions pr
+                               JOIN detections d ON d.id = pr.detection_id
+                               LEFT JOIN prediction_review pr_rev
+                                 ON pr_rev.prediction_id = pr.id
+                                AND pr_rev.workspace_id = ?
+                               WHERE d.photo_id = ?
+                                 AND pr.detection_id IS NOT ?
+                                 AND COALESCE(pr_rev.status, 'pending')
+                                     NOT IN ('rejected', 'alternative')
+                                 AND d.detector_confidence >= ?
+                                 AND pr.labels_fingerprint = (
+                                     SELECT pr2.labels_fingerprint
+                                     FROM predictions pr2
+                                     WHERE pr2.detection_id = pr.detection_id
+                                       AND pr2.classifier_model
+                                           = pr.classifier_model
+                                     ORDER BY pr2.created_at DESC, pr2.id DESC
+                                     LIMIT 1
+                                 )""",
+                            (ws, photo_id, this_det_id, _det_threshold),
                         ).fetchall()
+                        if row["species"]
                     ]
-                    self.conn.execute(
-                        """DELETE FROM photo_keywords
-                           WHERE photo_id = ?
-                             AND keyword_id IN (
-                               SELECT id FROM keywords
-                               WHERE is_species = 1 OR type = 'taxonomy'
-                             )""",
+                    protected = {
+                        keyword_match_key(s) for s in neighbour_species
+                    }
+                    existing = self.conn.execute(
+                        """SELECT k.id, k.name
+                           FROM photo_keywords pk
+                           JOIN keywords k ON k.id = pk.keyword_id
+                           WHERE pk.photo_id = ?
+                             AND (k.is_species = 1 OR k.type = 'taxonomy')""",
                         (photo_id,),
-                    )
+                    ).fetchall()
+                    # Compare treats a neighbouring subject's prediction as
+                    # supporting an existing keyword under the taxonomy —
+                    # match (same taxon), refinement (existing is broader
+                    # than the prediction), broader (existing is more
+                    # specific than the prediction). See compare.py's
+                    # compare_prediction_to_keywords and the "keyword
+                    # support" counters in templates/compare.html. Without
+                    # this, a photo tagged with a broader ancestor keyword
+                    # (e.g. Anatidae) that is only "held down" by a
+                    # neighbour's American Wigeon prediction is stripped
+                    # when a different box is replaced, and its curation
+                    # (highlights, representatives) gets migrated onto the
+                    # new species — the wrong subject. With no taxonomy
+                    # available the check quietly no-ops and we fall back
+                    # to exact-text protection, matching prior behaviour.
+                    def _supported_by_neighbour_taxonomy(kw_name):
+                        if not _replace_taxonomy or not neighbour_species:
+                            return False
+                        if _compare_pred_to_kws is None:
+                            return False
+                        for pred_species in neighbour_species:
+                            cmp_result = _compare_pred_to_kws(
+                                pred_species, [kw_name], _replace_taxonomy,
+                            )
+                            if cmp_result["category"] in (
+                                "match", "refinement", "broader",
+                            ):
+                                return True
+                        return False
+
+                    to_remove = [
+                        row for row in existing
+                        if keyword_match_key(row["name"]) not in protected
+                        and not _supported_by_neighbour_taxonomy(row["name"])
+                    ]
+                    old_species = [row["name"] for row in to_remove]
+                    for row in to_remove:
+                        self.conn.execute(
+                            """DELETE FROM photo_keywords
+                               WHERE photo_id = ? AND keyword_id = ?""",
+                            (photo_id, row["id"]),
+                        )
                     # The DB rows are gone, but sync_to_xmp only strips a
                     # keyword from the sidecar when a matching keyword_remove
                     # pending change exists. Queue one per removed species so a
@@ -14195,6 +14313,75 @@ class Database:
                 self.conn.rollback()
             raise
 
+    def accept_subject_species(self, prediction_id):
+        """Accept agreeing model predictions for one detected subject.
+
+        Compare uses this for an additional-species suggestion: the species
+        keyword is added once to the photo, the existing species keywords are
+        preserved, and every current-model prediction that names the same
+        species on the same detection is resolved together. Grouped
+        predictions are explicitly limited to this photo so accepting a
+        subject in Compare cannot silently tag the rest of a burst.
+        """
+        ws = self._ws_id()
+        target = self.conn.execute(
+            """SELECT pr.id, pr.detection_id, pr.species, d.photo_id
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos ph ON ph.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+               WHERE pr.id = ?""",
+            (ws, prediction_id),
+        ).fetchone()
+        if target is None:
+            return None
+
+        agreeing = self.conn.execute(
+            """SELECT pr.id
+               FROM predictions pr
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               WHERE pr.detection_id = ?
+                 AND lower(trim(pr.species)) = lower(trim(?))
+                 AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                 AND pr.labels_fingerprint = (
+                     SELECT pr2.labels_fingerprint FROM predictions pr2
+                     WHERE pr2.detection_id = pr.detection_id
+                       AND pr2.classifier_model = pr.classifier_model
+                     ORDER BY pr2.created_at DESC, pr2.id DESC
+                     LIMIT 1
+                 )
+               ORDER BY pr.confidence DESC, pr.id ASC""",
+            (ws, target["detection_id"], target["species"]),
+        ).fetchall()
+
+        accepted_ids = []
+        result = None
+        try:
+            for row in agreeing:
+                accepted = self.accept_prediction(
+                    row["id"],
+                    photo_ids=[target["photo_id"]],
+                    _commit=False,
+                )
+                if accepted is not None:
+                    result = accepted
+                    accepted_ids.append(row["id"])
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        if result is None:
+            return None
+        return {
+            "species": result["species"],
+            "keyword_id": result["keyword_id"],
+            "photo_id": target["photo_id"],
+            "prediction_ids": accepted_ids,
+        }
+
     # -- Detections --
 
     def record_detector_run(self, photo_id, detector_model, box_count):
@@ -14276,23 +14463,28 @@ class Database:
         return {(r["classifier_model"], r["labels_fingerprint"]) for r in rows}
 
     def count_classifier_runs(self, photo_ids, classifier_model, labels_fingerprint):
-        """Count distinct photos in `photo_ids` that have at least one
-        runtime-classifiable target with a classifier_runs row matching the
-        given (classifier_model, labels_fingerprint).
+        """Count distinct photos in `photo_ids` where EVERY runtime-classifiable
+        target has a classifier_runs row matching the given
+        (classifier_model, labels_fingerprint).
 
         Used by the streaming pipeline's classify stage to pre-flight how
         many photos will hit the cache vs. require fresh inference.
 
-        Mirrors the runtime gate's photo selection (see pipeline_job.py,
-        the ``primary_det = photo_dets[0]`` block in the classify loop):
-        above-threshold real detections count normally, and photos where
-        MegaDetector ran with ``box_count=0`` count through their synthetic
-        full-image anchor. Below-threshold real detections are ignored because
-        the pipeline still skips them instead of falling back. May still
-        overcount for photos with multiple above-threshold non-full-image
-        detections where a non-primary one happens to carry the matching
-        run key — exact mirroring would require a window function over
-        every photo's detection set.
+        Photo-scoped to match runtime accounting: the classify loop keeps its
+        ``cached`` bucket photo-scoped (see pipeline_job.py — a photo lands
+        there only if every processed detection is a cache hit; the moment
+        any detection runs fresh inference it is promoted to ``count``).
+        So the preflight only counts a photo as cached when NO qualifying
+        detection would need fresh inference — otherwise a multi-subject
+        photo with one cached and one uncached detection would inflate
+        ``cached_estimate`` up to ``total`` and the banner would misread as
+        "no work to classify" when there is real work remaining.
+
+        Above-threshold real detections must all have matching run keys,
+        and photos where MegaDetector ran with ``box_count=0`` still count
+        through their synthetic full-image anchor. Below-threshold real
+        detections are ignored because the pipeline still skips them
+        instead of falling back.
         """
         if not photo_ids:
             return 0
@@ -14307,16 +14499,46 @@ class Database:
         for i in range(0, len(photo_ids), CHUNK):
             chunk = photo_ids[i:i + CHUNK]
             placeholders = ",".join("?" * len(chunk))
+            # A photo counts as fully cached iff it has at least one
+            # above-threshold real detection AND every above-threshold real
+            # detection carries a matching (classifier_model,
+            # labels_fingerprint) run key. The outer NOT EXISTS is the
+            # "no uncached qualifying detection remains" clause; the outer
+            # WHERE also requires at least one qualifying detection so
+            # empty-detection photos don't fall through this branch (they
+            # are handled by the full-image anchor branch below).
+            # The category='animal' predicate on both the outer and inner
+            # detection scans mirrors the runtime classify loop's
+            # non-animal skip (MegaDetector can return person/vehicle
+            # boxes above the confidence threshold, and the classifier
+            # stage filters them out before inference). Without matching
+            # the runtime filter here, a photo with cached animal
+            # detections plus one uncached person/vehicle box would be
+            # excluded from ``cached_estimate`` even though that photo
+            # will actually be entirely cache-served at runtime, so the
+            # UI would understate cached work.
             rows = self.conn.execute(
                 f"SELECT DISTINCT d.photo_id "
                 f"FROM detections d "
-                f"JOIN classifier_runs cr ON cr.detection_id = d.id "
-                f"WHERE cr.classifier_model = ? "
-                f"  AND cr.labels_fingerprint = ? "
-                f"  AND d.detector_model != 'full-image' "
+                f"WHERE d.detector_model != 'full-image' "
+                f"  AND d.category = 'animal' "
                 f"  AND d.detector_confidence >= ? "
-                f"  AND d.photo_id IN ({placeholders})",
-                [classifier_model, labels_fingerprint, min_conf, *chunk],
+                f"  AND d.photo_id IN ({placeholders}) "
+                f"  AND NOT EXISTS ( "
+                f"    SELECT 1 FROM detections d2 "
+                f"    WHERE d2.photo_id = d.photo_id "
+                f"      AND d2.detector_model != 'full-image' "
+                f"      AND d2.category = 'animal' "
+                f"      AND d2.detector_confidence >= ? "
+                f"      AND NOT EXISTS ( "
+                f"        SELECT 1 FROM classifier_runs cr "
+                f"        WHERE cr.detection_id = d2.id "
+                f"          AND cr.classifier_model = ? "
+                f"          AND cr.labels_fingerprint = ? "
+                f"      ) "
+                f"  )",
+                [min_conf, *chunk, min_conf, classifier_model,
+                 labels_fingerprint],
             ).fetchall()
             for r in rows:
                 matched.add(r["photo_id"])
@@ -14596,10 +14818,10 @@ class Database:
                                   detector_model=None):
         """Return {photo_id: [det_dict, ...]} for a batch of photos.
 
-        Each det_dict has keys: x, y, w, h, confidence, category. Lists are
-        ordered by confidence DESC. The detections table is global — threshold
-        filtering happens at read time. Photos with no detections above
-        ``min_conf`` are omitted from the result.
+        Each det_dict has keys: id, x, y, w, h, confidence, category, and
+        detector_model. Lists are ordered by confidence DESC. The detections
+        table is global — threshold filtering happens at read time. Photos
+        with no detections above ``min_conf`` are omitted from the result.
 
         Args:
             photo_ids: iterable of photo ids
@@ -14621,8 +14843,8 @@ class Database:
         for chunk in _chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             q = (
-                f"SELECT photo_id, box_x, box_y, box_w, box_h, "
-                f"       detector_confidence, category "
+                f"SELECT id, photo_id, box_x, box_y, box_w, box_h, "
+                f"       detector_confidence, category, detector_model "
                 f"FROM detections "
                 f"WHERE photo_id IN ({placeholders}) "
                 f"  AND detector_confidence >= ?"
@@ -14635,12 +14857,14 @@ class Database:
             rows = self.conn.execute(q, params).fetchall()
             for r in rows:
                 result.setdefault(r["photo_id"], []).append({
+                    "id": r["id"],
                     "x": r["box_x"],
                     "y": r["box_y"],
                     "w": r["box_w"],
                     "h": r["box_h"],
                     "confidence": r["detector_confidence"],
                     "category": r["category"],
+                    "detector_model": r["detector_model"],
                 })
         return result
 

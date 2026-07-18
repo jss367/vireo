@@ -2620,7 +2620,16 @@ def test_classify_photos_new_photo(tmp_path):
     assert raw_results[0]["confidence"] == 0.95
     assert failed == 0
     assert skipped == 0
-    mock_db.upsert_photo_embedding.assert_called_once()
+    # Fresh classification writes two embedding rows per detection: the
+    # legacy photo-level (variant='') entry for backwards-compatible
+    # consumers (culling, similarity search) and a per-detection
+    # (variant='det:<id>') entry so multi-subject reruns from cache use
+    # the correct per-subject vector instead of last-wins.
+    embed_calls = mock_db.upsert_photo_embedding.call_args_list
+    assert len(embed_calls) == 2
+    variants = {call.kwargs.get("variant", "") for call in embed_calls}
+    assert "" in variants
+    assert any(v.startswith("det:") for v in variants)
 
 
 def test_classify_photos_skips_existing(tmp_path):
@@ -2788,6 +2797,83 @@ def test_flush_batch_default_top_k_is_one():
 # ── GPU lock scope ────────────────────────────────────────────────────────
 
 
+def test_flush_batch_writes_per_detection_embedding(tmp_path):
+    """_flush_batch persists a per-detection embedding alongside the
+    photo-level row so multi-subject cache reruns don't reuse the last
+    detection's vector for every subject.
+
+    Regression for the Codex P2 review on PR #1294: when a multi-subject
+    photo is rerun from the classifier cache, each cached detection was
+    fetching the same ``(photo, model)`` row — set by whichever detection
+    happened to classify last — so ``refine_groups_by_similarity`` merged
+    distinct subjects or shuffled burst grouping on the non-inference
+    path. Persist the embedding per ``det:{detection_id}`` variant so
+    the cached path can restore each subject's own vector.
+    """
+    from unittest.mock import MagicMock
+
+    import numpy as np
+    from classify_job import _flush_batch
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/photos", name="photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="bird.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp=None, width=1, height=1,
+    )
+    # Simulate two qualifying detections on one photo.
+    det_ids = db.save_detections(
+        photo_id,
+        [
+            {"box": {"x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0},
+             "confidence": 0.9, "category": "animal"},
+            {"box": {"x": 0.5, "y": 0.0, "w": 0.5, "h": 1.0},
+             "confidence": 0.9, "category": "animal"},
+        ],
+        detector_model="MegaDetector",
+    )
+
+    emb_a = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    emb_b = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+
+    clf = MagicMock()
+    clf.classify_batch_with_embedding.return_value = [
+        ([{"species": "Robin", "score": 0.9, "taxonomy": None}], emb_a),
+        ([{"species": "Jay", "score": 0.9, "taxonomy": None}], emb_b),
+    ]
+
+    photo_row = {"id": photo_id, "filename": "bird.jpg", "timestamp": None}
+    batch = [
+        {"photo": photo_row, "detection_id": det_ids[0],
+         "folder_path": "/photos", "image_path": "/photos/bird.jpg",
+         "img": MagicMock()},
+        {"photo": photo_row, "detection_id": det_ids[1],
+         "folder_path": "/photos", "image_path": "/photos/bird.jpg",
+         "img": MagicMock()},
+    ]
+
+    raw_results: list = []
+    _flush_batch(batch, clf, "bioclip", "test-model", db, raw_results)
+
+    # Per-detection variants recover each detection's own embedding
+    # rather than whichever landed last on the photo-level row.
+    per_a = db.get_photo_embedding(
+        photo_id, "test-model", variant=f"det:{det_ids[0]}",
+    )
+    per_b = db.get_photo_embedding(
+        photo_id, "test-model", variant=f"det:{det_ids[1]}",
+    )
+    assert per_a is not None and per_b is not None
+    assert np.frombuffer(per_a, dtype=np.float32).tolist() == [1.0, 0.0, 0.0, 0.0]
+    assert np.frombuffer(per_b, dtype=np.float32).tolist() == [0.0, 1.0, 0.0, 0.0]
+    # Photo-level (variant='') stays populated for legacy consumers
+    # (culling, similarity search); last-wins is unchanged from prior
+    # behavior — just no longer the sole source of the classify cache.
+    photo_level = db.get_photo_embedding(photo_id, "test-model")
+    assert photo_level is not None
+
+
 def test_flush_batch_does_not_hold_gpu_lock_around_helper_or_db():
     """``_flush_batch`` must not hold the GPU semaphore around the
     classifier helper call or the DB writes.
@@ -2819,7 +2905,7 @@ def test_flush_batch_does_not_hold_gpu_lock_around_helper_or_db():
             for _ in images
         ]
 
-    def record_inside_db(photo_id, model_name, embedding_bytes):
+    def record_inside_db(photo_id, model_name, embedding_bytes, variant=""):
         snapshots["during_db_write"] = pipeline_locks._GPU_SEMAPHORE._value
 
     clf = MagicMock()
