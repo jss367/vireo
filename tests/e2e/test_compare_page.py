@@ -292,12 +292,12 @@ def test_compare_load_reset_filter_when_stale_cache_reports_needs_review(
     # Force activeFilter to 'all' so we can observe whether the reload
     # re-pins it to 'needs_review' based on a stale cache read.
     page.evaluate(
-        """() => {
+        """(photoId) => {
           window.activeFilter = 'all';
           // Plant an assessment cache entry that claims THIS photo has a
           // pending prediction. The key uses the same shape
           // photoSubjectAssessment() builds — see compare.html.
-          var key = 'assessment|' + String(arguments[0]) + '|' +
+          var key = 'assessment|' + String(photoId) + '|' +
                     visibleModels().join('|');
           signalCache.set(key, {
             subjects: [{detection_id: null, kind: 'full_image'}],
@@ -323,13 +323,23 @@ def test_compare_load_reset_filter_when_stale_cache_reports_needs_review(
 
     # Wipe the real pending prediction from the DB so a fresh assessment
     # would report needs_review=0 — mirroring the state after a
-    # predictionAction() accept/reject on the last pending row.
-    with db.conn:
-        db.conn.execute(
-            "UPDATE predictions SET status='accepted' WHERE status='pending'",
-        )
+    # predictionAction() accept/reject on the last pending row. The
+    # predictions table has no ``status`` column — per-workspace review
+    # state lives in ``prediction_review`` (absence == pending) — so we
+    # upsert accepted rows via update_prediction_status().
+    pred_ids = [
+        row["id"]
+        for row in db.conn.execute("SELECT id FROM predictions").fetchall()
+    ]
+    for pred_id in pred_ids:
+        db.update_prediction_status(pred_id, "accepted", _commit=False)
+    db.conn.commit()
     # Also make the initial dataset explicit: seed a fresh non-pending row
     # so photoReviewStatus() doesn't collapse to missing_prediction.
+    # status="accepted" writes a matching prediction_review row so the
+    # zero-pending fixture doesn't rely on the seed's status="pending"
+    # default when this add_prediction actually inserts a new row instead
+    # of colliding with the seeded Red-tailed Hawk entry.
     det_id = db.conn.execute(
         "SELECT id FROM detections WHERE photo_id = ? ORDER BY id LIMIT 1",
         (photo_id,),
@@ -340,6 +350,7 @@ def test_compare_load_reset_filter_when_stale_cache_reports_needs_review(
         confidence=0.95,
         model="BioCLIP-2",
         category="match",
+        status="accepted",
         labels_fingerprint=TOL_SENTINEL,
     )
     db.conn.commit()

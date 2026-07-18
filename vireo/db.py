@@ -14381,16 +14381,28 @@ class Database:
             # WHERE also requires at least one qualifying detection so
             # empty-detection photos don't fall through this branch (they
             # are handled by the full-image anchor branch below).
+            # The category='animal' predicate on both the outer and inner
+            # detection scans mirrors the runtime classify loop's
+            # non-animal skip (MegaDetector can return person/vehicle
+            # boxes above the confidence threshold, and the classifier
+            # stage filters them out before inference). Without matching
+            # the runtime filter here, a photo with cached animal
+            # detections plus one uncached person/vehicle box would be
+            # excluded from ``cached_estimate`` even though that photo
+            # will actually be entirely cache-served at runtime, so the
+            # UI would understate cached work.
             rows = self.conn.execute(
                 f"SELECT DISTINCT d.photo_id "
                 f"FROM detections d "
                 f"WHERE d.detector_model != 'full-image' "
+                f"  AND d.category = 'animal' "
                 f"  AND d.detector_confidence >= ? "
                 f"  AND d.photo_id IN ({placeholders}) "
                 f"  AND NOT EXISTS ( "
                 f"    SELECT 1 FROM detections d2 "
                 f"    WHERE d2.photo_id = d.photo_id "
                 f"      AND d2.detector_model != 'full-image' "
+                f"      AND d2.category = 'animal' "
                 f"      AND d2.detector_confidence >= ? "
                 f"      AND NOT EXISTS ( "
                 f"        SELECT 1 FROM classifier_runs cr "

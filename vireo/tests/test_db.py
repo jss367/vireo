@@ -14526,6 +14526,55 @@ def test_count_classifier_runs_excludes_full_image_and_below_threshold(tmp_path)
     ) == 1
 
 
+def test_count_classifier_runs_ignores_non_animal_detections(tmp_path):
+    """Non-animal detector boxes (person, vehicle) are skipped by the
+    classify loop before inference — so an uncached non-animal box on an
+    otherwise cache-served photo must not force that photo out of the
+    ``cached`` bucket. Mirrors pipeline_job.py's ``category == 'animal'``
+    filter on both the cache- and DB-read detection paths.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+
+    # p1: one animal detection (cached) + one uncached person detection.
+    # The person box gets skipped at runtime so p1 IS fully cache-served.
+    d1_animal = _add_one_detection(db, p1, conf=0.9)
+    db.record_classifier_run(d1_animal, "BioCLIP-2.5", "fp-a", prediction_count=1)
+    db.conn.execute(
+        """INSERT INTO detections
+             (photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category)
+           VALUES (?, 'test-det', 0.0, 0.0, 1.0, 1.0, 0.9, 'person')""",
+        (p1,),
+    )
+    db.conn.commit()
+
+    # p2: only a person detection has a matching run key. Person boxes
+    # aren't classifier targets, so p2 has zero classifiable detections —
+    # it falls through to the empty-detections/full-image branch and is
+    # not counted here.
+    cur = db.conn.execute(
+        """INSERT INTO detections
+             (photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category)
+           VALUES (?, 'test-det', 0.0, 0.0, 1.0, 1.0, 0.9, 'vehicle')""",
+        (p2,),
+    )
+    db.conn.commit()
+    db.record_classifier_run(cur.lastrowid, "BioCLIP-2.5", "fp-a", prediction_count=1)
+
+    assert db.count_classifier_runs(
+        [p1, p2], "BioCLIP-2.5", "fp-a",
+    ) == 1
+
+
 def test_all_nav_ids_covers_every_page():
     from db import ALL_NAV_IDS
     expected = {
