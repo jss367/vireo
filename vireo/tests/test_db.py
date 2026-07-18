@@ -5449,6 +5449,70 @@ def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_pa
     assert (pid, "American Wigeon") not in removed
 
 
+def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_path):
+    """The protected-species query must only consider the neighbouring
+    detection's *current* labels_fingerprint. A re-classified detection can
+    still carry pending predictions from an older label set naming a species
+    that the current run no longer produces; those stale rows must not
+    shield an obsolete species keyword from replace_species.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # The photo carries a stale species tag left over from when the neighbour
+    # was previously classified as Green-winged Teal.
+    fresh_wigeon = db.add_keyword("American Wigeon", is_species=True)
+    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, fresh_wigeon)
+    db.tag_photo(pid, stale_teal)
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # Neighbour's *old* fingerprint still has a pending row naming the stale
+    # species — the kind of row get_predictions() filters out.
+    db.add_prediction(
+        d_neighbour, "Green-winged Teal", 0.90, "bioclip",
+        labels_fingerprint="fp_old",
+    )
+    # Neighbour's *current* fingerprint names the wigeon; the target box was
+    # classified as the wrong teal and needs correction to Blue-winged Teal.
+    db.add_prediction(
+        d_neighbour, "American Wigeon", 0.95, "bioclip",
+        labels_fingerprint="fp_new",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp_new",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "American Wigeon" in names          # protected by current fp
+    assert "Green-winged Teal" not in names    # stale fp must not protect it
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+
+
 def test_accept_prediction_queues_normalized_species(tmp_path):
     """When the prediction's species carries stray edge quotes (e.g.
     `‘apapane`), accept_prediction must tag the photo with the normalized

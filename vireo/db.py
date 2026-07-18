@@ -14099,6 +14099,11 @@ class Database:
                         (this_pred_id,),
                     ).fetchone()
                     this_det_id = this_det["detection_id"] if this_det else None
+                    # Restrict to the latest labels_fingerprint per
+                    # (detection, classifier_model) — mirrors get_predictions
+                    # and the review/summary paths so stale rows from a prior
+                    # label set on a re-classified neighbouring detection do
+                    # not spuriously protect an obsolete species keyword.
                     protected = {
                         row["sp"] for row in self.conn.execute(
                             """SELECT DISTINCT lower(trim(pr.species)) AS sp
@@ -14110,7 +14115,16 @@ class Database:
                                WHERE d.photo_id = ?
                                  AND pr.detection_id IS NOT ?
                                  AND COALESCE(pr_rev.status, 'pending')
-                                     != 'rejected'""",
+                                     != 'rejected'
+                                 AND pr.labels_fingerprint = (
+                                     SELECT pr2.labels_fingerprint
+                                     FROM predictions pr2
+                                     WHERE pr2.detection_id = pr.detection_id
+                                       AND pr2.classifier_model
+                                           = pr.classifier_model
+                                     ORDER BY pr2.created_at DESC, pr2.id DESC
+                                     LIMIT 1
+                                 )""",
                             (ws, photo_id, this_det_id),
                         ).fetchall()
                     }
