@@ -369,6 +369,70 @@ def test_browse_lightbox_filename_can_be_selected_without_resetting_zoom(
     ) is True
 
 
+def test_browse_lightbox_reserves_space_for_bottom_controls(live_server, page):
+    """The fitted image stays above the toolbar and expands when it is hidden."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200" '
+        'viewBox="0 0 1600 1200"><rect width="1600" height="1200" fill="#274"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1600;
+        }"""
+    )
+    page.wait_for_function(
+        """() => {
+            const wrapRect = document.getElementById('lightboxWrap').getBoundingClientRect();
+            const imageRect = document.getElementById('lightboxTransform').getBoundingClientRect();
+            return imageRect.top >= wrapRect.top - 1
+                && imageRect.bottom <= wrapRect.bottom + 1;
+        }"""
+    )
+
+    visible = page.evaluate(
+        """() => {
+            const wrap = document.getElementById('lightboxWrap');
+            const bar = document.querySelector('.lightbox-bottom-bar');
+            const image = document.getElementById('lightboxTransform');
+            const wrapRect = wrap.getBoundingClientRect();
+            const barRect = bar.getBoundingClientRect();
+            const imageRect = image.getBoundingClientRect();
+            return {
+                wrapHeight: wrapRect.height,
+                wrapBottom: wrapRect.bottom,
+                barTop: barRect.top,
+                imageBottom: imageRect.bottom,
+                fitScale: window._lbFitScale,
+            };
+        }"""
+    )
+    assert visible["wrapBottom"] < visible["barTop"]
+    assert visible["imageBottom"] <= visible["wrapBottom"] + 1
+
+    page.locator("#lightboxToggleChrome").click()
+    expect(page.locator("#lightboxOverlay")).to_have_class(
+        "lightbox-overlay active lb-hide-chrome"
+    )
+    page.wait_for_function(
+        """before => {
+            const wrap = document.getElementById('lightboxWrap');
+            return wrap.clientHeight > before.wrapHeight + 20
+                && window._lbFitScale > before.fitScale;
+        }""",
+        arg=visible,
+    )
+
+
 def test_browse_photo_id_deep_link_loads_target_folder_first_page(live_server, page):
     """Open in Browse must find a target that is not on global Browse page 1."""
     db = live_server["db"]
