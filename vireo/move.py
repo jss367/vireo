@@ -1767,7 +1767,13 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         return {"moved": 0, "errors": ["Folder not found"]}
 
     src_path = folder["path"]
-    folder_name = folder["name"] or os.path.basename(src_path)
+    # rstrip separators before basename() so a legacy row stored with a
+    # trailing '/' or '\\' still yields the folder leaf; without it a
+    # nameless folder row falls back to an empty landing_name here, and the
+    # copy lands directly in the selected parent (or merges into it) even
+    # though preflight — which uses the same rstrip in resolve_folder_dest
+    # and the remote branch — approves ``<parent>/<source-leaf>``.
+    folder_name = folder["name"] or os.path.basename(src_path.rstrip("/\\"))
     try:
         landing_name = normalize_destination_name(destination_name) or folder_name
     except ValueError as exc:

@@ -248,6 +248,57 @@ def test_move_folder_no_op_rename_preserves_untrimmed_source_name(tmp_path):
     assert folder["path"] == str(landing)
 
 
+def test_move_folder_no_op_rename_uses_source_leaf_when_name_missing(tmp_path):
+    """A nameless folder row whose path ends in '/' must still land at its leaf.
+
+    Legacy/relocated rows can carry an empty ``name`` alongside a ``path``
+    stored with a trailing separator. ``os.path.basename("/photos/shoot/")``
+    is ``""``, so without stripping the separator the no-op rename fallback
+    collapses to ``""`` and the copy lands directly in the selected parent
+    (potentially merging with a different folder). Preflight and
+    ``resolve_folder_dest`` already ``rstrip("/\\")`` before basename();
+    ``move_folder`` must too.
+    """
+    from move import move_folder
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    src = tmp_path / "shoot"
+    src.mkdir()
+    (src / "bird.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 100)
+    dst = tmp_path / "archive"
+    dst.mkdir()
+
+    fid = db.add_folder(str(src), name="shoot")
+    # Simulate a legacy row: blank name, trailing separator on path.
+    db.conn.execute(
+        "UPDATE folders SET name = '', path = ? WHERE id = ?",
+        (str(src) + "/", fid),
+    )
+    db.conn.commit()
+
+    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                 file_size=102, file_mtime=1.0)
+
+    result = move_folder(
+        db=db,
+        folder_id=fid,
+        destination=str(dst),
+        destination_name="",
+    )
+
+    landing = dst / "shoot"
+    assert result["errors"] == []
+    assert landing.is_dir()
+    assert (landing / "bird.jpg").exists()
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()
+    assert folder["path"] == str(landing)
+
+
 def test_move_folder_rejects_destination_name_with_path_segments(move_env):
     """The rename field cannot escape the separately selected parent."""
     from move import move_folder
