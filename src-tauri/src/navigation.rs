@@ -107,6 +107,21 @@ pub fn handle_navigation<R: Runtime>(app: &tauri::AppHandle<R>, url: &Url) -> bo
     }
 }
 
+/// Allow downloads only from Vireo's own packaged frontend or loopback
+/// backend. Download navigations can bypass the ordinary navigation callback
+/// on some webview engines, so they need the same origin check here.
+pub fn allow_download<R: Runtime>(app: &tauri::AppHandle<R>, url: &Url) -> bool {
+    if matches!(
+        classify(url, backend_port(app)),
+        NavigationAction::AllowInternal
+    ) {
+        true
+    } else {
+        log::warn!("Blocked download from non-Vireo URL: {}", url);
+        false
+    }
+}
+
 /// Handle a `window.open` request. Vireo is intentionally single-webview:
 /// external pages go to the OS browser and no child webview is ever created.
 pub fn handle_new_window<R: Runtime>(app: &tauri::AppHandle<R>, url: &Url) {
