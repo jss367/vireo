@@ -3860,6 +3860,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     full_image_fallbacks = 0
                     stages["classify"].setdefault("cached", 0)
                     stages["classify"].setdefault("seen", 0)
+                    # Photo-scoped bookkeeping for ``count`` (inferred) and
+                    # ``cached``. ``total`` and ``cached_estimate`` count PHOTOS
+                    # (× specs), so multi-subject photos with several qualifying
+                    # detections must not each add multiple ticks to ``count`` /
+                    # ``cached`` — otherwise the UI's ``inferred · cached /
+                    # total`` line can read ``2 inferred / 1`` on a two-subject
+                    # photo, and the cached-preflight would understate remaining
+                    # work when only one of the photo's detections is cached.
+                    # A photo lands in ``photos_cached_in_spec`` on its first
+                    # cache-hit detection and is promoted to
+                    # ``photos_inferred_in_spec`` (decrementing ``cached``,
+                    # incrementing ``count``) the moment any of its detections
+                    # actually runs inference. Reset per spec so a photo can be
+                    # counted once per (photo × spec) — matching ``total``.
+                    photos_cached_in_spec: set = set()
+                    photos_inferred_in_spec: set = set()
                     # Photos that iterated past the inner abort check IN THIS spec.
                     # Used for the per-spec ``runner.update_step`` progress (which
                     # is bounded by ``total``, not the multi-spec stage total) and
@@ -3887,6 +3903,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         model_type=model_type,
                         model_name=model_name,
                         spec_fp=spec_fp,
+                        photos_cached_in_spec=photos_cached_in_spec,
+                        photos_inferred_in_spec=photos_inferred_in_spec,
                     ):
                         nonlocal failed, has_flushed_in_spec
                         if not inference_batch:
@@ -3918,10 +3936,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             pre_len,
                         )
 
-                        new_count = len(raw_results) - pre_len
-                        if new_count > 0:
+                        # Photo-scoped ``count`` bookkeeping: each distinct
+                        # photo whose flush yielded at least one successful
+                        # classification counts once. If it was previously
+                        # bucketed as fully-cached (an earlier detection hit
+                        # the cache), migrate it — decrement ``cached`` and
+                        # add it to ``count`` — so ``count + cached`` stays
+                        # bounded by the (photo-scoped) ``total``.
+                        new_photo_ids = {
+                            r["photo"]["id"] for r in raw_results[pre_len:]
+                        }
+                        promoted = new_photo_ids & photos_cached_in_spec
+                        if promoted:
+                            photos_cached_in_spec.difference_update(promoted)
+                            stages["classify"]["cached"] = max(
+                                0,
+                                stages["classify"].get("cached", 0)
+                                - len(promoted),
+                            )
+                        newly_inferred = new_photo_ids - photos_inferred_in_spec
+                        if newly_inferred:
+                            photos_inferred_in_spec.update(newly_inferred)
                             stages["classify"]["count"] = (
-                                stages["classify"].get("count", 0) + new_count
+                                stages["classify"].get("count", 0)
+                                + len(newly_inferred)
                             )
 
                     for batch_start in range(0, total, batch_size):
@@ -4064,7 +4102,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         )
                                         if cached:
                                             skipped_existing += 1
-                                            stages["classify"]["cached"] += 1
+                                            # Photo-scoped ``cached`` bucket:
+                                            # only the FIRST cached detection
+                                            # per photo (per spec) ticks the
+                                            # counter. A subsequent inferred
+                                            # detection on the same photo will
+                                            # promote it into ``count`` in the
+                                            # flush path above.
+                                            if (
+                                                photo["id"]
+                                                not in photos_inferred_in_spec
+                                                and photo["id"]
+                                                not in photos_cached_in_spec
+                                            ):
+                                                photos_cached_in_spec.add(
+                                                    photo["id"],
+                                                )
+                                                stages["classify"]["cached"] += 1
                                             top = cached[0]
                                             folder_path = folders.get(photo["folder_id"], "")
                                             image_path = os.path.join(
