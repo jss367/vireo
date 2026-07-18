@@ -217,3 +217,49 @@ def test_compare_missing_prediction_filter_includes_subjectless_photos(live_serv
     page.locator("#filterRow button", has_text="Missing predictions").click()
     row = page.locator(f'tr[data-photo-id="{subjectless_pid}"]')
     expect(row).to_be_visible()
+
+
+def test_compare_row_status_surfaces_unclassified_over_pending_match(
+    live_server, page
+):
+    """When a multi-subject photo has one pending-match subject and another
+    detected-but-unclassified subject, the row status must render/sort as
+    ``unclassified`` — the higher-priority category — not as the pending
+    match. Regression for a bug where ``photoReviewStatus()`` filtered
+    candidates by ``status.needs_review`` first, dropping the unclassified
+    subject (which has no predictions and therefore no pending state) before
+    ``CATEGORY_ORDER`` could apply.
+    """
+    db = live_server["db"]
+    photo_id = live_server["data"]["photos"][0]
+    # Add a second detection with no predictions — an unclassified subject.
+    db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.6, "y": 0.4, "w": 0.25, "h": 0.3},
+            "confidence": 0.75,
+            "category": "animal",
+        }],
+        detector_model="test-detector-secondary",
+    )
+
+    page.goto(f"{live_server['url']}/compare")
+    page.wait_for_function("() => window.compareData !== null")
+
+    status = page.evaluate(
+        """(photoId) => {
+          const photo = compareData.photos.find(item => item.photo_id === photoId);
+          const assessment = photoSubjectAssessment(photo);
+          const rowStatus = photoReviewStatus(photo);
+          return {
+            categories: assessment.statuses.map(item => item.category),
+            rowCategory: rowStatus.category,
+          };
+        }""",
+        photo_id,
+    )
+    # Both subjects should be present: the original with a pending match and
+    # the new detection with no predictions (unclassified).
+    assert sorted(status["categories"]) == ["match", "unclassified"]
+    # The row surfaces the unclassified subject rather than the pending match.
+    assert status["rowCategory"] == "unclassified"

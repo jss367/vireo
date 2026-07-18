@@ -1132,7 +1132,16 @@ function photoSubjectAssessment(photo) {
 
 function photoReviewStatus(photo) {
   var assessment = photoSubjectAssessment(photo);
-  var candidates = assessment.statuses.filter(function(status) { return status.needs_review; });
+  // Keep ``unclassified`` statuses alongside pending ones: an ``unclassified``
+  // subject has no predictions at all, so ``needs_review`` (which tracks
+  // pending predictions) is false, but the subject still needs classification.
+  // Without this, a multi-subject photo with one pending match plus one
+  // unclassified subject would drop the unclassified one before sorting and
+  // the row would render/sort as the pending match instead of surfacing the
+  // higher-priority ``unclassified`` category (see CATEGORY_ORDER).
+  var candidates = assessment.statuses.filter(function(status) {
+    return status.needs_review || status.category === 'unclassified';
+  });
   if (!candidates.length) candidates = assessment.statuses.slice();
   candidates.sort(function(a, b) {
     return desc(CATEGORY_ORDER[a.category] || 0, CATEGORY_ORDER[b.category] || 0);
