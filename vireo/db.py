@@ -14086,25 +14086,53 @@ class Database:
                 self.update_prediction_status(this_pred_id, "accepted", _commit=False)
                 old_species = []
                 if replace_species:
-                    old_species = [
-                        row["name"] for row in self.conn.execute(
-                            """SELECT k.name
-                               FROM photo_keywords pk
-                               JOIN keywords k ON k.id = pk.keyword_id
-                               WHERE pk.photo_id = ?
-                                 AND (k.is_species = 1 OR k.type = 'taxonomy')""",
-                            (photo_id,),
+                    # Replace corrects *this subject's* identity, so it must
+                    # not strip a species that belongs to a different detection
+                    # (another subject) on the same photo. Any species named by
+                    # a live prediction on another box is protected; without
+                    # this, correcting the teal's ID wiped the American Wigeon
+                    # confirmed on the neighbouring box. On a single-detection
+                    # photo no box is protected, so every species keyword is
+                    # replaced exactly as before.
+                    this_det = self.conn.execute(
+                        "SELECT detection_id FROM predictions WHERE id = ?",
+                        (this_pred_id,),
+                    ).fetchone()
+                    this_det_id = this_det["detection_id"] if this_det else None
+                    protected = {
+                        row["sp"] for row in self.conn.execute(
+                            """SELECT DISTINCT lower(trim(pr.species)) AS sp
+                               FROM predictions pr
+                               JOIN detections d ON d.id = pr.detection_id
+                               LEFT JOIN prediction_review pr_rev
+                                 ON pr_rev.prediction_id = pr.id
+                                AND pr_rev.workspace_id = ?
+                               WHERE d.photo_id = ?
+                                 AND pr.detection_id IS NOT ?
+                                 AND COALESCE(pr_rev.status, 'pending')
+                                     != 'rejected'""",
+                            (ws, photo_id, this_det_id),
                         ).fetchall()
-                    ]
-                    self.conn.execute(
-                        """DELETE FROM photo_keywords
-                           WHERE photo_id = ?
-                             AND keyword_id IN (
-                               SELECT id FROM keywords
-                               WHERE is_species = 1 OR type = 'taxonomy'
-                             )""",
+                    }
+                    existing = self.conn.execute(
+                        """SELECT k.id, k.name
+                           FROM photo_keywords pk
+                           JOIN keywords k ON k.id = pk.keyword_id
+                           WHERE pk.photo_id = ?
+                             AND (k.is_species = 1 OR k.type = 'taxonomy')""",
                         (photo_id,),
-                    )
+                    ).fetchall()
+                    to_remove = [
+                        row for row in existing
+                        if row["name"].strip().lower() not in protected
+                    ]
+                    old_species = [row["name"] for row in to_remove]
+                    for row in to_remove:
+                        self.conn.execute(
+                            """DELETE FROM photo_keywords
+                               WHERE photo_id = ? AND keyword_id = ?""",
+                            (photo_id, row["id"]),
+                        )
                     # The DB rows are gone, but sync_to_xmp only strips a
                     # keyword from the sidecar when a matching keyword_remove
                     # pending change exists. Queue one per removed species so a

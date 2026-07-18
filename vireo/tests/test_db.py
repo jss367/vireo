@@ -5391,6 +5391,64 @@ def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_pa
     assert statuses == {"bioclip": "accepted", "inat": "accepted"}
 
 
+def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_path):
+    """Replacing one subject's species must not strip a species that belongs
+    to a different detection (subject) on the same photo.
+
+    Regression: accept_prediction(replace_species=True) deleted every species
+    keyword on the photo, so correcting the teal box's ID wiped the American
+    Wigeon confirmed on the other box.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    wigeon = db.add_keyword("American Wigeon", is_species=True)
+    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, wigeon)
+    db.tag_photo(pid, stale_teal)
+
+    d_wigeon, d_teal = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # The wigeon box keeps a live prediction naming the wigeon; the teal box's
+    # real identity is Blue-winged Teal.
+    db.add_prediction(
+        d_wigeon, "American Wigeon", 0.99, "bioclip", labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_teal, "Blue-winged Teal", 0.95, "bioclip", labels_fingerprint="fp",
+    )
+    teal_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_teal
+    )
+
+    result = db.accept_prediction(teal_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names        # this subject's corrected ID
+    assert "American Wigeon" in names          # other subject preserved
+    assert "Green-winged Teal" not in names    # this subject's stale ID gone
+    # The stripped species is reported (and only it), so the sidecar remove is
+    # queued for the stale teal but not the still-tagged wigeon.
+    assert result["affected"][0]["old_species"] == ["Green-winged Teal"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+    assert (pid, "American Wigeon") not in removed
+
+
 def test_accept_prediction_queues_normalized_species(tmp_path):
     """When the prediction's species carries stray edge quotes (e.g.
     `‘apapane`), accept_prediction must tag the photo with the normalized
