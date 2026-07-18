@@ -263,3 +263,99 @@ def test_compare_row_status_surfaces_unclassified_over_pending_match(
     assert sorted(status["categories"]) == ["match", "unclassified"]
     # The row surfaces the unclassified subject rather than the pending match.
     assert status["rowCategory"] == "unclassified"
+
+
+def test_compare_load_reset_filter_when_stale_cache_reports_needs_review(
+    live_server, page
+):
+    """After ``predictionAction()`` reloads compare data, ``loadComparison()``
+    must clear ``signalCache`` before it calls ``effectiveSummary()`` — the
+    summary picks ``activeFilter`` from ``needs_review > 0``, and would
+    otherwise read stale assessments cached from before the action ran.
+    The visible symptom is an empty Needs review table after accepting or
+    rejecting the last pending subject: the summary keeps reporting
+    needs_review=1 from the pre-action cache, so ``activeFilter`` stays on
+    ``needs_review`` while the freshly rendered rows have nothing pending.
+
+    Regression for a bug where the cache clear only fired inside
+    ``renderCompare()`` — after ``effectiveSummary()`` had already returned
+    pre-action data.
+    """
+    from labels_fingerprint import TOL_SENTINEL
+
+    db = live_server["db"]
+    photo_id = live_server["data"]["photos"][0]
+
+    page.goto(f"{live_server['url']}/compare")
+    page.wait_for_function("() => window.compareData !== null")
+
+    # Force activeFilter to 'all' so we can observe whether the reload
+    # re-pins it to 'needs_review' based on a stale cache read.
+    page.evaluate(
+        """() => {
+          window.activeFilter = 'all';
+          // Plant an assessment cache entry that claims THIS photo has a
+          // pending prediction. The key uses the same shape
+          // photoSubjectAssessment() builds — see compare.html.
+          var key = 'assessment|' + String(arguments[0]) + '|' +
+                    visibleModels().join('|');
+          signalCache.set(key, {
+            subjects: [{detection_id: null, kind: 'full_image'}],
+            signals: [{all_predictions: [{status: 'pending'}]}],
+            statuses: [{
+              category: 'conflict',
+              label: 'Conflict',
+              needs_review: true,
+              has_prediction: true,
+              signal: {all_predictions: [{status: 'pending'}]},
+            }],
+          });
+        }""",
+        photo_id,
+    )
+    # Sanity: with the planted entry in the cache, effectiveSummary() sees
+    # a needs_review count of at least 1 — this is what the reload's
+    # activeFilter check would key off of if the cache were not cleared.
+    stale_needs_review = page.evaluate(
+        "() => effectiveSummary().needs_review",
+    )
+    assert stale_needs_review >= 1
+
+    # Wipe the real pending prediction from the DB so a fresh assessment
+    # would report needs_review=0 — mirroring the state after a
+    # predictionAction() accept/reject on the last pending row.
+    with db.conn:
+        db.conn.execute(
+            "UPDATE predictions SET status='accepted' WHERE status='pending'",
+        )
+    # Also make the initial dataset explicit: seed a fresh non-pending row
+    # so photoReviewStatus() doesn't collapse to missing_prediction.
+    det_id = db.conn.execute(
+        "SELECT id FROM detections WHERE photo_id = ? ORDER BY id LIMIT 1",
+        (photo_id,),
+    ).fetchone()["id"]
+    db.add_prediction(
+        detection_id=det_id,
+        species="Red-tailed Hawk",
+        confidence=0.95,
+        model="BioCLIP-2",
+        category="match",
+        labels_fingerprint=TOL_SENTINEL,
+    )
+    db.conn.commit()
+
+    # Reload compare data via the same code path predictionAction() takes.
+    page.evaluate("() => loadComparison()")
+    page.wait_for_function("() => window.compareData !== null")
+
+    # The reload must have cleared the cache before computing the summary,
+    # so activeFilter reflects the fresh dataset (0 pending → 'all'), not
+    # the stale planted count.
+    result = page.evaluate(
+        """() => ({
+          filter: window.activeFilter,
+          needsReview: effectiveSummary().needs_review,
+        })"""
+    )
+    assert result["needsReview"] == 0
+    assert result["filter"] == "all"

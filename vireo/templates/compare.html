@@ -617,6 +617,14 @@ async function loadComparison() {
     compareData = data;
     populateModelSelects(data.models || []);
     populateSortSelect();
+    // Drop cached subject/photo signals before computing the summary that
+    // picks activeFilter. renderCompare() clears the cache too, but that
+    // fires AFTER effectiveSummary() reads through it — so without this
+    // reset, a reload following predictionAction() can reuse the pre-action
+    // assessment and keep activeFilter='needs_review' while the freshly
+    // rendered rows have nothing pending, showing an empty Needs review
+    // table.
+    signalCache = new Map();
     activeFilter = effectiveSummary().needs_review > 0 ? 'needs_review' : 'all';
     renderCompare();
   } catch(e) {
