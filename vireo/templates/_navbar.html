@@ -1873,6 +1873,7 @@ document.addEventListener('keydown', function(e) {
       const p = window.location.pathname;
       if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
       if (p.startsWith('/pipeline/review')) return 'pipeline_review';
+      if (p.startsWith('/locations/review')) return 'location_review';
       if (p === '/' || p.startsWith('/browse')) return 'browse';
       return (p.split('/')[1] || '').replace(/-/g, '_');
     })();
@@ -2353,6 +2354,8 @@ window.NAV_ALL_PAGES = [
   {id: 'browse',          label: 'Browse',          href: '/browse'},
   {id: 'edit',            label: 'Edit',            href: '/edit'},
   {id: 'map',             label: 'Map',             href: '/map'},
+  {id: 'location_review', label: 'Review Photo Locations', href: '/locations/review',
+   keywords: 'location review map coordinates collections gps places'},
   {id: 'variants',        label: 'Variants',        href: '/variants'},
   {id: 'dashboard',       label: 'Dashboard',       href: '/dashboard'},
   {id: 'storage',         label: 'Storage',         href: '/storage'},
@@ -2394,6 +2397,7 @@ window.NAV_ALL_PAGES = [
     const p = window.location.pathname;
     if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
     if (p.startsWith('/pipeline/review')) return 'pipeline_review';
+    if (p.startsWith('/locations/review')) return 'location_review';
     if (p === '/' || p.startsWith('/browse')) return 'browse';
     const seg = (p.split('/')[1] || '').replace(/-/g, '_');
     return seg;
@@ -11975,6 +11979,7 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
     const p = window.location.pathname;
     if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
     if (p.startsWith('/pipeline/review')) return 'pipeline_review';
+    if (p.startsWith('/locations/review')) return 'location_review';
     if (p === '/' || p.startsWith('/browse')) return 'browse';
     return (p.split('/')[1] || '').replace(/-/g, '_');
   }
