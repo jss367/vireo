@@ -889,8 +889,21 @@ function resetQuickFolderName() {
 }
 
 function quickFolderNameResult() {
-  var name = document.getElementById('quickFolderName').value.trim();
-  if (!name) return {value: '', error: 'Enter a name for the folder.'};
+  var raw = document.getElementById('quickFolderName').value;
+  // "Unchanged from the pre-populated default" is a distinct state from
+  // "the user typed something that happens to trim to the source name":
+  // if we .trim() a source folder whose real name has leading or trailing
+  // whitespace on a no-op submit, we'd rename it to the trimmed variant
+  // (landing at /archive/Shoot instead of preserving /archive/ Shoot ).
+  // Signal "keep original" with an empty value + rename:false so callers
+  // send no destination_name and the backend uses folder.name verbatim.
+  var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  var folder = fid ? allFolders.find(function(f) { return f.id === fid; }) : null;
+  if (folder && raw === sourceFolderName(folder)) {
+    return {value: '', error: '', rename: false};
+  }
+  var name = raw.trim();
+  if (!name) return {value: '', error: 'Enter a name for the folder.', rename: false};
   // Colon rejection matches the backend: on Windows, joining a parent with
   // e.g. "C:shoot" collapses to the drive-relative "C:shoot" and escapes
   // the selected parent, so the leaf name has to stay free of : as well.
@@ -898,9 +911,10 @@ function quickFolderNameResult() {
     return {
       value: '',
       error: 'Use a single folder name without slashes or colons.',
+      rename: false,
     };
   }
-  return {value: name, error: ''};
+  return {value: name, error: '', rename: true};
 }
 
 function setQuickMoveSummary(folder, finalPath) {
@@ -943,7 +957,7 @@ function setQuickMoveSummary(folder, finalPath) {
 
   var meta = document.createElement('div');
   meta.className = 'move-preview-meta';
-  var renamed = sourceFolderName(folder) !== quickFolderNameResult().value;
+  var renamed = quickFolderNameResult().rename;
   meta.textContent = count.toLocaleString() + ' photo' + (count !== 1 ? 's' : '') +
     ' · Includes subfolders' + (renamed ? ' · Folder will be renamed' : '');
 
@@ -1038,7 +1052,10 @@ function updateQuickMovePreview() {
     }
     var sub = subResult.value;
     var base = t.remote_path.replace(/\/+$/, '') + (sub ? '/' + sub : '');
-    var finalPath = base + '/' + destinationName;
+    // Fall back to the source folder's actual name when the user hasn't
+    // renamed: destinationName is intentionally empty in that case so the
+    // backend uses the untrimmed folder.name, so the preview must match.
+    var finalPath = base + '/' + (destinationName || sourceFolderName(folder));
     var finalDestSpec = rsyncDestSpec(t.user, t.host, finalPath);
 
     preview.textContent = '';
