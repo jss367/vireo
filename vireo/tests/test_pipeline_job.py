@@ -3264,11 +3264,12 @@ def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
     assert 42 in processed
 
 
-def test_pipeline_classify_passes_primary_detection_to_prepare_image(
+def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
     tmp_path, monkeypatch
 ):
-    """classify_stage must pass the primary detection dict (with box_x/y/w/h
-    keys) to _prepare_image, not the raw {photo_id: [dets]} det_map.
+    """classify_stage must pass every qualifying detection dict (with
+    box_x/y/w/h keys) to _prepare_image, not the raw {photo_id: [dets]}
+    det_map. Raw detections below the workspace threshold stay excluded.
 
     Regression: classify_stage called
         _prepare_image(photo, folders, det_map)
@@ -3276,8 +3277,8 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
     once any photo in a batch has a detection, _prepare_image entered its
     crop branch and evaluated det_map["box_w"] -> KeyError: 'box_w', aborting
     classify the moment the first detection came back.  The fix is to look
-    up the highest-confidence detection for this specific photo and pass
-    that (or None) to _prepare_image.
+    up the detections for this specific photo and pass each one (or None for
+    the full-image fallback) to _prepare_image.
     """
     import classifier as classifier_mod
     import classify_job
@@ -3308,11 +3309,24 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
         "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
         "confidence": 0.95, "category": "animal",
     }
+    secondary_det = {
+        "id": 78,
+        "box_x": 0.6, "box_y": 0.2, "box_w": 0.25, "box_h": 0.3,
+        "confidence": 0.45, "category": "animal",
+    }
+    below_threshold_det = {
+        "id": 79,
+        "box_x": 0.8, "box_y": 0.8, "box_w": 0.05, "box_h": 0.05,
+        "confidence": 0.1, "category": "animal",
+    }
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None):
-        det_map = {p["id"]: [primary_det] for p in batch}
+        det_map = {
+            p["id"]: [primary_det, secondary_det, below_threshold_det]
+            for p in batch
+        }
         return det_map, len(batch), {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -3379,12 +3393,10 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
             f"_prepare_image received {det!r}; expected a detection dict "
             "with 'box_w' (or None), not the {photo_id: [dets]} map."
         )
-    # The fix should pass this photo's primary detection through.
-    assert any(
-        isinstance(d, dict) and d.get("box_w") == 0.5 for d in captured
-    ), (
-        f"Expected _prepare_image to receive the primary detection for "
-        f"photo {photo_id}, got {captured!r}."
+    captured_ids = [d.get("id") for d in captured if isinstance(d, dict)]
+    assert captured_ids == [77, 78], (
+        f"Expected both detections above the 0.2 workspace threshold, "
+        f"and no raw low-confidence detection; got {captured!r}."
     )
     # And the KeyError must not have leaked into job errors.
     assert not any("'box_w'" in e for e in job["errors"]), (
