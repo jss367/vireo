@@ -314,7 +314,7 @@ NO_LOCATION_INFORMATION_RULES = {
 ALL_NAV_IDS = frozenset({
     "import",
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-    "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
+    "misses", "highlights", "life_list", "browse", "edit", "map", "location_review", "variants",
     "dashboard", "storage", "audit", "move", "compare",
     "settings", "workspace", "lightroom", "shortcuts",
     "keywords", "duplicates", "logs",

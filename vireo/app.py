@@ -141,6 +141,8 @@ ALL_PAGES = [
     {"id": "browse",          "label": "Browse",          "href": "/browse"},
     {"id": "edit",            "label": "Edit",            "href": "/edit"},
     {"id": "map",             "label": "Map",             "href": "/map"},
+    {"id": "location_review", "label": "Review Photo Locations", "href": "/locations/review",
+     "keywords": "location review map coordinates collections gps places"},
     {"id": "variants",        "label": "Variants",        "href": "/variants"},
     {"id": "dashboard",       "label": "Dashboard",       "href": "/dashboard"},
     {"id": "storage",         "label": "Storage",         "href": "/storage"},

@@ -1,3 +1,5 @@
+import json
+
 from playwright.sync_api import expect
 
 LEAFLET_STUB = """
@@ -36,6 +38,41 @@ def _stub_leaflet(route):
             content_type="application/javascript",
             body=LEAFLET_STUB,
         )
+
+
+def test_location_review_is_a_navigable_collection_page(live_server, page):
+    """The standalone page lets the user choose a collection and start its queue."""
+    photo_id = live_server["data"]["photos"][0]
+    with live_server["db"].conn:
+        live_server["db"].conn.execute(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            (33.2550, -116.4050, photo_id),
+        )
+    collection_id = live_server["db"].add_collection(
+        "San Diego Field Notes",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.goto(f"{live_server['url']}/locations/review")
+
+    expect(page.locator("#locationReviewEmptyTitle")).to_have_text(
+        "Choose a collection"
+    )
+    expect(page.locator("#locationReviewCollection")).to_contain_text(
+        "San Diego Field Notes (1)"
+    )
+    expect(
+        page.locator('.nav-tab[data-nav-id="location_review"]')
+    ).to_have_class("nav-tab is-ephemeral active")
+
+    page.locator("#locationReviewCollection").select_option(str(collection_id))
+    page.wait_for_url(f"**/locations/review?collection_id={collection_id}")
+
+    expect(page.locator("#locationReviewCollection")).to_have_value(
+        str(collection_id)
+    )
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
 
 
 def test_location_review_assigns_a_custom_name_to_coordinate_group(
