@@ -3799,11 +3799,13 @@ class Database:
         )
         self.conn.commit()
 
-    def move_folder_path(self, folder_id, new_path):
+    def move_folder_path(self, folder_id, new_path, new_name=None):
         """Update a folder's path and cascade to all children.
 
         Unlike relocate_folder (which only updates missing children),
-        this updates ALL child folders regardless of status.
+        this updates ALL child folders regardless of status. ``new_name`` is
+        used when the root folder is renamed as part of the move; descendants
+        keep their existing names.
         """
         old_row = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (folder_id,)
@@ -3811,9 +3813,15 @@ class Database:
         if not old_row:
             return
         old_path = old_row["path"]
-        self.conn.execute(
-            "UPDATE folders SET path = ? WHERE id = ?", (new_path, folder_id)
-        )
+        if new_name is None:
+            self.conn.execute(
+                "UPDATE folders SET path = ? WHERE id = ?", (new_path, folder_id)
+            )
+        else:
+            self.conn.execute(
+                "UPDATE folders SET path = ?, name = ? WHERE id = ?",
+                (new_path, new_name, folder_id),
+            )
         children = self.conn.execute(
             """SELECT id, path FROM folders
                WHERE substr(REPLACE(path, '\\', '/'), 1, ?) = ?""",

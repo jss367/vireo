@@ -29,7 +29,7 @@ def test_move_folder_button_shows_preflight_progress(live_server, page):
     assert held_routes
 
     expect(btn).to_be_disabled()
-    expect(btn).to_have_text("Checking...")
+    expect(btn).to_have_text("Checking destination…")
 
     held_routes[0].fulfill(
         status=200,
@@ -46,7 +46,7 @@ def test_move_folder_button_shows_preflight_progress(live_server, page):
         "Confirm moving 3 photos from /photos/park to "
         "/tmp/vireo-archive/park?"
     )
-    expect(btn).to_have_text("Move Folder")
+    expect(btn).to_contain_text("Review move")
     expect(btn).to_be_enabled()
 
 
@@ -73,7 +73,66 @@ def test_move_folder_prints_full_move_before_submission(live_server, page):
 
     summary = page.locator("#quickMoveSummary")
     expect(summary).to_be_visible()
-    expect(summary).to_have_text(
-        "Confirm moving 3 photos from /photos/park to "
-        "/archive/2024-03-10/park?"
+    route_paths = summary.locator(".move-route-path")
+    expect(route_paths.nth(0)).to_have_text("/photos/park")
+    expect(route_paths.nth(1)).to_have_text("/archive/2024-03-10/park")
+    expect(summary.locator(".move-preview-meta")).to_contain_text("3 photos")
+
+
+def test_move_folder_can_be_renamed_in_final_location_preview(live_server, page):
+    live_server["db"].update_folder_counts()
+    url = live_server["url"]
+    page.goto(f"{url}/move")
+
+    page.locator("#quickFolderSelect").select_option(index=1)
+    expect(page.locator("#quickFolderName")).to_have_value("park")
+
+    page.locator("#quickDestInput").fill("/archive/2026")
+    page.locator("#quickFolderName").fill("2026-07-12")
+
+    summary = page.locator("#quickMoveSummary")
+    expect(summary).to_be_visible()
+    expect(summary.locator(".move-route-path").nth(1)).to_have_text(
+        "/archive/2026/2026-07-12"
     )
+    expect(summary.locator(".move-preview-meta")).to_contain_text(
+        "Folder will be renamed"
+    )
+    expect(page.locator("#quickMoveBtn")).to_be_enabled()
+
+
+def test_move_folder_preserves_untouched_name_with_surrounding_spaces(
+    live_server, page
+):
+    """An unchanged folder name keeps its original whitespace.
+
+    A .trim() on submit would silently rename e.g. ' Shoot ' to 'Shoot' on
+    a no-op move — merging with a different existing folder. Leaving the
+    pre-populated name untouched must round-trip verbatim.
+    """
+    db = live_server["db"]
+    fid = db.add_folder("/photos/ shoot ", name=" shoot ")
+    db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0, timestamp="2024-04-01T10:00:00",
+    )
+    db.update_folder_counts()
+    url = live_server["url"]
+    page.goto(f"{url}/move")
+
+    page.locator("#quickFolderSelect").select_option(value=str(fid))
+    expect(page.locator("#quickFolderName")).to_have_value(" shoot ")
+
+    page.locator("#quickDestInput").fill("/archive/2026")
+
+    summary = page.locator("#quickMoveSummary")
+    expect(summary).to_be_visible()
+    # The trailing whitespace is preserved on the destination leaf.
+    expect(summary.locator(".move-route-path").nth(1)).to_have_text(
+        "/archive/2026/ shoot "
+    )
+    # No rename notice — the user hasn't actually renamed anything.
+    expect(summary.locator(".move-preview-meta")).not_to_contain_text(
+        "Folder will be renamed"
+    )
+    expect(page.locator("#quickMoveBtn")).to_be_enabled()

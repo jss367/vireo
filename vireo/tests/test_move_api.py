@@ -185,6 +185,46 @@ def test_move_folder_job_starts(app_and_db, tmp_path):
     assert data["job_id"].startswith("move-folder-")
 
 
+def test_move_folder_job_passes_explicit_destination_name(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The rename shown by preflight is also used by the asynchronous move."""
+    import move as move_module
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    parent = tmp_path / "move_folder_dst"
+    parent.mkdir()
+    fid = db.get_folder_tree()[0]["id"]
+    captured = {}
+
+    def fake_move_folder(
+        db,
+        folder_id,
+        destination,
+        progress_cb=None,
+        developed_dir=None,
+        merge=False,
+        remote=None,
+        destination_name="",
+    ):
+        captured["destination_name"] = destination_name
+        return {"moved": 1, "errors": []}
+
+    monkeypatch.setattr(move_module, "move_folder", fake_move_folder)
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "destination": str(parent),
+        "destination_name": "2026-07-12",
+    })
+
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    assert captured["destination_name"] == "2026-07-12"
+
+
 def test_move_folder_job_invalidates_missing_originals_cache(
     app_and_db, tmp_path, monkeypatch,
 ):
@@ -206,9 +246,11 @@ def test_move_folder_job_invalidates_missing_originals_cache(
         developed_dir=None,
         merge=False,
         remote=None,
+        destination_name="",
     ):
         assert folder_id == fid
         assert destination == str(dst)
+        assert destination_name == ""
         return {"moved": 1, "errors": []}
 
     monkeypatch.setattr(move_module, "move_folder", fake_move_folder)
@@ -378,6 +420,69 @@ def test_move_folder_preflight_dest_exists(app_and_db, tmp_path):
     assert data["file_count"] == 1
     assert data["file_count_truncated"] is False
     assert data["resolved_dest"] == str(landing)
+
+
+def test_move_folder_preflight_uses_explicit_destination_name(
+    app_and_db, tmp_path,
+):
+    """Preflight resolves the editable folder name as the final path leaf."""
+    app, db = app_and_db
+    parent = tmp_path / "dest"
+    parent.mkdir()
+    folder = db.get_folder_tree()[0]
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(parent),
+        "destination_name": "2026-07-12",
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["resolved_dest"] == str(parent / "2026-07-12")
+    assert data["exists"] is False
+
+
+def test_move_folder_preflight_rejects_invalid_destination_name(
+    app_and_db, tmp_path,
+):
+    """The final folder name is one component, never a hidden path override."""
+    app, db = app_and_db
+    folder = db.get_folder_tree()[0]
+    client = app.test_client()
+
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(tmp_path),
+        "destination_name": "2026/07/12",
+    })
+
+    assert resp.status_code == 400
+    assert "without slashes" in resp.get_json()["error"]
+
+
+def test_move_folder_preflight_rejects_drive_qualified_destination_name(
+    app_and_db, tmp_path,
+):
+    """A Windows drive-qualified leaf (colon) is rejected at the API boundary.
+
+    Left through, os.path.join(destination, "C:shoot") on a Windows client
+    would collapse to "C:shoot" and land the copy — plus the repointed
+    catalog_path — outside the selected destination.
+    """
+    app, db = app_and_db
+    folder = db.get_folder_tree()[0]
+    client = app.test_client()
+
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(tmp_path),
+        "destination_name": "C:shoot",
+    })
+
+    assert resp.status_code == 400
+    assert "colons" in resp.get_json()["error"]
 
 
 def test_move_folder_preflight_caps_existing_destination_count(app_and_db, tmp_path):
