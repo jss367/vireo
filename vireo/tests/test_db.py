@@ -14414,8 +14414,10 @@ def _add_one_detection(db, photo_id, detector_model="test-det", conf=0.9):
 
 def test_count_classifier_runs_filters_by_model_and_fingerprint(tmp_path):
     """count_classifier_runs returns the number of distinct photos in the
-    given id list that have at least one detection with a classifier_runs
-    row matching the given (model, fingerprint)."""
+    given id list where every qualifying detection has a classifier_runs
+    row matching the given (model, fingerprint). Photo-scoped to match
+    the classify loop's ``cached`` bucket: a photo is only "cached" when
+    no detection would need fresh inference."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
@@ -14445,9 +14447,18 @@ def test_count_classifier_runs_filters_by_model_and_fingerprint(tmp_path):
     # Empty input returns 0.
     assert db.count_classifier_runs([], "BioCLIP-2.5", "fp-a") == 0
 
-    # Photo with multiple detections, only one cached, still counts as 1.
+    # Photo with multiple detections, only one cached, does NOT count:
+    # the runtime would still need to infer the uncached detection, and the
+    # photo would end up in ``count`` (inferred), not ``cached``.
     d2b = _add_one_detection(db, p2)
     db.record_classifier_run(d2b, "BioCLIP-2.5", "fp-a", prediction_count=1)
+    assert db.count_classifier_runs(
+        [p1, p2, p3], "BioCLIP-2.5", "fp-a"
+    ) == 1  # only p1 — p2 still has d2 (fp-b) with no matching run key
+
+    # Once every qualifying detection on p2 has a matching run key, p2
+    # counts too.
+    db.record_classifier_run(d2, "BioCLIP-2.5", "fp-a", prediction_count=1)
     assert db.count_classifier_runs(
         [p1, p2, p3], "BioCLIP-2.5", "fp-a"
     ) == 2  # p1 and p2

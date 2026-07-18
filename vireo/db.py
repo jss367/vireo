@@ -14337,23 +14337,28 @@ class Database:
         return {(r["classifier_model"], r["labels_fingerprint"]) for r in rows}
 
     def count_classifier_runs(self, photo_ids, classifier_model, labels_fingerprint):
-        """Count distinct photos in `photo_ids` that have at least one
-        runtime-classifiable target with a classifier_runs row matching the
-        given (classifier_model, labels_fingerprint).
+        """Count distinct photos in `photo_ids` where EVERY runtime-classifiable
+        target has a classifier_runs row matching the given
+        (classifier_model, labels_fingerprint).
 
         Used by the streaming pipeline's classify stage to pre-flight how
         many photos will hit the cache vs. require fresh inference.
 
-        Mirrors the runtime gate's photo selection (see pipeline_job.py,
-        the ``primary_det = photo_dets[0]`` block in the classify loop):
-        above-threshold real detections count normally, and photos where
-        MegaDetector ran with ``box_count=0`` count through their synthetic
-        full-image anchor. Below-threshold real detections are ignored because
-        the pipeline still skips them instead of falling back. May still
-        overcount for photos with multiple above-threshold non-full-image
-        detections where a non-primary one happens to carry the matching
-        run key — exact mirroring would require a window function over
-        every photo's detection set.
+        Photo-scoped to match runtime accounting: the classify loop keeps its
+        ``cached`` bucket photo-scoped (see pipeline_job.py — a photo lands
+        there only if every processed detection is a cache hit; the moment
+        any detection runs fresh inference it is promoted to ``count``).
+        So the preflight only counts a photo as cached when NO qualifying
+        detection would need fresh inference — otherwise a multi-subject
+        photo with one cached and one uncached detection would inflate
+        ``cached_estimate`` up to ``total`` and the banner would misread as
+        "no work to classify" when there is real work remaining.
+
+        Above-threshold real detections must all have matching run keys,
+        and photos where MegaDetector ran with ``box_count=0`` still count
+        through their synthetic full-image anchor. Below-threshold real
+        detections are ignored because the pipeline still skips them
+        instead of falling back.
         """
         if not photo_ids:
             return 0
@@ -14368,16 +14373,34 @@ class Database:
         for i in range(0, len(photo_ids), CHUNK):
             chunk = photo_ids[i:i + CHUNK]
             placeholders = ",".join("?" * len(chunk))
+            # A photo counts as fully cached iff it has at least one
+            # above-threshold real detection AND every above-threshold real
+            # detection carries a matching (classifier_model,
+            # labels_fingerprint) run key. The outer NOT EXISTS is the
+            # "no uncached qualifying detection remains" clause; the outer
+            # WHERE also requires at least one qualifying detection so
+            # empty-detection photos don't fall through this branch (they
+            # are handled by the full-image anchor branch below).
             rows = self.conn.execute(
                 f"SELECT DISTINCT d.photo_id "
                 f"FROM detections d "
-                f"JOIN classifier_runs cr ON cr.detection_id = d.id "
-                f"WHERE cr.classifier_model = ? "
-                f"  AND cr.labels_fingerprint = ? "
-                f"  AND d.detector_model != 'full-image' "
+                f"WHERE d.detector_model != 'full-image' "
                 f"  AND d.detector_confidence >= ? "
-                f"  AND d.photo_id IN ({placeholders})",
-                [classifier_model, labels_fingerprint, min_conf, *chunk],
+                f"  AND d.photo_id IN ({placeholders}) "
+                f"  AND NOT EXISTS ( "
+                f"    SELECT 1 FROM detections d2 "
+                f"    WHERE d2.photo_id = d.photo_id "
+                f"      AND d2.detector_model != 'full-image' "
+                f"      AND d2.detector_confidence >= ? "
+                f"      AND NOT EXISTS ( "
+                f"        SELECT 1 FROM classifier_runs cr "
+                f"        WHERE cr.detection_id = d2.id "
+                f"          AND cr.classifier_model = ? "
+                f"          AND cr.labels_fingerprint = ? "
+                f"      ) "
+                f"  )",
+                [min_conf, *chunk, min_conf, classifier_model,
+                 labels_fingerprint],
             ).fetchall()
             for r in rows:
                 matched.add(r["photo_id"])

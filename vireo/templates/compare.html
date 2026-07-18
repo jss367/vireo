@@ -487,6 +487,15 @@ var CATEGORY_ORDER = {
   broader: 4,
   new: 3,
   missing_prediction: 2,
+  // ``unclassified`` marks a detected subject with no predictions at all
+  // (see photoSubjectAssessment). It needs the missing-prediction
+  // priority so that photoReviewStatus() surfaces the unclassified
+  // subject on multi-subject photos where another subject already
+  // matched — otherwise the matched subject (priority 1) would outrank
+  // the unclassified one and the row would render/sort as a Match,
+  // burying the subject that still needs classification unless the user
+  // manually selects the Missing predictions filter.
+  unclassified: 2,
   match: 1,
   low_conflict: 0,
 };
