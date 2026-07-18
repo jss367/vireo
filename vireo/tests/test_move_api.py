@@ -448,6 +448,29 @@ def test_move_folder_preflight_rejects_invalid_destination_name(
     assert "without slashes" in resp.get_json()["error"]
 
 
+def test_move_folder_preflight_rejects_drive_qualified_destination_name(
+    app_and_db, tmp_path,
+):
+    """A Windows drive-qualified leaf (colon) is rejected at the API boundary.
+
+    Left through, os.path.join(destination, "C:shoot") on a Windows client
+    would collapse to "C:shoot" and land the copy — plus the repointed
+    catalog_path — outside the selected destination.
+    """
+    app, db = app_and_db
+    folder = db.get_folder_tree()[0]
+    client = app.test_client()
+
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(tmp_path),
+        "destination_name": "C:shoot",
+    })
+
+    assert resp.status_code == 400
+    assert "colons" in resp.get_json()["error"]
+
+
 def test_move_folder_preflight_caps_existing_destination_count(app_and_db, tmp_path):
     """Preflight should not recursively count an unbounded destination tree."""
     app, db = app_and_db

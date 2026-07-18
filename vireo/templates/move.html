@@ -891,8 +891,14 @@ function resetQuickFolderName() {
 function quickFolderNameResult() {
   var name = document.getElementById('quickFolderName').value.trim();
   if (!name) return {value: '', error: 'Enter a name for the folder.'};
-  if (name === '.' || name === '..' || /[\\\/]/.test(name)) {
-    return {value: '', error: 'Use a single folder name without slashes.'};
+  // Colon rejection matches the backend: on Windows, joining a parent with
+  // e.g. "C:shoot" collapses to the drive-relative "C:shoot" and escapes
+  // the selected parent, so the leaf name has to stay free of : as well.
+  if (name === '.' || name === '..' || /[\\\/:]/.test(name)) {
+    return {
+      value: '',
+      error: 'Use a single folder name without slashes or colons.',
+    };
   }
   return {value: name, error: ''};
 }

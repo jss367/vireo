@@ -222,6 +222,43 @@ def test_move_folder_rejects_destination_name_with_path_segments(move_env):
     assert env["src"].exists()
 
 
+def test_move_folder_rejects_drive_qualified_destination_name(move_env):
+    """A Windows drive-qualified leaf like C:shoot must not escape the parent.
+
+    os.path.join(r"D:\\archive", "C:shoot") returns the drive-relative path
+    "C:shoot" on Windows, so accepting a colon-bearing leaf would drop the
+    copy — and repoint catalog_path — outside the selected destination.
+    """
+    from move import move_folder
+
+    env = move_env
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        destination_name="C:shoot",
+    )
+
+    assert result["moved"] == 0
+    assert "colons" in result["errors"][0]
+    assert env["src"].exists()
+
+
+def test_normalize_destination_name_rejects_colon():
+    """Drive-qualified and colon-containing leaves are rejected everywhere."""
+    import pytest
+    from move import normalize_destination_name
+
+    for bad in ("C:shoot", "D:\\archive", "foo:bar", ":", "bird:cage/nest"):
+        with pytest.raises(ValueError):
+            normalize_destination_name(bad)
+
+    # Valid single-component names still pass through.
+    assert normalize_destination_name("2026-07-12") == "2026-07-12"
+    assert normalize_destination_name("") == ""
+    assert normalize_destination_name(None) == ""
+
+
 def test_move_folder_reports_cleanup_error_after_commit(move_env, monkeypatch):
     """Catalog repoints first, so a post-commit rmtree failure is committed.
 

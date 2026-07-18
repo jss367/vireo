@@ -137,7 +137,11 @@ def normalize_destination_name(destination_name):
     folder that lands inside it.  Keeping the leaf name separate makes rename-
     while-moving explicit and prevents an entered name from escaping the
     selected parent.  Both slash styles are rejected because moves can target
-    a POSIX NAS from a Windows client (and vice versa).
+    a POSIX NAS from a Windows client (and vice versa).  Colons are rejected
+    too: on Windows ``os.path.join(r"D:\\archive", "C:shoot")`` returns the
+    drive-relative ``"C:shoot"``, so accepting a drive-qualified leaf would
+    let the entered name escape the selected parent and land the copy — and
+    the repointed ``catalog_path`` — outside the chosen destination.
 
     An empty value means "keep the source folder name" and is returned as an
     empty string for backwards-compatible callers.
@@ -149,8 +153,16 @@ def normalize_destination_name(destination_name):
     name = destination_name.strip()
     if not name:
         return ""
-    if name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
-        raise ValueError("Folder name must be a single name without slashes")
+    if (
+        name in (".", "..")
+        or "/" in name
+        or "\\" in name
+        or ":" in name
+        or "\0" in name
+    ):
+        raise ValueError(
+            "Folder name must be a single name without slashes or colons"
+        )
     return name
 
 
