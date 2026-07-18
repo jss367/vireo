@@ -205,6 +205,49 @@ def test_move_folder_can_rename_during_move(move_env):
     assert folder["name"] == "2026-07-12"
 
 
+def test_move_folder_no_op_rename_preserves_untrimmed_source_name(tmp_path):
+    """A no-op rename lands at the source's raw name — spaces and all.
+
+    When the user leaves the Folder name field unchanged, the UI sends
+    ``destination_name=""`` so the backend keeps the source folder name
+    verbatim. If move_folder trims that fallback, the copy lands at
+    ``/archive/shoot`` while preflight showed ``/archive/ shoot `` — the
+    catalog then points at a folder that doesn't match what the user
+    approved and could silently merge with a different existing folder.
+    """
+    from move import move_folder
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    src = tmp_path / " shoot "
+    src.mkdir()
+    (src / "bird.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 100)
+    dst = tmp_path / "archive"
+    dst.mkdir()
+
+    fid = db.add_folder(str(src), name=" shoot ")
+    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                 file_size=102, file_mtime=1.0)
+
+    result = move_folder(
+        db=db,
+        folder_id=fid,
+        destination=str(dst),
+        destination_name="",
+    )
+
+    landing = dst / " shoot "
+    assert result["errors"] == []
+    assert landing.is_dir()
+    assert (landing / "bird.jpg").exists()
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()
+    assert folder["path"] == str(landing)
+
+
 def test_move_folder_rejects_destination_name_with_path_segments(move_env):
     """The rename field cannot escape the separately selected parent."""
     from move import move_folder

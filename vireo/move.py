@@ -1821,12 +1821,19 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # when this code runs on Windows; os.path.join would produce a
         # backslash and rsync would treat it as a single path segment.
         transfer_dest = posixpath.join(remote["ssh_dest_base"], landing_name)
-        catalog_path = resolve_folder_dest(
-            src_path, folder["name"], mount_base, landing_name)
+        # Join landing_name directly rather than routing it back through
+        # resolve_folder_dest: that helper calls normalize_destination_name,
+        # which would re-trim/reject a value we've already resolved. When the
+        # user didn't request a rename, landing_name is the raw folder_name
+        # (potentially with surrounding whitespace, or POSIX-legal ``:``/``\``
+        # on Linux/macOS filesystems that allow them). Preflight preserves
+        # those characters — the move job must too, or the copy lands at a
+        # different path than preflight showed and the catalog repoints to
+        # yet another (trimmed) path.
+        catalog_path = os.path.join(mount_base, landing_name)
         rsync_target = rsync_dest_spec(remote, transfer_dest)
     else:
-        transfer_dest = resolve_folder_dest(
-            src_path, folder["name"], destination, landing_name)
+        transfer_dest = os.path.join(destination, landing_name)
         catalog_path = transfer_dest
         rsync_target = transfer_dest
 
