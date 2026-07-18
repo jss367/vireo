@@ -11985,6 +11985,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             })
 
         preds = db.get_predictions(photo_ids=photo_ids)
+        detections_by_photo = db.get_detections_for_photos(photo_ids)
         keywords_by_photo = db.get_keywords_for_photos(photo_ids)
         species_by_photo = db.get_species_keywords_for_photos(photo_ids)
         edit_recipes_by_photo = db.get_photo_edit_recipes(photo_ids)
@@ -12011,6 +12012,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "keywords": keywords_by_photo.get(row["id"], []),
                 "species_keywords": species_by_photo.get(row["id"], []),
                 "predictions": {},
+                "subjects": [],
                 "row_category": "missing_prediction",
                 "row_label": "Missing prediction",
             }
@@ -12019,15 +12021,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # With multi-detection, each photo may have multiple predictions per model
         models = set()
         by_photo = {p["id"]: summarize_photo(p) for p in photos}
+        subjects_by_detection = {}
+        for pid, detections in detections_by_photo.items():
+            photo = by_photo.get(pid)
+            if photo is None:
+                continue
+            for det in detections:
+                if (
+                    det.get("category") != "animal"
+                    or det.get("detector_model") == "full-image"
+                ):
+                    continue
+                subject = {
+                    "detection_id": det["id"],
+                    "kind": "detected",
+                    "box": {
+                        "x": det["x"],
+                        "y": det["y"],
+                        "w": det["w"],
+                        "h": det["h"],
+                    },
+                    "detector_confidence": det["confidence"],
+                    "predictions": {},
+                }
+                photo["subjects"].append(subject)
+                subjects_by_detection[det["id"]] = subject
+
         for pr in preds:
             d = dict(pr)
             if d.get("status") == "alternative":
                 continue
             pid = d["photo_id"]
             model = d["model"]
-            models.add(model)
             if pid not in by_photo:
                 continue
+            subject = subjects_by_detection.get(d.get("detection_id"))
+            if subject is None:
+                if d.get("detector_model") != "full-image":
+                    # Predictions backed by a detection below the current
+                    # workspace threshold are intentionally dormant until the
+                    # user lowers that threshold. Do not let them create
+                    # invisible Compare conflicts.
+                    continue
+                subject = {
+                    "detection_id": d["detection_id"],
+                    "kind": "full_image",
+                    "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                    "detector_confidence": 0,
+                    "predictions": {},
+                }
+                by_photo[pid]["subjects"].append(subject)
+                subjects_by_detection[d["detection_id"]] = subject
+
+            models.add(model)
             if model not in by_photo[pid]["predictions"]:
                 by_photo[pid]["predictions"][model] = []
             comparison = compare_prediction_to_keywords(
@@ -12035,8 +12081,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 species_by_photo.get(pid, []),
                 taxonomy,
             )
-            by_photo[pid]["predictions"][model].append({
+            prediction = {
                 "id": d["id"],
+                "detection_id": d["detection_id"],
                 "species": d["species"],
                 "confidence": d["confidence"],
                 "status": d["status"],
@@ -12049,7 +12096,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "box_y": d.get("box_y"),
                 "box_w": d.get("box_w"),
                 "box_h": d.get("box_h"),
-            })
+            }
+            by_photo[pid]["predictions"][model].append(prediction)
+            subject["predictions"].setdefault(model, []).append(prediction)
 
         priority = {
             "conflict": 6,
@@ -12210,6 +12259,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.record_edit('prediction_accept', desc, str(result['keyword_id']),
                            items, is_batch=is_batch)
         return jsonify({"ok": True})
+
+    @app.route("/api/predictions/<int:pred_id>/accept-subject", methods=["POST"])
+    def api_accept_subject_species(pred_id):
+        db = _get_db()
+        result = db.accept_subject_species(pred_id)
+        if result is None:
+            return json_error("prediction not found", 404)
+        db.record_edit(
+            "prediction_accept",
+            f'Accepted additional subject species: added "{result["species"]}"',
+            str(result["keyword_id"]),
+            [{
+                "photo_id": result["photo_id"],
+                "old_value": ",".join(
+                    str(pred_id) for pred_id in result["prediction_ids"]
+                ),
+                "new_value": str(result["keyword_id"]),
+            }],
+        )
+        return jsonify({
+            "ok": True,
+            "species": result["species"],
+            "prediction_ids": result["prediction_ids"],
+        })
 
     @app.route("/api/predictions/<int:pred_id>/reject", methods=["POST"])
     def api_reject_prediction(pred_id):

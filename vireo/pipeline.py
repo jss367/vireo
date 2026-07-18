@@ -233,6 +233,43 @@ def load_photo_features(db, collection_id=None, config=None,
     effective_cfg = db.get_effective_config(cfg.load())
     min_conf = effective_cfg.get("detector_confidence", 0.2)
 
+    # Preserve every qualifying animal detection as a first-class subject,
+    # including detections that do not have a species prediction yet. The
+    # latter is important review information: a second box must not disappear
+    # merely because classification failed or has not run for that detection.
+    subject_det_rows = db.conn.execute(
+        f"""SELECT d.id AS detection_id, d.photo_id,
+                   d.box_x, d.box_y, d.box_w, d.box_h,
+                   d.detector_confidence, d.category
+            FROM detections d
+            JOIN photos p ON p.id = d.photo_id
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            WHERE wf.workspace_id = ?
+              AND d.detector_confidence >= ?
+              AND d.detector_model != 'full-image'
+              AND d.category = 'animal'
+              {scope_sql}
+            ORDER BY d.photo_id, d.detector_confidence DESC, d.id ASC""",
+        (ws_id, min_conf, *scope_params),
+    ).fetchall()
+    subjects_by_photo = defaultdict(list)
+    subjects_by_detection = {}
+    for det in subject_det_rows:
+        subject = {
+            "detection_id": det["detection_id"],
+            "box": {
+                "x": det["box_x"],
+                "y": det["box_y"],
+                "w": det["box_w"],
+                "h": det["box_h"],
+            },
+            "detection_confidence": det["detector_confidence"],
+            "category": det["category"],
+            "predictions": [],
+        }
+        subjects_by_photo[det["photo_id"]].append(subject)
+        subjects_by_detection[det["detection_id"]] = subject
+
     # Load species predictions (top-5 per photo, ordered by confidence).
     # Predictions reference detections (not photos directly), so JOIN through
     # the detections table to get photo_id. Only surface predictions whose
@@ -250,7 +287,8 @@ def load_photo_features(db, collection_id=None, config=None,
     # old label set don't leak into the top-k.
     if labels_fingerprint is not None:
         pred_rows = db.conn.execute(
-            f"""SELECT d.photo_id, pr.species, pr.confidence,
+            f"""SELECT d.photo_id, d.id AS detection_id,
+                      pr.species, pr.confidence,
                       pr.classifier_model AS model
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
@@ -265,7 +303,8 @@ def load_photo_features(db, collection_id=None, config=None,
         ).fetchall()
     else:
         pred_rows = db.conn.execute(
-            f"""SELECT d.photo_id, pr.species, pr.confidence,
+            f"""SELECT d.photo_id, d.id AS detection_id,
+                      pr.species, pr.confidence,
                       pr.classifier_model AS model
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
@@ -292,6 +331,11 @@ def load_photo_features(db, collection_id=None, config=None,
         pid = pr["photo_id"]
         if len(species_by_photo[pid]) < top_k:
             species_by_photo[pid].append((pr["species"], pr["confidence"], pr["model"]))
+        subject = subjects_by_detection.get(pr["detection_id"])
+        if subject is not None and len(subject["predictions"]) < top_k:
+            subject["predictions"].append(
+                (pr["species"], pr["confidence"], pr["model"])
+            )
 
     # Load primary detection per photo (highest confidence) via the global
     # read-time helper. This replaces the old photos.detection_box /
@@ -431,6 +475,7 @@ def load_photo_features(db, collection_id=None, config=None,
             "dino_subject_embedding": subj_emb,
             "dino_global_embedding": global_emb,
             "species_top5": species_by_photo.get(pid, []),
+            "subjects": subjects_by_photo.get(pid, []),
             "confirmed_species": confirmed_by_photo.get(pid),
             "subject_absent": subject_absent,
             "subject_present": subject_present,

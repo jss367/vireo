@@ -1224,6 +1224,59 @@ input[type="range"]::-moz-range-thumb {
   font-weight: 700;
   text-transform: uppercase;
 }
+.grm-card-subject-count {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  z-index: 4;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(18, 25, 38, 0.88);
+  border: 1px solid var(--accent);
+  color: var(--text-primary);
+  font-size: 10px;
+  font-weight: 700;
+  pointer-events: none;
+}
+.grm-subject-review {
+  margin: 10px 0 12px;
+  padding: 10px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+}
+.grm-subject-review-heading {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+}
+.grm-subject-review-hint,
+.grm-subject-review-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.grm-subject-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 9px 0 7px;
+}
+.grm-subject-chip {
+  padding: 5px 8px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.grm-subject-chip:hover { color: var(--text-primary); }
+.grm-subject-chip.selected {
+  border-color: var(--accent);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 1px var(--accent);
+}
 
 .grm-footer {
   padding: 12px 20px;
@@ -4697,6 +4750,7 @@ var grmState = {
   removed: new Set(),
   selected: null,     // photo id
   selectedIds: new Set(),
+  selectedSubjectByPhoto: {}, // photo id -> detection id (multi-subject photos only)
   selectionAnchor: null,
   touched: new Set(), // photo ids changed by the user before DB seeding lands
   sessionId: 0,       // bumped on each openGroupReview; used to drop stale fetches
@@ -4978,6 +5032,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     removed: new Set(),
     selected: initialSelectedId,
     selectedIds: initialSelectedIds,
+    selectedSubjectByPhoto: {},
     selectionAnchor: initialSelectedId,
     touched: new Set(),
     // Filled in by the /group/state fetch below. Keys: photo_id → {flag,
@@ -5296,6 +5351,60 @@ function grmKeywordBadgeHtml(p, stats) {
   return '<span class="grm-card-needs-tag" title="Missing species keyword; Apply will add it if Confirm species is checked">Needs tag</span>';
 }
 
+function grmPhotoSubjects(photo) {
+  return photo && Array.isArray(photo.subjects) ? photo.subjects : [];
+}
+
+function grmSubjectTopPrediction(subject) {
+  var predictions = subject && Array.isArray(subject.predictions)
+    ? subject.predictions : [];
+  if (!predictions.length) return null;
+  return predictions.reduce(function(best, entry) {
+    return !best || Number(entry[1] || 0) > Number(best[1] || 0) ? entry : best;
+  }, null);
+}
+
+function grmSubjectLabel(subject, index) {
+  var top = grmSubjectTopPrediction(subject);
+  return 'Subject ' + (index + 1) + ' · ' + (top ? top[0] : 'Unclassified');
+}
+
+function grmSubjectBadgeHtml(photo) {
+  var subjects = grmPhotoSubjects(photo);
+  if (subjects.length < 2) return '';
+  return '<span class="grm-card-subject-count" data-testid="multi-subject-badge" ' +
+    'title="Multiple detected subjects">' + subjects.length + ' subjects</span>';
+}
+
+function grmSelectedSubject(photo) {
+  var subjects = grmPhotoSubjects(photo);
+  if (!subjects.length) return null;
+  if (!grmState.selectedSubjectByPhoto) grmState.selectedSubjectByPhoto = {};
+  var selectedId = grmState.selectedSubjectByPhoto[photo.id];
+  var selected = subjects.find(function(subject) {
+    return String(subject.detection_id) === String(selectedId);
+  });
+  if (!selected) {
+    selected = subjects[0];
+    grmState.selectedSubjectByPhoto[photo.id] = selected.detection_id;
+  }
+  return selected;
+}
+
+function grmSelectSubject(photoId, detectionId) {
+  if (!grmState || !grmState.items) return;
+  var photo = grmState.items.find(function(item) { return item.id === photoId; });
+  if (!photo) return;
+  var subject = grmPhotoSubjects(photo).find(function(item) {
+    return String(item.detection_id) === String(detectionId);
+  });
+  if (!subject) return;
+  if (!grmState.selectedSubjectByPhoto) grmState.selectedSubjectByPhoto = {};
+  grmState.selectedSubjectByPhoto[photoId] = subject.detection_id;
+  grmState.selected = photoId;
+  grmRefreshSelectedLoupe();
+}
+
 function renderGroupModal() {
   var items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
   // Per-card badges are keyed off the *visible* items — a removed frame has
@@ -5325,6 +5434,7 @@ function renderGroupModal() {
     else if (dbFlag === 'rejected') flagHtml = '<span class="photo-flag-badge flag-rejected" title="Already rejected in library" style="bottom:auto;top:4px;left:4px;">X</span>';
 
     var kwHtml = grmKeywordBadgeHtml(p, keywordStats);
+    var subjectHtml = grmSubjectBadgeHtml(p);
     var repHtml = dbSt.is_species_representative
       ? '<span class="grm-card-representative">Representative</span>'
       : '';
@@ -5343,6 +5453,7 @@ function renderGroupModal() {
           ' onload="grmCardImgLoaded(this)" loading="lazy" draggable="false">' +
         flagHtml +
         kwHtml +
+        subjectHtml +
         repHtml +
       '</div>' +
       '<div class="grm-card-info">' +
@@ -5760,8 +5871,8 @@ function renderSpeciesBlock(title, rows) {
 // Group a single photo's raw species_top5 ([species, confidence, model] rows)
 // into the same {species, models} shape the aggregate uses, dropping models
 // below `threshold` and sorting by confidence descending.
-function buildPerPhotoSpeciesRows(photo, threshold) {
-  var top5 = (photo && photo.species_top5) || [];
+function buildSpeciesRows(top5, threshold) {
+  top5 = top5 || [];
   if (top5.length === 0) return [];
   var bySpecies = {};
   var order = [];
@@ -5779,6 +5890,47 @@ function buildPerPhotoSpeciesRows(photo, threshold) {
   });
   rows.sort(function(a, b) { return b.models[0].confidence - a.models[0].confidence; });
   return rows;
+}
+
+function buildPerPhotoSpeciesRows(photo, threshold) {
+  return buildSpeciesRows((photo && photo.species_top5) || [], threshold);
+}
+
+function buildMultiSubjectReviewHtml(photo, threshold) {
+  var subjects = grmPhotoSubjects(photo);
+  if (subjects.length < 2) return '';
+  var selected = grmSelectedSubject(photo);
+  if (!selected) return '';
+
+  var html = '<div class="grm-subject-review" data-testid="multi-subject-review">';
+  html += '<div class="grm-subject-review-heading">' + subjects.length + ' subjects detected</div>';
+  html += '<div class="grm-subject-review-hint">Choose a subject to see the prediction tied to that part of the photo.</div>';
+  html += '<div class="grm-subject-switcher">';
+  subjects.forEach(function(subject, index) {
+    var isSelected = String(subject.detection_id) === String(selected.detection_id);
+    html += '<button type="button" class="grm-subject-chip' + (isSelected ? ' selected' : '') +
+      '" data-testid="subject-chip" onclick="grmSelectSubject(' + photo.id + ', ' +
+      Number(subject.detection_id) + ')">' + escapeHtml(grmSubjectLabel(subject, index)) + '</button>';
+  });
+  html += '</div>';
+
+  var box = selected.box || {};
+  var conf = selected.detection_confidence;
+  var boxText = [box.x, box.y, box.w, box.h].every(function(value) { return value != null; })
+    ? ' · box x ' + Math.round(box.x * 100) + '–' + Math.round((box.x + box.w) * 100) +
+      '%, y ' + Math.round(box.y * 100) + '–' + Math.round((box.y + box.h) * 100) + '%'
+    : '';
+  html += '<div class="grm-subject-review-meta">Detector confidence ' +
+    (conf == null ? 'unknown' : Math.round(conf * 100) + '%') + boxText + '</div>';
+  html += '</div>';
+  html += renderSpeciesBlock(
+    'Selected subject predictions',
+    buildSpeciesRows(selected.predictions || [], threshold)
+  );
+  if (!selected.predictions || selected.predictions.length === 0) {
+    html += '<div class="grm-subject-review-hint" data-testid="subject-unclassified">No species prediction is available for this subject.</div>';
+  }
+  return html;
 }
 
 // Drop aggregate rows (and their models) below `threshold`.
@@ -5875,7 +6027,12 @@ function candidateSpeciesOverrideFromPhotos(photos) {
 function buildSpeciesPredictionsHtml(photo, consensusRows, consensusTitleText, threshold) {
   threshold = threshold || 0;
   var html = '';
-  html += renderSpeciesBlock('Species Predictions (this photo)', buildPerPhotoSpeciesRows(photo, threshold));
+  var subjects = grmPhotoSubjects(photo);
+  if (subjects.length > 1) {
+    html += buildMultiSubjectReviewHtml(photo, threshold);
+  } else {
+    html += renderSpeciesBlock('Species Predictions (this photo)', buildPerPhotoSpeciesRows(photo, threshold));
+  }
   if (consensusRows && consensusRows.length > 0) {
     html += renderSpeciesBlock(consensusTitleText, filterAggSpeciesRows(consensusRows, threshold));
   }

@@ -3673,6 +3673,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 user_cfg = thread_db.get_effective_config(cfg.load())
                 grouping_window = user_cfg.get("grouping_window_seconds", 5)
                 similarity_threshold = user_cfg.get("similarity_threshold", 0.85)
+                detector_confidence = user_cfg.get("detector_confidence", 0.2)
 
                 tax = loaded_models["tax"]
                 # Fingerprint for the FIRST model is preloaded by model_loader_stage.
@@ -3859,6 +3860,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     full_image_fallbacks = 0
                     stages["classify"].setdefault("cached", 0)
                     stages["classify"].setdefault("seen", 0)
+                    # Photo-scoped bookkeeping for ``count`` (inferred) and
+                    # ``cached``. ``total`` and ``cached_estimate`` count PHOTOS
+                    # (× specs), so multi-subject photos with several qualifying
+                    # detections must not each add multiple ticks to ``count`` /
+                    # ``cached`` — otherwise the UI's ``inferred · cached /
+                    # total`` line can read ``2 inferred / 1`` on a two-subject
+                    # photo, and the cached-preflight would understate remaining
+                    # work when only one of the photo's detections is cached.
+                    # A photo lands in ``photos_cached_in_spec`` on its first
+                    # cache-hit detection and is promoted to
+                    # ``photos_inferred_in_spec`` (decrementing ``cached``,
+                    # incrementing ``count``) the moment any of its detections
+                    # actually runs inference. Reset per spec so a photo can be
+                    # counted once per (photo × spec) — matching ``total``.
+                    photos_cached_in_spec: set = set()
+                    photos_inferred_in_spec: set = set()
                     # Photos that iterated past the inner abort check IN THIS spec.
                     # Used for the per-spec ``runner.update_step`` progress (which
                     # is bounded by ``total``, not the multi-spec stage total) and
@@ -3886,6 +3903,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         model_type=model_type,
                         model_name=model_name,
                         spec_fp=spec_fp,
+                        photos_cached_in_spec=photos_cached_in_spec,
+                        photos_inferred_in_spec=photos_inferred_in_spec,
                     ):
                         nonlocal failed, has_flushed_in_spec
                         if not inference_batch:
@@ -3917,10 +3936,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             pre_len,
                         )
 
-                        new_count = len(raw_results) - pre_len
-                        if new_count > 0:
+                        # Photo-scoped ``count`` bookkeeping: each distinct
+                        # photo whose flush yielded at least one successful
+                        # classification counts once. If it was previously
+                        # bucketed as fully-cached (an earlier detection hit
+                        # the cache), migrate it — decrement ``cached`` and
+                        # add it to ``count`` — so ``count + cached`` stays
+                        # bounded by the (photo-scoped) ``total``.
+                        new_photo_ids = {
+                            r["photo"]["id"] for r in raw_results[pre_len:]
+                        }
+                        promoted = new_photo_ids & photos_cached_in_spec
+                        if promoted:
+                            photos_cached_in_spec.difference_update(promoted)
+                            stages["classify"]["cached"] = max(
+                                0,
+                                stages["classify"].get("cached", 0)
+                                - len(promoted),
+                            )
+                        newly_inferred = new_photo_ids - photos_inferred_in_spec
+                        if newly_inferred:
+                            photos_inferred_in_spec.update(newly_inferred)
                             stages["classify"]["count"] = (
-                                stages["classify"].get("count", 0) + new_count
+                                stages["classify"].get("count", 0)
+                                + len(newly_inferred)
                             )
 
                     for batch_start in range(0, total, batch_size):
@@ -3946,7 +3985,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             if models_succeeded == 0:
                                 first_model_photo_ids.add(photo["id"])
 
-                            # Pull the primary detection for this photo from the
+                            # Pull every qualifying detection for this photo from the
                             # detect-stage cache. Fall back to db.get_detections()
                             # only for photos whose per-photo detect iteration
                             # never completed (e.g. mid-batch exception, or the
@@ -3961,11 +4000,18 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 # cached_detections from _detect_batch can include
                                 # full-image rows when an earlier pass synthesized
                                 # them (legacy db state); filter to match the
-                                # fallback-query branch below so primary_det only
-                                # lands on a real detector box.
+                                # fallback-query branch below so classifiers only
+                                # see real, qualifying animal boxes. _detect_batch's
+                                # fresh cache contains raw low-confidence boxes too,
+                                # while DB reads normally apply this threshold.
                                 photo_dets = [
                                     d for d in cached_detections[photo["id"]]
                                     if d.get("detector_model") != "full-image"
+                                    and d.get("category", "animal") == "animal"
+                                    and d.get(
+                                        "confidence",
+                                        d.get("detector_confidence", 0),
+                                    ) >= detector_confidence
                                 ]
                             else:
                                 photo_dets = [
@@ -3978,11 +4024,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         "confidence": d["detector_confidence"],
                                         "category": d["category"],
                                     }
-                                    for d in thread_db.get_detections(photo["id"])
+                                    for d in thread_db.get_detections(
+                                        photo["id"], min_conf=detector_confidence,
+                                    )
                                     if d["detector_model"] != "full-image"
+                                    and d["category"] == "animal"
                                 ]
-                            primary_det = photo_dets[0] if photo_dets else None
-                            if primary_det is None:
+                            detections_to_classify = photo_dets
+                            if not detections_to_classify:
                                 # Distinguish "no eligible detection at the
                                 # workspace threshold" from "MegaDetector found
                                 # nothing at all." Weak raw detections keep the
@@ -4015,7 +4064,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         detector_model="full-image",
                                     )
                                     full_det_id = full_det_ids[0]
-                                primary_det = {
+                                detections_to_classify = [{
                                     "id": full_det_id,
                                     "box_x": 0,
                                     "box_y": 0,
@@ -4024,99 +4073,137 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     "confidence": 0,
                                     "category": "animal",
                                     "detector_model": "full-image",
-                                }
+                                }]
                                 full_image_fallback = True
                                 full_image_fallbacks += 1
                                 fresh_full_image_ids_by_photo.setdefault(
                                     photo["id"], set(),
                                 ).add(full_det_id)
 
-                            # Classifier-run gate: skip work when this exact
-                            # (detection, classifier_model, labels_fingerprint)
-                            # triple was already classified. Reclassify bypasses
-                            # the gate so users can force a fresh pass. When
-                            # gated, surface the cached top-1 prediction into
-                            # raw_results so downstream grouping/storage sees
-                            # it — otherwise the cached detection would silently
-                            # drop out of the grouping pipeline.
-                            if not params.reclassify:
-                                run_keys = thread_db.get_classifier_run_keys(
-                                    primary_det["id"]
-                                )
-                                if (model_name, spec_fp) in run_keys:
-                                    cached = thread_db.get_predictions_for_detection(
-                                        primary_det["id"],
-                                        classifier_model=model_name,
-                                        labels_fingerprint=spec_fp,
-                                        min_classifier_conf=0,
+                            for detection in detections_to_classify:
+                                # Classifier-run gate: skip work when this exact
+                                # (detection, classifier_model, labels_fingerprint)
+                                # triple was already classified. Reclassify bypasses
+                                # the gate so users can force a fresh pass. When
+                                # gated, surface the cached top-1 prediction into
+                                # raw_results so downstream grouping/storage sees
+                                # it — otherwise the cached detection would silently
+                                # drop out of the grouping pipeline.
+                                if not params.reclassify:
+                                    run_keys = thread_db.get_classifier_run_keys(
+                                        detection["id"]
                                     )
-                                    if cached:
-                                        skipped_existing += 1
-                                        stages["classify"]["cached"] += 1
-                                        top = cached[0]
-                                        folder_path = folders.get(photo["folder_id"], "")
-                                        image_path = os.path.join(
-                                            folder_path, photo["filename"],
+                                    if (model_name, spec_fp) in run_keys:
+                                        cached = thread_db.get_predictions_for_detection(
+                                            detection["id"],
+                                            classifier_model=model_name,
+                                            labels_fingerprint=spec_fp,
+                                            min_classifier_conf=0,
                                         )
-                                        timestamp = None
-                                        if photo["timestamp"]:
-                                            with contextlib.suppress(ValueError, TypeError):
-                                                timestamp = dt.fromisoformat(
-                                                    photo["timestamp"]
+                                        if cached:
+                                            skipped_existing += 1
+                                            # Photo-scoped ``cached`` bucket:
+                                            # only the FIRST cached detection
+                                            # per photo (per spec) ticks the
+                                            # counter. A subsequent inferred
+                                            # detection on the same photo will
+                                            # promote it into ``count`` in the
+                                            # flush path above.
+                                            if (
+                                                photo["id"]
+                                                not in photos_inferred_in_spec
+                                                and photo["id"]
+                                                not in photos_cached_in_spec
+                                            ):
+                                                photos_cached_in_spec.add(
+                                                    photo["id"],
                                                 )
-                                        embedding = None
-                                        if model_type != "timm":
-                                            emb_blob = thread_db.get_photo_embedding(
-                                                photo["id"], model_name,
+                                                stages["classify"]["cached"] += 1
+                                            top = cached[0]
+                                            folder_path = folders.get(photo["folder_id"], "")
+                                            image_path = os.path.join(
+                                                folder_path, photo["filename"],
                                             )
-                                            if emb_blob:
-                                                embedding = np.frombuffer(
-                                                    emb_blob, dtype=np.float32,
+                                            timestamp = None
+                                            if photo["timestamp"]:
+                                                with contextlib.suppress(ValueError, TypeError):
+                                                    timestamp = dt.fromisoformat(
+                                                        photo["timestamp"]
+                                                    )
+                                            embedding = None
+                                            if model_type != "timm":
+                                                # Prefer the per-detection
+                                                # embedding so multi-subject
+                                                # cache reruns don't reuse a
+                                                # single last-wins photo-level
+                                                # vector for every detection.
+                                                # Fall back to the photo-level
+                                                # entry only when the photo has
+                                                # a single qualifying detection
+                                                # — there the photo-level row
+                                                # unambiguously belongs to it,
+                                                # so legacy data (classified
+                                                # before per-detection variants
+                                                # were written) still refines
+                                                # correctly.
+                                                emb_blob = thread_db.get_photo_embedding(
+                                                    photo["id"], model_name,
+                                                    variant=f"det:{detection['id']}",
                                                 )
-                                        raw_results.append({
-                                            "photo": photo,
-                                            "detection_id": primary_det["id"],
-                                            "folder_path": folder_path,
-                                            "image_path": image_path,
-                                            "prediction": top["species"],
-                                            "confidence": top["confidence"],
-                                            "timestamp": timestamp,
-                                            "filename": photo["filename"],
-                                            "embedding": embedding,
-                                            "taxonomy": None,
-                                            "_existing": True,
-                                        })
-                                        continue
-                                    # Run key with no cached rows (e.g.
-                                    # prior pass stored `category == 'match'`
-                                    # so the prediction was intentionally not
-                                    # written). Fall through to re-classify
-                                    # instead of stranding the detection.
+                                                if not emb_blob and len(
+                                                    detections_to_classify
+                                                ) == 1:
+                                                    emb_blob = thread_db.get_photo_embedding(
+                                                        photo["id"], model_name,
+                                                    )
+                                                if emb_blob:
+                                                    embedding = np.frombuffer(
+                                                        emb_blob, dtype=np.float32,
+                                                    )
+                                            raw_results.append({
+                                                "photo": photo,
+                                                "detection_id": detection["id"],
+                                                "folder_path": folder_path,
+                                                "image_path": image_path,
+                                                "prediction": top["species"],
+                                                "confidence": top["confidence"],
+                                                "timestamp": timestamp,
+                                                "filename": photo["filename"],
+                                                "embedding": embedding,
+                                                "taxonomy": None,
+                                                "_existing": True,
+                                            })
+                                            continue
+                                        # Run key with no cached rows (e.g.
+                                        # prior pass stored `category == 'match'`
+                                        # so the prediction was intentionally not
+                                        # written). Fall through to re-classify
+                                        # instead of stranding the detection.
 
-                            img, folder_path, image_path = _prepare_image(
-                                photo, folders,
-                                None if full_image_fallback else primary_det,
-                            )
-                            if img is None:
-                                failed += 1
-                                failed_photo_ids.add(photo["id"])
-                                continue
-                            inference_batch.append({
-                                "photo": photo,
-                                "detection_id": primary_det["id"],
-                                "folder_path": folder_path,
-                                "image_path": image_path,
-                                "img": img,
-                            })
-                            # Flush the first real inference immediately. That
-                            # preserves the existing cancel checkpoint after model
-                            # warm-up, then later images batch normally for GPU
-                            # throughput.
-                            if (
-                                not has_flushed_in_spec
-                                or len(inference_batch) >= inference_batch_size
-                            ):
-                                _flush_pending_inference()
+                                img, folder_path, image_path = _prepare_image(
+                                    photo, folders,
+                                    None if full_image_fallback else detection,
+                                )
+                                if img is None:
+                                    failed += 1
+                                    failed_photo_ids.add(photo["id"])
+                                    continue
+                                inference_batch.append({
+                                    "photo": photo,
+                                    "detection_id": detection["id"],
+                                    "folder_path": folder_path,
+                                    "image_path": image_path,
+                                    "img": img,
+                                })
+                                # Flush the first real inference immediately. That
+                                # preserves the existing cancel checkpoint after model
+                                # warm-up, then later images batch normally for GPU
+                                # throughput.
+                                if (
+                                    not has_flushed_in_spec
+                                    or len(inference_batch) >= inference_batch_size
+                                ):
+                                    _flush_pending_inference()
 
                         # Batch boundary: surface the per-photo accumulated
                         # count + cached to the UI. Replaces the old per-batch

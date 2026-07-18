@@ -64,6 +64,39 @@ def _write_predictionless_pipeline_cache(live_server, photo_ids):
         json.dump(cache, f)
 
 
+def _write_multi_subject_pipeline_cache(live_server, photo_ids):
+    _write_predictionless_pipeline_cache(live_server, photo_ids)
+    db = live_server["db"]
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path) as f:
+        cache = json.load(f)
+    cache["photos"][0]["species_top5"] = [
+        ["American Wigeon", 0.98, "BioCLIP"],
+        ["Blue-winged Teal", 0.91, "BioCLIP"],
+    ]
+    cache["photos"][0]["subjects"] = [
+        {
+            "detection_id": 40633,
+            "box": {"x": 0.07, "y": 0.47, "w": 0.11, "h": 0.18},
+            "detection_confidence": 0.66,
+            "category": "animal",
+            "predictions": [["American Wigeon", 0.98, "BioCLIP"]],
+        },
+        {
+            "detection_id": 40634,
+            "box": {"x": 0.47, "y": 0.42, "w": 0.10, "h": 0.15},
+            "detection_confidence": 0.24,
+            "category": "animal",
+            "predictions": [["Blue-winged Teal", 0.91, "BioCLIP"]],
+        },
+    ]
+    with open(path, "w") as f:
+        json.dump(cache, f)
+
+
 def _write_confirmation_pipeline_cache(live_server, photo_ids):
     db = live_server["db"]
     placeholders = ",".join("?" for _ in photo_ids)
@@ -1594,6 +1627,54 @@ def test_pipeline_review_search_rejects_cross_field_token_split(live_server, pag
     search.fill("Trumpeter Swan")
     expect(page.locator(".encounter-card")).to_have_count(1)
     expect(page.locator("#countAll")).to_have_text(" (2)")
+
+
+def test_burst_review_surfaces_and_switches_multi_subject_predictions(
+    live_server, page
+):
+    photo_ids = live_server["data"]["photos"][:2]
+    _write_multi_subject_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    page.wait_for_function("() => window.pipelineResults !== null")
+    page.evaluate("(photoId) => openGroupReview(0, 0, photoId)", photo_ids[0])
+
+    expect(page.locator('[data-testid="multi-subject-badge"]')).to_have_count(1)
+    review = page.locator('[data-testid="multi-subject-review"]')
+    expect(review).to_be_visible()
+    expect(review).to_contain_text("2 subjects detected")
+    chips = page.locator('[data-testid="subject-chip"]')
+    expect(chips).to_have_count(2)
+    expect(chips.nth(0)).to_contain_text("American Wigeon")
+    expect(chips.nth(1)).to_contain_text("Blue-winged Teal")
+    expect(page.locator("#grmLoupeDetail")).to_contain_text("American Wigeon")
+
+    chips.nth(1).click()
+    expect(chips.nth(1)).to_have_class(re.compile(r"\bselected\b"))
+    expect(page.locator("#grmLoupeDetail")).to_contain_text(
+        "Selected subject predictions"
+    )
+    expect(page.locator("#grmLoupeDetail")).to_contain_text("Blue-winged Teal")
+
+    # A detected subject remains visible even before classification has
+    # produced a species row (the current _D856860.NEF state).
+    page.evaluate(
+        """() => {
+          grmState.items[0].subjects[1].predictions = [];
+          grmRefreshSelectedLoupe();
+        }"""
+    )
+    expect(page.locator('[data-testid="subject-unclassified"]')).to_contain_text(
+        "No species prediction is available"
+    )
+
+    # The second cached photo has no multi-subject payload, so selecting it
+    # follows the legacy single-subject detail path without extra controls.
+    page.evaluate(
+        "(photoId) => { grmState.selected = photoId; grmRefreshSelectedLoupe(); }",
+        photo_ids[1],
+    )
+    expect(page.locator('[data-testid="multi-subject-review"]')).to_have_count(0)
 
 
 def test_pipeline_review_species_confirm_ignores_duplicate_inflight_clicks(live_server, page):

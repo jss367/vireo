@@ -11,7 +11,7 @@
 html, body { height: 100%; overflow: hidden; }
 body { margin: 0; }
 .location-review-page {
-  height: calc(100vh - 76px);
+  height: calc(100vh - 48px - var(--bottom-offset, 28px));
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -293,7 +293,7 @@ body { margin: 0; }
 }
 @media (max-width: 860px) {
   html, body { overflow: auto; }
-  .location-review-page { height: auto; min-height: calc(100vh - 76px); }
+  .location-review-page { height: auto; min-height: calc(100vh - 48px - var(--bottom-offset, 28px)); }
   .location-review-header { flex-wrap: wrap; }
   .location-review-source { order: 3; width: 100%; max-width: none; margin-left: 0; }
   .location-review-main { grid-template-columns: 1fr; grid-template-rows: 58vh auto; }
