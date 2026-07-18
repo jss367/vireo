@@ -1461,7 +1461,9 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .missing-photo-row:last-child { border-bottom: none; }
 .missing-photo-thumb {
-  width: 56px; height: 56px; flex-shrink: 0;
+  width: var(--missing-thumb-size, 56px);
+  height: var(--missing-thumb-size, 56px);
+  flex-shrink: 0;
   background: var(--bg-tertiary);
   border-radius: 4px;
   display: flex; align-items: center; justify-content: center;
@@ -2230,6 +2232,13 @@ function sendReport() {
       <label><input type="checkbox" id="missingPhotosSelectAll" onchange="toggleAllMissingPhotos(this.checked)"> Select all</label>
       <span id="missingPhotosSelectedCount">0 selected</span>
       <span class="spacer"></span>
+      <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
+        <input type="range" id="missingPhotosThumbSizeSlider" min="40" max="160" step="8" value="56"
+               aria-label="Thumbnail size"
+               style="width:80px;accent-color:var(--accent);"
+               oninput="updateMissingPhotosThumbSize(this.value)">
+        <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
+      </label>
       <label title="Also delete the .xmp sidecar files left behind on disk."><input type="checkbox" id="missingPhotosDeleteSidecars" checked> Also delete leftover XMP sidecars</label>
     </div>
     <div id="missingPhotosList" style="flex:1;overflow-y:auto;"></div>
@@ -11727,6 +11736,11 @@ function _escapeAttr(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 function _escapeHtml(s) { return _escapeAttr(s); }
+
+function updateMissingPhotosThumbSize(value) {
+  const list = document.getElementById('missingPhotosList');
+  if (list) list.style.setProperty('--missing-thumb-size', value + 'px');
+}
 
 async function loadMissingPhotos() {
   const container = document.getElementById('missingPhotosList');
