@@ -110,16 +110,35 @@ pub fn handle_navigation<R: Runtime>(app: &tauri::AppHandle<R>, url: &Url) -> bo
 /// Allow downloads only from Vireo's own packaged frontend or loopback
 /// backend. Download navigations can bypass the ordinary navigation callback
 /// on some webview engines, so they need the same origin check here.
+///
+/// Same-origin `blob:` URLs are also allowed so the frontend's internal
+/// fallbacks (e.g. the issue-report modal saves diagnostics via
+/// `URL.createObjectURL` when the API can't email them) still work in the
+/// desktop shell. Blob URLs can only be created by a same-origin page, so
+/// gating on the inner origin keeps the trust boundary intact.
 pub fn allow_download<R: Runtime>(app: &tauri::AppHandle<R>, url: &Url) -> bool {
-    if matches!(
-        classify(url, backend_port(app)),
-        NavigationAction::AllowInternal
-    ) {
+    let port = backend_port(app);
+    if matches!(classify(url, port), NavigationAction::AllowInternal)
+        || is_same_origin_blob(url, port)
+    {
         true
     } else {
         log::warn!("Blocked download from non-Vireo URL: {}", url);
         false
     }
+}
+
+fn is_same_origin_blob(url: &Url, backend_port: Option<u16>) -> bool {
+    if url.scheme() != "blob" {
+        return false;
+    }
+    let Ok(inner) = Url::parse(url.path()) else {
+        return false;
+    };
+    matches!(
+        classify(&inner, backend_port),
+        NavigationAction::AllowInternal
+    )
 }
 
 /// Handle a `window.open` request. Vireo is intentionally single-webview:
@@ -157,11 +176,15 @@ pub fn open_external_url<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, NavigationAction};
+    use super::{classify, is_same_origin_blob, NavigationAction};
     use tauri::Url;
 
     fn action(raw: &str, port: Option<u16>) -> NavigationAction {
         classify(&Url::parse(raw).unwrap(), port)
+    }
+
+    fn blob_allowed(raw: &str, port: Option<u16>) -> bool {
+        is_same_origin_blob(&Url::parse(raw).unwrap(), port)
     }
 
     #[test]
@@ -233,6 +256,37 @@ mod tests {
             action("http://someone:secret@127.0.0.1:43127/browse", Some(43127)),
             NavigationAction::OpenExternal
         );
+    }
+
+    #[test]
+    fn allows_same_origin_blob_downloads() {
+        assert!(blob_allowed(
+            "blob:http://localhost:43127/1e2b-c",
+            Some(43127)
+        ));
+        assert!(blob_allowed(
+            "blob:http://127.0.0.1:43127/9f-08",
+            Some(43127)
+        ));
+        assert!(blob_allowed("blob:tauri://localhost/abc-1", None));
+    }
+
+    #[test]
+    fn blocks_cross_origin_and_malformed_blob_downloads() {
+        assert!(!blob_allowed(
+            "blob:https://evil.example.com/1e2b-c",
+            Some(43127)
+        ));
+        assert!(!blob_allowed(
+            "blob:http://localhost:43128/wrong-port",
+            Some(43127)
+        ));
+        assert!(!blob_allowed(
+            "blob:http://someone@localhost:43127/user-info",
+            Some(43127)
+        ));
+        assert!(!blob_allowed("blob:null/opaque", Some(43127)));
+        assert!(!blob_allowed("http://localhost:43127/not-a-blob", Some(43127)));
     }
 
     #[test]
