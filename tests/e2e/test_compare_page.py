@@ -166,3 +166,54 @@ def test_compare_treats_second_detected_species_as_additional(live_server, page)
         if pred["detection_id"] == second_detection
     }
     assert statuses == {"BioCLIP-2": "accepted", "iNat21": "accepted"}
+
+
+def test_compare_missing_prediction_filter_includes_subjectless_photos(live_server, page):
+    """A photo with no compare subjects at all (no qualifying detection and
+    no full-image prediction) still falls back to ``missing_prediction`` in
+    ``photoReviewStatus()``. The Missing predictions filter and pill count
+    must include it — otherwise subjectless missing-prediction photos
+    disappear from the very filter meant to surface them.
+    """
+    from PIL import Image
+
+    db = live_server["db"]
+    folder_id = live_server["data"]["folders"][0]
+    subjectless_pid = db.add_photo(
+        folder_id=folder_id, filename="subjectless.jpg", extension=".jpg",
+        file_size=1000, file_mtime=1.0, timestamp="2024-03-10T09:00:00",
+    )
+    thumb_dir = live_server["app"].config["THUMB_CACHE_DIR"]
+    Image.new("RGB", (100, 100), color="blue").save(
+        f"{thumb_dir}/{subjectless_pid}.jpg"
+    )
+
+    page.goto(f"{live_server['url']}/compare")
+    page.wait_for_function("() => window.compareData !== null")
+
+    row_status = page.evaluate(
+        """(photoId) => {
+          const photo = compareData.photos.find(item => item.photo_id === photoId);
+          if (!photo) return null;
+          const assessment = photoSubjectAssessment(photo);
+          const status = photoReviewStatus(photo);
+          return {
+            statusCount: assessment.statuses.length,
+            category: status.category,
+            matchesFilter: photoMatchesFilter(photo, 'missing_prediction'),
+          };
+        }""",
+        subjectless_pid,
+    )
+    assert row_status == {
+        "statusCount": 0,
+        "category": "missing_prediction",
+        "matchesFilter": True,
+    }
+
+    summary_missing = page.evaluate("() => effectiveSummary().missing_predictions")
+    assert summary_missing >= 1
+
+    page.locator("#filterRow button", has_text="Missing predictions").click()
+    row = page.locator(f'tr[data-photo-id="{subjectless_pid}"]')
+    expect(row).to_be_visible()

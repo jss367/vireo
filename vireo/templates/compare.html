@@ -785,9 +785,15 @@ function photoMatchesFilter(photo, filter) {
   if (filter === 'additional') return signal.additional_subject_count > 0;
   if (filter === 'reviewed') return hasReviewedPrediction(photo);
   if (filter === 'missing_prediction') {
-    return photoSubjectAssessment(photo).statuses.some(function(item) {
-      return item.category === 'unclassified';
-    });
+    // Detected subjects with no predictions surface as ``unclassified``
+    // statuses. Photos with no compare subjects at all (no qualifying
+    // detection and no full-image prediction) have an empty statuses
+    // array, so ``photoReviewStatus()`` falls back to
+    // ``missing_prediction``; fall back to that too or those photos
+    // disappear from the Missing predictions filter.
+    var assessment = photoSubjectAssessment(photo);
+    if (assessment.statuses.some(function(item) { return item.category === 'unclassified'; })) return true;
+    return status.category === 'missing_prediction';
   }
   return status.category === filter;
 }
@@ -1161,7 +1167,14 @@ function effectiveSummary() {
     var status = photoReviewStatus(photo);
     if (status.needs_review) s.needs_review += 1;
     var assessment = photoSubjectAssessment(photo);
-    if (assessment.statuses.some(function(item) { return item.category === 'unclassified'; })) s.missing_predictions += 1;
+    // Mirror the ``missing_prediction`` filter: unclassified subject rows
+    // count, and subjectless photos (empty statuses → status falls back
+    // to ``missing_prediction``) count too. Otherwise the filter and the
+    // pill counter disagree on how many photos need a prediction.
+    if (
+      assessment.statuses.some(function(item) { return item.category === 'unclassified'; })
+      || status.category === 'missing_prediction'
+    ) s.missing_predictions += 1;
     assessment.statuses.forEach(function(item) {
       if (item.category === 'match') s.matches += 1;
       else if (item.category === 'refinement') s.refinements += 1;
