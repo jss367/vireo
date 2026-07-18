@@ -14104,9 +14104,15 @@ class Database:
                     # and the review/summary paths so stale rows from a prior
                     # label set on a re-classified neighbouring detection do
                     # not spuriously protect an obsolete species keyword.
+                    # Fold both sides through keyword_match_key so a raw
+                    # prediction species like `‘apapane` matches the stored
+                    # keyword `apapane` (add_keyword normalizes on write, so
+                    # a lower(trim(species)) SQL fold would otherwise miss
+                    # the still-live neighbour and queue its removal).
                     protected = {
-                        row["sp"] for row in self.conn.execute(
-                            """SELECT DISTINCT lower(trim(pr.species)) AS sp
+                        keyword_match_key(row["species"])
+                        for row in self.conn.execute(
+                            """SELECT DISTINCT pr.species AS species
                                FROM predictions pr
                                JOIN detections d ON d.id = pr.detection_id
                                LEFT JOIN prediction_review pr_rev
@@ -14127,6 +14133,7 @@ class Database:
                                  )""",
                             (ws, photo_id, this_det_id),
                         ).fetchall()
+                        if row["species"]
                     }
                     existing = self.conn.execute(
                         """SELECT k.id, k.name
@@ -14138,7 +14145,7 @@ class Database:
                     ).fetchall()
                     to_remove = [
                         row for row in existing
-                        if row["name"].strip().lower() not in protected
+                        if keyword_match_key(row["name"]) not in protected
                     ]
                     old_species = [row["name"] for row in to_remove]
                     for row in to_remove:

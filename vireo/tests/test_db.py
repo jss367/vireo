@@ -5513,6 +5513,71 @@ def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_
     assert (pid, "Green-winged Teal") in removed
 
 
+def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
+    """The neighbour's *live* prediction species must be folded through the
+    same keyword-normalization as the photo's stored keyword before deciding
+    what to protect.
+
+    Regression: predictions.species stores the raw model output (e.g.
+    `‘apapane` with a leading edge quote), while add_keyword normalizes on
+    write so the photo actually carries the clean keyword `apapane`. A
+    naive `lower(trim(species))` fold on the SQL side would leave the raw
+    edge quote in place, `keyword.name.strip().lower() not in protected`
+    would be True, and replace_species would queue a keyword_remove for
+    the still-live neighbouring subject.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries the neighbour's species under the normalized (clean)
+    # spelling — the shape add_keyword actually writes.
+    apapane = db.add_keyword("apapane", is_species=True)
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, apapane)
+    db.tag_photo(pid, stale)
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # Neighbour's live prediction still carries the raw edge-quote form
+    # that predictions.species records verbatim.
+    db.add_prediction(
+        d_neighbour, "‘apapane", 0.95, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "apapane" in names                  # protected across normalization
+    assert "Green-winged Teal" not in names    # this subject's stale ID gone
+    assert result["affected"][0]["old_species"] == ["Green-winged Teal"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+    assert (pid, "apapane") not in removed
+
+
 def test_accept_prediction_queues_normalized_species(tmp_path):
     """When the prediction's species carries stray edge quotes (e.g.
     `‘apapane`), accept_prediction must tag the photo with the normalized
