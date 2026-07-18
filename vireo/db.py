@@ -14005,6 +14005,23 @@ class Database:
         limited_photo_ids = None
         if photo_ids is not None:
             limited_photo_ids = {int(pid) for pid in photo_ids}
+        # Load taxonomy once for the whole call so replace_species can protect
+        # keywords whose relationship to a neighbouring subject's prediction is
+        # broader/same/narrower — not just exact-text matches. Loaded here
+        # rather than inside _accept_for_photo so grouped accepts don't repeat
+        # the JSON parse per photo. None (missing/corrupt file, or unrelated
+        # import failure) cleanly degrades to exact-text protection.
+        _replace_taxonomy = None
+        _compare_pred_to_kws = None
+        if replace_species:
+            try:
+                from compare import compare_prediction_to_keywords as _cpk
+                from taxonomy import load_local_taxonomy as _llt
+                _replace_taxonomy = _llt()
+                _compare_pred_to_kws = _cpk
+            except Exception:
+                _replace_taxonomy = None
+                _compare_pred_to_kws = None
         pred = self.conn.execute(
             """SELECT pr.*,
                       pr.classifier_model AS model,
@@ -14127,9 +14144,8 @@ class Database:
                     # keyword `apapane` (add_keyword normalizes on write, so
                     # a lower(trim(species)) SQL fold would otherwise miss
                     # the still-live neighbour and queue its removal).
-                    protected = {
-                        keyword_match_key(row["species"])
-                        for row in self.conn.execute(
+                    neighbour_species = [
+                        row["species"] for row in self.conn.execute(
                             """SELECT DISTINCT pr.species AS species
                                FROM predictions pr
                                JOIN detections d ON d.id = pr.detection_id
@@ -14153,6 +14169,9 @@ class Database:
                             (ws, photo_id, this_det_id, _det_threshold),
                         ).fetchall()
                         if row["species"]
+                    ]
+                    protected = {
+                        keyword_match_key(s) for s in neighbour_species
                     }
                     existing = self.conn.execute(
                         """SELECT k.id, k.name
@@ -14162,9 +14181,40 @@ class Database:
                              AND (k.is_species = 1 OR k.type = 'taxonomy')""",
                         (photo_id,),
                     ).fetchall()
+                    # Compare treats a neighbouring subject's prediction as
+                    # supporting an existing keyword under the taxonomy —
+                    # match (same taxon), refinement (existing is broader
+                    # than the prediction), broader (existing is more
+                    # specific than the prediction). See compare.py's
+                    # compare_prediction_to_keywords and the "keyword
+                    # support" counters in templates/compare.html. Without
+                    # this, a photo tagged with a broader ancestor keyword
+                    # (e.g. Anatidae) that is only "held down" by a
+                    # neighbour's American Wigeon prediction is stripped
+                    # when a different box is replaced, and its curation
+                    # (highlights, representatives) gets migrated onto the
+                    # new species — the wrong subject. With no taxonomy
+                    # available the check quietly no-ops and we fall back
+                    # to exact-text protection, matching prior behaviour.
+                    def _supported_by_neighbour_taxonomy(kw_name):
+                        if not _replace_taxonomy or not neighbour_species:
+                            return False
+                        if _compare_pred_to_kws is None:
+                            return False
+                        for pred_species in neighbour_species:
+                            cmp_result = _compare_pred_to_kws(
+                                pred_species, [kw_name], _replace_taxonomy,
+                            )
+                            if cmp_result["category"] in (
+                                "match", "refinement", "broader",
+                            ):
+                                return True
+                        return False
+
                     to_remove = [
                         row for row in existing
                         if keyword_match_key(row["name"]) not in protected
+                        and not _supported_by_neighbour_taxonomy(row["name"])
                     ]
                     old_species = [row["name"] for row in to_remove]
                     for row in to_remove:

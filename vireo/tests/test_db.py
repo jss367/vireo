@@ -5748,6 +5748,191 @@ def test_replace_species_preserves_neighbour_above_threshold(tmp_path):
     assert "Green-winged Teal" not in names
 
 
+def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
+    tmp_path, monkeypatch,
+):
+    """A broader taxonomy keyword (e.g. Anatidae) supported by a neighbouring
+    subject's prediction under the taxonomy — not just by exact text — must
+    survive replace_species and its curation must not be migrated onto the
+    new species.
+
+    Regression: the protected set only contained ``keyword_match_key(pr.species)``
+    so a multi-detection photo carrying a family-level keyword like Anatidae
+    alongside the neighbour's American Wigeon still had Anatidae deleted when
+    a different box was replaced, and the ``rename_*_species`` migration then
+    rebound Anatidae's curation onto the corrected species — the wrong
+    subject.
+    """
+    import json as _json
+
+    import taxonomy as taxonomy_mod
+    from db import Database
+    from taxonomy import Taxonomy
+
+    # Minimal taxonomy: Anatidae family + three species inside it. Enough for
+    # Compare's relationship rules to fire:
+    #   * Anatidae vs American Wigeon -> ancestor / refinement (must protect)
+    #   * Green-winged Teal vs American Wigeon -> sibling / conflict (must not)
+    tax_path = tmp_path / "taxonomy.json"
+    with open(tax_path, "w") as f:
+        _json.dump({
+            "last_updated": "2026-07-18",
+            "source": "test",
+            "taxa_by_common": {
+                "american wigeon": {
+                    "taxon_id": 1,
+                    "scientific_name": "Mareca americana",
+                    "common_name": "American Wigeon",
+                    "rank": "species",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae", "Mareca", "Mareca americana",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order",
+                        "family", "genus", "species",
+                    ],
+                },
+                "green-winged teal": {
+                    "taxon_id": 2,
+                    "scientific_name": "Anas crecca",
+                    "common_name": "Green-winged Teal",
+                    "rank": "species",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae", "Anas", "Anas crecca",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order",
+                        "family", "genus", "species",
+                    ],
+                },
+                "wood duck": {
+                    "taxon_id": 3,
+                    "scientific_name": "Aix sponsa",
+                    "common_name": "Wood Duck",
+                    "rank": "species",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae", "Aix", "Aix sponsa",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order",
+                        "family", "genus", "species",
+                    ],
+                },
+                "anatidae": {
+                    "taxon_id": 4,
+                    "scientific_name": "Anatidae",
+                    "common_name": "Anatidae",
+                    "rank": "family",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order", "family",
+                    ],
+                },
+            },
+            "taxa_by_scientific": {
+                "anatidae": {
+                    "taxon_id": 4,
+                    "scientific_name": "Anatidae",
+                    "common_name": "Anatidae",
+                    "rank": "family",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order", "family",
+                    ],
+                },
+            },
+        }, f)
+    fake_tax = Taxonomy(str(tax_path))
+    monkeypatch.setattr(
+        taxonomy_mod, "load_local_taxonomy", lambda: fake_tax,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries the neighbour's species AND a broader family taxonomy
+    # keyword — the shape a photo picks up from a prior curation pass. It
+    # also carries an unrelated stale species that only the target box's
+    # (soon-to-be-replaced) old identity supported.
+    wigeon = db.add_keyword("American Wigeon", is_species=True)
+    anatidae = db.add_keyword("Anatidae", kw_type="taxonomy")
+    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, wigeon)
+    db.tag_photo(pid, anatidae)
+    db.tag_photo(pid, stale_teal)
+
+    # Seed curation state on the family keyword so we can verify it is NOT
+    # migrated onto the new species when Anatidae survives replace.
+    ws_id = db._ws_id()
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+             (workspace_id, purpose, species, photo_id)
+           VALUES (?, ?, ?, ?)""",
+        (ws_id, "highlights", "Anatidae", pid),
+    )
+    db.conn.commit()
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(
+        d_neighbour, "American Wigeon", 0.99, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Wood Duck", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Wood Duck" in names                # target's corrected identity
+    assert "American Wigeon" in names           # exact-text neighbour survives
+    assert "Anatidae" in names                  # taxonomy ancestor survives
+    assert "Green-winged Teal" not in names     # target's stale ID gone
+    # Anatidae must not appear in old_species: it wasn't stripped, so no
+    # keyword_remove was queued and the curation migration was skipped.
+    assert "Anatidae" not in result["affected"][0]["old_species"]
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+    assert (pid, "Anatidae") not in removed
+    assert (pid, "American Wigeon") not in removed
+    # Anatidae's curation stayed on Anatidae — not silently rebound to the
+    # newly-added Wood Duck.
+    prefs = db.conn.execute(
+        "SELECT species FROM photo_preferences WHERE photo_id = ?",
+        (pid,),
+    ).fetchall()
+    pref_species = {row["species"] for row in prefs}
+    assert "Anatidae" in pref_species
+    assert "Wood Duck" not in pref_species
+
+
 def test_accept_prediction_queues_normalized_species(tmp_path):
     """When the prediction's species carries stray edge quotes (e.g.
     `‘apapane`), accept_prediction must tag the photo with the normalized
