@@ -182,6 +182,46 @@ def test_move_folder_copies_tree(move_env):
     assert folder["path"] == str(env["dst"] / "src")
 
 
+def test_move_folder_can_rename_during_move(move_env):
+    """An explicit destination name moves and renames in one safe operation."""
+    from move import move_folder
+
+    env = move_env
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        destination_name="2026-07-12",
+    )
+
+    landing = env["dst"] / "2026-07-12"
+    assert result["errors"] == []
+    assert (landing / "bird1.jpg").exists()
+    assert not env["src"].exists()
+    folder = env["db"].conn.execute(
+        "SELECT path, name FROM folders WHERE id = ?", (env["fid_src"],)
+    ).fetchone()
+    assert folder["path"] == str(landing)
+    assert folder["name"] == "2026-07-12"
+
+
+def test_move_folder_rejects_destination_name_with_path_segments(move_env):
+    """The rename field cannot escape the separately selected parent."""
+    from move import move_folder
+
+    env = move_env
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        destination_name="../somewhere-else",
+    )
+
+    assert result["moved"] == 0
+    assert "without slashes" in result["errors"][0]
+    assert env["src"].exists()
+
+
 def test_move_folder_reports_cleanup_error_after_commit(move_env, monkeypatch):
     """Catalog repoints first, so a post-commit rmtree failure is committed.
 
@@ -2132,6 +2172,10 @@ def test_resolve_folder_dest():
     # Falls back to basename when name is empty
     assert resolve_folder_dest("/a/birds/", "", "/nas/photos") == \
         os.path.join("/nas/photos", "birds")
+    # An explicit final name supports rename-while-moving.
+    assert resolve_folder_dest(
+        "/a/12", "12", "/nas/photos/2026", "2026-07-12"
+    ) == os.path.join("/nas/photos/2026", "2026-07-12")
 
 
 def test_move_folder_updates_counts(move_env):

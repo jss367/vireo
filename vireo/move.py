@@ -130,15 +130,42 @@ def build_remote_move_spec(target, subpath, rsync_bin, ssh_bin=""):
     }
 
 
-def resolve_folder_dest(folder_path, folder_name, destination):
+def normalize_destination_name(destination_name):
+    """Return a safe, single-component folder name for a move destination.
+
+    Folder moves accept a destination *parent* separately from the name of the
+    folder that lands inside it.  Keeping the leaf name separate makes rename-
+    while-moving explicit and prevents an entered name from escaping the
+    selected parent.  Both slash styles are rejected because moves can target
+    a POSIX NAS from a Windows client (and vice versa).
+
+    An empty value means "keep the source folder name" and is returned as an
+    empty string for backwards-compatible callers.
+    """
+    if destination_name is None:
+        return ""
+    if not isinstance(destination_name, str):
+        raise ValueError("Folder name must be a string")
+    name = destination_name.strip()
+    if not name:
+        return ""
+    if name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
+        raise ValueError("Folder name must be a single name without slashes")
+    return name
+
+
+def resolve_folder_dest(folder_path, folder_name, destination,
+                        destination_name=""):
     """Compute the final landing path for a folder move.
 
-    The source folder is placed *inside* destination, keeping its name —
-    e.g. moving /local/birds to /nas/photos yields /nas/photos/birds.
+    The source folder is placed *inside* destination. By default it keeps its
+    name (moving /local/birds to /nas/photos yields /nas/photos/birds), while
+    ``destination_name`` allows an explicit rename during the move.
     Shared by move_folder() and the preflight route so the resolved path
     is computed in exactly one place.
     """
-    name = folder_name or os.path.basename(folder_path.rstrip("/\\"))
+    name = normalize_destination_name(destination_name) or folder_name \
+        or os.path.basename(folder_path.rstrip("/\\"))
     return os.path.join(destination, name)
 
 
@@ -1656,17 +1683,20 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
 
 def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
                 merge=False, remote=None, reject_tracked_ancestor=False,
-                allow_tracked_merge=False):
+                allow_tracked_merge=False, destination_name=""):
     """Move an entire folder (and subfolders) to a destination.
 
-    The folder is placed inside the destination, preserving its name.
-    E.g., moving /local/birds to /nas/photos creates /nas/photos/birds.
+    The folder is placed inside the destination, preserving its name unless
+    ``destination_name`` explicitly renames it. E.g., moving /local/birds to
+    /nas/photos creates /nas/photos/birds by default.
 
     Args:
         db: Database instance
         folder_id: ID of the source folder
         destination: absolute path to parent destination directory. Ignored
             for a remote move (the destination comes from ``remote``).
+        destination_name: optional new name for the folder at the destination.
+            Must be one path component. Empty preserves the source name.
         progress_cb: optional callback(current, total, filename)
         merge: when False (default), refuse to write into a destination
             that already exists — the safe all-or-nothing behavior. When
@@ -1726,6 +1756,10 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
 
     src_path = folder["path"]
     folder_name = folder["name"] or os.path.basename(src_path)
+    try:
+        landing_name = normalize_destination_name(destination_name) or folder_name
+    except ValueError as exc:
+        return {"moved": 0, "errors": [str(exc)]}
 
     # Three destination views:
     #   transfer_dest — where rsync writes (NAS-side path for remote, local
@@ -1774,13 +1808,13 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         # The NAS side is POSIX, so the SSH dest must be joined with '/' even
         # when this code runs on Windows; os.path.join would produce a
         # backslash and rsync would treat it as a single path segment.
-        name = folder["name"] or os.path.basename(src_path.rstrip("/\\"))
-        transfer_dest = posixpath.join(remote["ssh_dest_base"], name)
+        transfer_dest = posixpath.join(remote["ssh_dest_base"], landing_name)
         catalog_path = resolve_folder_dest(
-            src_path, folder["name"], mount_base)
+            src_path, folder["name"], mount_base, landing_name)
         rsync_target = rsync_dest_spec(remote, transfer_dest)
     else:
-        transfer_dest = resolve_folder_dest(src_path, folder["name"], destination)
+        transfer_dest = resolve_folder_dest(
+            src_path, folder["name"], destination, landing_name)
         catalog_path = transfer_dest
         rsync_target = transfer_dest
 
@@ -2169,7 +2203,7 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
         merge_counts = db.merge_staged_tree_into_archive(
             folder_id, merge_reconcile_base)
     else:
-        db.move_folder_path(folder_id, catalog_path)
+        db.move_folder_path(folder_id, catalog_path, new_name=landing_name)
     db.update_folder_counts()
 
     # Rebase any developed-output subdirs nested under the configured

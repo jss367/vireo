@@ -19079,6 +19079,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("JSON body must be an object")
         folder_id = body.get("folder_id")
         destination = body.get("destination", "")
+        destination_name_raw = body.get("destination_name", "")
         remote_target_id = (body.get("remote_target_id") or "").strip()
         subpath = body.get("subpath", "")
         merge_raw = body.get("merge", False)
@@ -19156,6 +19157,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         import config as cfg
         import move as move_mod
+        try:
+            destination_name = move_mod.normalize_destination_name(
+                destination_name_raw)
+        except ValueError as exc:
+            return json_error(str(exc))
         effective_cfg = _get_db().get_effective_config(cfg.load())
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
@@ -19268,6 +19274,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 developed_dir=developed_dir,
                 merge=merge,
                 remote=remote,
+                destination_name=destination_name,
             )
 
             # Tell the JobRunner whether the move actually succeeded. Without
@@ -19307,6 +19314,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         job_config = {
             "folder_id": folder_id, "destination": display_dest, "merge": merge,
         }
+        if destination_name:
+            job_config["destination_name"] = destination_name
         if remote:
             # Surface that this is an SSH transfer (and to where) so the job
             # panel can show it, per the UI-transparency rule.
@@ -19363,6 +19372,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("JSON body must be an object")
         folder_id = body.get("folder_id")
         destination = body.get("destination", "")
+        destination_name_raw = body.get("destination_name", "")
         mode = body.get("mode", "quick")
         if mode not in ("quick", "exact", "preview"):
             mode = "quick"
@@ -19371,6 +19381,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not folder_id:
             return json_error("folder_id required")
+        try:
+            destination_name = move_mod.normalize_destination_name(
+                destination_name_raw)
+        except ValueError as exc:
+            return json_error(str(exc))
 
         folder = _get_db().conn.execute(
             "SELECT path, name FROM folders WHERE id = ?", (folder_id,)
@@ -19406,9 +19421,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # different remote path than the actual transfer (move_folder
             # uses posixpath.join), so an existing destination would be
             # reported as new and the first non-merge move would fail.
-            folder_name = (folder["name"]
-                           or os.path.basename(folder["path"].rstrip("/\\")))
-            resolved = posixpath.join(spec["ssh_dest_base"], folder_name)
+            landing_name = destination_name or folder["name"] \
+                or os.path.basename(folder["path"].rstrip("/\\"))
+            resolved = posixpath.join(spec["ssh_dest_base"], landing_name)
             exists, fcount, truncated, reachable, err = \
                 move_mod.remote_preflight(target, resolved)
             return jsonify({
@@ -19429,7 +19444,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
 
-        resolved = resolve_folder_dest(folder["path"], folder["name"], destination)
+        resolved = resolve_folder_dest(
+            folder["path"], folder["name"], destination, destination_name)
         exists = os.path.isdir(resolved)
         file_count = 0
         file_count_truncated = False
