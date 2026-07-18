@@ -3791,7 +3791,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if j.get("type") != "pipeline":
                 continue
             status = j.get("status")
-            if status == "running":
+            if status in {"running", "pausing", "paused"}:
                 active += 1
             elif status == "queued":
                 queued += 1

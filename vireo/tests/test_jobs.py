@@ -85,6 +85,78 @@ def test_pausable_job_stops_at_checkpoint_and_resumes():
     assert status_events == ["pausing", "paused", "running"]
 
 
+def test_pipeline_pause_gate_waits_for_every_active_worker():
+    """A pipeline is not reported paused while one worker is still in-flight."""
+    from jobs import JobRunner
+    from pipeline_job import _PipelinePauseGate
+
+    runner = JobRunner()
+    release_slow_worker = threading.Event()
+    slow_worker_started = threading.Event()
+    stop = threading.Event()
+    counts = {"fast": 0, "slow": 0}
+
+    def work(job):
+        gate = _PipelinePauseGate(runner, job["id"])
+        gate.register_many(("fast", "slow"))
+
+        def fast_worker():
+            try:
+                while True:
+                    if gate.checkpoint("fast") or stop.is_set():
+                        return
+                    counts["fast"] += 1
+                    time.sleep(0.005)
+            finally:
+                gate.unregister("fast")
+
+        def slow_worker():
+            try:
+                # Simulate a model/GPU batch that cannot be interrupted until
+                # it reaches its next safe boundary.
+                slow_worker_started.set()
+                assert release_slow_worker.wait(timeout=3)
+                while True:
+                    if gate.checkpoint("slow") or stop.is_set():
+                        return
+                    counts["slow"] += 1
+                    time.sleep(0.005)
+            finally:
+                gate.unregister("slow")
+
+        threads = [
+            threading.Thread(target=fast_worker),
+            threading.Thread(target=slow_worker),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        return dict(counts)
+
+    job_id = runner.start("pipeline", work, pausable=True)
+    assert slow_worker_started.wait(timeout=2)
+    deadline = time.monotonic() + 2
+    while counts["fast"] < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert runner.pause_job(job_id) is True
+    time.sleep(0.05)
+    assert runner.get(job_id)["status"] == "pausing"
+
+    release_slow_worker.set()
+    _wait_for_status(runner, job_id, "paused")
+    paused_counts = dict(counts)
+    time.sleep(0.05)
+    assert counts == paused_counts
+
+    assert runner.resume_job(job_id) is True
+    stop.set()
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job["status"] == "completed"
+
+
 def test_pause_status_events_stay_ordered_through_completion():
     """Competing pause and worker transitions cannot publish stale states."""
     from jobs import JobRunner
