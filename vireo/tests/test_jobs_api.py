@@ -664,9 +664,17 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
     import shutil
     import subprocess
     import sys
+
+    import metadata
     monkeypatch.setattr(sys, "platform", "darwin")
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/local/bin/brew" if cmd == "brew" else (None if cmd == "exiftool" else original_which(cmd)))
+    monkeypatch.setattr(metadata, "find_homebrew", lambda: "/usr/local/bin/brew")
+    statuses = iter([
+        {"available": False, "path": "", "version": None, "error": None, "hint": ""},
+        {"available": True, "path": "/usr/local/bin/exiftool", "version": "13.59", "error": None, "hint": ""},
+    ])
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: next(statuses))
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0, "stderr": ""})())
     app, _ = app_and_db
     with app.test_client() as client:
@@ -674,15 +682,54 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
         assert resp.status_code == 200
         data = resp.get_json()
         assert data.get("success") is True
+        assert data["exiftool"]["path"] == "/usr/local/bin/exiftool"
+
+
+def test_install_exiftool_verifies_homebrew_result(app_and_db, monkeypatch):
+    """A successful brew exit must not mask an undiscoverable ExifTool."""
+    import subprocess
+    import sys
+
+    import metadata
+
+    unavailable = {
+        "available": False,
+        "path": "",
+        "version": None,
+        "error": "not found",
+        "hint": "",
+    }
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: unavailable)
+    monkeypatch.setattr(metadata, "find_homebrew", lambda: "/opt/homebrew/bin/brew")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **kw: type("R", (), {"returncode": 0, "stderr": ""})(),
+    )
+
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/system/install-exiftool")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is False
+        assert "could not run ExifTool" in data["error"]
 
 
 def test_install_exiftool_fails_without_brew(app_and_db, monkeypatch):
     """Install endpoint should fail gracefully when brew is not available."""
     import shutil
     import sys
+
+    import metadata
     monkeypatch.setattr(sys, "platform", "darwin")
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: None if cmd in ("brew", "exiftool") else original_which(cmd))
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": False, "path": "", "version": None,
+        "error": None, "hint": "",
+    })
+    monkeypatch.setattr(metadata, "find_homebrew", lambda: None)
     app, _ = app_and_db
     with app.test_client() as client:
         resp = client.post("/api/system/install-exiftool")
@@ -2565,7 +2612,10 @@ def _fake_active_model(monkeypatch):
     survive to the job config unmangled."""
     import models
 
-    monkeypatch.setattr(models, "get_active_model", lambda: {"id": "fake"})
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "fake", "model_type": "timm", "model_str": "fake",
+        "weights_path": "",
+    })
 
 
 def _process_id(db, name):
@@ -3368,6 +3418,310 @@ def _import_card(tmp_path, names=("DSC_0001.jpg",)):
     for name in names:
         Image.new("RGB", (16, 16), "red").save(str(card / name))
     return str(card)
+
+
+@pytest.mark.parametrize("route,copy_mode", [
+    ("/api/jobs/import-in-place", False),
+    ("/api/jobs/import-photos", True),
+])
+def test_photo_import_requires_exiftool_with_explicit_advanced_override(
+    app_and_db, tmp_path, monkeypatch, route, copy_mode,
+):
+    import metadata
+
+    app, _ = app_and_db
+    app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"] = True
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": False,
+        "path": "",
+        "version": None,
+        "error": None,
+        "hint": "repair ExifTool",
+    })
+    card = _import_card(tmp_path)
+    body = {"sources": [card], "after_import": None}
+    if copy_mode:
+        body["destination"] = str(tmp_path / "archive")
+
+    with app.test_client() as client:
+        blocked = client.post(route, json=body)
+        assert blocked.status_code == 409
+        assert blocked.get_json()["code"] == "exiftool_required"
+        assert "capture dates" in blocked.get_json()["error"]
+
+        body["allow_missing_exiftool"] = True
+        allowed = client.post(route, json=body)
+        assert allowed.status_code == 200, allowed.get_json()
+        job = wait_for_job_via_client(client, allowed.get_json()["job_id"])
+        assert job["status"] == "completed", job
+        assert job["config"]["allow_missing_exiftool"] is True
+
+
+def test_import_readiness_surfaces_and_starts_metadata_repair(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import metadata
+    import scanner
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **kwargs: {
+        path: {"EXIF": {"Make": "Repair Camera"}, "File": {"FileType": "JPEG"}}
+        for path in paths
+    })
+    photos = tmp_path / "repair-photos"
+    photos.mkdir()
+    source = photos / "repair.jpg"
+    Image.new("RGB", (32, 24), "green").save(source)
+    folder_id = db.add_folder(str(photos), name="repair-photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename=source.name,
+        extension=".jpg",
+        file_size=source.stat().st_size,
+        file_mtime=source.stat().st_mtime,
+    )
+    assert db.conn.execute(
+        "SELECT exif_data FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()["exif_data"] is None
+
+    with app.test_client() as client:
+        ready = client.get("/api/import/readiness")
+        assert ready.status_code == 200
+        payload = ready.get_json()
+        assert payload["exiftool"]["available"] is True
+        assert payload["metadata_repair_count"] >= 1
+        assert payload["metadata_repair_available"] is True
+
+        started = client.post("/api/jobs/repair-metadata")
+        assert started.status_code == 200, started.get_json()
+        assert started.get_json()["photo_count"] >= 1
+        job = wait_for_job_via_client(client, started.get_json()["job_id"])
+        assert job["type"] == "metadata-repair"
+        assert job["config"]["repair_metadata"] is True
+        repaired = db.conn.execute(
+            "SELECT exif_data FROM photos WHERE id = ?", (photo_id,),
+        ).fetchone()["exif_data"]
+        assert json.loads(repaired)["EXIF"]["Make"] == "Repair Camera"
+
+
+def test_import_readiness_skips_excluded_bundle_roots(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The readiness endpoint fires as soon as the Import page opens; it
+    must never stat a workspace root that resolves inside a macOS
+    ``.photoslibrary`` bundle, since that stat itself trips the TCC
+    "access data from other apps" prompt for Photos Library-style
+    bundles."""
+    import app as app_module
+    import metadata
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    reachable = tmp_path / "reachable"
+    reachable.mkdir()
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    db.add_folder(str(reachable), name="reachable")
+    db.add_folder(str(bundle), name="legacy-library")
+
+    original_isdir = os.path.isdir
+    isdir_calls = []
+
+    def tracking_isdir(path):
+        isdir_calls.append(path)
+        return original_isdir(path)
+
+    monkeypatch.setattr(app_module.os.path, "isdir", tracking_isdir)
+
+    with app.test_client() as client:
+        resp = client.get("/api/import/readiness")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload["reachable_root_count"] == 1
+
+    assert str(bundle) not in isdir_calls, (
+        f"os.path.isdir must not be called on excluded bundle roots; "
+        f"got calls: {isdir_calls!r}"
+    )
+
+
+def test_import_readiness_counts_photos_in_stale_missing_folders(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A workspace root that was marked ``status='missing'`` while its
+    drive was unplugged, then reconnected, still carries a stale status
+    until ``check_folder_health`` next runs. The readiness count must
+    include those photos anyway — otherwise the Import page would report
+    ``0`` repairable rows in the reconnection window and users would have
+    no button to click even though the repair job could scan the drive.
+    """
+    import metadata
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    photos = tmp_path / "reconnected"
+    photos.mkdir()
+    source = photos / "needs-repair.jpg"
+    Image.new("RGB", (32, 24), "green").save(source)
+    folder_id = db.add_folder(str(photos), name="reconnected")
+    db.add_photo(
+        folder_id=folder_id,
+        filename=source.name,
+        extension=".jpg",
+        file_size=source.stat().st_size,
+        file_mtime=source.stat().st_mtime,
+    )
+    # Simulate the drive-unplugged→plugged-back-in window: folder row
+    # still says missing even though ``os.path.isdir`` sees the tree.
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (folder_id,),
+    )
+    db.conn.commit()
+
+    with app.test_client() as client:
+        ready = client.get("/api/import/readiness")
+        assert ready.status_code == 200
+        payload = ready.get_json()
+        assert payload["metadata_repair_count"] >= 1
+        assert payload["metadata_repair_available"] is True
+
+        started = client.post("/api/jobs/repair-metadata")
+        assert started.status_code == 200, started.get_json()
+        assert started.get_json()["photo_count"] >= 1
+
+
+def test_import_readiness_excludes_offline_root_photos_from_repair_count(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Photos under an offline workspace root must not inflate the count.
+
+    Concrete pathology this closes: a workspace with two roots, one whose
+    drive is currently unplugged (photos there have ``exif_data IS NULL``)
+    and another that's fully imported. An unscoped count combined with a
+    non-empty reachable-roots list would enable the Repair button and
+    start a job that finishes without ever touching the offline photos —
+    the reported count would then stay the same, so the button would
+    remain enabled and the user could re-run the same no-op forever.
+    """
+    import metadata
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    # Reachable root — every photo already has EXIF, so this root
+    # contributes zero to the repair count on its own.
+    reachable = tmp_path / "reachable-drive"
+    reachable.mkdir()
+    reach_src = reachable / "ok.jpg"
+    Image.new("RGB", (32, 24), "green").save(reach_src)
+    reach_fid = db.add_folder(str(reachable), name="reachable-drive")
+    reach_pid = db.add_photo(
+        folder_id=reach_fid,
+        filename=reach_src.name,
+        extension=".jpg",
+        file_size=reach_src.stat().st_size,
+        file_mtime=reach_src.stat().st_mtime,
+    )
+    db.conn.execute(
+        "UPDATE photos SET exif_data = ? WHERE id = ?",
+        ('{"EXIF": {"Make": "cam"}}', reach_pid),
+    )
+
+    # Offline root — path lives in the DB, but the directory is not on
+    # disk (drive unplugged). The photo under it has NULL EXIF.
+    offline_path = str(tmp_path / "unplugged-drive")
+    off_fid = db.add_folder(offline_path, name="unplugged-drive")
+    db.add_photo(
+        folder_id=off_fid,
+        filename="orphan.jpg",
+        extension=".jpg",
+        file_size=1024,
+        file_mtime=0.0,
+    )
+    db.conn.commit()
+
+    with app.test_client() as client:
+        resp = client.get("/api/import/readiness")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload["reachable_root_count"] == 1
+        # The offline root's photo is exif_data IS NULL but its root is
+        # not reachable, so the scoped count must exclude it. The
+        # reachable root has no NULL-EXIF photos, so the count is 0 and
+        # the Repair button stays disabled.
+        assert payload["metadata_repair_count"] == 0
+        assert payload["metadata_repair_available"] is False
+
+        # /api/jobs/repair-metadata must refuse to start the no-op job.
+        blocked = client.post("/api/jobs/repair-metadata")
+        assert blocked.status_code == 409
+        assert "no photos need metadata repair" in blocked.get_json()["error"]
+
+
+def test_import_readiness_excludes_deleted_originals_from_repair_count(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A DB-only photo cannot be repaired by the disk-discovery scan."""
+    import metadata
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    photos = tmp_path / "reachable-with-deleted-original"
+    photos.mkdir()
+    folder_id = db.add_folder(str(photos), name=photos.name)
+    db.add_photo(
+        folder_id=folder_id,
+        filename="deleted.jpg",
+        extension=".jpg",
+        file_size=1024,
+        file_mtime=0.0,
+    )
+
+    with app.test_client() as client:
+        ready = client.get("/api/import/readiness")
+        assert ready.status_code == 200
+        payload = ready.get_json()
+        assert payload["reachable_root_count"] == 1
+        assert payload["metadata_repair_count"] == 0
+        assert payload["metadata_repair_available"] is False
+
+        blocked = client.post("/api/jobs/repair-metadata")
+        assert blocked.status_code == 409
+        assert "no photos need metadata repair" in blocked.get_json()["error"]
 
 
 def test_lightroom_import_route_not_shadowed(app_and_db):
@@ -4886,6 +5240,41 @@ def test_import_chains_process_job(app_and_db, tmp_path):
         assert res["collection_name"].startswith("Import ")
         photos = db.get_collection_photos(col_id, per_page=999999)
         assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
+
+
+def test_import_pauses_chained_classification_when_labels_are_missing(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A successful import must not enqueue a pipeline guaranteed to fail."""
+    import models
+
+    app, db = app_and_db
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-vit-b-16",
+        "downloaded": True,
+        "model_type": "bioclip",
+        "model_str": "ViT-B-16",
+        "weights_path": str(tmp_path / "model"),
+    })
+    identify_id = _process_id(db, "Identify birds")
+    card = _chain_card(tmp_path)
+
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "arch", identify_id)
+        job = wait_for_job_via_client(client, job_id)
+        result = job["result"]
+
+        assert job["status"] == "completed", job
+        assert result["collection_id"]
+        assert "process_job_id" not in result
+        assert result["after_import_skipped"].startswith("paused —")
+        assert "Settings › Labels" in result["after_import_skipped"]
+        history = client.get("/api/jobs/history").get_json()
+        chained = [
+            item for item in history
+            if item.get("config", {}).get("chained_from") == job_id
+        ]
+        assert chained == []
 
 
 def test_import_only_choice_skips_chaining(app_and_db, tmp_path):

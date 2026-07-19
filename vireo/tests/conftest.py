@@ -55,6 +55,10 @@ def _disable_startup_backfill_timers(monkeypatch):
     """
     monkeypatch.setenv("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS", "1")
     monkeypatch.setenv("VIREO_DISABLE_BROWSER_AUTH", "1")
+    # Import-route tests exercise ingest behavior independently of the
+    # desktop dependency preflight. Tests for the preflight explicitly turn
+    # this back on through app.config.
+    monkeypatch.setenv("VIREO_REQUIRE_EXIFTOOL_FOR_IMPORT", "0")
 
 
 @pytest.fixture(autouse=True)

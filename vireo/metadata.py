@@ -6,6 +6,7 @@ Returns grouped tag dictionaries keyed by ExifTool group (EXIF, GPS, XMP, etc.).
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -23,27 +24,133 @@ _BATCH_SIZE = 100
 _EXIFTOOL_TIMEOUT = 120
 _MAX_TIMEOUT_SPLIT_ATTEMPTS = 16
 _TIMEOUT = object()
+_MACOS_HOMEBREW_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+# Cached ``-ver`` probe results for bundled ExifTool paths. Repeating the
+# probe on every scan batch (~100/scan) would add subprocess overhead, so
+# results are memoized per resolved path. :func:`clear_exiftool_cache`
+# resets it after the in-app Repair action installs a PATH copy.
+_BUNDLED_PROBE_CACHE: dict[str, bool] = {}
 
 
 def find_exiftool() -> str | None:
-    """Resolve ExifTool, preferring Vireo's packaged Windows copy.
+    """Resolve ExifTool, preferring Vireo's packaged desktop copy.
 
     PyInstaller extracts bundled data below ``sys._MEIPASS``.  Keeping the
     support directory next to the executable is required by the official
     Windows distribution.  Development installs continue to use PATH.
+
+    If the bundled binary is present but fails a ``-ver`` probe (for
+    example its ``lib`` directory was corrupted), PATH and Homebrew's
+    standard macOS locations are consulted as fallbacks. GUI-launched
+    apps often inherit a PATH without ``/opt/homebrew/bin``, even though
+    the Repair action can invoke Homebrew there directly. The bundled
+    probe result is cached per-path so hot scan batches don't reprobe
+    every invocation.
     """
     bundle_root = getattr(sys, "_MEIPASS", None)
     if bundle_root:
-        bundled = Path(bundle_root) / "vendor" / "exiftool" / "exiftool.exe"
-        if bundled.is_file():
-            return str(bundled)
+        names = ("exiftool.exe",) if sys.platform == "win32" else ("exiftool",)
+        for name in names:
+            bundled = Path(bundle_root) / "vendor" / "exiftool" / name
+            if bundled.is_file():
+                if _bundled_exiftool_works(str(bundled)):
+                    return str(bundled)
+                # Bundled copy is present but broken — fall through to PATH.
+                break
     try:
-        return shutil.which("exiftool")
+        found = shutil.which("exiftool")
     except (AttributeError, OSError):
         # Defensive for restricted Windows runtimes where executable lookup
         # itself is unavailable. Callers that execute the fallback still
         # receive the normal FileNotFoundError handling.
-        return None
+        found = None
+    if found:
+        return found
+    if sys.platform == "darwin":
+        return _find_standard_homebrew_tool("exiftool")
+    return None
+
+
+def _bundled_exiftool_works(path: str) -> bool:
+    """Return True if a ``-ver`` probe of a bundled ExifTool succeeds."""
+    cached = _BUNDLED_PROBE_CACHE.get(path)
+    if cached is not None:
+        return cached
+    ok = _probe_exiftool_ver(path)[0]
+    _BUNDLED_PROBE_CACHE[path] = ok
+    return ok
+
+
+def clear_exiftool_cache() -> None:
+    """Reset the bundled-ExifTool probe cache.
+
+    Called after the in-app Repair action so a freshly installed PATH
+    ExifTool becomes visible without an app restart even when the
+    previous bundled probe was cached.
+    """
+    _BUNDLED_PROBE_CACHE.clear()
+
+
+def _probe_exiftool_ver(path: str) -> tuple[bool, str | None, str | None]:
+    """Run ``exiftool -ver`` at ``path`` and return (ok, version, error)."""
+    try:
+        result = subprocess.run(
+            [*_exiftool_command(path), "-ver"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **no_window_kwargs(),
+        )
+        if result.returncode == 0:
+            return True, (result.stdout.strip() or None), None
+        return (
+            False,
+            None,
+            (
+                result.stderr.strip()
+                or f"exiftool -ver exited with status {result.returncode}"
+            ),
+        )
+    except Exception as e:
+        return False, None, str(e) or e.__class__.__name__
+
+
+def _exiftool_command(path: str | None = None) -> list[str]:
+    """Return an executable argv prefix for a resolved ExifTool path.
+
+    PyInstaller may extract a data file without its executable bit.  The
+    bundled macOS distribution is a Perl script, so invoking it explicitly
+    through the system Perl interpreter keeps the signed app reliable across
+    PyInstaller versions and temporary extraction filesystems.
+    """
+    path = path or find_exiftool() or "exiftool"
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    is_bundled_unix = (
+        sys.platform != "win32"
+        and bundle_root
+        and Path(path).parent == Path(bundle_root) / "vendor" / "exiftool"
+    )
+    if is_bundled_unix or (sys.platform != "win32" and not os.access(path, os.X_OK)):
+        return ["/usr/bin/perl", path]
+    return [path]
+
+
+def find_homebrew() -> str | None:
+    """Resolve Homebrew from PATH or its standard GUI-app locations."""
+    found = shutil.which("brew")
+    if found:
+        return found
+    return _find_standard_homebrew_tool("brew")
+
+
+def _find_standard_homebrew_tool(name: str) -> str | None:
+    """Find an executable in Homebrew's Apple Silicon or Intel prefix."""
+    for bin_dir in _MACOS_HOMEBREW_BIN_DIRS:
+        candidate = os.path.join(bin_dir, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def _exiftool_install_hint() -> str:
@@ -89,27 +196,7 @@ def exiftool_status():
             "hint": _exiftool_install_hint(),
         }
 
-    ran_ok = False
-    version = None
-    error = None
-    try:
-        result = subprocess.run(
-            [path, "-ver"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            **no_window_kwargs(),
-        )
-        if result.returncode == 0:
-            ran_ok = True
-            version = result.stdout.strip() or None
-        else:
-            error = (
-                result.stderr.strip()
-                or f"exiftool -ver exited with status {result.returncode}"
-            )
-    except Exception as e:
-        error = str(e) or e.__class__.__name__
+    ran_ok, version, error = _probe_exiftool_ver(path)
 
     if ran_ok:
         return {
@@ -159,8 +246,7 @@ def _run_exiftool(file_paths, extra_args=None):
     if not file_paths:
         return []
 
-    exiftool = find_exiftool() or "exiftool"
-    cmd = [exiftool, "-G", "-json", "-n"]
+    cmd = [*_exiftool_command(), "-G", "-json", "-n"]
     if extra_args:
         cmd.extend(extra_args)
     cmd.append("--")

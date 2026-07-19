@@ -15,6 +15,7 @@ def _disable_startup_backfill_timers(monkeypatch):
     leak Timer-driven backfill jobs across tests."""
     monkeypatch.setenv("VIREO_DISABLE_STARTUP_BACKFILL_TIMERS", "1")
     monkeypatch.setenv("VIREO_DISABLE_BROWSER_AUTH", "1")
+    monkeypatch.setenv("VIREO_REQUIRE_EXIFTOOL_FOR_IMPORT", "0")
 
 
 @pytest.fixture(autouse=True)

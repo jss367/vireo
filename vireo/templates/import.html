@@ -175,6 +175,13 @@ body { display: flex; flex-direction: column; height: 100vh; }
   border: 0; background: transparent; color: var(--text-secondary);
   cursor: pointer; padding: 0; line-height: 1;
 }
+.dependency-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.dependency-status { font-size: 12px; color: var(--text-secondary); }
+.dependency-status.ok { color: var(--success, #2da44e); }
+.dependency-status.bad { color: var(--warning, #bf8700); }
+.advanced-import { margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+.advanced-import summary { cursor: pointer; }
+.metadata-repair { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-primary); }
 </style>
 </head>
 <body>
@@ -189,6 +196,34 @@ body { display: flex; flex-direction: column; height: 100vh; }
         Cleanup is only enabled after every staged file is verified in the archive.
       </div>
       <div class="staging-items" id="orphanedStagingItems"></div>
+    </div>
+
+    <div class="card" id="exiftoolCard">
+      <h3>Photo metadata</h3>
+      <div id="importExiftoolStatus" class="dependency-status">Checking ExifTool…</div>
+      <div class="dependency-actions" id="importExiftoolActions" style="display:none;">
+        <button class="btn btn-primary" type="button" id="btnInstallExiftool"
+                onclick="installImportExiftool()">Repair ExifTool</button>
+      </div>
+      <details class="advanced-import" id="missingExiftoolAdvanced" style="display:none;">
+        <summary>Advanced</summary>
+        <label>
+          <input type="checkbox" id="chkAllowMissingExiftool">
+          Import without metadata
+        </label>
+        <div class="hint">
+          Capture dates, GPS, camera details, and date-based folder placement may be missing.
+          You can repair them later while the originals are available.
+        </div>
+      </details>
+      <div class="metadata-repair" id="metadataRepairSection" style="display:none;">
+        <div id="metadataRepairSummary" class="dependency-status"></div>
+        <div class="dependency-actions">
+          <button class="btn" type="button" id="btnRepairMetadata"
+                  onclick="startMetadataRepair()">Repair photo metadata</button>
+          <span id="metadataRepairStatus" class="hint"></span>
+        </div>
+      </div>
     </div>
 
     <div class="card" id="sourceCard">
@@ -444,6 +479,85 @@ let importPreviewSeq = 0;
 let importPreviewTimer = null;
 let importThumbSchedulerCancel = null;
 let importTags = [];
+let importExiftoolReady = null;
+let importExiftoolRequired = true;
+
+async function loadImportReadiness() {
+  const status = document.getElementById('importExiftoolStatus');
+  const actions = document.getElementById('importExiftoolActions');
+  const advanced = document.getElementById('missingExiftoolAdvanced');
+  const repairSection = document.getElementById('metadataRepairSection');
+  try {
+    const resp = await fetch('/api/import/readiness');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'readiness check failed');
+    const exiftool = data.exiftool || {};
+    importExiftoolReady = !!exiftool.available;
+    importExiftoolRequired = data.requires_exiftool !== false;
+    status.className = 'dependency-status ' + (importExiftoolReady ? 'ok' : 'bad');
+    status.textContent = importExiftoolReady
+      ? 'ExifTool ' + (exiftool.version || '') + ' is ready. Capture dates, GPS, and camera details will be preserved.'
+      : 'ExifTool is unavailable. Repair it before importing so photo metadata is preserved.';
+    actions.style.display = importExiftoolReady ? 'none' : '';
+    advanced.style.display = importExiftoolReady ? 'none' : '';
+
+    const repairCount = Number(data.metadata_repair_count || 0);
+    repairSection.style.display = repairCount ? '' : 'none';
+    if (repairCount) {
+      document.getElementById('metadataRepairSummary').textContent =
+        repairCount.toLocaleString() + ' existing photo' + (repairCount === 1 ? '' : 's') +
+        ' need metadata repair.';
+      const repairBtn = document.getElementById('btnRepairMetadata');
+      repairBtn.disabled = !data.metadata_repair_available;
+      repairBtn.title = data.metadata_repair_available
+        ? '' : (importExiftoolReady ? 'Connect the original photo folder first.' : 'Repair ExifTool first.');
+    }
+  } catch (e) {
+    importExiftoolReady = null;
+    status.className = 'dependency-status bad';
+    status.textContent = 'Could not check ExifTool. Vireo will verify it when import starts.';
+    actions.style.display = 'none';
+    advanced.style.display = 'none';
+    repairSection.style.display = 'none';
+  }
+}
+
+async function installImportExiftool() {
+  const btn = document.getElementById('btnInstallExiftool');
+  const status = document.getElementById('importExiftoolStatus');
+  btn.disabled = true;
+  btn.textContent = 'Repairing…';
+  try {
+    const resp = await fetch('/api/system/install-exiftool', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok || !data.success) throw new Error(data.error || 'ExifTool repair failed');
+    status.textContent = 'ExifTool repaired. Verifying…';
+    await loadImportReadiness();
+  } catch (e) {
+    status.className = 'dependency-status bad';
+    status.textContent = String(e.message || e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Repair ExifTool';
+  }
+}
+
+async function startMetadataRepair() {
+  const btn = document.getElementById('btnRepairMetadata');
+  const status = document.getElementById('metadataRepairStatus');
+  btn.disabled = true;
+  status.textContent = 'Starting repair…';
+  try {
+    const resp = await fetch('/api/jobs/repair-metadata', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'repair failed to start');
+    status.innerHTML = 'Repair started for ' + Number(data.photo_count || 0).toLocaleString() +
+      ' photos · <a href="/jobs">Open Jobs</a>';
+  } catch (e) {
+    status.textContent = String(e.message || e);
+    btn.disabled = false;
+  }
+}
 
 function normalizedImportTag(name) {
   return String(name || '').trim().replace(/\s+/g, ' ');
@@ -2210,11 +2324,18 @@ async function startImport() {
   showError('');
   addImportTagFromInput();
   if (!sources.length) { showError('Add at least one source folder.'); return; }
+  const allowMissingExiftool = !!document.getElementById('chkAllowMissingExiftool')?.checked;
+  if (importExiftoolRequired && importExiftoolReady === false && !allowMissingExiftool) {
+    showError('Repair ExifTool before importing, or use Advanced → Import without metadata.');
+    document.getElementById('exiftoolCard')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
   const copyMode = selectedImportMode() === 'copy';
   const body = {
     sources: sources,
     recursive: document.getElementById('chkRecursive').checked,
   };
+  if (allowMissingExiftool) body.allow_missing_exiftool = true;
   if (importTags.length) body.tags = importTags.slice();
   if (document.getElementById('chkLocationFromGps').checked) {
     body.location_from_gps = true;
@@ -2494,6 +2615,7 @@ async function initImportPage() {
   // template, or file-type controls without the rendered structure
   // being invalidated.
   wireDestStructureInvalidation();
+  await loadImportReadiness();
   // Native menu deep link: File > Import Folder... routes here as
   // /import?mode=copy&pick=source so it lands in Copy-to-archive with the
   // source picker open, while File > Import Photos... gets the page

@@ -1308,7 +1308,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
     }
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, skip_working_copies=False):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, skip_working_copies=False, repair_missing_metadata=False):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -1316,6 +1316,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         db: Database instance
         progress_callback: optional callable(current, total) for progress reporting
         incremental: if True, skip files unchanged since last scan
+        repair_missing_metadata: in incremental mode, force rows whose
+            ExifTool payload is NULL through metadata extraction even when a
+            fallback timestamp was available during the original scan
         extract_full_metadata: if True, store full ExifTool JSON in exif_data column
         photo_callback: optional callable(photo_id, path_str) called after each photo is committed
         skip_paths: optional set of absolute path strings to exclude from scanning
@@ -1770,8 +1773,12 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                         and existing["width"] < 1000
                     )
                     metadata_missing = (
-                        (existing["timestamp"] is None or dims_suspect)
-                        and existing["id"] not in exif_extracted
+                        existing["id"] not in exif_extracted
+                        and (
+                            repair_missing_metadata
+                            or existing["timestamp"] is None
+                            or dims_suspect
+                        )
                     )
                     existing_file_hash = existing_file_hashes.get(existing["id"])
                     empty_hash_needs_repair = (
