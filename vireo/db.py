@@ -11006,7 +11006,17 @@ class Database:
                        )"""
                 )
 
-                names = {keyword_match_key(row["name"]) for row in group}
+                # Only cancel pending changes for the root spellings actually
+                # being detached. Using every name in ``group`` here would
+                # also match preserved hierarchy leaves — e.g. a leaf
+                # ``Desert Verdin`` that a user tagged shortly before the
+                # repair runs. That pending ``keyword_add`` must still reach
+                # the sidecar, otherwise ``sync_to_xmp`` writes only the
+                # root cleanup and the preserved hierarchy never appears
+                # in XMP.
+                remove_keys = {
+                    keyword_match_key(row["name"]) for row in remove
+                }
                 pending = self.conn.execute(
                     """SELECT id, change_type, value FROM pending_changes
                        WHERE photo_id = ?
@@ -11017,7 +11027,7 @@ class Database:
                 cancelled_add_keys = set()
                 for row in pending:
                     key = keyword_match_key(row["value"] or "")
-                    if key not in names:
+                    if key not in remove_keys:
                         continue
                     pending_ids.append(row["id"])
                     if row["change_type"] == "keyword_add":

@@ -15134,6 +15134,57 @@ def test_repair_duplicate_photo_species_cancels_unsynced_root_add(tmp_path):
     )
 
 
+def test_repair_duplicate_photo_species_preserves_leaf_pending_add(tmp_path):
+    """A pending ``keyword_add`` for a surviving hierarchy leaf must not
+    be cancelled when the repair detaches the redundant root. Cancelling
+    the leaf's add would leave ``sync_to_xmp`` writing only the root
+    cleanup and never surfacing the preserved hierarchy in XMP; a
+    subsequent scan would then see the DB and sidecar diverge."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # The leaf's add is still pending sidecar sync when repair fires.
+    db.queue_change(pid, "keyword_add", "Desert Verdin")
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    leaf_adds = [
+        row for row in pending
+        if row["change_type"] == "keyword_add"
+        and row["value"] == "Desert Verdin"
+    ]
+    assert len(leaf_adds) == 1, (
+        f"expected the preserved leaf's pending keyword_add to survive "
+        f"the repair, got: {pending}"
+    )
+
+
 def test_repair_duplicate_photo_species_queues_sidecar_remove_in_photo_workspace(tmp_path):
     """When the photo's folder lives only in a workspace other than the
     active one, the sidecar ``keyword_remove`` must be queued under that
