@@ -14087,6 +14087,26 @@ def test_update_keyword_explicit_location_type_clears_species_flag(tmp_path):
     assert dict(after) == {"type": "location", "is_species": 0}
 
 
+def test_update_keyword_noop_general_type_preserves_legacy_species_flag(tmp_path):
+    """Re-selecting General must not erase a legacy species marker."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    effective_id = db.update_keyword(kid, type="general")
+
+    assert effective_id == kid
+    row = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,),
+    ).fetchone()
+    assert dict(row) == {"type": "general", "is_species": 1}
+
+
 def test_update_keyword_explicit_type_and_taxon_id_kwargs_win(tmp_path):
     """Caller-supplied type and taxon_id win over auto-detection. Used by
     the bulk-type-apply UI path."""

@@ -12999,16 +12999,17 @@ class Database:
                 effective_type = updates.get('type', cur_type)
                 if 'type' not in updates and cur_type == 'general' and taxon_id:
                     effective_type = 'taxonomy'
-                # The type dropdown sends only {type: ...}. Keep the legacy
-                # is_species flag coherent on that path: otherwise demoting a
-                # taxonomy homonym to a deliberate type such as 'location'
-                # leaves is_species=1, and downstream queries that accept
-                # ``type='taxonomy' OR is_species=1`` still treat it as a
-                # species. Conversely, an explicit taxonomy type must make the
-                # row species-bearing even when no same-type peer exists.
-                if 'type' in updates:
-                    updates['is_species'] = int(effective_type == 'taxonomy')
                 type_changed = effective_type != cur_type
+                # The type dropdown sends only {type: ...}. Keep the legacy
+                # is_species flag coherent on an actual type transition:
+                # otherwise demoting a taxonomy homonym to a deliberate type
+                # such as 'location' leaves is_species=1, and downstream
+                # queries that accept ``type='taxonomy' OR is_species=1`` still
+                # treat it as a species. Do not touch no-op type submissions:
+                # legacy general rows can legitimately retain is_species=1
+                # until taxonomy marking normalizes them.
+                if 'type' in updates and type_changed:
+                    updates['is_species'] = int(effective_type == 'taxonomy')
                 if name_changed or type_changed:
                     # Merge into a same-slot same-type peer instead of
                     # writing a duplicate. Without this, top-level renames
