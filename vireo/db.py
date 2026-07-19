@@ -16724,9 +16724,15 @@ class Database:
     def mark_species_keywords(self, taxonomy):
         """Mark keywords that are recognized species in the taxonomy.
 
-        Retypes any keyword whose name matches a taxon lookup: sets
-        is_species=1, type='taxonomy', and (if the local taxa table is
-        populated) links taxon_id to the matching taxa row by inat_id.
+        Retypes untyped and ``type='general'`` keywords whose names match a
+        taxon lookup, and repairs incomplete ``type='taxonomy'`` rows. Explicit
+        non-taxonomy types such as ``location``, ``genre``, and ``individual``
+        are user intent and must be preserved even when their names are taxon
+        homonyms (for example, the location "California" is also a plant
+        genus).
+
+        Matching rows get ``is_species=1``, ``type='taxonomy'``, and (if the
+        local taxa table is populated) a ``taxon_id`` link by iNaturalist id.
 
         Uses the local taxonomy only (no network requests).
 
@@ -16736,11 +16742,14 @@ class Database:
         # Also include already-typed taxonomy keywords whose taxon_id is
         # still NULL — those were created before the local taxa table was
         # populated (e.g. via add_keyword(..., is_species=True) from the
-        # classifier), and still need their hierarchy link filled in.
+        # classifier), and still need their hierarchy link filled in. Deliberate
+        # non-taxonomy types are excluded before lookup so a taxon homonym can
+        # never silently retype them.
         keywords = self.conn.execute(
             "SELECT id, name, type, taxon_id, is_species FROM keywords "
-            "WHERE is_species = 0 OR type IS NULL OR type != 'taxonomy' "
-            "   OR taxon_id IS NULL"
+            "WHERE (type IS NULL OR type IN ('general', 'taxonomy')) "
+            "  AND (is_species = 0 OR type IS NULL OR type != 'taxonomy' "
+            "       OR taxon_id IS NULL)"
         ).fetchall()
         updated = 0
         for kw in keywords:

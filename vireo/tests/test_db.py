@@ -1447,6 +1447,59 @@ def test_mark_species_keywords_sets_type_taxonomy(tmp_path):
     assert row['type'] == 'taxonomy'
 
 
+def test_mark_species_keywords_preserves_explicit_location_homonym(tmp_path):
+    """A location name that is also a taxon must remain a location.
+
+    ``California`` is both a geographic name and a plant genus. Retyping a
+    location hierarchy node as taxonomy makes subsequent Google Place chain
+    upserts fail with ``name_conflict``.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    location_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="location",
+    )
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            if name == "California":
+                return {"taxon_id": 123, "scientific_name": "California"}
+            return None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+
+    assert updated == 0
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (location_id,),
+    ).fetchone()
+    assert dict(row) == {
+        "type": "location",
+        "is_species": 0,
+        "taxon_id": None,
+    }
+
+    leaf_id = db.upsert_place_chain({
+        "place_id": "test-california-park",
+        "name": "Test California Park",
+        "types": ["park"],
+        "lat": 32.9,
+        "lng": -117.2,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+            {
+                "name": "California",
+                "types": ["administrative_area_level_1"],
+            },
+        ],
+    })
+    leaf = db.conn.execute(
+        "SELECT type, parent_id FROM keywords WHERE id = ?", (leaf_id,),
+    ).fetchone()
+    assert dict(leaf) == {"type": "location", "parent_id": location_id}
+
+
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
     """mark_species_keywords links keywords.taxon_id when taxa table has a match."""
     from db import Database
