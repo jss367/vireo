@@ -17,15 +17,29 @@ requires_exiftool = pytest.mark.skipif(
 )
 
 
+class _ProbeOk:
+    returncode = 0
+    stdout = "13.59\n"
+    stderr = ""
+
+
+class _ProbeBroken:
+    returncode = 2
+    stdout = ""
+    stderr = "Can't locate Image/ExifTool.pm"
+
+
 def test_find_exiftool_prefers_pyinstaller_bundle(monkeypatch, tmp_path):
     import metadata
 
+    metadata.clear_exiftool_cache()
     monkeypatch.setattr(metadata.sys, "platform", "win32")
     bundled = tmp_path / "vendor" / "exiftool" / "exiftool.exe"
     bundled.parent.mkdir(parents=True)
     bundled.write_bytes(b"exe")
     monkeypatch.setattr(metadata.sys, "_MEIPASS", str(tmp_path), raising=False)
     monkeypatch.setattr(metadata.shutil, "which", lambda _name: "/path/exiftool")
+    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _ProbeOk())
 
     assert metadata.find_exiftool() == str(bundled)
 
@@ -33,17 +47,73 @@ def test_find_exiftool_prefers_pyinstaller_bundle(monkeypatch, tmp_path):
 def test_find_exiftool_prefers_pyinstaller_macos_bundle(monkeypatch, tmp_path):
     import metadata
 
+    metadata.clear_exiftool_cache()
     monkeypatch.setattr(metadata.sys, "platform", "darwin")
     bundled = tmp_path / "vendor" / "exiftool" / "exiftool"
     bundled.parent.mkdir(parents=True)
     bundled.write_text("#!/usr/bin/perl\n")
     monkeypatch.setattr(metadata.sys, "_MEIPASS", str(tmp_path), raising=False)
     monkeypatch.setattr(metadata.shutil, "which", lambda _name: "/path/exiftool")
+    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _ProbeOk())
 
     assert metadata.find_exiftool() == str(bundled)
     assert metadata._exiftool_command(str(bundled)) == [
         "/usr/bin/perl", str(bundled),
     ]
+
+
+def test_find_exiftool_falls_back_to_path_when_bundled_broken(monkeypatch, tmp_path):
+    """A present-but-broken bundled ExifTool falls back to PATH.
+
+    Without the fallback, ``exiftool_status()`` and every scan below keep
+    calling the busted bundled copy even after the in-app Repair action
+    installs a working Homebrew ExifTool on PATH, so readiness stays red
+    until the user restarts the app.
+    """
+    import metadata
+
+    metadata.clear_exiftool_cache()
+    monkeypatch.setattr(metadata.sys, "platform", "darwin")
+    bundled = tmp_path / "vendor" / "exiftool" / "exiftool"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text("#!/usr/bin/perl\n")
+    monkeypatch.setattr(metadata.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(
+        metadata.shutil, "which", lambda _name: "/opt/homebrew/bin/exiftool"
+    )
+    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _ProbeBroken())
+
+    assert metadata.find_exiftool() == "/opt/homebrew/bin/exiftool"
+
+
+def test_find_exiftool_bundled_probe_is_cached(monkeypatch, tmp_path):
+    """The bundled ``-ver`` probe is cached so scan batches don't reprobe."""
+    import metadata
+
+    metadata.clear_exiftool_cache()
+    monkeypatch.setattr(metadata.sys, "platform", "darwin")
+    bundled = tmp_path / "vendor" / "exiftool" / "exiftool"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text("#!/usr/bin/perl\n")
+    monkeypatch.setattr(metadata.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(metadata.shutil, "which", lambda _name: None)
+
+    probe_calls = []
+
+    def _run(*args, **kwargs):
+        probe_calls.append(args)
+        return _ProbeOk()
+
+    monkeypatch.setattr(metadata.subprocess, "run", _run)
+
+    for _ in range(5):
+        metadata.find_exiftool()
+
+    assert len(probe_calls) == 1
+
+    metadata.clear_exiftool_cache()
+    metadata.find_exiftool()
+    assert len(probe_calls) == 2
 
 
 def _create_jpg_with_exif(path):

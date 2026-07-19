@@ -13391,8 +13391,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Install ExifTool where Vireo can safely automate installation."""
         import subprocess
 
-        from metadata import exiftool_status, find_homebrew
+        from metadata import clear_exiftool_cache, exiftool_status, find_homebrew
 
+        # Reprobe: a broken bundled copy may have cached True previously,
+        # or the caller may be retrying after a failed install.
+        clear_exiftool_cache()
         status = exiftool_status()
         if status["available"]:
             return jsonify({"success": True, "message": "exiftool is already installed"})

@@ -25,6 +25,12 @@ _EXIFTOOL_TIMEOUT = 120
 _MAX_TIMEOUT_SPLIT_ATTEMPTS = 16
 _TIMEOUT = object()
 
+# Cached ``-ver`` probe results for bundled ExifTool paths. Repeating the
+# probe on every scan batch (~100/scan) would add subprocess overhead, so
+# results are memoized per resolved path. :func:`clear_exiftool_cache`
+# resets it after the in-app Repair action installs a PATH copy.
+_BUNDLED_PROBE_CACHE: dict[str, bool] = {}
+
 
 def find_exiftool() -> str | None:
     """Resolve ExifTool, preferring Vireo's packaged desktop copy.
@@ -32,6 +38,13 @@ def find_exiftool() -> str | None:
     PyInstaller extracts bundled data below ``sys._MEIPASS``.  Keeping the
     support directory next to the executable is required by the official
     Windows distribution.  Development installs continue to use PATH.
+
+    If the bundled binary is present but fails a ``-ver`` probe (for
+    example its ``lib`` directory was corrupted), PATH is consulted as a
+    fallback so a Homebrew ExifTool installed via the in-app Repair
+    button rescues both readiness and downstream scan reads without an
+    app restart. The bundled probe result is cached per-path so hot scan
+    batches don't reprobe every invocation.
     """
     bundle_root = getattr(sys, "_MEIPASS", None)
     if bundle_root:
@@ -39,7 +52,10 @@ def find_exiftool() -> str | None:
         for name in names:
             bundled = Path(bundle_root) / "vendor" / "exiftool" / name
             if bundled.is_file():
-                return str(bundled)
+                if _bundled_exiftool_works(str(bundled)):
+                    return str(bundled)
+                # Bundled copy is present but broken — fall through to PATH.
+                break
     try:
         return shutil.which("exiftool")
     except (AttributeError, OSError):
@@ -47,6 +63,50 @@ def find_exiftool() -> str | None:
         # itself is unavailable. Callers that execute the fallback still
         # receive the normal FileNotFoundError handling.
         return None
+
+
+def _bundled_exiftool_works(path: str) -> bool:
+    """Return True if a ``-ver`` probe of a bundled ExifTool succeeds."""
+    cached = _BUNDLED_PROBE_CACHE.get(path)
+    if cached is not None:
+        return cached
+    ok = _probe_exiftool_ver(path)[0]
+    _BUNDLED_PROBE_CACHE[path] = ok
+    return ok
+
+
+def clear_exiftool_cache() -> None:
+    """Reset the bundled-ExifTool probe cache.
+
+    Called after the in-app Repair action so a freshly installed PATH
+    ExifTool becomes visible without an app restart even when the
+    previous bundled probe was cached.
+    """
+    _BUNDLED_PROBE_CACHE.clear()
+
+
+def _probe_exiftool_ver(path: str) -> tuple[bool, str | None, str | None]:
+    """Run ``exiftool -ver`` at ``path`` and return (ok, version, error)."""
+    try:
+        result = subprocess.run(
+            [*_exiftool_command(path), "-ver"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **no_window_kwargs(),
+        )
+        if result.returncode == 0:
+            return True, (result.stdout.strip() or None), None
+        return (
+            False,
+            None,
+            (
+                result.stderr.strip()
+                or f"exiftool -ver exited with status {result.returncode}"
+            ),
+        )
+    except Exception as e:
+        return False, None, str(e) or e.__class__.__name__
 
 
 def _exiftool_command(path: str | None = None) -> list[str]:
@@ -123,27 +183,7 @@ def exiftool_status():
             "hint": _exiftool_install_hint(),
         }
 
-    ran_ok = False
-    version = None
-    error = None
-    try:
-        result = subprocess.run(
-            [*_exiftool_command(path), "-ver"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            **no_window_kwargs(),
-        )
-        if result.returncode == 0:
-            ran_ok = True
-            version = result.stdout.strip() or None
-        else:
-            error = (
-                result.stderr.strip()
-                or f"exiftool -ver exited with status {result.returncode}"
-            )
-    except Exception as e:
-        error = str(e) or e.__class__.__name__
+    ran_ok, version, error = _probe_exiftool_ver(path)
 
     if ran_ok:
         return {
