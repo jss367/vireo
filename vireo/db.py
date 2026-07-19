@@ -10702,31 +10702,47 @@ class Database:
                 )
                 removed_count += len(remove_ids)
 
-                # Exact-id history payloads should point at the surviving
-                # association so an old undo/redo never references a tag this
-                # repair deliberately detached. Values in these columns are
-                # action-dependent, so only rewrite action/column pairs that
-                # actually store keyword ids; a rating or prediction id can
-                # legitimately have the same numeric value as a keyword id.
-                keyword_id_actions = {
-                    "new_value": (
-                        "keyword_add", "species_replace", "prediction_accept",
-                    ),
-                    "old_value": ("keyword_remove", "species_replace"),
-                }
+                # Drop this photo's undo/redo items that reference a root tag
+                # the repair detached. The keyword_add, keyword_remove, and
+                # prediction_accept handlers read the shared parent
+                # edit_history.new_value rather than the per-photo value, so
+                # merely retargeting edit_history_items would let redo attach
+                # the redundant root again. Deleting only the affected item
+                # preserves other photos in a batch; empty parent edits are
+                # removed below. Scope by action/column so an unrelated rating
+                # or prediction id with the same numeric value is untouched.
                 for removed in remove:
-                    for column, actions in keyword_id_actions.items():
-                        action_placeholders = ",".join("?" for _ in actions)
-                        self.conn.execute(
-                            f"""UPDATE edit_history_items SET {column} = ?
-                                WHERE photo_id = ? AND {column} = ?
-                                  AND edit_id IN (
-                                      SELECT id FROM edit_history
-                                      WHERE action_type IN ({action_placeholders})
-                                  )""",
-                            (str(keep["keyword_id"]), photo_id,
-                             str(removed["keyword_id"]), *actions),
-                        )
+                    removed_id = str(removed["keyword_id"])
+                    self.conn.execute(
+                        """DELETE FROM edit_history_items
+                           WHERE photo_id = ?
+                             AND edit_id IN (
+                                 SELECT id FROM edit_history
+                                 WHERE (
+                                     action_type IN (
+                                         'keyword_add', 'prediction_accept'
+                                     ) AND edit_history_items.new_value = ?
+                                 ) OR (
+                                     action_type = 'keyword_remove'
+                                     AND edit_history_items.old_value = ?
+                                 ) OR (
+                                     action_type = 'species_replace'
+                                     AND (
+                                         edit_history_items.old_value = ?
+                                         OR edit_history_items.new_value = ?
+                                     )
+                                 )
+                             )""",
+                        (photo_id, removed_id, removed_id,
+                         removed_id, removed_id),
+                    )
+
+                self.conn.execute(
+                    """DELETE FROM edit_history
+                       WHERE id NOT IN (
+                           SELECT DISTINCT edit_id FROM edit_history_items
+                       )"""
+                )
 
                 names = {keyword_match_key(row["name"]) for row in group}
                 pending = self.conn.execute(

@@ -14063,7 +14063,7 @@ def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path)
         "SELECT new_value FROM edit_history_items WHERE edit_id = ?",
         (keyword_edit_id,),
     ).fetchone()
-    assert history_item["new_value"] == str(nested)
+    assert history_item is None
     rating_item = db.conn.execute(
         "SELECT old_value, new_value FROM edit_history_items WHERE edit_id = ?",
         (rating_edit_id,),
@@ -14073,6 +14073,41 @@ def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path)
         "new_value": str(root),
     }
     assert db.repair_duplicate_photo_species() == 0
+
+
+def test_repair_duplicate_photo_species_drops_root_redo_history(tmp_path):
+    """Undo/redo after repair must not recreate the detached root species."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.record_edit(
+        "keyword_add", 'Confirmed species "Verdin"', str(root),
+        [{"photo_id": pid, "old_value": "", "new_value": str(root)}],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    assert db.get_edit_history() == []
+    assert db.undo_last_edit() is None
+    assert db.redo_last_undo() is None
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
 
 
 def test_update_keyword_rename_general_no_match_stays_general(tmp_path):
