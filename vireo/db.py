@@ -14811,20 +14811,44 @@ class Database:
                         "SELECT name, taxon_id FROM keywords WHERE id = ?",
                         (kid,),
                     ).fetchone()
+                    # Mirror get_photos_with_equivalent_species: when another
+                    # taxonomy/species keyword row shares the target's match
+                    # key but points at a different taxon (e.g. legacy
+                    # ``Robin`` alongside taxonomy ``robin``), the unlinked
+                    # same-key row on the photo is ambiguous — it could be
+                    # either species. Treating it as the target here would
+                    # exclude it from ``to_remove``, so Replace Keywords
+                    # would leave the wrong species attached while adding
+                    # the correct one. Detect the homonym conflict once and
+                    # gate the NULL-taxon fallback below.
+                    _target_key = keyword_match_key(target_row["name"])
+                    _target_homonym_conflict = False
+                    if target_row["taxon_id"] is not None:
+                        for _hrow in self.conn.execute(
+                            """SELECT name FROM keywords
+                               WHERE (is_species = 1 OR type = 'taxonomy')
+                                 AND taxon_id IS NOT NULL
+                                 AND taxon_id != ?""",
+                            (target_row["taxon_id"],),
+                        ).fetchall():
+                            if keyword_match_key(_hrow["name"]) == _target_key:
+                                _target_homonym_conflict = True
+                                break
 
                     def _is_target_species(row):
                         if target_row["taxon_id"] is not None:
-                            return (
-                                row["taxon_id"] == target_row["taxon_id"]
-                                or (
-                                    row["taxon_id"] is None
-                                    and keyword_match_key(row["name"])
-                                    == keyword_match_key(target_row["name"])
-                                )
-                            )
+                            if row["taxon_id"] == target_row["taxon_id"]:
+                                return True
+                            if (
+                                row["taxon_id"] is None
+                                and not _target_homonym_conflict
+                                and keyword_match_key(row["name"])
+                                == _target_key
+                            ):
+                                return True
+                            return False
                         return (
-                            keyword_match_key(row["name"])
-                            == keyword_match_key(target_row["name"])
+                            keyword_match_key(row["name"]) == _target_key
                         )
                     # Compare treats a neighbouring subject's prediction as
                     # supporting an existing keyword under the taxonomy —
@@ -14908,6 +14932,16 @@ class Database:
                 if changed_tag:
                     self.tag_photo(photo_id, kid, _commit=False)
                     self.queue_change(photo_id, "keyword_add", species, _commit=False)
+                # Record every photo that actually mutated — either the
+                # target tag was newly added, or replace_species stripped
+                # stale species rows. Without this, a replace-keywords
+                # accept on a photo that already carried the target via
+                # a hierarchical row would delete the stale species and
+                # queue its keyword_remove but be excluded from
+                # ``affected``; the API builds edit-history items from
+                # ``affected`` alone, so the audit trail (and any undo)
+                # for the removed species would be lost.
+                if changed_tag or old_species:
                     affected.append({
                         "photo_id": photo_id,
                         "prediction_id": this_pred_id,

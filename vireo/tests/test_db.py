@@ -5426,6 +5426,131 @@ def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
     assert stale not in tagged
 
 
+def test_replace_prediction_records_affected_when_only_removals_occur(tmp_path):
+    """Replace Keywords on a photo that already carries the accepted target
+    via a hierarchy leaf must still record the photo in ``affected`` when
+    stale species are removed.
+
+    ``/api/predictions/<id>/replace-keywords`` builds its edit-history items
+    from ``result['affected']`` alone, so a photo that gets stale species
+    stripped but no new tag added must still surface; otherwise the removed
+    species has no audit entry and undo cannot restore it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    stale = db.add_keyword("Sparrow", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, stale)
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Verdin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    # Even though no new tag was added (hierarchy leaf already satisfies the
+    # target), the stale Sparrow removal must be visible in ``affected`` so
+    # the API layer can record it.
+    assert len(result["affected"]) == 1
+    entry = result["affected"][0]
+    assert entry["photo_id"] == pid
+    assert entry["old_species"] == ["Sparrow"]
+    # And the keyword_remove pending change was actually queued.
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Sparrow") in removed
+
+
+def test_replace_prediction_removes_ambiguous_legacy_homonym_row(tmp_path):
+    """When Replace Keywords accepts a linked target and the photo carries
+    an unlinked same-key homonym row, the ambiguous row must be treated as
+    a stale species and removed.
+
+    Regression: the target-species check treated any NULL-taxon same-key row
+    as equivalent to the linked target, so with a legacy ``Robin`` alongside
+    taxonomy ``robin``/``ROBIN`` bound to different taxa, the legacy row was
+    kept while the correct linked target was added, leaving the wrong
+    species attached.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (18001, "Erithacus rubecula", "European Robin"),
+            (18002, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "robin.jpg", ".jpg", 100, 1.0)
+
+    # Two distinct linked species keywords share the NOCASE match key
+    # "robin" but resolve to different taxa. add_keyword dedupes case-
+    # insensitively so INSERT directly to preserve both rows.
+    european = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["European Robin"],),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    )
+    # An unlinked, typed legacy row with the same match key. It could be
+    # either species; Replace Keywords must not treat it as authoritatively
+    # equivalent to the target and must strip it as a stale species.
+    legacy = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('ROBIN', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    db.tag_photo(pid, legacy)
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "robin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    tagged = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert european in tagged, (
+        "Linked target must be attached even though a same-key legacy row "
+        "existed"
+    )
+    assert legacy not in tagged, (
+        "Ambiguous NULL-taxon same-key row must be removed — its identity "
+        "cannot be assumed to equal the linked target"
+    )
+    assert len(result["affected"]) == 1
+    entry = result["affected"][0]
+    assert entry["photo_id"] == pid
+    assert "ROBIN" in entry["old_species"]
+
+
 def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_path):
     """An additional subject species is added without replacing the original.
 
