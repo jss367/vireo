@@ -14063,6 +14063,30 @@ def test_update_keyword_no_name_change_does_not_touch_type(tmp_path):
     assert row["taxon_id"] is None
 
 
+def test_update_keyword_explicit_location_type_clears_species_flag(tmp_path):
+    """Demoting a taxonomy homonym without a merge peer clears is_species.
+
+    The Keywords UI sends only ``type`` for this edit. Leaving the legacy flag
+    set would make species queries continue to treat the location as taxonomy
+    even though taxonomy marking now preserves explicit non-taxonomy types.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("California", kw_type="taxonomy")
+    before = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,),
+    ).fetchone()
+    assert dict(before) == {"type": "taxonomy", "is_species": 1}
+
+    effective_id = db.update_keyword(kid, type="location")
+
+    assert effective_id == kid
+    after = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,),
+    ).fetchone()
+    assert dict(after) == {"type": "location", "is_species": 0}
+
+
 def test_update_keyword_explicit_type_and_taxon_id_kwargs_win(tmp_path):
     """Caller-supplied type and taxon_id win over auto-detection. Used by
     the bulk-type-apply UI path."""

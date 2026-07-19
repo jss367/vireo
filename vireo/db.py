@@ -12941,7 +12941,8 @@ class Database:
         already 'taxonomy' and the new name matches a different taxon,
         taxon_id is updated. Manually-set non-'general' types (e.g.
         'location', 'individual') are preserved. Explicit type/taxon_id
-        kwargs always win over auto-detection.
+        kwargs always win over auto-detection, and an explicit type change
+        reconciles the legacy ``is_species`` flag with the requested type.
         """
         if 'type' in kwargs:
             kt = kwargs['type']
@@ -12998,6 +12999,15 @@ class Database:
                 effective_type = updates.get('type', cur_type)
                 if 'type' not in updates and cur_type == 'general' and taxon_id:
                     effective_type = 'taxonomy'
+                # The type dropdown sends only {type: ...}. Keep the legacy
+                # is_species flag coherent on that path: otherwise demoting a
+                # taxonomy homonym to a deliberate type such as 'location'
+                # leaves is_species=1, and downstream queries that accept
+                # ``type='taxonomy' OR is_species=1`` still treat it as a
+                # species. Conversely, an explicit taxonomy type must make the
+                # row species-bearing even when no same-type peer exists.
+                if 'type' in updates:
+                    updates['is_species'] = int(effective_type == 'taxonomy')
                 type_changed = effective_type != cur_type
                 if name_changed or type_changed:
                     # Merge into a same-slot same-type peer instead of
