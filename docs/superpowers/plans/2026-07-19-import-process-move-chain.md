@@ -42,7 +42,7 @@ Existing landmarks (verify line numbers with grep before editing — they drift)
 
 - [ ] **Step 1: Write failing tests**
 
-The existing coercion tests live in `vireo/tests/test_move_remote.py` (`test_coerce_remote_target_*` at ~150-210, calling `cfg._coerce_remote_target` directly); `vireo/tests/test_config.py` isolates config inline with `monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))` — there is no `_patch_config_path` helper, so inline that line (or add the helper). Either test file is fine; prefer `test_move_remote.py` to sit next to its siblings, testing `_coerce_remote_target` directly in their style. Add:
+Put these in `vireo/tests/test_config.py` (all later steps, the commit, and Task 8's suite command assume that file). For style reference, the existing coercion tests are `test_coerce_remote_target_*` in `vireo/tests/test_move_remote.py` (~150-210). `test_config.py` isolates config inline with `monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))` — there is no `_patch_config_path` helper, so inline that line (or add the helper locally). Add:
 
 ```python
 def _base_target(**over):
@@ -553,6 +553,7 @@ def test_chain_moves_even_when_process_raises(app_and_db, tmp_path, stub_move, m
          #   deadline = time.time() + 10
          #   while not stub_move and time.time() < deadline: time.sleep(0.05)
          #   assert stub_move, "chained move never fired after process failure"
+         # (confirm `time` is imported in test_jobs_api.py before pasting)
 
 
 def test_chain_skips_move_on_cancelled_process(app_and_db, tmp_path, stub_move, monkeypatch):
