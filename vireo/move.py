@@ -1591,11 +1591,14 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
     # would collapse a sibling like '/photos/a\b' onto the descendants of
     # '/photos/a/b/...' and drag unrelated rows into this move. This mirrors
     # the platform-aware treatment in ``ingest.py``.
+    #
+    # Also case-fold on Windows: `C:\Photos` and `c:\photos\2026` refer to
+    # the same subtree on Windows' case-insensitive FS, and without folding
+    # the SQL prefix comparison would drop the differently-cased descendant.
+    # SQLite's built-in LOWER() only folds ASCII, so mirror the ingest
+    # prefilter's Unicode-aware LOWER_UNICODE helper so both sides agree on
+    # non-ASCII stems (e.g. `C:\Älbum`).
     if sys.platform == "win32":
-        # Windows paths are case-insensitive as well as separator-agnostic.
-        # Use the same Unicode-aware SQL fold as ingest's descendant
-        # prefilter so a catalog row such as ``c:\\photos\\2026`` is still
-        # included when its tracked parent is stored as ``C:\\Photos``.
         db.conn.create_function(
             "LOWER_UNICODE", 1,
             lambda s: s.lower() if s is not None else None,

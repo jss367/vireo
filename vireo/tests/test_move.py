@@ -733,32 +733,6 @@ def test_plan_folder_date_moves_rejects_destination_occupied_by_file(tmp_path):
         plan_folder_date_moves(db, fid, str(archive), "%Y-%m-%d")
 
 
-def test_plan_folder_date_moves_case_folds_descendants_on_windows(
-    tmp_path, monkeypatch,
-):
-    """Windows descendant discovery ignores case and separator differences."""
-    import move as move_mod
-
-    db = Database(str(tmp_path / "test.db"))
-    ws_id = db.ensure_default_workspace()
-    db.set_active_workspace(ws_id)
-    root_id = db.add_folder(r"C:\Photos", name="Photos")
-    child_id = db.add_folder(r"c:\photos\2026", name="2026")
-    child_photo_id = db.add_photo(
-        folder_id=child_id, filename="photo.jpg", extension=".jpg",
-        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
-    )
-    monkeypatch.setattr(move_mod.sys, "platform", "win32")
-
-    plan = move_mod.plan_folder_date_moves(
-        db, root_id, str(tmp_path / "archive"), "%Y-%m-%d",
-    )
-
-    assert [photo_id for item in plan for photo_id in item["photo_ids"]] == [
-        child_photo_id,
-    ]
-
-
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="Windows doesn't allow '\\' in folder names, so folding '\\' to '/' "
@@ -817,6 +791,79 @@ def test_plan_folder_date_moves_does_not_leak_slash_siblings_on_posix(tmp_path):
     only_id = next(iter(planned_ids))
     only_photo = db.get_photo(only_id)
     assert only_photo["filename"] == "target.jpg"
+
+
+def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
+    tmp_path, monkeypatch,
+):
+    """Regression: on Windows, tracked descendants whose stored path differs
+    from the selected folder only by case must still be picked up by the
+    descendants prefix query. Before the fix the query only normalized
+    separators (``REPLACE(f.path, '\\', '/')``), so a folder stored as
+    ``C:\\Photos`` with a descendant row ``c:\\photos\\2026`` would drop
+    the descendant and leave those photos behind.
+
+    Executes on non-Windows hosts by swapping ``move``'s ``sys`` for a
+    shim that reports ``platform == "win32"`` — patching the real
+    ``sys.platform`` would leak into stdlib modules that gate
+    Windows-only imports (multiprocessing, etc.).
+    """
+    import types
+
+    import move as move_mod
+    from move import plan_folder_date_moves
+
+    shim = types.SimpleNamespace(platform="win32")
+    monkeypatch.setattr(move_mod, "sys", shim)
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    # Rows are stored with mixed case; the actual on-disk paths are used
+    # only to satisfy add_folder's isdir check.
+    parent_disk = tmp_path / "photos"
+    parent_disk.mkdir()
+    child_disk = parent_disk / "2026"
+    child_disk.mkdir()
+    (parent_disk / "root.jpg").write_bytes(b"root")
+    (child_disk / "child.jpg").write_bytes(b"child")
+
+    # Insert the folder rows directly so we can control the exact case that
+    # gets stored — add_folder normalizes through the filesystem.
+    parent_fid = db.add_folder(str(parent_disk), name="photos")
+    child_fid = db.add_folder(str(child_disk), name="2026")
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        ("C:\\Photos", parent_fid),
+    )
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        ("c:\\photos\\2026", child_fid),
+    )
+    db.conn.commit()
+
+    db.add_photo(
+        folder_id=parent_fid, filename="root.jpg", extension=".jpg",
+        file_size=4, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=child_fid, filename="child.jpg", extension=".jpg",
+        file_size=5, file_mtime=2.0, timestamp="2026-07-13T09:30:00",
+    )
+
+    # The destination itself is host-OS absolute so os.path.isabs and the
+    # traversal check pass under the test runner; only the descendants
+    # query needs the Windows-style stored rows to trigger the case-fold
+    # branch.
+    plan = plan_folder_date_moves(
+        db, parent_fid, str(tmp_path / "archive"), "%Y-%m-%d",
+    )
+
+    planned_ids = {pid for group in plan for pid in group["photo_ids"]}
+    assert len(planned_ids) == 2, (
+        "differently-cased descendant should be included in the plan"
+    )
 
 
 def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):
