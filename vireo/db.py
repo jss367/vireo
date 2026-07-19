@@ -10868,6 +10868,24 @@ class Database:
                 remove = [row for row in group if row["parent_id"] is None]
                 if not nested or not remove:
                     continue
+                if group_key[1] == "name":
+                    # Unlinked (NULL-taxon) rows are grouped by
+                    # ``keyword_match_key`` only. Curation/eligibility for
+                    # unlinked species keys is compared with exact
+                    # ``k.name`` — there is no taxon fallback that maps a
+                    # differently-spelled leaf back to the root spelling.
+                    # Detaching root ``Foo`` while only leaf ``foo``
+                    # remains would strand highlights/representatives/
+                    # life-list preferences saved under ``Foo``. Restrict
+                    # removal to root rows whose exact spelling matches at
+                    # least one surviving leaf so exact-name eligibility
+                    # keeps applying; different-spelling unlinked
+                    # duplicates stay attached until a taxon link makes
+                    # canonicalization safe.
+                    nested_names = {row["name"] for row in nested}
+                    remove = [row for row in remove if row["name"] in nested_names]
+                    if not remove:
+                        continue
                 # Preserve every hierarchy placement; detach only root rows.
                 remove_ids = [row["keyword_id"] for row in remove]
                 placeholders = ",".join("?" for _ in remove_ids)

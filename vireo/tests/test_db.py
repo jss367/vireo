@@ -15235,6 +15235,115 @@ def test_repair_duplicate_photo_species_preserves_curation_eligibility(tmp_path)
         assert resp.status_code == 200, resp.get_json()
 
 
+def test_repair_duplicate_photo_species_skips_unlinked_case_variants(tmp_path):
+    """Unlinked (NULL-taxon) same-key duplicates with different spellings
+    must stay attached. Curation/eligibility for unlinked species keys is
+    compared with exact ``k.name`` — there is no taxon fallback that maps
+    a differently-spelled leaf back to the root spelling. Detaching root
+    ``Foo`` while only leaf ``foo`` remains would strand the
+    representative/highlight stored under ``Foo``. Same-spelling unlinked
+    duplicates are still repaired because the surviving leaf carries the
+    exact root name.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    # A species row is required so the repair's early-exit does not fire;
+    # the seeded taxon is unrelated to the unlinked "Foo" keywords under
+    # test.
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    # Unlinked hierarchy leaf spelled "foo"; taxonomy-typed without a
+    # taxon link (mark_species_keywords stamps this on legacy upgrades).
+    nested = db.add_keyword("foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    # Unlinked root spelled "Foo" — different spelling, same match_key.
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Curation stored under the root spelling — the exact string the
+    # unlinked eligibility queries compare against.
+    db.set_species_representative("Foo", pid)
+    db.add_species_highlight("Foo", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    # The unlinked case-variant duplicate is left alone — there is no
+    # safe canonicalization when both rows have NULL taxon_id.
+    assert db.repair_duplicate_photo_species() == 0
+    attached_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert root in attached_ids, (
+        "unlinked root spelling must stay attached so exact-name curation "
+        "keeps applying"
+    )
+    assert nested in attached_ids
+
+    # Root-spelled representative and highlight remain eligible because
+    # the exact ``k.name = 'Foo'`` row is still attached.
+    assert db.get_species_representatives(eligible_only=True) == {"Foo": pid}
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights.get("Foo", {})
+
+
+def test_repair_duplicate_photo_species_repairs_unlinked_same_spelling(tmp_path):
+    """Unlinked duplicates whose root and surviving leaf share the same
+    exact spelling are still repaired: the leaf carries the same
+    ``k.name`` after the root is detached, so exact-name eligibility keeps
+    matching.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    nested = db.add_keyword("Foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.set_species_representative("Foo", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    attached_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in attached_ids
+    assert root not in attached_ids
+    # The surviving leaf carries the same "Foo" name, so root-spelled
+    # curation still resolves.
+    assert db.get_species_representatives(eligible_only=True) == {"Foo": pid}
+
+
 def test_update_keyword_rename_general_no_match_stays_general(tmp_path):
     """Renaming a 'general' keyword to a name with no taxon match leaves
     it as 'general' with NULL taxon_id."""
