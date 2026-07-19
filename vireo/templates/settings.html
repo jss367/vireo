@@ -868,7 +868,7 @@
   <div class="section">
     <div class="section-title">Remote targets (NAS / SSH)</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Destinations for moving folders to a NAS over SSH — far more reliable than an SMB mount over a slow/remote link, with resume and integrity verification. The <b>Remote path</b> is the NAS-side filesystem path rsync writes to (e.g. <code>/volume1/Photography</code>); the <b>Local mount path</b> is where you can read those same files afterward (e.g. <code>/Volumes/Photography</code>) — moved photos are repointed there so they stay in your library. Remote moves need GNU rsync (set its path under “GNU rsync path” in the Paths settings if auto-detect fails). <b>Local archive root</b> is the local folder that mirrors the remote path. Imports under this folder can chain an automatic move to this target after processing.
+      Destinations for moving folders to a NAS over SSH — far more reliable than an SMB mount over a slow/remote link, with resume and integrity verification. The <b>Remote path</b> is the NAS-side filesystem path rsync writes to (e.g. <code>/volume1/Photography</code>); the <b>Local mount path</b> is where you can read those same files afterward (e.g. <code>/Volumes/Photography</code>) — moved photos are repointed there so they stay in your library. Remote moves need GNU rsync (set its path under “GNU rsync path” in the Paths settings if auto-detect fails). <b>Local archive root</b> is the local folder that mirrors the remote path. Imports under this folder can chain an automatic move to this target after processing. It must be an absolute path outside the local mount path — other values are cleared on save.
     </p>
     <div id="cfgRemoteTargetsList" style="display:flex;flex-direction:column;gap:10px;margin-bottom:8px;"></div>
     <button type="button" onclick="addRemoteTarget()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">+ Add remote target</button>
@@ -1758,6 +1758,9 @@ async function loadConfig() {
     _remoteTargetsState = [];
     rawTargets.forEach(function(t) {
       if (!t || typeof t !== 'object') return;
+      // Adding a target field? Also update the row builder, addRemoteTarget,
+      // and collectRemoteTargets — a miss HERE silently erases the field on
+      // the next save after a page reload.
       _remoteTargetsState.push({
         id: typeof t.id === 'string' && t.id ? t.id : _genTargetId(),
         name: typeof t.name === 'string' ? t.name : '',
