@@ -392,9 +392,10 @@ def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):
     env = move_env
 
     original_remove = move_mod.os.remove
+    target_src = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.jpg")))
 
     def failing_remove(path):
-        if path.endswith("bird1.jpg") and env["src"].as_posix() in path:
+        if os.path.normcase(os.path.normpath(path)) == target_src:
             raise OSError("permission denied")
         return original_remove(path)
 
@@ -440,9 +441,10 @@ def test_move_photos_rebases_developed_before_source_cleanup(
     (developed / old_key / "bird1.jpg").write_bytes(b"bird1-dev")
 
     original_remove = move_mod.os.remove
+    target_src = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.jpg")))
 
     def failing_remove(path):
-        if path.endswith("bird1.jpg") and env["src"].as_posix() in path:
+        if os.path.normcase(os.path.normpath(path)) == target_src:
             raise OSError("permission denied")
         return original_remove(path)
 
