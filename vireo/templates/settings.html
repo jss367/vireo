@@ -868,7 +868,7 @@
   <div class="section">
     <div class="section-title">Remote targets (NAS / SSH)</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Destinations for moving folders to a NAS over SSH — far more reliable than an SMB mount over a slow/remote link, with resume and integrity verification. The <b>Remote path</b> is the NAS-side filesystem path rsync writes to (e.g. <code>/volume1/Photography</code>); the <b>Local mount path</b> is where you can read those same files afterward (e.g. <code>/Volumes/Photography</code>) — moved photos are repointed there so they stay in your library. Remote moves need GNU rsync (set its path under “GNU rsync path” in the Paths settings if auto-detect fails).
+      Destinations for moving folders to a NAS over SSH — far more reliable than an SMB mount over a slow/remote link, with resume and integrity verification. The <b>Remote path</b> is the NAS-side filesystem path rsync writes to (e.g. <code>/volume1/Photography</code>); the <b>Local mount path</b> is where you can read those same files afterward (e.g. <code>/Volumes/Photography</code>) — moved photos are repointed there so they stay in your library. Remote moves need GNU rsync (set its path under “GNU rsync path” in the Paths settings if auto-detect fails). <b>Local archive root</b> is the local folder that mirrors the remote path. Imports under this folder can chain an automatic move to this target after processing.
     </p>
     <div id="cfgRemoteTargetsList" style="display:flex;flex-direction:column;gap:10px;margin-bottom:8px;"></div>
     <button type="button" onclick="addRemoteTarget()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">+ Add remote target</button>
@@ -1624,6 +1624,8 @@ function renderRemoteTargets() {
     r2.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
     r2.appendChild(_rtField('Remote path (NAS side)', t.remote_path, '/volume1/Photography', save('remote_path'), {flex: '1', mono: true}));
     r2.appendChild(_rtField('Local mount path', t.mount_path, '/Volumes/Photography', save('mount_path'), {flex: '1', mono: true}));
+    r2.appendChild(_rtField('Local archive root (chained moves)', t.local_archive_root,
+      '/Users/you/Photos', save('local_archive_root'), {flex: '1', mono: true}));
     card.appendChild(r2);
 
     var r3 = document.createElement('div');
@@ -1664,6 +1666,7 @@ function addRemoteTarget() {
   _remoteTargetsState.push({
     id: _genTargetId(), name: '', host: '', user: '', port: 22,
     ssh_key: '', remote_path: '', mount_path: '', bwlimit_kbps: 0,
+    local_archive_root: '',
   });
   renderRemoteTargets();
   // Defer save until fields are filled — _coerce_remote_target drops empty
@@ -1682,6 +1685,7 @@ function collectRemoteTargets() {
         name: asStr(t.name), host: asStr(t.host), user: asStr(t.user),
         port: asInt(t.port, 22), ssh_key: asStr(t.ssh_key),
         remote_path: asStr(t.remote_path), mount_path: asStr(t.mount_path),
+        local_archive_root: asStr(t.local_archive_root),
         bwlimit_kbps: Math.max(0, asInt(t.bwlimit_kbps, 0)),
       };
     })

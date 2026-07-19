@@ -915,8 +915,6 @@ async function browseForDestination() {
         // row) exactly like a manual edit would — matches
         // selectRecentDestination().
         destination.dispatchEvent(new Event('input', { bubbles: true }));
-        hideDestStructure();
-        scheduleImportPreview();
       }
       return;
     }
@@ -1205,8 +1203,6 @@ function selectImportBrowserFolder() {
     // row) exactly like a manual edit would — matches
     // selectRecentDestination().
     destination.dispatchEvent(new Event('input', { bubbles: true }));
-    hideDestStructure();
-    scheduleImportPreview();
   } else {
     const paths = browserSelectedPaths.length
       ? browserSelectedPaths
@@ -1317,7 +1313,7 @@ function updateAfterMoveUI() {
     if (importIsAbsolutePath(destination)) {
       unavailable.textContent =
         "Move to NAS unavailable: the destination is not inside any remote "
-        + "target's local archive root. Set one under Settings → Remote targets.";
+        + "target's local archive root. Set one under Settings > Remote targets.";
       unavailable.style.display = '';
     }
     return;
@@ -1378,6 +1374,17 @@ function updateAfterMoveUI() {
       'Warning: the move to NAS would fail: this target\'s local mount path must be absolute — fix it under Settings > Remote targets.'));
   }
   preview.style.display = '';
+}
+
+function afterMoveRequest() {
+  // Reads the row visibility updateAfterMoveUI maintains — keeping the
+  // writer and this reader adjacent so a refactor can't silently split them.
+  const row = document.getElementById('afterMoveRow');
+  const sel = document.getElementById('afterMoveTarget');
+  const chk = document.getElementById('chkAfterMove');
+  return (row && chk && sel && chk.checked &&
+          row.style.display !== 'none' && sel.value)
+    ? {remote_target_id: sel.value} : null;
 }
 
 function retireHiddenDefaultOption(sel) {
@@ -1453,12 +1460,12 @@ function updateAdvancedImportOptions() {
   _afterImportHidingDefault = false;
 }
 
-window.addEventListener('advancedmodechange', updateAdvancedImportOptions);
-window.addEventListener('devmodechange', updateAdvancedImportOptions);
-// Registered after the resync handlers above so the move row re-evaluates
-// against the already-updated After Import selection.
-window.addEventListener('advancedmodechange', updateAfterMoveUI);
-window.addEventListener('devmodechange', updateAfterMoveUI);
+// Combined into one listener per event (rather than registering
+// updateAdvancedImportOptions then updateAfterMoveUI separately) so the
+// move row always re-evaluates against the already-updated After Import
+// selection, without depending on listener registration order.
+window.addEventListener('advancedmodechange', () => { updateAdvancedImportOptions(); updateAfterMoveUI(); });
+window.addEventListener('devmodechange', () => { updateAdvancedImportOptions(); updateAfterMoveUI(); });
 
 // True once initImportPage() has resolved the workspace's after-import
 // default into the select. Until then, the select still shows its HTML
@@ -2262,12 +2269,7 @@ async function startImport() {
   // The chained NAS move is only offered while its row is visible (local
   // archive copy + chained process + eligible target) — a hidden row means
   // a stale checkbox must not send anything.
-  body.after_process_move =
-    (document.getElementById('chkAfterMove').checked &&
-     document.getElementById('afterMoveRow').style.display !== 'none' &&
-     document.getElementById('afterMoveTarget').value)
-      ? {remote_target_id: document.getElementById('afterMoveTarget').value}
-      : null;
+  body.after_process_move = afterMoveRequest();
   document.getElementById('btnStart').disabled = true;
   try {
     const resp = await fetch(copyMode ? '/api/jobs/import-photos' : '/api/jobs/import-in-place', {
