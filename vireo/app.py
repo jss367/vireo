@@ -10462,8 +10462,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         f"""SELECT DISTINCT pk.photo_id
                             FROM photo_keywords pk
                             JOIN keywords k ON k.id = pk.keyword_id
+                            LEFT JOIN taxa t ON t.id = k.taxon_id
                             WHERE pk.photo_id IN ({placeholders})
-                              AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                              AND (k.is_species = 1 OR k.type = 'taxonomy')
+                              AND (t.rank = 'species' OR t.rank IS NULL)""",
                         chunk,
                     ).fetchall()
                 )

@@ -9368,6 +9368,58 @@ def test_highlights_confirm_skips_taxonomy_keyword_photo(app_and_db):
     assert db.get_review_status(pred["id"], db._ws_id()) == "pending"
 
 
+def test_highlights_confirm_ignores_higher_rank_taxonomy_keyword(app_and_db):
+    # Codex P2: a higher-rank taxonomy keyword (e.g. genus) must not count as
+    # a confirmed species — otherwise Highlights Confirm would skip the photo
+    # and never accept the species-rank prediction the user actually saw. The
+    # pre-skip must mirror get_highlights_candidates' rank filter.
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hcr2', 'hcr2', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    genus_taxon_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank) "
+        "VALUES (?, ?, ?, ?)",
+        (900001, "Haliaeetus", "Sea Eagles", "genus"),
+    ).lastrowid
+    genus_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Haliaeetus', 'taxonomy', 0, ?)",
+        (genus_taxon_id,),
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'genus.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, genus_kid)
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det, "Bald Eagle", 0.91, "m")
+    pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ? AND species = ?",
+        (det, "Bald Eagle"),
+    ).fetchone()
+
+    resp = client.post("/api/highlights/confirm", json={"photo_ids": [pid]})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["skipped"] == []
+    assert db.get_review_status(pred["id"], db._ws_id()) == "accepted"
+    kw_names = {kw["name"] for kw in db.get_photo_keywords(pid)}
+    assert "Bald Eagle" in kw_names
+    # The genus-rank tag is preserved alongside the newly-confirmed species.
+    assert "Haliaeetus" in kw_names
+
+
 def test_highlights_confirm_group_limited_to_submitted_photos(app_and_db):
     """Grouped Highlights confirm does not tag hidden or unsubmitted group photos."""
     app, db = app_and_db
