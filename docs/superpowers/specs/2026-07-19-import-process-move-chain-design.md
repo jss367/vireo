@@ -90,10 +90,11 @@ a new row:
   UI-transparency rule, this states what will actually happen, computed from
   current selections.
 
-When the destination is *not* under any target's `local_archive_root`, the row
-is shown disabled with a hint saying why (e.g. "Destination is not inside any
-remote target's local archive root — set one in Settings"), rather than
-silently hidden.
+When the destination is *not* under any target's `local_archive_root` (and an
+absolute destination has been entered), the row is replaced by a hint saying
+why the option is unavailable ("Move to NAS unavailable: the destination is
+not inside any remote target's local archive root. Set one under Settings >
+Remote targets"), rather than silently hidden.
 
 Import-in-place and remote-destination imports never show the row.
 
