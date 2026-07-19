@@ -10925,6 +10925,12 @@ class Database:
                 # preserves other photos in a batch; empty parent edits are
                 # removed below. Scope by action/column so an unrelated rating
                 # or prediction id with the same numeric value is untouched.
+                # ``no_tag`` prediction_accept items (JSON old_value carrying
+                # ``"no_tag": true``) already skip tag mutations on undo/redo
+                # because the photo carried the species via an equivalent
+                # row, so keeping them cannot reattach the detached root and
+                # dropping them would erase the only audit/undo record of
+                # the accepted prediction-status flip.
                 for removed in remove:
                     removed_id = str(removed["keyword_id"])
                     self.conn.execute(
@@ -10933,9 +10939,16 @@ class Database:
                              AND edit_id IN (
                                  SELECT id FROM edit_history
                                  WHERE (
-                                     action_type IN (
-                                         'keyword_add', 'prediction_accept'
-                                     ) AND edit_history_items.new_value = ?
+                                     action_type = 'keyword_add'
+                                     AND edit_history_items.new_value = ?
+                                 ) OR (
+                                     action_type = 'prediction_accept'
+                                     AND edit_history_items.new_value = ?
+                                     AND (
+                                         edit_history_items.old_value IS NULL
+                                         OR edit_history_items.old_value
+                                             NOT LIKE '%"no_tag"%'
+                                     )
                                  ) OR (
                                      action_type = 'keyword_remove'
                                      AND edit_history_items.old_value = ?
@@ -10947,7 +10960,7 @@ class Database:
                                      )
                                  )
                              )""",
-                        (photo_id, removed_id, removed_id,
+                        (photo_id, removed_id, removed_id, removed_id,
                          removed_id, removed_id),
                     )
 

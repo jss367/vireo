@@ -14791,6 +14791,75 @@ def test_repair_duplicate_photo_species_drops_root_redo_history(tmp_path):
     assert root not in tagged_ids
 
 
+def test_repair_duplicate_photo_species_preserves_no_tag_prediction_accepts(tmp_path):
+    """A ``prediction_accept`` recorded with a ``no_tag`` JSON old_value
+    already skips tag mutations on undo/redo (see the ``_skip_tag_undo``
+    / ``_skip_tag_redo`` branches keyed by ``old_meta['no_tag']``), so
+    keeping the item cannot reattach the detached root. Deleting it
+    would erase the only audit/undo record of the accepted prediction-
+    status flip — the repair must leave those items intact."""
+    import json as _json
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Simulate an accept where the photo already carried the equivalent
+    # hierarchy leaf: the API records ``prediction_accept`` with
+    # ``old_value`` = JSON payload including ``no_tag: true``. Its
+    # ``new_value`` still points at the root keyword id so it would
+    # match the repair's numeric filter without the no_tag guard.
+    payload = _json.dumps({"prediction_id": 42, "no_tag": True})
+    no_tag_edit_id = db.record_edit(
+        "prediction_accept", 'Accepted "Verdin"', str(root),
+        [{"photo_id": pid, "old_value": payload,
+          "new_value": str(root)}],
+    )
+    # A regular tag-mutating prediction_accept for the same root must
+    # still be dropped so its undo/redo cannot reattach the detached
+    # root.
+    regular_edit_id = db.record_edit(
+        "prediction_accept", 'Accepted "Verdin" (tagged)', str(root),
+        [{"photo_id": pid, "old_value": "17",
+          "new_value": str(root)}],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+    # The no_tag accept survives — its audit/undo path is intact.
+    surviving = db.conn.execute(
+        "SELECT old_value, new_value FROM edit_history_items "
+        "WHERE edit_id = ? AND photo_id = ?",
+        (no_tag_edit_id, pid),
+    ).fetchone()
+    assert surviving is not None
+    assert surviving["old_value"] == payload
+    assert surviving["new_value"] == str(root)
+    # The tag-mutating accept is dropped so redo can't reattach root.
+    dropped = db.conn.execute(
+        "SELECT 1 FROM edit_history_items "
+        "WHERE edit_id = ? AND photo_id = ?",
+        (regular_edit_id, pid),
+    ).fetchone()
+    assert dropped is None
+
+
 def test_repair_duplicate_photo_species_guards_against_unlinked_homonyms(tmp_path):
     """A legacy NULL-taxon leaf whose key collides with a linked root but
     represents a different species (e.g. legacy ``Robin`` alongside
