@@ -2153,6 +2153,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app.config["BROWSER_AUTH_ENABLED"] = (
         os.environ.get("VIREO_DISABLE_BROWSER_AUTH") != "1"
     )
+    app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"] = (
+        os.environ.get("VIREO_REQUIRE_EXIFTOOL_FOR_IMPORT", "1") != "0"
+    )
 
     # Schema creation and migrations are startup work, never request work.
     # `:memory:` is the development exception because each SQLite connection
@@ -13248,18 +13251,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             model_source.startswith("hf-hub:") or model_source == "timm"
         )
 
-        import shutil
-
         from metadata import exiftool_status as get_exiftool_status
+        from metadata import find_homebrew
 
         exiftool_probe = get_exiftool_status()
         exiftool_status = {
             "installed": exiftool_probe["available"],
             "version": exiftool_probe["version"],
             "bundled": bool(
-                sys.platform.startswith("win") and exiftool_probe["available"]
+                getattr(sys, "_MEIPASS", None) and exiftool_probe["available"]
             ),
-            "brew_available": shutil.which("brew") is not None,
+            "brew_available": find_homebrew() is not None,
         }
 
         # timm models have a fixed class set — no labels needed
@@ -13389,7 +13391,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Install ExifTool where Vireo can safely automate installation."""
         import subprocess
 
-        from metadata import exiftool_status
+        from metadata import exiftool_status, find_homebrew
 
         status = exiftool_status()
         if status["available"]:
@@ -13409,8 +13411,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "error": "Install ExifTool with your Linux package manager, then restart Vireo.",
             })
 
-        import shutil
-        if not shutil.which("brew"):
+        brew = find_homebrew()
+        if not brew:
             return jsonify({
                 "success": False,
                 "error": "Homebrew is not installed. Install it from https://brew.sh, then run: brew install exiftool",
@@ -13418,7 +13420,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         try:
             result = subprocess.run(
-                ["brew", "install", "exiftool"],
+                [brew, "install", "exiftool"],
                 capture_output=True, text=True, timeout=300,
                 **no_window_kwargs(),
             )
@@ -17468,7 +17470,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Job API routes --
 
-    def _build_scan_work(roots, incremental, active_ws):
+    def _build_scan_work(
+        roots, incremental, active_ws, repair_missing_metadata=False,
+    ):
         """Build the background work function for a scan job.
 
         Shared by ``POST /api/jobs/scan`` and
@@ -17619,6 +17623,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         vireo_dir=vireo_dir,
                         thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
                         cancel_check=cancel_check,
+                        repair_missing_metadata=repair_missing_metadata,
                     )
                 except Exception as exc:
                     if isinstance(exc, ScanCancelled) and cancel_check():
@@ -18001,6 +18006,85 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             pausable=True,
         )
         return jsonify({"job_id": job_id, "roots": existing, "skipped": skipped})
+
+    def _metadata_repair_count(db, workspace_id):
+        row = db.conn.execute(
+            """SELECT COUNT(DISTINCT p.id) AS count
+               FROM photos p
+               JOIN folders f ON f.id = p.folder_id
+               JOIN workspace_folders wf ON wf.folder_id = f.id
+               WHERE wf.workspace_id = ?
+                 AND f.status IN ('ok', 'partial')
+                 AND p.exif_data IS NULL""",
+            (workspace_id,),
+        ).fetchone()
+        return int(row["count"] if row else 0)
+
+    @app.route("/api/import/readiness")
+    def api_import_readiness():
+        """Report metadata tooling and repairable degraded-import rows."""
+        from metadata import exiftool_status
+
+        db = _get_db()
+        active_ws = db._active_workspace_id
+        status = exiftool_status()
+        repair_count = _metadata_repair_count(db, active_ws)
+        roots = [r["path"] for r in db.get_workspace_folder_roots(active_ws)]
+        reachable_roots = [root for root in roots if os.path.isdir(root)]
+        return jsonify({
+            "exiftool": status,
+            "requires_exiftool": app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"],
+            "metadata_repair_count": repair_count,
+            "metadata_repair_available": bool(
+                status["available"] and repair_count and reachable_roots
+            ),
+            "reachable_root_count": len(reachable_roots),
+        })
+
+    @app.route("/api/jobs/repair-metadata", methods=["POST"])
+    def api_job_repair_metadata():
+        """Incrementally rescan reachable roots that contain missing EXIF."""
+        from metadata import exiftool_status
+
+        status = exiftool_status()
+        if not status["available"]:
+            return jsonify({
+                "error": "Repair ExifTool before repairing photo metadata.",
+                "code": "exiftool_required",
+                "exiftool": status,
+            }), 409
+
+        db = _get_db()
+        active_ws = db._active_workspace_id
+        repair_count = _metadata_repair_count(db, active_ws)
+        if not repair_count:
+            return json_error("no photos need metadata repair", 409)
+        roots = [r["path"] for r in db.get_workspace_folder_roots(active_ws)]
+        existing = [root for root in roots if os.path.isdir(root)]
+        if not existing:
+            return json_error("no metadata-repair folders are currently on disk")
+
+        runner = app._job_runner
+        work = _build_scan_work(
+            existing, True, active_ws, repair_missing_metadata=True,
+        )
+        job_config = {
+            "roots": existing,
+            "incremental": True,
+            "repair_metadata": True,
+            "repair_photo_count": repair_count,
+        }
+        if len(existing) == 1:
+            job_config["root"] = existing[0]
+        job_id = runner.start(
+            "metadata-repair", work, config=job_config,
+            workspace_id=active_ws, pausable=True,
+        )
+        return jsonify({
+            "job_id": job_id,
+            "photo_count": repair_count,
+            "roots": existing,
+        })
 
     @app.route("/api/jobs/thumbnails", methods=["POST"])
     def api_job_thumbnails():
@@ -20349,6 +20433,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(f"unknown process id: {value}")
         return None
 
+    def _validate_import_metadata_dependency(body):
+        """Require working metadata extraction unless explicitly overridden.
+
+        Import can be repaired later, but proceeding silently loses capture
+        dates, GPS, camera data, and date-based archive placement.  Keep an
+        advanced escape hatch for unusual recovery workflows while making the
+        safe behavior the API default (not merely a client-side convention).
+        """
+        allow_missing = body.get("allow_missing_exiftool", False)
+        if not isinstance(allow_missing, bool):
+            return json_error("allow_missing_exiftool must be a boolean")
+        if not app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"] or allow_missing:
+            return None
+
+        from metadata import exiftool_status
+
+        status = exiftool_status()
+        if status["available"]:
+            return None
+        return jsonify({
+            "error": (
+                "ExifTool is required for import so Vireo can preserve "
+                "capture dates, GPS, and camera metadata. Repair ExifTool "
+                "or explicitly choose Import without metadata in Advanced."
+            ),
+            "code": "exiftool_required",
+            "exiftool": status,
+        }), 409
+
     def _create_import_collection(thread_db, photo_ids):
         """Create the static collection that records one completed import.
 
@@ -20395,6 +20508,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from image_loader import is_excluded_scan_path
 
         body = request.get_json(silent=True) or {}
+        dependency_error = _validate_import_metadata_dependency(body)
+        if dependency_error is not None:
+            return dependency_error
         sources = body.get("sources")
         if isinstance(sources, str):
             sources = [sources]
@@ -20488,13 +20604,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 return
             try:
-                process_job_id, model_warning = _enqueue_process_job(
+                process_job_id, model_warning, process_blocker = _enqueue_process_job(
                     thread_db, runner, active_ws,
                     collection_id=col_id,
                     process_id=after_import,
                     chained_from=job["id"],
                     expanded=after_import_snapshot,
                 )
+                if process_blocker:
+                    result["after_import_skipped"] = process_blocker
+                    return
                 result["process_job_id"] = process_job_id
                 if model_warning:
                     result["model_warning"] = model_warning
@@ -20698,6 +20817,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "after_import": after_import,
             "tags": import_tags,
             "location_from_gps": location_from_gps,
+            "allow_missing_exiftool": bool(
+                body.get("allow_missing_exiftool", False)
+            ),
             "mode": "in_place",
             "workspace_id": active_ws,
             "created_workspace": created_workspace,
@@ -20725,6 +20847,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from ingest import _is_unsafe_path
 
         body = request.get_json(silent=True) or {}
+        dependency_error = _validate_import_metadata_dependency(body)
+        if dependency_error is not None:
+            return dependency_error
 
         sources = body.get("sources")
         if isinstance(sources, str):
@@ -20999,6 +21124,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "after_import": after_import,
             "tags": import_tags,
             "location_from_gps": location_from_gps,
+            "allow_missing_exiftool": bool(
+                body.get("allow_missing_exiftool", False)
+            ),
             "remote_target_id": remote_target_id or None,
             "remote_subpath": remote_subpath or None,
             "workspace_id": active_ws,
@@ -21034,13 +21162,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 return
             try:
-                process_job_id, model_warning = _enqueue_process_job(
+                process_job_id, model_warning, process_blocker = _enqueue_process_job(
                     thread_db, runner, active_ws,
                     collection_id=col_id,
                     process_id=after_import,
                     chained_from=job["id"],
                     expanded=after_import_snapshot,
                 )
+                if process_blocker:
+                    result["after_import_skipped"] = process_blocker
+                    return
                 result["process_job_id"] = process_job_id
                 if model_warning:
                     result["model_warning"] = model_warning
@@ -23107,7 +23238,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``Database`` and never touches ``request``/``_get_db``. Applies the
         same process expansion and no-model auto-skip as ``api_job_pipeline``
         so a chained run degrades identically to a manual one. Returns
-        ``(job_id, model_warning)``.
+        ``(job_id, model_warning, process_blocker)``. A non-null blocker
+        means prerequisites are missing and no doomed job was enqueued.
 
         ``expanded`` is the pre-resolved flag snapshot the import endpoint
         captured at enqueue-request time. Pass it through so a saved-process
@@ -23139,6 +23271,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             ),
         )
         model_warning = _apply_no_model_auto_skip(params)
+
+        # Chained imports bypass the Process page's missing-label Start gate.
+        # Resolve the active label mode with the pipeline's own loader before
+        # reserving a queue slot, so missing regional labels pause cleanly
+        # instead of producing a guaranteed model_loader failure.
+        if not params.skip_classify:
+            from classify_job import _load_labels
+            from models import get_active_model
+
+            model = get_active_model()
+            if model is not None:
+                try:
+                    _load_labels(
+                        model.get("model_type", "bioclip"),
+                        model.get("model_str", ""),
+                        None,
+                        None,
+                        db=thread_db,
+                        model_dir=model.get("weights_path"),
+                    )
+                except RuntimeError:
+                    saved_process = thread_db.get_saved_process(process_id)
+                    process_name = (
+                        saved_process["name"] if saved_process
+                        else "the selected process"
+                    )
+                    return None, model_warning, (
+                        "paused — Classify needs a species list. Download one "
+                        "in Settings › Labels, then run "
+                        f"{process_name} on this import collection."
+                    )
 
         work_units = _runtime_warning_work_units(
             "pipeline collection",
@@ -23191,7 +23354,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             workspace_id=workspace_id,
             runtime_warning=runtime_warning,
         )
-        return job_id, model_warning
+        return job_id, model_warning, None
 
     @app.route("/api/jobs/pipeline", methods=["POST"])
     def api_job_pipeline():
@@ -27484,7 +27647,22 @@ def main():
         action="store_true",
         help="Download and import the iNaturalist taxonomy, then exit",
     )
+    parser.add_argument(
+        "--check-exiftool",
+        action="store_true",
+        help="Verify the bundled/system ExifTool, print its version, and exit",
+    )
     args = parser.parse_args()
+
+    if args.check_exiftool:
+        from metadata import exiftool_status
+
+        status = exiftool_status()
+        if status["available"]:
+            print(status["version"] or "unknown")
+            raise SystemExit(0)
+        print(status.get("error") or status.get("hint") or "ExifTool unavailable", file=sys.stderr)
+        raise SystemExit(1)
 
     if args.headless:
         args.no_browser = True

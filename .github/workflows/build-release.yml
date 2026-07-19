@@ -118,6 +118,17 @@ jobs:
           codesign --display --verbose=2 "$SIDECAR" 2>&1 || echo "Not signed (expected — Tauri will sign during bundling)"
           echo "::endgroup::"
 
+      - name: Smoke-test bundled ExifTool
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        shell: bash
+        run: |
+          TRIPLE=$(rustc --print host-tuple)
+          SIDECAR="src-tauri/binaries/vireo-server-${TRIPLE}"
+          if [ "$RUNNER_OS" = "Windows" ]; then SIDECAR="${SIDECAR}.exe"; fi
+          VERSION_OUTPUT=$("$SIDECAR" --check-exiftool)
+          echo "Bundled ExifTool: $VERSION_OUTPUT"
+          test "$VERSION_OUTPUT" = "13.59"
+
       - name: Smoke-test sidecar binary
         shell: bash
         run: |

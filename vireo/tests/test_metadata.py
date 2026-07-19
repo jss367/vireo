@@ -20,6 +20,7 @@ requires_exiftool = pytest.mark.skipif(
 def test_find_exiftool_prefers_pyinstaller_bundle(monkeypatch, tmp_path):
     import metadata
 
+    monkeypatch.setattr(metadata.sys, "platform", "win32")
     bundled = tmp_path / "vendor" / "exiftool" / "exiftool.exe"
     bundled.parent.mkdir(parents=True)
     bundled.write_bytes(b"exe")
@@ -27,6 +28,22 @@ def test_find_exiftool_prefers_pyinstaller_bundle(monkeypatch, tmp_path):
     monkeypatch.setattr(metadata.shutil, "which", lambda _name: "/path/exiftool")
 
     assert metadata.find_exiftool() == str(bundled)
+
+
+def test_find_exiftool_prefers_pyinstaller_macos_bundle(monkeypatch, tmp_path):
+    import metadata
+
+    monkeypatch.setattr(metadata.sys, "platform", "darwin")
+    bundled = tmp_path / "vendor" / "exiftool" / "exiftool"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text("#!/usr/bin/perl\n")
+    monkeypatch.setattr(metadata.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(metadata.shutil, "which", lambda _name: "/path/exiftool")
+
+    assert metadata.find_exiftool() == str(bundled)
+    assert metadata._exiftool_command(str(bundled)) == [
+        "/usr/bin/perl", str(bundled),
+    ]
 
 
 def _create_jpg_with_exif(path):

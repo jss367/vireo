@@ -5,12 +5,19 @@ All notable changes to Vireo are documented in this file.
 ## Unreleased
 
 ### Added
+- **Reliable photo metadata on macOS.** macOS releases now bundle a pinned,
+  checksum-verified ExifTool. Import checks metadata readiness before starting,
+  offers an explicit advanced metadata-free override, and can repair photos
+  imported by an older or damaged installation.
 - **Windows 11 public beta.** Windows releases now include ExifTool, report
   optional integration readiness, support long-path-aware packaging, require
   signed release installers, and run Windows browser, native-shell, installer,
   updater, and uninstall-preservation gates before publication.
 
 ### Fixed
+- After-import classification now pauses with an actionable label-download
+  message when the selected model cannot run without a species list, instead
+  of enqueueing a pipeline job guaranteed to fail.
 - Miss detection now aligns its default no-subject threshold with the default
   detector confidence floor, avoiding "no subject" misses for photos whose
   bird detection is already visible. Existing installs that had the previous

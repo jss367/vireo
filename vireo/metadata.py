@@ -6,6 +6,7 @@ Returns grouped tag dictionaries keyed by ExifTool group (EXIF, GPS, XMP, etc.).
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -26,7 +27,7 @@ _TIMEOUT = object()
 
 
 def find_exiftool() -> str | None:
-    """Resolve ExifTool, preferring Vireo's packaged Windows copy.
+    """Resolve ExifTool, preferring Vireo's packaged desktop copy.
 
     PyInstaller extracts bundled data below ``sys._MEIPASS``.  Keeping the
     support directory next to the executable is required by the official
@@ -34,9 +35,11 @@ def find_exiftool() -> str | None:
     """
     bundle_root = getattr(sys, "_MEIPASS", None)
     if bundle_root:
-        bundled = Path(bundle_root) / "vendor" / "exiftool" / "exiftool.exe"
-        if bundled.is_file():
-            return str(bundled)
+        names = ("exiftool.exe",) if sys.platform == "win32" else ("exiftool",)
+        for name in names:
+            bundled = Path(bundle_root) / "vendor" / "exiftool" / name
+            if bundled.is_file():
+                return str(bundled)
     try:
         return shutil.which("exiftool")
     except (AttributeError, OSError):
@@ -44,6 +47,37 @@ def find_exiftool() -> str | None:
         # itself is unavailable. Callers that execute the fallback still
         # receive the normal FileNotFoundError handling.
         return None
+
+
+def _exiftool_command(path: str | None = None) -> list[str]:
+    """Return an executable argv prefix for a resolved ExifTool path.
+
+    PyInstaller may extract a data file without its executable bit.  The
+    bundled macOS distribution is a Perl script, so invoking it explicitly
+    through the system Perl interpreter keeps the signed app reliable across
+    PyInstaller versions and temporary extraction filesystems.
+    """
+    path = path or find_exiftool() or "exiftool"
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    is_bundled_unix = (
+        sys.platform != "win32"
+        and bundle_root
+        and Path(path).parent == Path(bundle_root) / "vendor" / "exiftool"
+    )
+    if is_bundled_unix or (sys.platform != "win32" and not os.access(path, os.X_OK)):
+        return ["/usr/bin/perl", path]
+    return [path]
+
+
+def find_homebrew() -> str | None:
+    """Resolve Homebrew from PATH or its standard GUI-app locations."""
+    found = shutil.which("brew")
+    if found:
+        return found
+    for candidate in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 
 
 def _exiftool_install_hint() -> str:
@@ -94,7 +128,7 @@ def exiftool_status():
     error = None
     try:
         result = subprocess.run(
-            [path, "-ver"],
+            [*_exiftool_command(path), "-ver"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -159,8 +193,7 @@ def _run_exiftool(file_paths, extra_args=None):
     if not file_paths:
         return []
 
-    exiftool = find_exiftool() or "exiftool"
-    cmd = [exiftool, "-G", "-json", "-n"]
+    cmd = [*_exiftool_command(), "-G", "-json", "-n"]
     if extra_args:
         cmd.extend(extra_args)
     cmd.append("--")
