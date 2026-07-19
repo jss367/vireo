@@ -200,3 +200,47 @@ def test_location_review_actions_stay_above_open_bottom_panel(live_server, page)
     )
     assert positions["actionsBottom"] <= positions["panelTop"]
     expect(page.locator("#locationReviewAssign")).to_be_in_viewport()
+
+
+def test_location_review_actions_stay_visible_below_top_banner(live_server, page):
+    """Shared notification banners must resize rather than clip the review page."""
+    photo_id = live_server["data"]["photos"][0]
+    with live_server["db"].conn:
+        live_server["db"].conn.execute(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            (33.2550, -116.4050, photo_id),
+        )
+
+    page.set_viewport_size({"width": 890, "height": 600})
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate(
+        "photoId => sessionStorage.setItem('vireoLocationReviewSource', "
+        "JSON.stringify({photo_ids: [photoId]}))",
+        photo_id,
+    )
+    page.goto(f"{live_server['url']}/locations/review?source=selection")
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
+
+    page.evaluate(
+        """() => {
+          document.getElementById('newImagesMsg').textContent = '7 new images';
+          document.getElementById('newImagesBanner').style.display = 'flex';
+        }"""
+    )
+
+    positions = page.evaluate(
+        """() => ({
+          bannerBottom: document.getElementById('newImagesBanner')
+            .getBoundingClientRect().bottom,
+          reviewTop: document.querySelector('.location-review-page')
+            .getBoundingClientRect().top,
+          actionsBottom: document.querySelector('.location-review-actions')
+            .getBoundingClientRect().bottom,
+          bottomBarTop: document.getElementById('bottomToggle')
+            .getBoundingClientRect().top
+        })"""
+    )
+    assert positions["reviewTop"] >= positions["bannerBottom"]
+    assert positions["actionsBottom"] <= positions["bottomBarTop"]
+    expect(page.locator("#locationReviewAssign")).to_be_in_viewport()

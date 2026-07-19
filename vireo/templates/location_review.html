@@ -9,9 +9,19 @@
 <title>Vireo - Review Photo Locations</title>
 <style>
 html, body { height: 100%; overflow: hidden; }
-body { margin: 0; }
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: var(--bottom-offset, 28px);
+}
+.navbar,
+.runtime-warning-banner,
+.missing-folders-banner,
+.new-images-banner,
+.dup-cleanup-banner { flex-shrink: 0; }
 .location-review-page {
-  height: calc(100vh - 48px - var(--bottom-offset, 28px));
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -292,7 +302,8 @@ body { margin: 0; }
   border-color: var(--border-secondary) !important;
 }
 @media (max-width: 860px) {
-  html, body { overflow: auto; }
+  html, body { height: auto; overflow: auto; }
+  body { display: block; padding-bottom: var(--bottom-offset, 28px); }
   .location-review-page { height: auto; min-height: calc(100vh - 48px - var(--bottom-offset, 28px)); }
   .location-review-header { flex-wrap: wrap; }
   .location-review-source { order: 3; width: 100%; max-width: none; margin-left: 0; }
