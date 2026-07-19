@@ -5392,6 +5392,40 @@ def test_accept_prediction_tags_photo(tmp_path):
     assert any(k["name"] == "Elk" for k in kws)
 
 
+def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
+    """Replacing stale species leaves an equivalent hierarchical target in
+    place instead of flattening it to the root keyword."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    stale = db.add_keyword("Sparrow", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, stale)
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Verdin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    root = result["keyword_id"]
+    tagged = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged
+    assert root not in tagged
+    assert stale not in tagged
+
+
 def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_path):
     """An additional subject species is added without replacing the original.
 
@@ -14129,6 +14163,21 @@ def test_repair_duplicate_photo_species_drops_root_redo_history(tmp_path):
     tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
     assert nested in tagged_ids
     assert root not in tagged_ids
+
+
+def test_repair_duplicate_photo_species_waits_for_local_taxa(tmp_path):
+    """An empty taxa table must not consume the one-shot repair marker."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 0
+    assert db.get_meta(db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) is None
 
 
 def test_repair_duplicate_photo_species_keeps_curation_on_root_key(tmp_path):

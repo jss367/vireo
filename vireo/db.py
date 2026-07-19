@@ -10655,6 +10655,13 @@ class Database:
         """
         if self.get_meta(self._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) == "1":
             return 0
+        if self.conn.execute(
+            "SELECT 1 FROM taxa WHERE rank = 'species' LIMIT 1"
+        ).fetchone() is None:
+            # Taxonomy JSON can exist before the download job has populated
+            # the local taxa table. Without species rows, differently-spelled
+            # aliases cannot yet be grouped; leave the marker unset to retry.
+            return 0
         removed_count = 0
         try:
             rows = self.conn.execute(
@@ -14514,7 +14521,7 @@ class Database:
                         keyword_match_key(s) for s in neighbour_species
                     }
                     existing = self.conn.execute(
-                        """SELECT k.id, k.name
+                        """SELECT k.id, k.name, k.taxon_id
                            FROM photo_keywords pk
                            JOIN keywords k ON k.id = pk.keyword_id
                            LEFT JOIN taxa t ON t.id = k.taxon_id
@@ -14523,6 +14530,25 @@ class Database:
                              AND (t.rank = 'species' OR t.rank IS NULL)""",
                         (photo_id,),
                     ).fetchall()
+                    target_row = self.conn.execute(
+                        "SELECT name, taxon_id FROM keywords WHERE id = ?",
+                        (kid,),
+                    ).fetchone()
+
+                    def _is_target_species(row):
+                        if target_row["taxon_id"] is not None:
+                            return (
+                                row["taxon_id"] == target_row["taxon_id"]
+                                or (
+                                    row["taxon_id"] is None
+                                    and keyword_match_key(row["name"])
+                                    == keyword_match_key(target_row["name"])
+                                )
+                            )
+                        return (
+                            keyword_match_key(row["name"])
+                            == keyword_match_key(target_row["name"])
+                        )
                     # Compare treats a neighbouring subject's prediction as
                     # supporting an existing keyword under the taxonomy —
                     # match (same taxon), refinement (existing is broader
@@ -14555,7 +14581,8 @@ class Database:
 
                     to_remove = [
                         row for row in existing
-                        if keyword_match_key(row["name"]) not in protected
+                        if not _is_target_species(row)
+                        and keyword_match_key(row["name"]) not in protected
                         and not _supported_by_neighbour_taxonomy(row["name"])
                     ]
                     old_species = [row["name"] for row in to_remove]
@@ -14600,7 +14627,7 @@ class Database:
                             old_name, species, [(photo_id, ws)],
                             _commit=False,
                         )
-                changed_tag = replace_species or not already_has_species
+                changed_tag = not already_has_species
                 if changed_tag:
                     self.tag_photo(photo_id, kid, _commit=False)
                     self.queue_change(photo_id, "keyword_add", species, _commit=False)
