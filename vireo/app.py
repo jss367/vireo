@@ -19542,12 +19542,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _start_move_folder_job(runner, workspace_id, *, folder_id,
                                destination, display_dest, destination_name,
                                merge, remote, developed_dir,
-                               chained_from=None):
+                               chained_from=None, serialize_lock=None):
         """Enqueue a move-folder job and return its job id.
 
         Shared by the move-folder endpoint and the chained
         process-completion hook (which runs on a job thread, so this
         must not touch Flask request/app context).
+
+        ``serialize_lock``: optional ``threading.Lock`` shared by a batch
+        of chained moves; when given, the transfer itself runs under the
+        lock so batch-mates execute one at a time (see the why-comment at
+        the acquire site). The job still enqueues — and its id exists —
+        immediately.
         """
         def work(job):
             from move import move_folder
@@ -19585,16 +19591,41 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "phase": phase,
                 })
 
-            result = move_folder(
-                db=thread_db,
-                folder_id=folder_id,
-                destination=destination,
-                progress_cb=progress_cb,
-                developed_dir=developed_dir,
-                merge=merge,
-                remote=remote,
-                destination_name=destination_name,
-            )
+            # The chained moves from one import all rsync to the same NAS,
+            # and runner.start gives each its own thread immediately — so
+            # N folders would mean N concurrent rsyncs, each honoring
+            # --bwlimit individually and together consuming N× the
+            # configured bandwidth budget. The chain hands every job in
+            # the batch one shared lock so the transfers run one at a
+            # time while all N jobs (and their ids) still enqueue up
+            # front.
+            if serialize_lock is not None:
+                if not serialize_lock.acquire(blocking=False):
+                    # UI transparency: a job blocked on the batch lock
+                    # must say why it isn't moving anything yet.
+                    runner.push_event(job["id"], "progress", {
+                        "current": 0,
+                        "total": 0,
+                        "current_file": "",
+                        "phase": (
+                            "Waiting for an earlier chained move to finish"
+                        ),
+                    })
+                    serialize_lock.acquire()
+            try:
+                result = move_folder(
+                    db=thread_db,
+                    folder_id=folder_id,
+                    destination=destination,
+                    progress_cb=progress_cb,
+                    developed_dir=developed_dir,
+                    merge=merge,
+                    remote=remote,
+                    destination_name=destination_name,
+                )
+            finally:
+                if serialize_lock is not None:
+                    serialize_lock.release()
 
             # Tell the JobRunner whether the move actually succeeded. Without
             # this the runner marks any normal return "completed" — so a move
@@ -23249,7 +23280,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _enqueue_move_folder_job(thread_db, runner, workspace_id, *,
                                  folder_id, subpath, target,
-                                 chained_from=None):
+                                 chained_from=None, serialize_lock=None):
         """Enqueue a chained remote move for one imported folder.
 
         Job-thread path into move-folder (no request context). ``target`` is
@@ -23304,6 +23335,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             remote=remote,
             developed_dir=effective_cfg.get("darktable_output_dir", "") or "",
             chained_from=chained_from,
+            serialize_lock=serialize_lock,
         )
 
     def _chain_after_move(job, result, after_move, workspace_id):
@@ -23315,6 +23347,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             runner = app._job_runner
             skip = None
+            # Best-effort by design: a cancel landing in the microsecond
+            # window between this check and the runner's locked terminal-
+            # status decision still lets the moves enqueue.
             if runner.is_cancelled(job["id"]) or (
                     isinstance(result, dict) and result.get("cancelled")):
                 skip = "process cancelled"
@@ -23327,6 +23362,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return
             thread_db = Database(db_path)
             thread_db.set_active_workspace(workspace_id)
+            # One shared lock per batch: the move jobs all enqueue now (so
+            # move_job_ids is complete immediately) but their transfers run
+            # one at a time — see the why-comment in _start_move_folder_job.
+            serialize_lock = threading.Lock()
             move_ids, failures = [], []
             for entry in after_move["folders"]:
                 try:
@@ -23336,6 +23375,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         subpath=entry["subpath"],
                         target=after_move["target"],
                         chained_from=job["id"],
+                        serialize_lock=serialize_lock,
                     ))
                 except Exception as e:
                     log.exception(
@@ -23347,11 +23387,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     result["move_job_ids"] = move_ids
                 if failures:
                     result["after_move_errors"] = failures
-        except Exception:
+            elif failures:
+                # run_pipeline_job raised, so there is no result dict to
+                # carry after_move_errors — fold the failures into the
+                # job's own error tally so they reach the persisted
+                # history and jobs panel instead of dying in the log.
+                # Safe: same thread, before _run_job's except handler
+                # takes the lock, and that handler dedups before
+                # appending.
+                job["errors"].extend(failures)
+        except Exception as e:
             # This hook runs in the process job's ``finally`` — raising
             # here would mask a run_pipeline_job failure with a chaining
             # bug, so log and swallow.
             log.exception("after-process move chaining failed")
+            if not isinstance(result, dict):
+                # Raise path: no result dict to surface the failure on, so
+                # record it on the job itself (see the dedup note above).
+                msg = f"after-process move chaining failed: {e}"
+                if msg not in job["errors"]:
+                    job["errors"].append(msg)
 
     def _enqueue_process_job(thread_db, runner, workspace_id, *,
                              collection_id, process_id,

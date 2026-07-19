@@ -3600,9 +3600,17 @@ def test_chain_happy_path_enqueues_moves(app_and_db, tmp_path, stub_move):
     assert all(c["merge"] is True and c["remote"] is not None
                for c in stub_move)
     # The move must aim at the target's mount view of the archive layout:
-    # destination is remote["mount_dest_base"], derived from mount_path+subpath.
+    # destination is mount_path + the PARENT of the archive-relative
+    # subpath — move_folder re-appends the folder's own leaf name when it
+    # lands the folder inside that destination.
     mount = str(tmp_path / "mnt")
     assert all(c["destination"].startswith(mount) for c in stub_move)
+    # The import result card announces the planned move up front.
+    planned = import_job["result"]["after_process_move_planned"]
+    assert planned["target_name"] == "NAS"
+    assert isinstance(planned["folders"], list) and planned["folders"]
+    for entry in planned["folders"]:
+        assert set(entry) == {"folder_id", "subpath"}
 
 
 def test_chain_moves_even_when_process_raises(app_and_db, tmp_path, stub_move, monkeypatch):
@@ -3629,6 +3637,14 @@ def test_chain_moves_even_when_process_raises(app_and_db, tmp_path, stub_move, m
     while not stub_move and time.time() < deadline:
         time.sleep(0.05)
     assert stub_move, "chained move never fired after process failure"
+    # Let the move jobs reach a terminal state before the test ends so
+    # their worker threads don't race fixture teardown.
+    jobs = client.get("/api/jobs").get_json()
+    move_job_ids = [j["id"] for j in jobs["active"] + jobs["history"]
+                    if j.get("type") == "move-folder"]
+    assert move_job_ids
+    for mid in move_job_ids:
+        wait_for_job_via_client(client, mid)
 
 
 def test_chain_skips_move_on_cancelled_process(app_and_db, tmp_path, stub_move, monkeypatch):
@@ -3643,8 +3659,14 @@ def test_chain_skips_move_on_cancelled_process(app_and_db, tmp_path, stub_move, 
     assert import_job["status"] == "completed"
     process_job = wait_for_job_via_client(
         client, import_job["result"]["process_job_id"])
-    # Give the runner a short grace period so a wrongly-enqueued move job
-    # would have had time to invoke the stub before the assertion.
+    # Deterministic: the moves enqueue synchronously in the process job's
+    # ``finally``, before its terminal status is set — so once the wait
+    # above returned, a wrongly-enqueued move job would already be listed.
+    jobs = client.get("/api/jobs").get_json()
+    assert not [j for j in jobs["active"] + jobs["history"]
+                if j.get("type") == "move-folder"]
+    # Grace period so a wrongly-enqueued move job's worker thread would
+    # also have had time to invoke the stub before the assertion.
     time.sleep(0.5)
     assert stub_move == [], stub_move
     assert process_job["result"]["after_move_skipped"] == "process cancelled"

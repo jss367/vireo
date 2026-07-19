@@ -170,8 +170,14 @@ info makes this state visible.
   the move job moves whatever is in the folder at run time; per-file
   verification protects each file. Documented, not blocked.
 - **Zero new photos:** both links skip (see table).
-- **Multiple imported top-level folders:** one move job each; SLOT_CAP
-  scheduling in `JobRunner` serializes/limits them as with any jobs.
+- **Multiple imported top-level folders:** one move job per folder, all
+  enqueued together (so the process result's `move_job_ids` is complete
+  immediately). `JobRunner.start` gives each job its own thread — SLOT_CAP
+  only governs pipeline jobs — so the transfers themselves are serialized
+  by a chain-local lock shared across the batch: a single NAS never sees
+  concurrent chained rsyncs and `--bwlimit` is honored instead of being
+  multiplied by N. Jobs waiting on the lock report a "Waiting for an
+  earlier chained move to finish" phase.
 
 ### 6. Testing
 
