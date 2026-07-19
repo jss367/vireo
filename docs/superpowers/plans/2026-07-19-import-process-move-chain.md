@@ -42,7 +42,7 @@ Existing landmarks (verify line numbers with grep before editing — they drift)
 
 - [ ] **Step 1: Write failing tests**
 
-Follow the existing remote-target coercion test style in `vireo/tests/test_config.py` (find it: `grep -n "remote_target" vireo/tests/test_config.py`). Add:
+The existing coercion tests live in `vireo/tests/test_move_remote.py` (`test_coerce_remote_target_*` at ~150-210, calling `cfg._coerce_remote_target` directly); `vireo/tests/test_config.py` isolates config inline with `monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))` — there is no `_patch_config_path` helper, so inline that line (or add the helper). Either test file is fine; prefer `test_move_remote.py` to sit next to its siblings, testing `_coerce_remote_target` directly in their style. Add:
 
 ```python
 def _base_target(**over):
@@ -437,6 +437,8 @@ Pure refactor — behavior identical, existing tests are the safety net. The cha
 
 Move the guard stack (the `stage_boundary_lock()` block: `local_root_for_folder`, `local_root_under_folder`, `folder_has_local_workspace`, pending-transition check — vireo/app.py ~19486-19549) into a function defined above the endpoint that returns an error **string** or `None`. It takes the db explicitly (endpoint passes `_get_db()`; the chain passes its thread db). Keep the lock inside the helper. The endpoint converts a non-None return to `json_error(msg, 409)`.
 
+**Context-free requirement:** the guard stack must not touch Flask request/app context, because the chain calls it from a job thread. `local_root_for_folder`, `local_root_under_folder`, and `folder_has_local_workspace` already take the db explicitly — but `_pending_local_workspace_transition` (app.py ~4569) calls `_get_db()` internally in its `LOCAL_FOLDER_JOB_TYPES` branch, which raises `RuntimeError: working outside of application context` on a job thread. Give it an optional `db=None` parameter that defaults to `_get_db()` when omitted (so its other request-context callers are untouched), and have `_move_folder_guard_error` pass `guard_db` through. Grep all call sites of `_pending_local_workspace_transition` first to confirm the default-arg approach leaves them unchanged.
+
 - [ ] **Step 2: Extract `_start_move_folder_job(...)`**
 
 Move the work closure + `runner.start` (~19626-19724) into:
@@ -528,6 +530,11 @@ def test_chain_happy_path_enqueues_moves(app_and_db, tmp_path, stub_move):
         assert _job_config(client, mid)["chained_from"] == import_job["result"]["process_job_id"]
     assert all(c["merge"] is True and c["remote"] is not None
                for c in stub_move)
+    # Recover the spec §6 intent despite the stub: the move must aim at the
+    # target's mount view of the archive layout. destination is
+    # remote["mount_dest_base"], derived from mount_path + subpath.
+    mount = str(tmp_path / "mnt")
+    assert all(c["destination"].startswith(mount) for c in stub_move)
 
 
 def test_chain_moves_even_when_process_raises(app_and_db, tmp_path, stub_move, monkeypatch):
@@ -537,7 +544,15 @@ def test_chain_moves_even_when_process_raises(app_and_db, tmp_path, stub_move, m
         raise RuntimeError("model resolution failed")
 
     monkeypatch.setattr(pipeline_job, "run_pipeline_job", boom)
-    ...  # run chain; process job ends failed; assert stub_move received calls
+    ...  # run chain; process job ends failed. NOTE: result is None on the
+         # raise path, so move_job_ids exists nowhere — do NOT read them from
+         # the process result, and do NOT assert stub_move immediately (the
+         # move jobs run asynchronously). Poll with a deadline until
+         # stub_move is non-empty (or until the jobs list shows completed
+         # move-folder jobs), e.g.:
+         #   deadline = time.time() + 10
+         #   while not stub_move and time.time() < deadline: time.sleep(0.05)
+         #   assert stub_move, "chained move never fired after process failure"
 
 
 def test_chain_skips_move_on_cancelled_process(app_and_db, tmp_path, stub_move, monkeypatch):
