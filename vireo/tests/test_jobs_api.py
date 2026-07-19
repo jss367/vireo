@@ -3544,6 +3544,112 @@ def test_import_in_place_rejects_after_process_move(app_and_db, tmp_path):
     assert "import-in-place" in resp.get_json()["error"]
 
 
+@pytest.fixture
+def stub_move(monkeypatch):
+    """Stub the move machinery so chain tests exercise the chain, not rsync.
+
+    ``move.move_folder`` is imported inside the move job's work closure
+    (``from move import move_folder``), so patching the module attribute
+    intercepts it. The bin resolvers must return something truthy or the
+    enqueue helper refuses before ever reaching the stub.
+    """
+    import move as move_mod
+    calls = []
+
+    def fake_move_folder(db, folder_id, destination, progress_cb=None,
+                         developed_dir="", merge=False, remote=None,
+                         destination_name=""):
+        calls.append({"folder_id": folder_id, "destination": destination,
+                      "merge": merge, "remote": remote})
+        return {"moved": 1, "errors": []}
+
+    monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+    return calls
+
+
+def _run_chained_import(client, tmp_path, cull_ready_id):
+    card = _import_card(tmp_path)
+    dest = str(tmp_path / "archive")
+    _save_nas_target(tmp_path, local_root=dest)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    return wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+
+def test_chain_happy_path_enqueues_moves(app_and_db, tmp_path, stub_move):
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    import_job = _run_chained_import(client, tmp_path, cull_ready_id)
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    move_ids = process_job["result"]["move_job_ids"]
+    assert move_ids
+    for mid in move_ids:
+        mj = wait_for_job_via_client(client, mid)
+        assert mj["status"] == "completed", mj
+        assert _job_config(client, mid)["chained_from"] == import_job["result"]["process_job_id"]
+    assert all(c["merge"] is True and c["remote"] is not None
+               for c in stub_move)
+    # The move must aim at the target's mount view of the archive layout:
+    # destination is remote["mount_dest_base"], derived from mount_path+subpath.
+    mount = str(tmp_path / "mnt")
+    assert all(c["destination"].startswith(mount) for c in stub_move)
+
+
+def test_chain_moves_even_when_process_raises(app_and_db, tmp_path, stub_move, monkeypatch):
+    import pipeline_job
+
+    def boom(*a, **k):
+        raise RuntimeError("model resolution failed")
+
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", boom)
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    import_job = _run_chained_import(client, tmp_path, cull_ready_id)
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    assert process_job["status"] == "failed", process_job
+    # result is None on the raise path, so move_job_ids exists nowhere — the
+    # moves are only observable through the stub, and they run asynchronously
+    # on their own job threads. Poll with a deadline instead of asserting
+    # immediately.
+    deadline = time.time() + 10
+    while not stub_move and time.time() < deadline:
+        time.sleep(0.05)
+    assert stub_move, "chained move never fired after process failure"
+
+
+def test_chain_skips_move_on_cancelled_process(app_and_db, tmp_path, stub_move, monkeypatch):
+    import pipeline_job
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job",
+                        lambda *a, **k: {"cancelled": True, "stages": {}})
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    import_job = _run_chained_import(client, tmp_path, cull_ready_id)
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    # Give the runner a short grace period so a wrongly-enqueued move job
+    # would have had time to invoke the stub before the assertion.
+    time.sleep(0.5)
+    assert stub_move == [], stub_move
+    assert process_job["result"]["after_move_skipped"] == "process cancelled"
+
+
 def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()

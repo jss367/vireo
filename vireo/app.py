@@ -4542,6 +4542,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return False
 
     def _pending_local_workspace_transition(workspace_id, db=None):
+        """Return the queued/running local-workspace transition job, or None.
+
+        ``db``: pass an explicit Database when calling off the request
+        thread (job threads have no request context); defaults to the
+        request-scoped db via ``_get_db()``.
+        """
         # ``has_local_workspace`` only observes the ``local_workspaces`` row
         # a stage worker inserts once it actually runs; a stage/sync/discard
         # that has been enqueued but not yet reached that insert would leave
@@ -19639,6 +19645,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "bwlimit_kbps": remote["bwlimit_kbps"],
             }
         if chained_from:
+            # Provenance for the jobs panel: this move was started by a
+            # chained process run's completion hook, not by hand.
             job_config["chained_from"] = chained_from
         return runner.start(
             "move-folder", work,
@@ -21144,14 +21152,46 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 return
             try:
+                # Which imported folders must the chained NAS move relocate?
+                # Computed here — not at request time — because the archive
+                # folder rows only exist once the copy has landed. Minimal
+                # non-nested set: moving an ancestor also moves its
+                # descendants. The target itself is the enqueue-time
+                # snapshot, so a Settings edit mid-chain can't redirect the
+                # move.
+                after_move = None
+                if move_target_snapshot is not None:
+                    from import_chain import minimal_move_set
+                    folder_rows = []
+                    for i in range(0, len(photo_ids), 500):
+                        chunk = photo_ids[i:i + 500]
+                        ph = ",".join("?" * len(chunk))
+                        folder_rows.extend(thread_db.conn.execute(
+                            "SELECT DISTINCT f.id, f.path FROM photos p "
+                            "JOIN folders f ON f.id = p.folder_id "
+                            f"WHERE p.id IN ({ph})", chunk).fetchall())
+                    root = move_target_snapshot["local_archive_root"]
+                    after_move = {
+                        "target": move_target_snapshot,
+                        "folders": minimal_move_set(
+                            root, [(r["id"], r["path"]) for r in folder_rows]),
+                    }
                 process_job_id, model_warning = _enqueue_process_job(
                     thread_db, runner, active_ws,
                     collection_id=col_id,
                     process_id=after_import,
                     chained_from=job["id"],
                     expanded=after_import_snapshot,
+                    after_move=after_move,
                 )
                 result["process_job_id"] = process_job_id
+                if after_move is not None:
+                    # Surface the planned move on the import's result card so
+                    # the user can see what will happen before it fires.
+                    result["after_process_move_planned"] = {
+                        "target_name": move_target_snapshot["name"],
+                        "folders": after_move["folders"],
+                    }
                 if model_warning:
                     result["model_warning"] = model_warning
             except Exception as e:
@@ -23207,9 +23247,116 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "Download a model in Settings to enable species identification."
         )
 
+    def _enqueue_move_folder_job(thread_db, runner, workspace_id, *,
+                                 folder_id, subpath, target,
+                                 chained_from=None):
+        """Enqueue a chained remote move for one imported folder.
+
+        Job-thread path into move-folder (no request context). ``target`` is
+        the snapshot captured when the import was enqueued — deliberately NOT
+        re-resolved from Settings here, so a mid-chain edit cannot redirect
+        the move. Raises on any precondition failure — the caller records the
+        failure per folder rather than aborting the batch.
+        """
+        import posixpath
+
+        import config as cfg
+        import move as move_mod
+
+        mount_path = (target.get("mount_path") or "").strip()
+        if not mount_path:
+            raise RuntimeError(
+                "remote target has no local mount path, so moved photos "
+                "couldn't stay in your library — add one under Settings → "
+                "Remote targets")
+        if not os.path.isabs(mount_path):
+            raise RuntimeError(
+                f"remote target's local mount path isn't absolute "
+                f"(\"{mount_path}\") — fix it under Settings → Remote targets")
+        guard = _move_folder_guard_error(thread_db, folder_id)
+        if guard:
+            raise RuntimeError(guard)
+        effective_cfg = thread_db.get_effective_config(cfg.load())
+        rsync_bin = move_mod.resolve_rsync_bin(
+            effective_cfg.get("rsync_bin", "") or "")
+        if not rsync_bin:
+            raise RuntimeError("no usable GNU rsync for remote moves")
+        ssh_bin = move_mod.resolve_ssh_bin(
+            effective_cfg.get("ssh_bin", "") or "")
+        if not ssh_bin:
+            raise RuntimeError("OpenSSH client not found")
+        # ``move_folder`` lands the source folder INSIDE the destination,
+        # keeping the folder's own name — so to mirror the archive layout
+        # (``<local_archive_root>/2026/trip`` → ``<remote_path>/2026/trip``)
+        # the spec's subpath must be the folder's PARENT ("2026"), not the
+        # full archive-relative subpath, or the leaf would double up
+        # ("2026/trip/trip").
+        remote = move_mod.build_remote_move_spec(
+            target, posixpath.dirname(subpath), rsync_bin, ssh_bin)
+        return _start_move_folder_job(
+            runner, workspace_id,
+            folder_id=folder_id,
+            destination=remote["mount_dest_base"],
+            display_dest=move_mod.rsync_dest_spec(
+                target, remote["ssh_dest_base"]),
+            destination_name="",
+            merge=True,
+            remote=remote,
+            developed_dir=effective_cfg.get("darktable_output_dir", "") or "",
+            chained_from=chained_from,
+        )
+
+    def _chain_after_move(job, result, after_move, workspace_id):
+        """Enqueue the chained NAS moves when a chained process run ends.
+
+        Decision table (spec §4): fires on success AND failure; skips only on
+        an explicit cancel. ``result`` is None when run_pipeline_job raised.
+        """
+        try:
+            runner = app._job_runner
+            skip = None
+            if runner.is_cancelled(job["id"]) or (
+                    isinstance(result, dict) and result.get("cancelled")):
+                skip = "process cancelled"
+            elif not after_move.get("folders"):
+                skip = "no folders to move"
+            if skip:
+                if isinstance(result, dict):
+                    result["after_move_skipped"] = skip
+                log.info("after-process move skipped: %s", skip)
+                return
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+            move_ids, failures = [], []
+            for entry in after_move["folders"]:
+                try:
+                    move_ids.append(_enqueue_move_folder_job(
+                        thread_db, runner, workspace_id,
+                        folder_id=entry["folder_id"],
+                        subpath=entry["subpath"],
+                        target=after_move["target"],
+                        chained_from=job["id"],
+                    ))
+                except Exception as e:
+                    log.exception(
+                        "after-process move enqueue failed for folder %s",
+                        entry["folder_id"])
+                    failures.append(f"{entry['subpath']}: {e}")
+            if isinstance(result, dict):
+                if move_ids:
+                    result["move_job_ids"] = move_ids
+                if failures:
+                    result["after_move_errors"] = failures
+        except Exception:
+            # This hook runs in the process job's ``finally`` — raising
+            # here would mask a run_pipeline_job failure with a chaining
+            # bug, so log and swallow.
+            log.exception("after-process move chaining failed")
+
     def _enqueue_process_job(thread_db, runner, workspace_id, *,
                              collection_id, process_id,
-                             chained_from=None, expanded=None):
+                             chained_from=None, expanded=None,
+                             after_move=None):
         """Enqueue a collection-scoped process run for a saved-process id.
 
         The after-import chaining hook's path into the pipeline. Runs on a
@@ -23225,6 +23372,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         many minutes) can't silently swap in different toggles — or fail
         the chain outright — after the user has already accepted the choice.
         Falls back to a live resolve for callers that don't pre-capture.
+
+        ``after_move`` — ``{"target": dict, "folders": [{"folder_id",
+        "subpath"}]}`` — chains NAS moves off this run's completion via
+        ``_chain_after_move``. The target dict is the import-enqueue-time
+        snapshot (never re-resolved from Settings).
         """
         from pipeline_job import PipelineParams, run_pipeline_job
 
@@ -23263,11 +23415,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
 
         def work(job):
-            return run_pipeline_job(
-                job, runner, db_path, workspace_id, params,
-                thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
-                missing_originals_invalidator=_invalidate_missing_originals_cache,
-            )
+            result = None
+            try:
+                result = run_pipeline_job(
+                    job, runner, db_path, workspace_id, params,
+                    thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+                    missing_originals_invalidator=_invalidate_missing_originals_cache,
+                )
+                return result
+            finally:
+                # The move must fire even when processing FAILS (a processing
+                # failure must not strand photos off the NAS) — hence finally,
+                # not a post-return call. Explicit cancel is the one thing
+                # that stops the chain; _chain_after_move checks it.
+                if after_move:
+                    _chain_after_move(job, result, after_move, workspace_id)
 
         job_config = {
             "source": None,
