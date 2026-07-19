@@ -260,7 +260,7 @@ if (typeof safeFetch === 'undefined') {
     if (!resp.ok) {
       var body = {};
       try { body = await resp.json(); } catch(e) {}
-      throw new Error(body.error || 'Request failed (' + resp.status + ')');
+      throw new Error(body.message || body.error || 'Request failed (' + resp.status + ')');
     }
     var text = await resp.text();
     if (!text) return null;

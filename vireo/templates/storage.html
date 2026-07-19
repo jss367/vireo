@@ -576,7 +576,7 @@ async function deleteMaskVariant(variant) {
     });
     var body = await resp.json();
     if (!resp.ok) {
-      _showMasksModalError(body.error || ('HTTP ' + resp.status));
+      _showMasksModalError(body.message || body.error || ('HTTP ' + resp.status));
       return;
     }
     document.getElementById('masksModalError').style.display = 'none';

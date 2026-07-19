@@ -2346,13 +2346,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return jsonify({
             "error": "Internal server error",
             "code": "internal_error",
+            "message": "Something went wrong in Vireo. Try again.",
             "request_id": getattr(g, "request_id", None),
         }), 500
 
     _MAX_PER_PAGE = 500
 
-    def json_error(msg, status=400, *, code=None):
-        """Return a JSON error response. Standard shape: {"error": "msg"}."""
+    def json_error(msg, status=400, *, code=None, message=None):
+        """Return a JSON error response with an optional user-facing message."""
         if code is None:
             code = {
                 400: "invalid_request",
@@ -2366,7 +2367,87 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "code": code,
             "request_id": getattr(g, "request_id", None),
         }
+        if message:
+            payload["message"] = message
         return jsonify(payload), status
+
+    def _photo_not_found_error():
+        return json_error(
+            "photo_not_found",
+            404,
+            code="photo_not_found",
+            message=(
+                "This photo is no longer available in the active workspace. "
+                "Refresh the page and try again."
+            ),
+        )
+
+    def _keyword_not_found_error():
+        return json_error(
+            "keyword_not_found",
+            404,
+            code="keyword_not_found",
+            message=(
+                "That saved location no longer exists. Refresh the page and "
+                "select another location."
+            ),
+        )
+
+    def _google_maps_not_configured_error():
+        return json_error(
+            "no_api_key",
+            400,
+            code="no_api_key",
+            message=(
+                "Google Maps isn’t configured. Add an API key in Settings to "
+                "use Google place search."
+            ),
+        )
+
+    def _google_place_not_found_error():
+        return json_error(
+            "place_not_found",
+            404,
+            code="place_not_found",
+            message=(
+                "Google Maps couldn’t find that place. Search again and choose "
+                "another result."
+            ),
+        )
+
+    def _location_name_conflict_payload(err):
+        """Describe a location-keyword collision for both people and clients.
+
+        ``error`` remains the stable legacy code because existing clients use
+        it for branching. ``message`` is the text browser surfaces should show
+        to a person; ``error_detail`` retains the lower-level diagnostic for
+        logs and troubleshooting.
+        """
+        detail = str(err)
+        match = re.search(r"(?:child )?keyword '(.+?)' \((?:parent_id|id)=", detail)
+        if match:
+            message = (
+                f"Couldn’t assign this location because “{match.group(1)}” is "
+                "already used by another keyword. Rename that keyword in "
+                "Keywords, then try again."
+            )
+        else:
+            message = (
+                "Couldn’t assign this location because one of its place names "
+                "conflicts with an existing keyword. Rename the conflicting "
+                "keyword in Keywords, then try again."
+            )
+        return {
+            "error": "name_conflict",
+            "code": "name_conflict",
+            "message": message,
+            "error_detail": detail,
+        }
+
+    def _location_name_conflict_response(err):
+        payload = _location_name_conflict_payload(err)
+        payload["request_id"] = getattr(g, "request_id", None)
+        return jsonify(payload), 409
 
     def _resolve_remote_archive_target(remote_target_id, remote_subpath):
         """Shared remote-archive-target resolution for the import-photos
@@ -5289,7 +5370,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # mirrors serve_thumbnail / api_files_reveal.
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return json_error("not found", 404)
+            return _photo_not_found_error()
 
         result = dict(photo)
         _attach_location_statuses(db, [result])
@@ -5754,7 +5835,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if db.conn.execute(
             "SELECT 1 FROM photos WHERE id = ?", (photo_id,)
         ).fetchone() is None:
-            return json_error("photo_not_found", 404)
+            return _photo_not_found_error()
         if not db._photo_in_workspace(photo_id):
             return json_error(
                 f"Photo {photo_id} does not belong to the active workspace", 403,
@@ -6548,7 +6629,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("excluded must be a boolean")
         old = db.get_photo(photo_id)
         if not old:
-            return json_error("not found", 404)
+            return _photo_not_found_error()
         old_value = "1" if old["wildlife_excluded"] else "0"
         new_value = "1" if excluded else "0"
         try:
@@ -6568,7 +6649,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return json_error("not found", 404)
+            return _photo_not_found_error()
         recipe = db.get_photo_edit_recipe(photo_id)
         payload = {"photo_id": photo_id, "recipe": recipe}
         if recipe and recipe.get("local"):
@@ -6599,7 +6680,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return json_error("not found", 404)
+            return _photo_not_found_error()
         import local_masks
         variant_row = db.conn.execute(
             "SELECT active_mask_variant FROM photos WHERE id=?",
@@ -6632,7 +6713,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("recipe must be a JSON object")
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return json_error("not found", 404)
+            return _photo_not_found_error()
         from image_edits import RecipeError, normalize_recipe, recipe_to_json
         try:
             normalized = normalize_recipe(recipe)
@@ -6675,7 +6756,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return json_error("not found", 404)
+            return _photo_not_found_error()
         from image_edits import recipe_to_json
         old_recipe = db.get_photo_edit_recipe(photo_id)
         old_value = recipe_to_json(old_recipe) or ""
@@ -6860,7 +6941,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return json_error("not found", 404)
+            return _photo_not_found_error()
         limit = min(max(1, request.args.get("limit", 50, type=int)), 200)
         rows = db.conn.execute(
             """SELECT eh.id, eh.description, eh.created_at, eh.undone,
@@ -7407,7 +7488,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "SELECT id, type FROM keywords WHERE id = ?", (keyword_id,),
         ).fetchone()
         if row is None:
-            return json_error("keyword_not_found", 404)
+            return _keyword_not_found_error()
         if row["type"] != "location":
             return json_error("keyword is not a location", 400)
         return None
@@ -7634,10 +7715,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             import config as cfg
             key = cfg.load().get("google_maps_api_key", "")
             if not key:
-                return json_error("no_api_key", 400)
+                return _google_maps_not_configured_error()
             details = places.place_details(place_id, key)
             if details is None:
-                return json_error("place_not_found", 404)
+                return _google_place_not_found_error()
 
         try:
             leaf_id = db.upsert_place_chain(details)
@@ -7645,10 +7726,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # _upsert_one_keyword raises RuntimeError when the parent-chain
             # build hits an existing keyword of a different type at the same
             # (name, parent_id). Mirror /api/keywords/<id>/link-place's 409.
-            return jsonify({
-                "error": "name_conflict",
-                "error_detail": str(err),
-            }), 409
+            return _location_name_conflict_response(err)
         db.set_photo_location(photo_id, leaf_id)
         _queue_location_sync_if_enabled(photo_id)
         db.record_edit(
@@ -7879,18 +7957,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             import config as cfg
             key = cfg.load().get("google_maps_api_key", "")
             if not key:
-                return json_error("no_api_key", 400)
+                return _google_maps_not_configured_error()
             details = places.place_details(place_id, key)
             if details is None:
-                return json_error("place_not_found", 404)
+                return _google_place_not_found_error()
 
         try:
             leaf_id = db.upsert_place_chain(details)
         except RuntimeError as err:
-            return jsonify({
-                "error": "name_conflict",
-                "error_detail": str(err),
-            }), 409
+            return _location_name_conflict_response(err)
 
         items = []
         for pid in photo_ids:
@@ -7953,6 +8028,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "place_id": place_id,
                     "summary": group.get("summary") or place_id,
                     "error": "missing_details",
+                    "code": "missing_details",
+                    "message": (
+                        "Google Maps didn’t return enough information for this "
+                        "place. Search again and choose another result."
+                    ),
                 })
                 continue
             try:
@@ -7961,8 +8041,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 group_errors.append({
                     "place_id": place_id,
                     "summary": group.get("summary") or place_id,
-                    "error": "name_conflict",
-                    "error_detail": str(err),
+                    **_location_name_conflict_payload(err),
                 })
                 continue
             keyword_id_by_place_id[place_id] = leaf_id
@@ -8118,8 +8197,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         - 404 ``keyword_not_found`` — ``keyword_id`` doesn't exist.
         - 409 ``name_conflict`` — the parent chain would clash with an
           existing keyword of a different ``type`` at the same
-          ``(name, parent_id)``. Carries an ``error_detail`` string from the
-          underlying RuntimeError for debugging.
+          ``(name, parent_id)``. Carries a user-facing ``message`` plus an
+          ``error_detail`` string from the underlying RuntimeError for
+          debugging.
         """
         body = request.get_json(silent=True) or {}
         place_id = _extract_place_id(body)
@@ -8131,10 +8211,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             import config as cfg
             key = cfg.load().get("google_maps_api_key", "")
             if not key:
-                return json_error("no_api_key", 400)
+                return _google_maps_not_configured_error()
             details = places.place_details(place_id, key)
             if details is None:
-                return json_error("place_not_found", 404)
+                return _google_place_not_found_error()
 
         db = _get_db()
         try:
@@ -8146,17 +8226,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if "is type" in msg:
                 return jsonify({
                     "error": "wrong_keyword_type",
+                    "code": "wrong_keyword_type",
+                    "message": (
+                        "Only location keywords can be linked to Google Maps "
+                        "places."
+                    ),
                     "error_detail": msg,
+                    "request_id": getattr(g, "request_id", None),
                 }), 400
-            return json_error("keyword_not_found", 404)
+            return _keyword_not_found_error()
         except RuntimeError as err:
             # _upsert_one_keyword raises RuntimeError when the parent-chain
             # build hits an existing keyword of a different type at the same
             # (name, parent_id). Surface the message for debugging.
-            return jsonify({
-                "error": "name_conflict",
-                "error_detail": str(err),
-            }), 409
+            return _location_name_conflict_response(err)
 
         # Audit log: this action isn't tied to a single photo (it operates on
         # a keyword), so we omit the per-photo items list. ``photo_id`` in

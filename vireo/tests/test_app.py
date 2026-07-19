@@ -55,6 +55,9 @@ def test_browse_page(app_and_db):
     html = resp.get_data(as_text=True)
     assert 'id="syncBanner"' in html
     assert 'function refreshPendingSyncBanner()' in html
+    assert html.count(
+        "_showLocationError(e && e.message ? e.message : 'Could not"
+    ) == 5
 
 
 def test_browse_discloses_raw_jpeg_pairs_and_offers_source_switch(app_and_db):

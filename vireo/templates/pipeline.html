@@ -3936,7 +3936,7 @@ async function setActiveMaskVariant(variant) {
     });
     var body = await resp.json();
     if (!resp.ok) {
-      _showSam2CoverageError(body.error || ('HTTP ' + resp.status));
+      _showSam2CoverageError(body.message || body.error || ('HTTP ' + resp.status));
       return;
     }
   } catch(e) {
