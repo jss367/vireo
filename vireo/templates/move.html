@@ -705,8 +705,8 @@ body { padding-bottom: 48px; }
           </svg>
         </div>
         <div>
-          <h3>Move an entire folder</h3>
-          <p>Choose where it should live and rename it if you’d like. Subfolders and companion files move with it.</p>
+          <h3>Move a folder or organize its photos</h3>
+          <p>Keep everything together, or split photos into capture-date folders. Companion files stay with their photos.</p>
         </div>
       </div>
 
@@ -755,12 +755,30 @@ body { padding-bottom: 48px; }
               </div>
 
               <div class="field-group">
-                <label class="field-label" for="quickFolderName">Folder name</label>
-                <div class="move-control-row">
-                  <input type="text" id="quickFolderName" placeholder="Select a source folder first" oninput="updateQuickMoveBtn()" disabled>
-                  <button class="btn btn-secondary reset-name-btn" id="quickResetNameBtn" type="button" onclick="resetQuickFolderName()" disabled>Use original</button>
+                <label class="field-label" for="quickFolderMode">Folder organization</label>
+                <select class="move-control" id="quickFolderMode" onchange="onQuickFolderModeChange()">
+                  <option value="single">Keep as one folder</option>
+                  <option value="date">Organize photos by capture date</option>
+                </select>
+                <div id="quickSingleFolderControls" style="margin-top:8px;">
+                  <div class="move-control-row">
+                    <input type="text" id="quickFolderName" aria-label="Folder name" placeholder="Select a source folder first" oninput="updateQuickMoveBtn()" disabled>
+                    <button class="btn btn-secondary reset-name-btn" id="quickResetNameBtn" type="button" onclick="resetQuickFolderName()" disabled>Use original</button>
+                  </div>
+                  <div class="field-hint">Edit this name to rename the folder as part of the move.</div>
                 </div>
-                <div class="field-hint">Edit this name to rename the folder as part of the move.</div>
+                <div id="quickDateFolderControls" style="display:none;margin-top:8px;">
+                  <select class="move-control" id="quickFolderTemplatePreset" aria-label="Date folder format" onchange="updateQuickFolderTemplateControls()">
+                    <option value="%Y/%Y-%m-%d">%Y/%Y-%m-%d — 2026/2026-07-12</option>
+                    <option value="%Y/%m/%d">%Y/%m/%d — 2026/07/12</option>
+                    <option value="%Y/%m">%Y/%m — 2026/07</option>
+                    <option value="%Y">%Y — 2026</option>
+                    <option value="%Y-%m-%d" selected>%Y-%m-%d — 2026-07-12</option>
+                    <option value="__custom__">Custom…</option>
+                  </select>
+                  <input class="move-control" type="text" id="quickFolderTemplate" aria-label="Custom date folder format" placeholder="Enter a strftime format" oninput="updateQuickMoveBtn()" style="display:none;margin-top:8px;">
+                  <div class="field-hint">Photos can land in different folders when their capture dates differ. Photos without a capture date go to <code>unsorted</code>.</div>
+                </div>
                 <div class="field-error" id="quickFolderNameError" role="status"></div>
               </div>
             </div>
@@ -947,6 +965,13 @@ function onQuickDestModeChange() {
   var remoteId = quickRemoteTargetId();
   document.getElementById('quickLocalRow').style.display = remoteId ? 'none' : '';
   document.getElementById('quickRemoteRow').style.display = remoteId ? '' : 'none';
+  var dateOption = document.querySelector('#quickFolderMode option[value="date"]');
+  if (dateOption) dateOption.disabled = !!remoteId;
+  if (remoteId && quickUsesDateFolders()) {
+    document.getElementById('quickFolderMode').value = 'single';
+    onQuickFolderModeChange();
+    return;
+  }
   updateQuickMoveBtn();
 }
 
@@ -1036,7 +1061,45 @@ function resetQuickFolderName() {
   updateQuickMoveBtn();
 }
 
+function quickUsesDateFolders() {
+  return document.getElementById('quickFolderMode').value === 'date';
+}
+
+function onQuickFolderModeChange() {
+  var byDate = quickUsesDateFolders();
+  document.getElementById('quickSingleFolderControls').style.display = byDate ? 'none' : '';
+  document.getElementById('quickDateFolderControls').style.display = byDate ? '' : 'none';
+  updateQuickMoveBtn();
+}
+
+function selectedQuickFolderTemplate() {
+  var preset = document.getElementById('quickFolderTemplatePreset');
+  if (preset.value !== '__custom__') return preset.value;
+  return (document.getElementById('quickFolderTemplate').value || '').trim();
+}
+
+function updateQuickFolderTemplateControls() {
+  var preset = document.getElementById('quickFolderTemplatePreset');
+  var custom = document.getElementById('quickFolderTemplate');
+  custom.style.display = preset.value === '__custom__' ? '' : 'none';
+  if (preset.value === '__custom__') custom.focus();
+  updateQuickMoveBtn();
+}
+
+function quickFolderTemplateResult() {
+  if (!quickUsesDateFolders()) return {value: '', error: ''};
+  var value = selectedQuickFolderTemplate();
+  if (!value) return {value: '', error: 'Enter a date folder format.'};
+  var normalized = value.replace(/\\/g, '/');
+  if (normalized.charAt(0) === '/' || /^[A-Za-z]:/.test(normalized) ||
+      normalized.split('/').some(function(part) { return part === '..'; })) {
+    return {value: '', error: 'Use a relative folder format without “..”.'};
+  }
+  return {value: value, error: ''};
+}
+
 function quickFolderNameResult() {
+  if (quickUsesDateFolders()) return {value: '', error: '', rename: false};
   var raw = document.getElementById('quickFolderName').value;
   // "Unchanged from the pre-populated default" is a distinct state from
   // "the user typed something that happens to trim to the source name":
@@ -1116,21 +1179,61 @@ function setQuickMoveSummary(folder, finalPath) {
   return text;
 }
 
+function setQuickDateSummary(folder, data) {
+  var summary = document.getElementById('quickMoveSummary');
+  if (!folder || !data || !data.date_organized) {
+    summary.replaceChildren();
+    summary.style.display = 'none';
+    return;
+  }
+  summary.replaceChildren();
+  var eyebrow = document.createElement('div');
+  eyebrow.className = 'move-preview-eyebrow';
+  eyebrow.textContent = 'Resulting folders';
+  summary.appendChild(eyebrow);
+
+  var destinations = data.destinations || [];
+  destinations.slice(0, 8).forEach(function(item) {
+    var row = document.createElement('div');
+    row.className = 'move-preview-meta';
+    row.textContent = item.path + ' · ' + item.photo_count.toLocaleString() +
+      ' photo' + (item.photo_count !== 1 ? 's' : '') +
+      (item.exists ? ' · already exists' : '');
+    summary.appendChild(row);
+  });
+  if (destinations.length > 8) {
+    var more = document.createElement('div');
+    more.className = 'move-preview-meta';
+    more.textContent = '+ ' + (destinations.length - 8).toLocaleString() +
+      ' more folders';
+    summary.appendChild(more);
+  }
+  var meta = document.createElement('div');
+  meta.className = 'move-preview-meta';
+  meta.textContent = data.photo_count.toLocaleString() + ' photos across ' +
+    data.destination_count.toLocaleString() + ' folder' +
+    (data.destination_count !== 1 ? 's' : '') +
+    ' · Companion files move with their photos';
+  summary.appendChild(meta);
+  summary.style.display = 'block';
+}
+
 function updateQuickMoveBtn() {
   var fid = document.getElementById('quickFolderSelect').value;
   var remoteId = quickRemoteTargetId();
   var btn = document.getElementById('quickMoveBtn');
   var nameResult = quickFolderNameResult();
+  var templateResult = quickFolderTemplateResult();
   var nameError = document.getElementById('quickFolderNameError');
-  nameError.textContent = fid ? nameResult.error : '';
+  nameError.textContent = fid ? (nameResult.error || templateResult.error) : '';
   var ready;
   if (remoteId) {
     // Remote needs a usable GNU rsync; no destination text is required (the
     // target carries it). An optional subpath refines where under it.
-    ready = !!fid && quickRsyncAvailable && !nameResult.error;
+    ready = !!fid && quickRsyncAvailable && !nameResult.error && !templateResult.error;
   } else {
     ready = !!(fid && document.getElementById('quickDestInput').value.trim()
-      && !nameResult.error);
+      && !nameResult.error && !templateResult.error);
   }
   btn.disabled = quickMoveBusy || !ready;
   btn.innerHTML = quickMoveBusy
@@ -1245,6 +1348,23 @@ function updateQuickMovePreview() {
     setQuickMoveSummary(null, '');
     return;
   }
+  var templateResult = quickFolderTemplateResult();
+  if (quickUsesDateFolders()) {
+    if (templateResult.error) {
+      preview.textContent = '';
+      setQuickMoveSummary(null, '');
+      return;
+    }
+    preview.textContent = '';
+    var dateStatus = document.createElement('div');
+    dateStatus.id = 'quickDestStatus';
+    dateStatus.className = 'dest-status';
+    dateStatus.textContent = 'Checking capture dates…';
+    preview.appendChild(dateStatus);
+    setQuickMoveSummary(null, '');
+    scheduleQuickDatePreflight(fid, dest, templateResult.value);
+    return;
+  }
   var finalPath = resolvedMoveDest(folder, dest, destinationName);
 
   preview.textContent = '';
@@ -1317,6 +1437,51 @@ function normalizeRemoteSubpath(raw) {
 
 var quickPreflightSeq = 0;
 var quickPreflightTimer = null;
+
+function scheduleQuickDatePreflight(fid, destination, folderTemplate) {
+  if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
+  var seq = ++quickPreflightSeq;
+  if (!_isAbsolutePath(destination)) return;
+  quickPreflightTimer = setTimeout(async function() {
+    var data;
+    try {
+      var resp = await fetch('/api/move-folder/preflight', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          folder_id: fid,
+          destination: destination,
+          folder_template: folderTemplate,
+        }),
+      });
+      if (!resp.ok) { if (seq === quickPreflightSeq) clearQuickDestStatus(); return; }
+      data = await resp.json();
+    } catch (e) {
+      if (seq === quickPreflightSeq) clearQuickDestStatus();
+      return;
+    }
+    if (seq !== quickPreflightSeq || !quickUsesDateFolders()) return;
+    var folder = allFolders.find(function(item) { return item.id === fid; });
+    setQuickDateSummary(folder, data);
+    var status = document.getElementById('quickDestStatus');
+    if (!status) return;
+    if (!data.photo_count) {
+      status.textContent = 'No tracked photos were found in this folder.';
+      status.style.color = 'var(--warning)';
+    } else {
+      var existing = (data.destinations || []).filter(function(item) {
+        return item.exists;
+      }).length;
+      status.textContent = existing
+        ? '⚠ ' + existing.toLocaleString() + ' resulting folder' +
+          (existing !== 1 ? 's already exist' : ' already exists') +
+          '. Same-name files will not be overwritten.'
+        : '✓ ' + data.destination_count.toLocaleString() + ' date folder' +
+          (data.destination_count !== 1 ? 's' : '') + ' will be created.';
+      status.style.color = existing ? 'var(--warning)' : 'var(--text-dim)';
+    }
+  }, 350);
+}
 
 function scheduleQuickPreflight(fid, dest, remoteId, subpath, destinationName) {
   if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
@@ -1445,6 +1610,11 @@ async function startQuickMove() {
     showToast(nameResult.error, 'error');
     return;
   }
+  var templateResult = quickFolderTemplateResult();
+  if (templateResult.error) {
+    showToast(templateResult.error, 'error');
+    return;
+  }
 
   // Build the destination half of the request body — a local path or a
   // remote target + optional subpath. The same shape is reused for both the
@@ -1475,7 +1645,9 @@ async function startQuickMove() {
   } else {
     var dest = document.getElementById('quickDestInput').value.trim();
     if (!dest) return;
-    destBody = {destination: dest, destination_name: nameResult.value};
+    destBody = quickUsesDateFolders()
+      ? {destination: dest, folder_template: templateResult.value}
+      : {destination: dest, destination_name: nameResult.value};
   }
 
   var folder = allFolders.find(function(f) { return f.id === fid; });
@@ -1510,6 +1682,23 @@ async function startQuickMove() {
   }
 
   var finalPath = pf.resolved_dest;
+  if (pf.date_organized) {
+    setQuickDateSummary(folder, pf);
+    if (!pf.photo_count) {
+      showToast('No tracked photos were found in this folder.', 'error');
+      return;
+    }
+    var dateSummary = 'Move ' + pf.photo_count.toLocaleString() + ' photo' +
+      (pf.photo_count !== 1 ? 's' : '') + ' into ' +
+      pf.destination_count.toLocaleString() + ' capture-date folder' +
+      (pf.destination_count !== 1 ? 's' : '') + ' inside ' + finalPath +
+      '? Files are copied and verified before originals are removed. ' +
+      'Existing same-name files are left untouched.';
+    showConfirm('Organize by Capture Date', dateSummary, function() {
+      executeQuickMove(Object.assign({folder_id: fid, merge: false}, destBody));
+    });
+    return;
+  }
   var moveSummary = folder
     ? setQuickMoveSummary(folder, finalPath)
     : 'Confirm moving photos from ' + sourcePath + ' to ' + finalPath + '?';
@@ -1557,7 +1746,8 @@ async function executeQuickMove(body) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
-    showToast((body.merge ? 'Merge' : 'Move') + ' started (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
+    var action = body.folder_template ? 'Date organization' : (body.merge ? 'Merge' : 'Move');
+    showToast(action + ' started (job ' + resp.job_id + ') — track progress in the bottom panel', 'info');
   } catch (e) {
     // safeFetch already shows error toast
   }

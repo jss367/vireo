@@ -19472,6 +19472,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         folder_id = body.get("folder_id")
         destination = body.get("destination", "")
         destination_name_raw = body.get("destination_name", "")
+        folder_template_raw = body.get("folder_template", "")
         remote_target_id = (body.get("remote_target_id") or "").strip()
         subpath = body.get("subpath", "")
         merge_raw = body.get("merge", False)
@@ -19481,6 +19482,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not folder_id:
             return json_error("folder_id required")
+        if not isinstance(folder_template_raw, str):
+            return json_error("folder_template must be a string")
+        folder_template = folder_template_raw.strip()
+        if folder_template and destination_name_raw:
+            return json_error(
+                "destination_name cannot be combined with folder_template"
+            )
 
         # A folder covered by any workspace's local_workspace_folders row has
         # its folders.path rebased into that workspace's managed copy; a
@@ -19562,6 +19570,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # is not required in that case.
         remote = None
         if remote_target_id:
+            if folder_template:
+                return json_error(
+                    "Organizing one folder into capture-date folders is only "
+                    "available for local or mounted-drive destinations."
+                )
             target = cfg.get_remote_target(remote_target_id)
             if not target:
                 return json_error("Remote target not found", status=404)
@@ -19619,11 +19632,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return json_error("destination must be an absolute path")
             display_dest = destination
 
+        if folder_template:
+            try:
+                date_plan = move_mod.plan_folder_date_moves(
+                    _get_db(), folder_id, destination, folder_template,
+                )
+            except ValueError as exc:
+                return json_error(str(exc))
+            if not date_plan:
+                return json_error("No tracked photos found in the source folder")
+
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
 
         def work(job):
-            from move import move_folder
+            from move import move_folder, move_folder_by_date
 
             thread_db = Database(db_path)
             thread_db.set_active_workspace(active_ws)
@@ -19658,16 +19681,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "phase": phase,
                 })
 
-            result = move_folder(
-                db=thread_db,
-                folder_id=folder_id,
-                destination=destination,
-                progress_cb=progress_cb,
-                developed_dir=developed_dir,
-                merge=merge,
-                remote=remote,
-                destination_name=destination_name,
-            )
+            if folder_template:
+                result = move_folder_by_date(
+                    db=thread_db,
+                    folder_id=folder_id,
+                    destination=destination,
+                    folder_template=folder_template,
+                    progress_cb=progress_cb,
+                )
+            else:
+                result = move_folder(
+                    db=thread_db,
+                    folder_id=folder_id,
+                    destination=destination,
+                    progress_cb=progress_cb,
+                    developed_dir=developed_dir,
+                    merge=merge,
+                    remote=remote,
+                    destination_name=destination_name,
+                )
 
             # Tell the JobRunner whether the move actually succeeded. Without
             # this the runner marks any normal return "completed" — so a move
@@ -19706,6 +19738,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         job_config = {
             "folder_id": folder_id, "destination": display_dest, "merge": merge,
         }
+        if folder_template:
+            job_config["folder_template"] = folder_template
         if destination_name:
             job_config["destination_name"] = destination_name
         if remote:
@@ -19765,6 +19799,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         folder_id = body.get("folder_id")
         destination = body.get("destination", "")
         destination_name_raw = body.get("destination_name", "")
+        folder_template_raw = body.get("folder_template", "")
         mode = body.get("mode", "quick")
         if mode not in ("quick", "exact", "preview"):
             mode = "quick"
@@ -19773,6 +19808,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not folder_id:
             return json_error("folder_id required")
+        if not isinstance(folder_template_raw, str):
+            return json_error("folder_template must be a string")
+        folder_template = folder_template_raw.strip()
+        if folder_template and destination_name_raw:
+            return json_error(
+                "destination_name cannot be combined with folder_template"
+            )
         try:
             destination_name = move_mod.normalize_destination_name(
                 destination_name_raw)
@@ -19787,6 +19829,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         # Remote target: resolve the NAS-side dest and probe it over SSH.
         if remote_target_id:
+            if folder_template:
+                return json_error(
+                    "Organizing one folder into capture-date folders is only "
+                    "available for local or mounted-drive destinations."
+                )
             import posixpath
 
             import config as cfg
@@ -19835,6 +19882,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("destination required")
         if not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
+
+        if folder_template:
+            try:
+                plan = move_mod.plan_folder_date_moves(
+                    _get_db(), folder_id, destination, folder_template,
+                )
+            except ValueError as exc:
+                return json_error(str(exc))
+            destinations = [
+                {
+                    "path": item["destination"],
+                    "relative_path": item["relative_path"],
+                    "photo_count": item["photo_count"],
+                    "exists": os.path.isdir(item["destination"]),
+                }
+                for item in plan
+            ]
+            return jsonify({
+                "resolved_dest": destination,
+                "date_organized": True,
+                "folder_template": folder_template,
+                "destinations": destinations,
+                "destination_count": len(destinations),
+                "photo_count": sum(item["photo_count"] for item in plan),
+                "exists": any(item["exists"] for item in destinations),
+                "file_count": 0,
+                "file_count_truncated": False,
+            })
 
         resolved = resolve_folder_dest(
             folder["path"], folder["name"], destination, destination_name)

@@ -99,6 +99,76 @@ def test_move_photos_updates_db(move_env):
     assert photo["folder_id"] == env["fid_dst"]
 
 
+def test_move_folder_by_date_splits_photos_and_moves_sidecars(tmp_path):
+    """A date template can fan one source folder into multiple destinations."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "first.jpg").write_bytes(b"first")
+    (src / "first.xmp").write_text("<xmp/>")
+    (src / "second.jpg").write_bytes(b"second")
+    p1 = db.add_photo(
+        folder_id=fid, filename="first.jpg", extension=".jpg",
+        file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    p2 = db.add_photo(
+        folder_id=fid, filename="second.jpg", extension=".jpg",
+        file_size=6, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    result = move_folder_by_date(
+        db, fid, str(archive), "%Y-%m-%d",
+    )
+
+    assert result["moved"] == 2
+    assert result["errors"] == []
+    assert result["destination_count"] == 2
+    assert (archive / "2026-07-12" / "first.jpg").read_bytes() == b"first"
+    assert (archive / "2026-07-12" / "first.xmp").exists()
+    assert (archive / "2026-07-13" / "second.jpg").read_bytes() == b"second"
+    assert not (src / "first.jpg").exists()
+    assert not (src / "second.jpg").exists()
+    rows = db.conn.execute(
+        """SELECT p.id, f.path FROM photos p
+           JOIN folders f ON f.id = p.folder_id
+           WHERE p.id IN (?, ?)""",
+        (p1, p2),
+    ).fetchall()
+    assert {row["path"] for row in rows} == {
+        str(archive / "2026-07-12"),
+        str(archive / "2026-07-13"),
+    }
+
+
+def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path):
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    (src / "unknown.jpg").write_bytes(b"x")
+    db.add_photo(
+        folder_id=fid, filename="unknown.jpg", extension=".jpg",
+        file_size=1, file_mtime=None,
+    )
+
+    plan = plan_folder_date_moves(db, fid, str(tmp_path / "archive"), "%Y-%m-%d")
+
+    assert len(plan) == 1
+    assert plan[0]["relative_path"] == "unsorted"
+
+
 def test_move_photos_collision_skips(move_env):
     """move_photos reports collision and skips conflicting files."""
     from move import move_photos

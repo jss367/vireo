@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime
 
 try:
     from .proc import no_window_kwargs
@@ -1556,6 +1557,132 @@ def _tracked_destination_ancestor(db, folder_id, dest_path):
         ):
             return row
     return None
+
+
+def plan_folder_date_moves(db, folder_id, destination, folder_template):
+    """Plan a folder's tracked photos into capture-date destinations.
+
+    The date comes from the same catalog capture-time helper used elsewhere;
+    file mtime is the fallback, matching import's folder-planning behavior.
+    Returns a list ordered by rendered relative path so previews and jobs are
+    deterministic. Each item contains ``relative_path``, ``destination``,
+    ``photo_ids``, and ``photo_count``.
+    """
+    if not isinstance(destination, str) or not os.path.isabs(destination):
+        raise ValueError("destination must be an absolute path")
+    if not isinstance(folder_template, str) or not folder_template.strip():
+        raise ValueError("folder_template must be a non-empty string")
+
+    try:
+        from .capture_time import _capture_datetime
+        from .ingest import build_destination_path
+    except ImportError:
+        from capture_time import _capture_datetime
+        from ingest import build_destination_path
+
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (folder_id,)
+    ).fetchone()
+    if not folder:
+        raise ValueError("Folder not found")
+
+    root = folder["path"].replace("\\", "/").rstrip("/")
+    prefix = root + "/"
+    photos = db.conn.execute(
+        """SELECT p.*, f.path AS folder_path
+           FROM photos p
+           JOIN folders f ON f.id = p.folder_id
+           WHERE f.id = ?
+              OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?
+           ORDER BY p.id""",
+        (folder_id, len(prefix), prefix),
+    ).fetchall()
+
+    groups = {}
+    template = folder_template.strip()
+    for photo in photos:
+        capture_dt = _capture_datetime(photo)
+        if capture_dt is None and photo["file_mtime"] is not None:
+            try:
+                capture_dt = datetime.fromtimestamp(float(photo["file_mtime"]))
+            except (OSError, OverflowError, TypeError, ValueError):
+                capture_dt = None
+        relative = build_destination_path(capture_dt, template)
+        if not relative:
+            raise ValueError("folder template produced an empty path")
+        groups.setdefault(relative, []).append(int(photo["id"]))
+
+    return [
+        {
+            "relative_path": relative,
+            "destination": os.path.join(destination, *relative.split("/")),
+            "photo_ids": groups[relative],
+            "photo_count": len(groups[relative]),
+        }
+        for relative in sorted(groups)
+    ]
+
+
+def move_folder_by_date(db, folder_id, destination, folder_template,
+                        progress_cb=None):
+    """Move a folder's tracked photos into capture-date subfolders.
+
+    Each photo uses ``move_photos``' copy/verify/catalog-update/delete order,
+    including XMP and RAW/JPEG companions. Existing same-name files are never
+    overwritten. Unlike ``move_folder``, this intentionally moves photos (and
+    their companions), not unrelated untracked files in the source tree.
+    """
+    groups = plan_folder_date_moves(
+        db, folder_id, destination, folder_template,
+    )
+    if not groups:
+        return {
+            "moved": 0,
+            "errors": ["No tracked photos found in the source folder"],
+            "destinations": [],
+            "destination_count": 0,
+        }
+    total = sum(group["photo_count"] for group in groups)
+    completed = 0
+    moved = 0
+    errors = []
+    destinations = []
+
+    for group in groups:
+        group_start = completed
+
+        def group_progress(current, _total, filename, _start=group_start):
+            if progress_cb:
+                progress_cb(_start + current, total, filename,
+                            "Organizing by capture date")
+
+        result = move_photos(
+            db,
+            group["photo_ids"],
+            group["destination"],
+            progress_cb=group_progress,
+        )
+        group_moved = int(result.get("moved", 0))
+        moved += group_moved
+        errors.extend(result.get("errors") or [])
+        completed += group["photo_count"]
+        destinations.append({
+            "path": group["destination"],
+            "planned": group["photo_count"],
+            "moved": group_moved,
+        })
+        if progress_cb and completed > group_start + group_moved:
+            # Keep the overall bar advancing when a photo was skipped because
+            # of a missing source or collision (move_photos only reports
+            # successful items).
+            progress_cb(completed, total, "", "Organizing by capture date")
+
+    return {
+        "moved": moved,
+        "errors": errors,
+        "destinations": destinations,
+        "destination_count": len(destinations),
+    }
 
 
 def move_photos(db, photo_ids, destination, progress_cb=None):
