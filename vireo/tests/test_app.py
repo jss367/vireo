@@ -1728,6 +1728,81 @@ def test_encounter_species_replacement_retags_same_taxon_alias(app_and_db):
     assert redone == ["Auriparus flaviceps"]
 
 
+def test_encounter_species_replacement_preserves_legacy_homonym(app_and_db):
+    """When the previous species is a linked taxon and the catalog also
+    holds another taxonomy row with the SAME normalized key bound to a
+    different taxon (a homonym: legacy ``Robin`` alongside taxonomy
+    ``Robin`` pointing at a different species), a replacement must not
+    match unlinked NULL-taxon same-key rows as the old species. Otherwise
+    a legacy ``Robin`` tag on the photo (potentially the intended
+    homonym) is queued for removal purely because its normalized key
+    coincides with the swapped-out species name.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (100, 'Erithacus rubecula', 'Robin', 'species')"
+    )
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (200, 'Turdus migratorius', 'American Robin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    # Linked "old" species Erithacus rubecula (taxon 100), name "Robin".
+    old_root = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 100, type = 'taxonomy' WHERE id = ?",
+        (old_root,),
+    )
+    # A DIFFERENT taxonomy row anywhere in the catalog whose normalized key
+    # is also "robin" but points at a different taxon (American Robin).
+    # add_keyword's (name, parent_id, type) UNIQUE constraint means we insert
+    # directly under a hierarchy parent to make it a distinct row.
+    homonym_parent = db.add_keyword("Turdidae")
+    db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Robin', ?, 1, 'taxonomy', 200)",
+        (homonym_parent,),
+    )
+    # A separate legacy species leaf on the photo whose taxon has not
+    # been backfilled (species-like but taxon_id IS NULL). This mimics
+    # an upgraded catalog where a hierarchy leaf was flagged as
+    # taxonomy but never linked. Because its normalized key coincides
+    # with the swapped-out species, without the homonym guard the
+    # replacement would treat it as the old species and untag it.
+    legacy_parent = db.add_keyword("Old Field Guide")
+    legacy_leaf = db.add_keyword("Robin", parent_id=legacy_parent)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (legacy_leaf,),
+    )
+    db.tag_photo(photo_id, old_root)
+    db.tag_photo(photo_id, legacy_leaf)
+    db.conn.commit()
+
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Robin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    # Linked root "Robin" was the confirmed old species — must be untagged.
+    assert old_root not in tagged_ids
+    # Legacy leaf "Robin" is an ambiguous homonym — must survive; the
+    # replacement should not treat it as the old species just because
+    # the normalized key matches.
+    assert legacy_leaf in tagged_ids
+
+
 def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
     """Old-species lookup must be scoped to root species keywords only."""
     app, db = app_and_db

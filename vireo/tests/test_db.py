@@ -14518,6 +14518,132 @@ def test_repair_duplicate_photo_species_drops_root_redo_history(tmp_path):
     assert root not in tagged_ids
 
 
+def test_repair_duplicate_photo_species_guards_against_unlinked_homonyms(tmp_path):
+    """A legacy NULL-taxon leaf whose key collides with a linked root but
+    represents a different species (e.g. legacy ``Robin`` alongside
+    taxonomy ``Robin`` linked to a different taxon) must not be folded
+    into the linked root's group and cause the repair to detach the
+    accepted taxonomy species."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (100, "Erithacus rubecula", "Robin"),
+            (200, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Linked accepted species (Erithacus rubecula / Robin).
+    root_linked = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Robin"], root_linked),
+    )
+    # A DIFFERENT species (American Robin) also exists in the catalog under
+    # the same normalized display key — legacy hierarchy leaves under the
+    # same name were common before disambiguation.
+    other_root = db.add_keyword("Robin", parent_id=None, is_species=True)
+    # Manually make the "other_root" a taxonomy-linked homonym pointing at
+    # a different taxon. add_keyword may already have merged into the
+    # existing "Robin" row; if so, seed a separate linked keyword.
+    other_root_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ? AND parent_id IS NULL "
+        "AND id != ?",
+        ("Robin", root_linked),
+    ).fetchone()
+    if other_root_row is None:
+        db.conn.execute(
+            "INSERT INTO keywords (name, is_species, type, taxon_id) "
+            "VALUES (?, 1, 'taxonomy', ?)",
+            ("Robin (alt)", taxa["American Robin"]),
+        )
+        other_row = db.conn.execute(
+            "SELECT id FROM keywords WHERE name = ?", ("Robin (alt)",)
+        ).fetchone()
+        # Restore the same match_key so the ambiguity guard triggers.
+        db.conn.execute(
+            "UPDATE keywords SET name = ? WHERE id = ?",
+            ("Robin", other_row["id"]),
+        )
+    parent = db.add_keyword("Songbirds")
+    # An unlinked hierarchy leaf named "Robin" under Songbirds — intent
+    # ambiguous, could be either taxon.
+    unlinked_leaf = db.add_keyword("Robin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+        "taxon_id = NULL WHERE id = ?",
+        (unlinked_leaf,),
+    )
+    db.tag_photo(pid, root_linked)
+    db.tag_photo(pid, unlinked_leaf)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    # The repair must leave the linked root attached; the unlinked leaf
+    # cannot safely be folded into the linked group because the key is a
+    # known homonym.
+    db.repair_duplicate_photo_species()
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert root_linked in tagged_ids
+
+
+def test_repair_duplicate_photo_species_deletes_json_species_replace_history(tmp_path):
+    """species_replace items can store ``old_value`` as JSON with
+    ``keyword_ids``. A bare-string equality misses those, so undo/redo
+    of that entry would re-tag the detached root. The repair must parse
+    JSON payloads and delete species_replace items that reference any
+    of the removed root keyword ids."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute("UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,))
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Craft a species_replace item whose old_value is a JSON payload
+    # referencing the redundant root via ``keyword_ids``.
+    import json as _json
+    new_kw = db.add_keyword("Sparrow", is_species=True)
+    edit_id = db.record_edit(
+        "species_replace", "swap species", str(new_kw),
+        [{
+            "photo_id": pid,
+            "old_value": _json.dumps({"keyword_ids": [root, 999]}),
+            "new_value": str(new_kw),
+        }],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    # The species_replace item that referenced the detached root via JSON
+    # must be dropped so undo/redo cannot re-tag the root.
+    remaining = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM edit_history_items WHERE edit_id = ?",
+        (edit_id,),
+    ).fetchone()["n"]
+    assert remaining == 0
+
+
 def test_repair_duplicate_photo_species_queues_sidecar_remove_for_orphaned_alias(tmp_path):
     """When the surviving hierarchy leaf is spelled differently from the
     detached root (e.g. root ``Verdin`` and nested ``Desert Verdin`` for

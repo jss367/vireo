@@ -23980,6 +23980,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if is_replacement and old_kid_row is not None:
                 old_target_taxon_id = old_kid_row["taxon_id"]
                 old_target_key = keyword_match_key(old_kid_row["name"])
+                # When the previous species is linked to a taxon and another
+                # taxonomy row anywhere in the catalog shares the same
+                # normalized name but points at a different taxon (e.g.
+                # legacy ``Robin`` alongside taxonomy ``robin``), an
+                # unlinked NULL-taxon row could belong to either species.
+                # Treating it as the old species would queue a legacy
+                # homonym tag for removal. Mirror the guard in
+                # get_photos_with_equivalent_species.
+                old_homonym_conflict = False
+                if old_target_taxon_id is not None:
+                    for hrow in db.conn.execute(
+                        """SELECT name FROM keywords
+                           WHERE (is_species = 1 OR type = 'taxonomy')
+                             AND taxon_id IS NOT NULL
+                             AND taxon_id != ?""",
+                        (old_target_taxon_id,),
+                    ).fetchall():
+                        if keyword_match_key(hrow["name"]) == old_target_key:
+                            old_homonym_conflict = True
+                            break
                 for chunk in _chunked(photo_ids):
                     placeholders_ids = ",".join("?" for _ in chunk)
                     rows = db.conn.execute(
@@ -23996,16 +24016,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         list(chunk),
                     ).fetchall()
                     for row in rows:
-                        same_species = (
-                            old_target_taxon_id is not None
-                            and row["taxon_id"] == old_target_taxon_id
-                        ) or (
-                            row["taxon_id"] is None
-                            and keyword_match_key(row["name"]) == old_target_key
-                        )
                         if old_target_taxon_id is None:
                             same_species = (
                                 keyword_match_key(row["name"]) == old_target_key
+                            )
+                        else:
+                            same_species = (
+                                row["taxon_id"] == old_target_taxon_id
+                            ) or (
+                                not old_homonym_conflict
+                                and row["taxon_id"] is None
+                                and keyword_match_key(row["name"]) == old_target_key
                             )
                         if same_species:
                             old_rows_by_photo.setdefault(row["photo_id"], []).append(row)

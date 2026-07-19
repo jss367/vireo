@@ -10801,6 +10801,28 @@ class Database:
             for row in rows:
                 by_photo.setdefault(row["photo_id"], []).append(row)
 
+            # A key with multiple linked taxa anywhere in the catalog is an
+            # ambiguous homonym (e.g. legacy ``Robin`` alongside taxonomy
+            # ``robin`` bound to different taxa). ``get_photos_with_equivalent_species``
+            # gates its NULL-taxon fallback the same way; without the guard
+            # here, a NULL-taxon leaf on a photo that also carries one linked
+            # root gets folded into that root's group, the root is treated
+            # as a redundant duplicate, and the accepted taxonomy species is
+            # detached from the photo.
+            homonym_keys = set()
+            key_taxa = {}
+            for row in self.conn.execute(
+                """SELECT DISTINCT k.name, k.taxon_id
+                   FROM keywords k
+                   WHERE (k.is_species = 1 OR k.type = 'taxonomy')
+                     AND k.taxon_id IS NOT NULL"""
+            ).fetchall():
+                key = keyword_match_key(row["name"])
+                taxa = key_taxa.setdefault(key, set())
+                taxa.add(row["taxon_id"])
+                if len(taxa) > 1:
+                    homonym_keys.add(key)
+
             grouped = {}
             for photo_id, photo_rows in by_photo.items():
                 linked = {}
@@ -10814,8 +10836,13 @@ class Database:
                         ).append(row)
                 # Fold a legacy NULL-taxon spelling into a unique linked
                 # species group on the same photo. If multiple linked taxa
-                # share that common name, leave it alone rather than guessing.
+                # share that common name, or the same key is a known homonym
+                # bound to different taxa elsewhere, leave it alone rather
+                # than guessing.
                 for name_key, null_rows in unlinked.items():
+                    if name_key in homonym_keys:
+                        grouped[(photo_id, "name", name_key)] = null_rows
+                        continue
                     candidates = [
                         taxon_id for taxon_id, linked_rows in linked.items()
                         if any(
@@ -10885,6 +10912,54 @@ class Database:
                         (photo_id, removed_id, removed_id,
                          removed_id, removed_id),
                     )
+
+                # species_replace items can store ``old_value`` as a JSON
+                # payload carrying ``keyword_id``/``keyword_ids`` when the
+                # replace swapped out multiple old species rows for one
+                # photo. A bare-string equality misses those, so an undo/redo
+                # would parse the JSON and re-tag the detached root, undoing
+                # the repair. Scan JSON payloads on this photo and drop any
+                # species_replace item whose keyword_id(s) contains the
+                # detached root.
+                removed_id_ints = {int(row["keyword_id"]) for row in remove}
+                json_items = self.conn.execute(
+                    """SELECT ehi.id, ehi.old_value
+                       FROM edit_history_items ehi
+                       JOIN edit_history eh ON eh.id = ehi.edit_id
+                       WHERE ehi.photo_id = ?
+                         AND eh.action_type = 'species_replace'
+                         AND ehi.old_value IS NOT NULL
+                         AND ehi.old_value LIKE '{%'""",
+                    (photo_id,),
+                ).fetchall()
+                for item in json_items:
+                    try:
+                        payload = json.loads(item["old_value"])
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    references_removed = False
+                    raw_kid = payload.get("keyword_id")
+                    if raw_kid is not None:
+                        try:
+                            if int(raw_kid) in removed_id_ints:
+                                references_removed = True
+                        except (TypeError, ValueError):
+                            pass
+                    if not references_removed:
+                        for k in (payload.get("keyword_ids") or []):
+                            try:
+                                if int(k) in removed_id_ints:
+                                    references_removed = True
+                                    break
+                            except (TypeError, ValueError):
+                                continue
+                    if references_removed:
+                        self.conn.execute(
+                            "DELETE FROM edit_history_items WHERE id = ?",
+                            (item["id"],),
+                        )
 
                 self.conn.execute(
                     """DELETE FROM edit_history
