@@ -225,6 +225,72 @@ def _should_abort(abort_event):
     return abort_event.is_set()
 
 
+class _PipelinePauseGate:
+    """Park every active pipeline worker before publishing ``paused``.
+
+    Phase one has four concurrent workers.  Letting the first worker that
+    reaches a checkpoint publish ``paused`` would be misleading because the
+    other three could still be scanning, rendering, or loading a model.  This
+    gate tracks the active participants and only confirms the pause once all
+    of them are at safe checkpoints.  Later pipeline stages use the same gate
+    with one active participant.
+    """
+
+    def __init__(self, runner, job_id):
+        self._runner = runner
+        self._job_id = job_id
+        self._lock = threading.Lock()
+        self._active = set()
+        self._parked = set()
+
+    def _pause_requested(self):
+        probe = getattr(self._runner, "pause_requested", None)
+        return bool(probe and probe(self._job_id))
+
+    def _cancellation_requested(self):
+        probe = getattr(self._runner, "cancellation_requested", None)
+        if probe is not None:
+            return probe(self._job_id)
+        return self._runner.is_cancelled(self._job_id)
+
+    def register_many(self, participant_names):
+        with self._lock:
+            self._active.update(participant_names)
+
+    def register(self, participant_name):
+        self.register_many((participant_name,))
+
+    def unregister(self, participant_name):
+        with self._lock:
+            self._active.discard(participant_name)
+            self._parked.discard(participant_name)
+            all_parked = not self._active or self._active <= self._parked
+        if all_parked and self._pause_requested():
+            self._runner.mark_paused(self._job_id)
+
+    def checkpoint(self, participant_name):
+        """Wait through a requested pause and return cancellation state."""
+        if not self._pause_requested():
+            return self._cancellation_requested()
+
+        with self._lock:
+            if participant_name not in self._active:
+                return self._cancellation_requested()
+            self._parked.add(participant_name)
+            all_parked = self._active <= self._parked
+
+        if all_parked:
+            self._runner.mark_paused(self._job_id)
+
+        try:
+            return self._runner.wait_if_paused(
+                self._job_id, publish_paused=False,
+            )
+        finally:
+            with self._lock:
+                self._parked.discard(participant_name)
+
+
 def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
     """Thin wrapper around the shared resolver, returning just the path.
 
@@ -734,6 +800,53 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     """
     job["_start_time"] = time.time()
     abort = threading.Event()
+    pause_gate = _PipelinePauseGate(runner, job["id"])
+    pause_context = threading.local()
+
+    def _cancellation_requested():
+        probe = getattr(runner, "cancellation_requested", None)
+        if probe is not None:
+            return probe(job["id"])
+        return runner.is_cancelled(job["id"])
+
+    def _pause_checkpoint():
+        participant = getattr(pause_context, "participant", None)
+        if participant is None:
+            return _cancellation_requested()
+        cancelled = pause_gate.checkpoint(participant)
+        if cancelled:
+            abort.set()
+        return cancelled
+
+    # Shadow the module-level helper inside this run so the existing safe
+    # cancellation boundaries double as pause checkpoints.  Calls made from a
+    # library-owned helper thread have no registered participant and remain a
+    # non-blocking cancellation probe; the owning pipeline worker parks at its
+    # next outer boundary instead.
+    def _should_abort(abort_event):
+        if _pause_checkpoint():
+            abort_event.set()
+        # Resolve through the module namespace so tests and diagnostics that
+        # replace the pipeline's abort policy still observe every checkpoint.
+        return globals()["_should_abort"](abort_event)
+
+    def _should_abort_without_pause(abort_event):
+        """Check cancellation without parking while a shared lock is held."""
+        if _cancellation_requested():
+            abort_event.set()
+        return globals()["_should_abort"](abort_event)
+
+    def _run_pause_participant(participant, work_fn, *, pre_registered=False):
+        if not pre_registered:
+            pause_gate.register(participant)
+        pause_context.participant = participant
+        try:
+            _pause_checkpoint()
+            return work_fn()
+        finally:
+            pause_context.participant = None
+            pause_gate.unregister(participant)
+
     errors = job["errors"]  # shared list, append is thread-safe
     if params.destination or params.local_processing or params.remote_target_id:
         raise RuntimeError(
@@ -853,7 +966,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         def _cancel_watcher():
             while not cancel_watcher_stop.is_set():
-                if runner.is_cancelled(job["id"]):
+                # This watcher must never park for Pause: it is not pipeline
+                # work and would otherwise publish ``paused`` before the real
+                # stage workers have reached safe checkpoints.
+                if _cancellation_requested():
                     abort.set()
                     return
                 if cancel_watcher_stop.wait(0.25):
@@ -988,6 +1104,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         collection_ready = threading.Event()
         models_ready = threading.Event()
         loaded_models = {}  # populated by model_loader thread
+
+        def _put_scan_item(item):
+            """Put into the scan/thumbnail queue without defeating Pause.
+
+            Both ordinary photo items and the end sentinel can otherwise block
+            forever on a full queue after the thumbnail worker has parked.
+            """
+            while not _should_abort(abort):
+                try:
+                    scan_to_thumb.put(item, timeout=0.5)
+                    return True
+                except queue.Full:
+                    continue
+            return False
         # Resolved in collection_stage once the scanner has committed photo rows.
         # When set (i.e. snapshot-scoped runs), the collection is trimmed to this
         # set so every downstream stage (classify, extract_masks, eye_keypoints,
@@ -1040,17 +1170,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                 def photo_cb(photo_id, path):
                     collected_photo_ids.append(photo_id)
-                    # Abort-aware put: a blocking no-timeout put would wedge the
-                    # scanner forever if the thumbnail consumer died with a full
-                    # queue (its setup can fail before its drain loop starts).
-                    # On abort the item is dropped — the consumer is gone and the
-                    # pipeline is tearing down anyway.
-                    while not _should_abort(abort):
-                        try:
-                            scan_to_thumb.put((photo_id, path), timeout=0.5)
-                            break
-                        except queue.Full:
-                            continue
+                    # Abort/pause-aware: a blocking put would wedge the scanner
+                    # if the thumbnail consumer parked or failed on a full queue.
+                    _put_scan_item((photo_id, path))
                     stages["scan"]["count"] = len(collected_photo_ids)
                     runner.update_step(job["id"], "scan",
                                        current_file=os.path.basename(path))
@@ -1070,7 +1192,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
 
                 def cancel_check():
-                    return _should_abort(abort) or runner.is_cancelled(job["id"])
+                    return _should_abort(abort) or _cancellation_requested()
 
                 # Accumulator so multi-folder scans (repair loop, scan-in-place
                 # with sources=[...]) don't rewind the overall progress at each
@@ -1126,7 +1248,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             summary="Skipped (using collection)",
                         )
                         _update_stages(runner, job["id"], stages)
-                        scan_to_thumb.put(_SENTINEL)
+                        _put_scan_item(_SENTINEL)
                         return
 
                     total_broken = sum(len(paths) for _, paths in broken)
@@ -1193,7 +1315,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                         except (OSError, RuntimeError) as e:
                             if isinstance(e, ScanCancelled) and (
-                                _should_abort(abort) or runner.is_cancelled(job["id"])
+                                _should_abort(abort) or _cancellation_requested()
                             ):
                                 abort.set()
                                 stages["scan"]["status"] = "skipped"
@@ -1210,14 +1332,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         finally:
                             advance_scan_acc()
 
-                    if _should_abort(abort) or runner.is_cancelled(job["id"]):
+                    if _should_abort(abort) or _cancellation_requested():
                         stages["scan"]["status"] = "skipped"
                         runner.update_step(
                             job["id"], "scan",
                             status="completed",
                             summary="Cancelled",
                         )
-                        scan_to_thumb.put(_SENTINEL)
+                        _put_scan_item(_SENTINEL)
                         return
 
                     from metadata import scan_metadata_warning
@@ -1236,7 +1358,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     runner.update_step(
                         job["id"], "scan", status="completed", summary=summary,
                     )
-                    scan_to_thumb.put(_SENTINEL)
+                    _put_scan_item(_SENTINEL)
                     return
 
                 # Determine source folder(s)
@@ -1302,7 +1424,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     status="completed", summary="Skipped",
                                 )
                             abort.set()
-                            scan_to_thumb.put(_SENTINEL)
+                            _put_scan_item(_SENTINEL)
 
                         try:
                             if remote_archive is not None:
@@ -2135,7 +2257,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                         finally:
                             advance_scan_acc()
-                if _should_abort(abort) or runner.is_cancelled(job["id"]):
+                if _should_abort(abort) or _cancellation_requested():
                     stages["scan"]["status"] = "skipped"
                     runner.update_step(
                         job["id"], "scan", status="completed", summary="Cancelled",
@@ -2156,7 +2278,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                        summary=scan_summary)
             except Exception as e:
                 if isinstance(e, ScanCancelled) and (
-                    _should_abort(abort) or runner.is_cancelled(job["id"])
+                    _should_abort(abort) or _cancellation_requested()
                 ):
                     abort.set()
                     stages["scan"]["status"] = "skipped"
@@ -2202,7 +2324,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     "cache for %s",
                                     scanned_root,
                                 )
-                scan_to_thumb.put(_SENTINEL)
+                _put_scan_item(_SENTINEL)
                 _update_stages(runner, job["id"], stages)
 
         def collection_stage():
@@ -2216,6 +2338,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # Wait for scanner to complete (don't check abort -- we want the
             # collection regardless so the user can see scanned photos)
             while True:
+                # Pause is different from abort: this worker can park while it
+                # waits without giving up the collection the scanner produced.
+                _pause_checkpoint()
                 if stages["scan"]["status"] in ("completed", "failed", "skipped"):
                     break
                 time.sleep(0.1)
@@ -2348,6 +2473,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         pending_thumb_paths.clear()
 
                 while True:
+                    # Continue draining after cancellation, but park before
+                    # taking another item when the whole pipeline is paused.
+                    _pause_checkpoint()
                     try:
                         item = scan_to_thumb.get(timeout=1.0)
                     except queue.Empty:
@@ -3108,7 +3236,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         pass
 
                 def cancel_check():
-                    return _should_abort(abort) or runner.is_cancelled(job["id"])
+                    return _should_abort(abort) or _cancellation_requested()
 
                 if model_type == "timm":
                     if cancel_check():
@@ -3345,7 +3473,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         preload_err.__class__.__name__ == "ClassificationCancelled"
                     )
                     if (
-                        runner.is_cancelled(job["id"])
+                        _cancellation_requested()
                         or is_classification_cancelled
                         or str(preload_err) == "classification cancelled"
                     ):
@@ -3375,7 +3503,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     e.__class__.__name__ == "ClassificationCancelled"
                 )
                 if (
-                    runner.is_cancelled(job["id"])
+                    _cancellation_requested()
                     or is_classification_cancelled
                     or str(e) == "classification cancelled"
                 ):
@@ -3765,7 +3893,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                             if (
                                 _should_abort(abort)
-                                or runner.is_cancelled(job["id"])
+                                or _cancellation_requested()
                                 or is_classification_cancelled
                                 or str(model_err) == "classification cancelled"
                             ):
@@ -4830,7 +4958,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 skipped += 1
                                 processed = i + 1
                                 continue
-                            if _should_abort(abort):
+                            if _should_abort_without_pause(abort):
                                 break
 
                             # GPU serialisation lives inside masking.generate_mask
@@ -4844,7 +4972,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 skipped += 1
                                 processed = i + 1
                                 continue
-                            if _should_abort(abort):
+                            if _should_abort_without_pause(abort):
                                 break
 
                             mask_path = save_mask(
@@ -4852,7 +4980,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                             completeness = crop_completeness(mask)
                             features = compute_all_quality_features(proxy, mask)
-                            if _should_abort(abort):
+                            if _should_abort_without_pause(abort):
                                 break
 
                             # Per-mask features (move from photos row into
@@ -5649,10 +5777,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         threads = {}
 
         # Phase 1: scan + thumbnails + model loading (concurrent)
-        threads["scanner"] = threading.Thread(target=scanner_stage, daemon=True)
-        threads["collection"] = threading.Thread(target=collection_stage, daemon=True)
-        threads["thumbnail"] = threading.Thread(target=thumbnail_stage, daemon=True)
-        threads["model_loader"] = threading.Thread(target=model_loader_stage, daemon=True)
+        phase_one = {
+            "scanner": scanner_stage,
+            "collection": collection_stage,
+            "thumbnail": thumbnail_stage,
+            "model_loader": model_loader_stage,
+        }
+        # Register the complete phase before starting its first thread.  If the
+        # first worker reaches Pause immediately, it must wait for the other
+        # three rather than declaring the whole pipeline paused on its own.
+        pause_gate.register_many(phase_one)
+        for name, stage_fn in phase_one.items():
+            threads[name] = threading.Thread(
+                target=_run_pause_participant,
+                args=(name, stage_fn),
+                kwargs={"pre_registered": True},
+                daemon=True,
+            )
 
         for t in threads.values():
             t.start()
@@ -5670,7 +5811,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # call on abort would leave the runner.set_steps-created rows
         # persisted as "pending" with no finished_at, forever. Each stage
         # checks abort internally and marks itself "Skipped".
-        previews_stage()
+        _run_pause_participant("previews", previews_stage)
 
         # Phase 2: detect (needs collection; runs MegaDetector once across all
         # photos so each per-model classify step reuses cached detections
@@ -5680,21 +5821,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # the `detect` step row reaches a terminal status. Skipping the call
         # would leave the row pending forever on a model-loader failure.
         # detect_stage handles abort internally and marks itself skipped.
-        detect_stage()
+        _run_pause_participant("detect", detect_stage)
 
         # Phase 3: classify per model (reads cached detections from detect_stage).
         # Always invoked for the same reason: every `classify:<model_id>` row
         # must land in a terminal state so the jobs tree finalizes cleanly on
         # a loader-triggered abort.
-        classify_stage()
+        _run_pause_participant("classify", classify_stage)
 
         # Phase 3: extract-masks (needs classify output)
-        extract_masks_stage()
+        _run_pause_participant("extract_masks", extract_masks_stage)
 
         # Phase 3.5: eye keypoints (needs masks + classifier output). No-op when
         # SuperAnimal weights are absent — users opt in on the pipeline models
         # card. Per-photo failures log and continue rather than abort the stage.
-        eye_keypoints_stage()
+        _run_pause_participant("eye_keypoints", eye_keypoints_stage)
 
         # Phases 4 + 5: regroup and miss detection. Held under the
         # per-workspace regroup lock TOGETHER so a concurrent same-workspace
@@ -5708,20 +5849,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # miss_stage's own gate covers the regroup-failed and abort cases, so
         # both stages can be invoked unconditionally and still reach a
         # terminal step status.
-        if abort.is_set():
-            # Both stages early-return as "Skipped" without touching grouping
-            # state, so the lock isn't needed — and skipping the calls would
-            # leave their step rows pending forever. Staying outside the lock
-            # also keeps an aborted/cancelled run from blocking behind a
-            # concurrent pipeline's regroup.
-            regroup_stage()
-            miss_stage()
-        else:
-            with acquire_workspace_regroup(workspace_id):
+        def _run_regroup_and_misses():
+            if abort.is_set():
+                # Both stages early-return as "Skipped" without touching
+                # grouping state, so the lock isn't needed — and skipping the
+                # calls would leave their step rows pending forever. Staying
+                # outside the lock also keeps an aborted/cancelled run from
+                # blocking behind a concurrent pipeline's regroup.
                 regroup_stage()
                 miss_stage()
+            else:
+                # Pause checkpoints deliberately surround this critical
+                # section rather than living inside either stage: their shared
+                # lock must span regroup + misses atomically, but a paused job
+                # must not retain it and block another pipeline indefinitely.
+                with acquire_workspace_regroup(workspace_id):
+                    regroup_stage()
+                    miss_stage()
+            _pause_checkpoint()
 
-        archive_stage()
+        _run_pause_participant(
+            "regroup_and_misses", _run_regroup_and_misses,
+        )
+
+        _run_pause_participant("archive", archive_stage)
 
         cancel_watcher_stop.set()
 
@@ -5736,7 +5887,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         failed_stages = [
             name for name, s in stages.items() if s.get("status") == "failed"
         ]
-        if failed_stages and not runner.is_cancelled(job["id"]):
+        if failed_stages and not _cancellation_requested():
             # Stash the structured result on the job BEFORE raising so the
             # completion event and job_history still carry per-stage details
             # (stages dict, errors list). Without this, the pipeline UI loses

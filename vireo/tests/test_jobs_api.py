@@ -232,6 +232,17 @@ def test_pipeline_slots_counts_only_pipeline_jobs(app_and_db):
         "config": {},
         "result": {"ok": True},
     }
+    paused_pipeline = {
+        "id": "pipe-paused-1",
+        "type": "pipeline",
+        "status": "paused",
+        "started_at": "2026-05-27T09:45:00",
+        "finished_at": None,
+        "progress": {"current": 5, "total": 10},
+        "errors": [],
+        "config": {},
+        "result": None,
+    }
     running_scan = {
         "id": "scan-running-1",
         "type": "scan",
@@ -246,14 +257,15 @@ def test_pipeline_slots_counts_only_pipeline_jobs(app_and_db):
     with runner._lock:
         runner._jobs["pipe-running-1"] = running_pipeline
         runner._jobs["pipe-done-1"] = finished_pipeline
+        runner._jobs["pipe-paused-1"] = paused_pipeline
         runner._jobs["scan-running-1"] = running_scan
 
     from jobs import SLOT_CAP
     resp = client.get('/api/pipeline/slots')
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["active"] == 1, \
-        "only running pipelines count toward active slots"
+    assert data["active"] == 2, \
+        "running and paused pipelines both occupy active slots"
     assert data["queued"] == 0
     assert data["slot_cap"] == SLOT_CAP
 

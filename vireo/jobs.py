@@ -205,7 +205,10 @@ class JobRunner:
         with self._lock:
             active = sum(
                 1 for j in self._jobs.values()
-                if j["type"] == "pipeline" and j["status"] == "running"
+                if (
+                    j["type"] == "pipeline"
+                    and j["status"] in ("running", "pausing", "paused")
+                )
             )
             if active >= SLOT_CAP:
                 return
@@ -281,7 +284,7 @@ class JobRunner:
                         "steps": [],
                         "ephemeral": False,
                         "counts_for_badge": True,
-                        "pausable": False,
+                        "pausable": True,
                         "runtime_warning": ctx["runtime_warning"],
                         # Pre-seeded for iteration safety — see start().
                         "_start_time": time.time(),
@@ -1126,6 +1129,62 @@ class JobRunner:
             self._publish_status_locked(job, "pausing")
         return True
 
+    def pause_requested(self, job_id):
+        """Return whether *job_id* currently has a pending pause request.
+
+        Pipeline jobs use this non-blocking probe to coordinate several worker
+        threads.  A single worker reaching a checkpoint is not enough to call
+        the whole pipeline paused; the pipeline publishes ``paused`` only once
+        every active participant has reached a safe boundary.
+        """
+        with self._lock:
+            return (
+                job_id in self._pause_requested
+                and job_id not in self._cancelled
+            )
+
+    def mark_paused(self, job_id):
+        """Publish ``paused`` if a live pause request still applies.
+
+        This is separate from :meth:`wait_if_paused` so multi-worker jobs can
+        wait for all of their workers before claiming that work has stopped.
+        """
+        with self._pause_condition:
+            job = self._jobs.get(job_id)
+            if (
+                job is None
+                or not job.get("pausable")
+                or job_id not in self._pause_requested
+                or job_id in self._cancelled
+                or job.get("status") not in ("pausing", "paused")
+            ):
+                return False
+            if job.get("status") != "paused":
+                self._publish_status_locked(job, "paused")
+            return True
+
+    def wait_if_paused(self, job_id, *, publish_paused=False):
+        """Wait for a pause request to clear, then report cancellation.
+
+        ``publish_paused`` is appropriate for ordinary single-worker jobs.
+        Coordinated jobs pass ``False`` and call :meth:`mark_paused` only after
+        all active workers are parked.
+        """
+        while True:
+            with self._pause_condition:
+                if job_id in self._cancelled:
+                    return True
+                job = self._jobs.get(job_id)
+                if (
+                    job is None
+                    or not job.get("pausable")
+                    or job_id not in self._pause_requested
+                ):
+                    return False
+                if publish_paused and job.get("status") != "paused":
+                    self._publish_status_locked(job, "paused")
+                self._pause_condition.wait()
+
     def resume_job(self, job_id):
         """Resume a pausing or paused job."""
         with self._pause_condition:
@@ -1150,24 +1209,7 @@ class JobRunner:
         those same boundaries are also safe places to sleep without losing
         the work function's in-memory state.
         """
-        while True:
-            with self._pause_condition:
-                if job_id in self._cancelled:
-                    return True
-                job = self._jobs.get(job_id)
-                if (
-                    job is None
-                    or not job.get("pausable")
-                    or job_id not in self._pause_requested
-                ):
-                    return False
-                if job.get("status") != "paused":
-                    self._publish_status_locked(job, "paused")
-                if job_id in self._cancelled:
-                    return True
-                if job_id not in self._pause_requested:
-                    return False
-                self._pause_condition.wait()
+        return self.wait_if_paused(job_id, publish_paused=True)
 
     def cancellation_requested(self, job_id):
         """Report cancellation without waiting on a pause request.

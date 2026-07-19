@@ -7287,6 +7287,11 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
     ws_id = db._active_workspace_id
 
     events = []
+    pause_state = {
+        "requested": False,
+        "lock_held": False,
+        "wait_lock_states": [],
+    }
 
     real_acquire = pipeline_locks.acquire_workspace_regroup
 
@@ -7298,11 +7303,15 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
         def __enter__(self):
             events.append(("acquire", self._ws))
             self._inner.__enter__()
+            pause_state["lock_held"] = True
             return self
 
         def __exit__(self, *args):
             events.append(("release", self._ws))
-            return self._inner.__exit__(*args)
+            try:
+                return self._inner.__exit__(*args)
+            finally:
+                pause_state["lock_held"] = False
 
     monkeypatch.setattr(
         pj, "acquire_workspace_regroup",
@@ -7311,6 +7320,9 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
 
     def _ok_run(photos, config=None, emit_trace=False):
         events.append(("regroup_work", ws_id))
+        # Simulate Pause arriving during regroup work. The pipeline must defer
+        # its blocking wait until after the shared regroup/misses lock releases.
+        pause_state["requested"] = True
         return {"summary": {"groups": 1}, "photos": photos}
 
     monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _ok_run)
@@ -7321,6 +7333,22 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
     )
 
     class TrackingRunner(FakeRunner):
+        def pause_requested(self, job_id):
+            return pause_state["requested"]
+
+        def cancellation_requested(self, job_id):
+            return False
+
+        def mark_paused(self, job_id):
+            return True
+
+        def wait_if_paused(self, job_id, *, publish_paused=False):
+            pause_state["wait_lock_states"].append(
+                pause_state["lock_held"],
+            )
+            pause_state["requested"] = False
+            return False
+
         def update_step(self, job_id, step_id, **kwargs):
             if step_id == "misses":
                 events.append(("miss_step", kwargs.get("status")))
@@ -7376,6 +7404,10 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
         "miss step must run inside the same lock as regroup — otherwise "
         "a second same-workspace pipeline could sneak in and rewrite "
         f"grouping state between them. events: {interesting}"
+    )
+    assert pause_state["wait_lock_states"] == [False], (
+        "Pause must block only after the regroup/misses lock is released; "
+        f"wait states: {pause_state['wait_lock_states']}"
     )
 
 
@@ -8238,6 +8270,7 @@ def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
 
 def _run_extract_masks_for_test(
     tmp_path, monkeypatch, sam2_variant, photo_specs,
+    *, runner=None, on_generate_mask=None,
 ):
     """Drive a single pipeline run with extract_masks enabled and the heavy
     SAM2/DINOv2 calls stubbed.  Returns (db, runner, generate_mask_calls)
@@ -8298,6 +8331,8 @@ def _run_extract_masks_for_test(
         # Track every (variant, det_box) we get asked about — the cache
         # short-circuit must skip past this entirely on a hit.
         generate_mask_calls.append((variant, tuple(sorted(det_box.items()))))
+        if on_generate_mask is not None:
+            on_generate_mask()
         return np.ones((4, 4), dtype=bool)
 
     monkeypatch.setattr(masking, "render_proxy", fake_render_proxy)
@@ -8335,11 +8370,83 @@ def _run_extract_masks_for_test(
         skip_extract_masks=False,
         skip_regroup=True,
     )
-    runner = FakeRunner()
+    runner = runner or FakeRunner()
     job = _make_job()
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
     return db, runner, generate_mask_calls, photo_ids
+
+
+def test_extract_masks_pause_waits_outside_photo_lock(tmp_path, monkeypatch):
+    """Pause may be requested under a photo lock but must wait after release."""
+    import pipeline_job as pj
+    import pipeline_locks
+
+    pause_state = {
+        "requested": False,
+        "lock_held": False,
+        "wait_lock_states": [],
+    }
+    real_acquire = pipeline_locks.acquire_photo_mask
+
+    class TrackingLock:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            self._inner.__enter__()
+            pause_state["lock_held"] = True
+            return self
+
+        def __exit__(self, *args):
+            try:
+                return self._inner.__exit__(*args)
+            finally:
+                pause_state["lock_held"] = False
+
+    monkeypatch.setattr(
+        pj, "acquire_photo_mask",
+        lambda photo_id: TrackingLock(real_acquire(photo_id)),
+    )
+
+    class PauseTrackingRunner(FakeRunner):
+        def pause_requested(self, job_id):
+            return pause_state["requested"]
+
+        def cancellation_requested(self, job_id):
+            return False
+
+        def mark_paused(self, job_id):
+            return True
+
+        def wait_if_paused(self, job_id, *, publish_paused=False):
+            pause_state["wait_lock_states"].append(
+                pause_state["lock_held"],
+            )
+            pause_state["requested"] = False
+            return False
+
+    def request_pause():
+        assert pause_state["lock_held"] is True
+        pause_state["requested"] = True
+
+    _run_extract_masks_for_test(
+        tmp_path,
+        monkeypatch,
+        "sam2-small",
+        [{
+            "filename": "a.jpg",
+            "box": (10, 20, 100, 200),
+            "model": "MegaDetector",
+        }],
+        runner=PauseTrackingRunner(),
+        on_generate_mask=request_pause,
+    )
+
+    assert pause_state["wait_lock_states"] == [False], (
+        "Pause must block only after the per-photo mask lock is released; "
+        f"wait states: {pause_state['wait_lock_states']}"
+    )
 
 
 def _apply_extract_masks_stubs(monkeypatch, generate_mask_calls):
