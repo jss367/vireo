@@ -186,6 +186,21 @@ info makes this state visible.
   path asserting the move still runs.
 - Standard suite from `CLAUDE.md` before the PR.
 
+## Planning notes (from spec review)
+
+- **Hook placement must survive the raise path.** `run_pipeline_job` can fail
+  by *raising* (e.g. model-resolution `RuntimeError`), so a `_chain_after_move`
+  call placed after a normal return would never fire on failure — violating
+  decision 3. Place the hook so it runs on both the return and raise paths
+  (try/finally or the runner's completion path) while still distinguishing
+  cancel from fail. The required process-fail integration test guards this.
+- **Thread the folder set explicitly.** The import result (and thus the
+  imported folder set) lives in Link 1's scope; the hook runs inside the
+  process job. The plan must pick one: compute the top-level folder ids in
+  Link 1 and pass them through `_enqueue_process_job` alongside the move
+  snapshot (preferred — move-folder jobs are keyed by catalog `folder_id`,
+  not path), or re-derive them in Link 2.
+
 ## Out of scope
 
 - Persistent chain state surviving app restarts (additive later if the gap
