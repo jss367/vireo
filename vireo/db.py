@@ -13075,10 +13075,15 @@ class Database:
             # row named `Puma`) does not satisfy a species highlight —
             # sibling species queries already exclude that photo from the
             # species bucket via `(t.rank = 'species' OR t.rank IS NULL)`.
-            # The prediction-fallback branch below stays unfiltered:
-            # taxonomy rows do not participate there, and the fallback is
-            # explicitly conditioned on the photo carrying no accepted
-            # species/taxonomy keyword.
+            # The prediction-fallback branch below applies the same
+            # `(t.rank = 'species' OR t.rank IS NULL)` filter to the
+            # NOT EXISTS condition: a photo carrying only a higher-rank
+            # taxonomy keyword (e.g. genus/family) is no longer part of
+            # any species accepted bucket, and get_highlights_candidates
+            # / _collect_highlight_buckets will place it in a prediction
+            # bucket (bp.species is NULL). Without the rank filter here,
+            # the saved highlight would vanish on reload because the
+            # NOT EXISTS still sees the higher-rank taxonomy row.
             eligibility_filter = """
                  AND COALESCE(p.flag, 'none') != 'rejected'
                  AND (
@@ -13111,7 +13116,9 @@ class Database:
                              FROM photo_keywords pk
                              JOIN keywords k ON k.id = pk.keyword_id
                               AND (k.is_species = 1 OR k.type = 'taxonomy')
+                             LEFT JOIN taxa t ON t.id = k.taxon_id
                              WHERE pk.photo_id = sh.photo_id
+                               AND (t.rank = 'species' OR t.rank IS NULL)
                          )
                          AND sh.species = (
                              SELECT pr.species

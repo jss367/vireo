@@ -9614,11 +9614,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # spelling differs from the root ("Verdin") even though the same
         # taxon is still attached. Without this fallback, updating a
         # preserved root-key preference would fail eligibility.
+        # Match the (t.rank = 'species' OR t.rank IS NULL) guard used by
+        # the life-list / species-bucket queries. Without it, a photo
+        # tagged only with a linked genus/family whose name happens to
+        # match the requested species would pass eligibility here but
+        # not appear in any bucket, so a saved representative would be
+        # invisible.
         row = db.conn.execute(
             """SELECT 1
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
+               LEFT JOIN taxa t ON t.id = k.taxon_id
                JOIN photos p ON p.id = pk.photo_id
                 AND COALESCE(p.flag, 'none') != 'rejected'
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
@@ -9626,17 +9633,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
                WHERE pk.photo_id = ?
+                 AND (t.rank = 'species' OR t.rank IS NULL)
                  AND (
                      k.name = ?
                      OR (
                          k.taxon_id IS NOT NULL
                          AND EXISTS (
                              SELECT 1 FROM keywords root
+                             LEFT JOIN taxa rt ON rt.id = root.taxon_id
                              WHERE root.parent_id IS NULL
                                AND (root.is_species = 1
                                     OR root.type = 'taxonomy')
                                AND root.taxon_id = k.taxon_id
                                AND root.name = ?
+                               AND (rt.rank = 'species'
+                                    OR rt.rank IS NULL)
                          )
                      )
                  )
