@@ -866,6 +866,83 @@ def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
     )
 
 
+def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
+    """Regression: ``os.makedirs(destination, exist_ok=True)`` raises
+    ``FileExistsError`` when the path exists as a regular file, so a
+    date-organized move that lands on such a path would crash the batch
+    with an opaque error. ``move_photos`` must detect that up front and
+    return a structured error instead.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    (src / "photo.jpg").write_bytes(b"x")
+    pid = db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+
+    blocked = tmp_path / "blocked"
+    blocked.write_bytes(b"not a directory")
+
+    result = move_photos(
+        db=db, photo_ids=[pid], destination=str(blocked),
+    )
+
+    assert result["moved"] == 0
+    assert result["errors"]
+    assert any("not a directory" in err for err in result["errors"])
+    # The photo row stays at the original folder and the on-disk source
+    # file is untouched.
+    assert db.get_photo(pid)["folder_id"] == fid
+    assert (src / "photo.jpg").exists()
+    assert blocked.read_bytes() == b"not a directory"
+
+
+def test_relocate_stem_files_cleans_up_partial_copy_on_failure(
+    tmp_path, monkeypatch,
+):
+    """Regression: if ``shutil.copy2`` creates the destination file and
+    then fails (full disk, flaky mount), the partial file must be
+    removed. Otherwise ``_iter_developed_outputs`` picks up the
+    truncated render at the new key and serves it to exports/full-res
+    instead of falling back to the intact source or the RAW.
+    """
+    import shutil
+
+    from export import _relocate_stem_files
+
+    old_dir = tmp_path / "old"
+    old_dir.mkdir()
+    (old_dir / "img.jpg").write_bytes(b"payload")
+    new_dir = tmp_path / "new"
+
+    real_copy2 = shutil.copy2
+
+    def failing_copy2(src, dst, *a, **kw):
+        # Create a partial file at the destination and then blow up.
+        real_copy2(src, dst, *a, **kw)
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr("export.shutil.copy2", failing_copy2)
+
+    relocated = _relocate_stem_files(
+        str(old_dir), str(new_dir), "img", listing_cache={},
+        preserve_source=True,
+    )
+    assert relocated == 0
+    # The partial destination file must be gone so the fallback path in
+    # _iter_developed_outputs doesn't pick it up.
+    assert not (new_dir / "img.jpg").exists()
+    # The source render stayed in place.
+    assert (old_dir / "img.jpg").read_bytes() == b"payload"
+
+
 def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):
     """A post-commit os.remove failure must not roll back the catalog and
     must not abort remaining photos in the batch.

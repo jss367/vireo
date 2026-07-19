@@ -1772,6 +1772,24 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     """
     if developed_listing_cache is None:
         developed_listing_cache = {}
+    # ``os.makedirs(..., exist_ok=True)`` raises ``FileExistsError`` when the
+    # path exists but is a regular file. That would abort the whole batch
+    # with an opaque exception, and for date-organized moves the preflight
+    # can't rely on ``os.path.isdir`` alone to catch it. Detect that case
+    # here and return a structured error so the caller reports every
+    # affected photo instead of a mid-run crash.
+    if os.path.exists(destination) and not os.path.isdir(destination):
+        conflict_msg = (
+            f"destination path is not a directory: {destination}"
+        )
+        log.warning("Move refused: %s", conflict_msg)
+        return {
+            "moved": 0,
+            "errors": [
+                f"{pid}: {conflict_msg}" for pid in photo_ids
+            ] or [conflict_msg],
+            "destination_folder_id": None,
+        }
     os.makedirs(destination, exist_ok=True)
     total = len(photo_ids)
     moved = 0

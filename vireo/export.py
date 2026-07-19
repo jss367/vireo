@@ -705,6 +705,23 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None,
                 "Failed to relocate developed file %s -> %s: %s",
                 src_file, dst_file, exc,
             )
+            # shutil.copy2 (and shutil.move's EXDEV fallback) can create
+            # ``dst_file`` and then fail partway — a full disk, a flaky
+            # mounted archive, or a lost network share. The photo row was
+            # already repointed at this destination before the relocate
+            # call, so a truncated/corrupt render sitting at the new key
+            # would be picked up by ``_iter_developed_outputs`` and served
+            # to exports and full-resolution instead of the intact source
+            # render (or a clean fallback to the RAW). Delete the partial
+            # so lookup falls back correctly.
+            if os.path.lexists(dst_file):
+                try:
+                    os.remove(dst_file)
+                except OSError as cleanup_exc:
+                    log.warning(
+                        "Failed to remove partial developed file %s: %s",
+                        dst_file, cleanup_exc,
+                    )
     if relocated:
         try:
             if not os.listdir(old_subdir):
