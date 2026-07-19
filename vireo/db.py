@@ -12632,10 +12632,19 @@ class Database:
         the photo carries no such species (or is rejected / outside the
         workspace), which is exactly when no "Add to Life List" affordance
         should appear.
+
+        Linked-taxon rows are canonicalized to the same-taxon root keyword's
+        stored spelling — mirroring :meth:`get_species_keywords_for_photos` —
+        so ``api_photo_detail`` can still match returned names against
+        ``species_representative_lists``/``species_highlights``, which key on
+        the canonical root. Without this, a photo whose only surviving species
+        tag is a differently-spelled hierarchy leaf (``verdin`` after repair
+        detached the ``Verdin`` root) would fail those lookups and the
+        lightbox/context menu would offer to set it as representative again.
         """
         ws = self._ws_id()
         rows = self.conn.execute(
-            """SELECT DISTINCT k.name AS species
+            """SELECT k.name, k.taxon_id
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
@@ -12647,11 +12656,35 @@ class Database:
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
                WHERE pk.photo_id = ?
-                 AND (t.rank = 'species' OR t.rank IS NULL)
-               ORDER BY k.name""",
+                 AND (t.rank = 'species' OR t.rank IS NULL)""",
             (ws, photo_id),
         ).fetchall()
-        return [r["species"] for r in rows]
+        if not rows:
+            return []
+        taxon_ids = {r["taxon_id"] for r in rows if r["taxon_id"] is not None}
+        canonical_roots = {}
+        if taxon_ids:
+            for chunk in _chunks(list(taxon_ids)):
+                placeholders = ",".join("?" for _ in chunk)
+                root_rows = self.conn.execute(
+                    f"""SELECT taxon_id, name FROM keywords
+                        WHERE taxon_id IN ({placeholders})
+                          AND parent_id IS NULL
+                          AND (is_species = 1 OR type = 'taxonomy')
+                        ORDER BY id""",
+                    list(chunk),
+                ).fetchall()
+                for row in root_rows:
+                    canonical_roots.setdefault(row["taxon_id"], row["name"])
+        seen = {}
+        for r in rows:
+            name = (
+                canonical_roots.get(r["taxon_id"], r["name"])
+                if r["taxon_id"] is not None
+                else r["name"]
+            )
+            seen.setdefault(keyword_match_key(name), name)
+        return sorted(seen.values(), key=lambda n: keyword_match_key(n))
 
     def get_life_list_locations(self, species=None):
         """Return {species name: [location keyword names]} for the life list.

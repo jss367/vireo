@@ -14099,6 +14099,40 @@ def test_species_keywords_canonicalize_hierarchy_leaf_to_root_spelling(tmp_path)
     assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
 
 
+def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
+    tmp_path,
+):
+    """After repair leaves only a differently-spelled hierarchy leaf, the
+    photo-detail life-list species must still surface the canonical root
+    spelling. Otherwise ``api_photo_detail`` compares the leaf spelling
+    against ``get_species_representative_lists`` (keyed on the root) and the
+    lightbox/context menu drops the "current representative" flag and offers
+    to set it again for a taxon that is still eligibly attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+
+    assert db.get_photo_life_list_species(pid) == ["Verdin"]
+
+
 def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path):
     """The one-shot repair detaches only the redundant root association."""
     from db import Database
