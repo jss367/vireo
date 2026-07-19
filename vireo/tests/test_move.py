@@ -2407,6 +2407,58 @@ def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):
     assert copy_calls[-1][1] == 3  # same 3-file denominator
 
 
+def test_move_folder_prefers_discovered_gnu_rsync(move_env, monkeypatch):
+    """Local NAS moves use discovered GNU rsync instead of a Finder app's
+    bare ``rsync`` resolving to macOS openrsync."""
+    import move as move_mod
+
+    env = move_env
+    captured = {}
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": "/gnu/rsync",
+    )
+
+    def fake_run(*args, **kwargs):
+        captured["rsync_bin"] = kwargs.get("rsync_bin")
+        return 1, "simulated failure", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_run)
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+    )
+
+    assert captured["rsync_bin"] == "/gnu/rsync"
+    assert result["moved"] == 0
+
+
+def test_move_folder_stall_preserves_rsync_diagnostic(move_env, monkeypatch):
+    """A watchdog timeout includes stderr's filename/root cause instead of
+    replacing it with a generic 30-minute stall message."""
+    import move as move_mod
+
+    env = move_env
+    monkeypatch.setattr(
+        move_mod,
+        "_run_rsync_streamed",
+        lambda *args, **kwargs: (
+            -9,
+            "rsync: DSC_2042.NEF: file truncated while hashing\n",
+            True,
+        ),
+    )
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 0
+    assert "stalled" in result["errors"][0]
+    assert "DSC_2042.NEF" in result["errors"][0]
+    assert "file truncated while hashing" in result["errors"][0]
+
+
 def test_move_folder_shutil_fallback_preserves_dir_symlink(move_env, monkeypatch):
     """The shutil fallback (rsync unavailable) must not silently drop a
     symlinked subdirectory. os.walk doesn't recurse into one, so without

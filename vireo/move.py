@@ -2092,7 +2092,14 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # from `.rsync-partial/` instead of treating it as already-moved (which
     # would then fail the --checksum verify forever, stranding the partial
     # until the user manually deletes it).
-    rsync_bin = "rsync"
+    # Prefer a discovered GNU rsync even for local moves.  Finder-launched
+    # macOS apps usually inherit a sparse PATH, so a bare ``rsync`` resolves
+    # to Apple's legacy openrsync even when Homebrew GNU rsync is installed.
+    # openrsync has been observed spinning after a transient SMB short read;
+    # GNU rsync exits with a useful error instead.  Keep the bare-name
+    # fallback for machines where GNU rsync is unavailable (and retain the
+    # shutil fallback below when no rsync exists at all).
+    rsync_bin = resolve_rsync_bin() or "rsync"
     extra_args = None
     if remote:
         rsync_bin = remote.get("rsync_bin")
@@ -2140,10 +2147,18 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
 
     if timed_out:
         mins = RSYNC_STALL_TIMEOUT // 60
+        # rsync can emit the real cause (for example, the exact NAS file that
+        # returned a short read) and then wedge instead of exiting.  Do not
+        # throw that diagnostic away in favor of the generic watchdog text.
+        # Bound it because stderr can contain one warning per source file.
+        detail = stderr.strip()
+        if len(detail) > 1000:
+            detail = "…" + detail[-999:]
+        reported = f" rsync reported: {detail}" if detail else ""
         return {"moved": 0, "errors": [
             f"rsync stalled — no progress for over {mins} minutes, so the "
             f"copy was stopped. Originals are untouched; re-run with "
-            f"merge/resume to continue from where it left off."
+            f"merge/resume to continue from where it left off.{reported}"
         ]}
     if returncode != 0:
         return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}
