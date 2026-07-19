@@ -3478,8 +3478,8 @@ def test_import_readiness_skips_excluded_bundle_roots(
     ``.photoslibrary`` bundle, since that stat itself trips the TCC
     "access data from other apps" prompt for Photos Library-style
     bundles."""
-    import metadata
     import app as app_module
+    import metadata
 
     app, db = app_and_db
     monkeypatch.setattr(metadata, "exiftool_status", lambda: {
