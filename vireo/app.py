@@ -23839,7 +23839,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         ws_id = db._ws_id()
 
-        old_kid = None
+        old_kid_row = None
         # Compare using the ASCII-only fold SQLite's `COLLATE NOCASE` (which
         # add_keyword's dedupe relies on) uses — Python's str.lower() folds
         # non-ASCII letters that SQLite treats as distinct. Without this, a
@@ -23862,26 +23862,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # legacy is_species column, and the rest of the app treats
             # (is_species = 1 OR type = 'taxonomy') as species.
             old_kid_row = db.conn.execute(
-                """SELECT id, name FROM keywords
+                """SELECT id, name, taxon_id FROM keywords
                    WHERE name = ? COLLATE NOCASE
                      AND parent_id IS NULL
                      AND (is_species = 1 OR type = 'taxonomy')""",
                 (previous_species,),
             ).fetchone()
-            # Track the stored keyword row's spelling separately so the
-            # keyword_remove queued below cancels an unsynced keyword_add
-            # written under the DB's canonical case. Cached
-            # confirmed_species can legitimately differ from the stored
-            # row only by case (SQLite NOCASE keeps them together, but
-            # pending_changes.value is exact-match), so queueing the
-            # cache spelling would leave an add(<stored>) alongside a
-            # remove(<cache>) that sync_to_xmp treats as a paired rename
-            # and rewrites the removed spelling back into the sidecar.
-            old_species_stored = previous_species
-            if old_kid_row:
-                old_kid = old_kid_row["id"]
-                if old_kid_row["name"]:
-                    old_species_stored = old_kid_row["name"]
+            if old_kid_row is None:
+                # Hierarchical species intentionally have parent_id set. A
+                # prior confirmation may therefore be represented only by a
+                # nested leaf after duplicate repair; use that leaf as the
+                # identity target when no root row exists.
+                old_kid_row = db.conn.execute(
+                    """SELECT k.id, k.name, k.taxon_id
+                       FROM keywords k
+                       LEFT JOIN taxa t ON t.id = k.taxon_id
+                       WHERE k.name = ? COLLATE NOCASE
+                         AND (k.is_species = 1 OR k.type = 'taxonomy')
+                         AND (t.rank = 'species' OR t.rank IS NULL)
+                       ORDER BY CASE WHEN k.parent_id IS NULL THEN 0 ELSE 1 END,
+                                k.id
+                       LIMIT 1""",
+                    (previous_species,),
+                ).fetchone()
 
         # Run all mutations in a single transaction so that a mid-loop failure
         # (SQLite lock, disk error, etc.) can't leave half the photos retagged
@@ -23898,27 +23901,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if stored and stored["name"]:
                 species = stored["name"]
 
-            # Precheck which submitted photos already carry the new species
-            # keyword. Only photos that get a *new* tag should generate
-            # edit-history items and sidecar adds — otherwise confirming an
-            # already-tagged photo would push a no-op onto the undo stack, and
-            # undoing it would destructively remove the pre-existing keyword.
-            # Mirrors the precheck pattern in api_batch_keyword. Chunked so
-            # the IN-clause stays under SQLite's bound-parameter cap.
-            def _photos_with_keyword(keyword_id):
-                hits = set()
-                for chunk in _chunked(photo_ids):
-                    placeholders_ids = ",".join("?" for _ in chunk)
-                    hits.update(
-                        row["photo_id"]
-                        for row in db.conn.execute(
-                            f"""SELECT photo_id FROM photo_keywords
-                                WHERE keyword_id = ? AND photo_id IN ({placeholders_ids})""",
-                            [keyword_id] + list(chunk),
-                        ).fetchall()
-                    )
-                return hits
-
             # A species can already be attached through a hierarchical
             # keyword row with a different id/casing. Compare by taxon_id (or
             # normalized name for taxonomy-less legacy rows), otherwise a
@@ -23926,19 +23908,56 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             already_has_new = db.get_photos_with_equivalent_species(photo_ids, kid)
             newly_tagged = [pid for pid in photo_ids if pid not in already_has_new]
 
-            # For a replacement, only photos that actually carry the old
-            # species keyword should be untagged / generate a remove.
-            had_old = set()
-            if is_replacement and old_kid is not None:
-                had_old = _photos_with_keyword(old_kid)
-                for pid in photo_ids:
-                    if pid not in had_old:
-                        continue
-                    db.untag_photo(pid, old_kid, _commit=False)
-                    _queue_keyword_remove(
-                        pid, old_species_stored,
-                        workspace_id=ws_id, _commit=False,
-                    )
+            # Resolve every attached keyword row equivalent to the previous
+            # species, including nested hierarchy leaves. Multiple hierarchy
+            # placements are deliberate and survive duplicate repair, so a
+            # replacement must remove and record all of them for undo/redo.
+            old_rows_by_photo = {}
+            if is_replacement and old_kid_row is not None:
+                old_target_taxon_id = old_kid_row["taxon_id"]
+                old_target_key = keyword_match_key(old_kid_row["name"])
+                for chunk in _chunked(photo_ids):
+                    placeholders_ids = ",".join("?" for _ in chunk)
+                    rows = db.conn.execute(
+                        f"""SELECT pk.photo_id, k.id, k.name, k.taxon_id
+                            FROM photo_keywords pk
+                            JOIN keywords k ON k.id = pk.keyword_id
+                            LEFT JOIN taxa t ON t.id = k.taxon_id
+                            WHERE pk.photo_id IN ({placeholders_ids})
+                              AND (k.is_species = 1 OR k.type = 'taxonomy')
+                              AND (t.rank = 'species' OR t.rank IS NULL)
+                            ORDER BY pk.photo_id,
+                                     CASE WHEN k.parent_id IS NULL THEN 0 ELSE 1 END,
+                                     k.id""",
+                        list(chunk),
+                    ).fetchall()
+                    for row in rows:
+                        same_species = (
+                            old_target_taxon_id is not None
+                            and row["taxon_id"] == old_target_taxon_id
+                        ) or (
+                            row["taxon_id"] is None
+                            and keyword_match_key(row["name"]) == old_target_key
+                        )
+                        if old_target_taxon_id is None:
+                            same_species = (
+                                keyword_match_key(row["name"]) == old_target_key
+                            )
+                        if same_species:
+                            old_rows_by_photo.setdefault(row["photo_id"], []).append(row)
+
+                for pid, old_rows in old_rows_by_photo.items():
+                    remove_names = []
+                    for old in old_rows:
+                        db.untag_photo(pid, old["id"], _commit=False)
+                        if old["id"] != kid and old["name"] not in remove_names:
+                            remove_names.append(old["name"])
+                    for old_name in remove_names:
+                        _queue_keyword_remove(
+                            pid, old_name, workspace_id=ws_id, _commit=False,
+                        )
+
+            had_old = set(old_rows_by_photo)
 
             for pid in newly_tagged:
                 db.tag_photo(pid, kid, _commit=False)
@@ -23946,7 +23965,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     pid, species, workspace_id=ws_id, _commit=False,
                 )
 
-            if is_replacement and old_kid is not None and had_old:
+            if is_replacement and had_old:
                 # Photos that actually changed: had the old keyword (so the
                 # remove side fired) and/or newly gained the new one. Use the
                 # union so undo restores the exact state we mutated.
@@ -23954,14 +23973,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 changed = [
                     pid for pid in photo_ids if pid in had_old or pid in newly_set
                 ]
-                items = [
-                    {
+                items = []
+                for pid in changed:
+                    old_ids = [row["id"] for row in old_rows_by_photo.get(pid, [])]
+                    if len(old_ids) > 1:
+                        old_value = json.dumps({
+                            "keyword_id": old_ids[0],
+                            "keyword_ids": old_ids,
+                        }, sort_keys=True)
+                    else:
+                        old_value = str(old_ids[0]) if old_ids else ""
+                    items.append({
                         "photo_id": pid,
-                        "old_value": str(old_kid) if pid in had_old else "",
+                        "old_value": old_value,
                         "new_value": str(kid) if pid in newly_set else "",
-                    }
-                    for pid in changed
-                ]
+                    })
                 db.record_edit(
                     "species_replace",
                     f'Replaced species "{previous_species}" with "{species}" on {len(changed)} photos',

@@ -1551,6 +1551,61 @@ def test_encounter_species_rejects_out_of_range_burst_index(app_and_db):
     assert not db.get_pending_changes()
 
 
+def test_encounter_species_replacement_removes_hierarchical_previous(app_and_db):
+    """Replacing a confirmed species removes its nested hierarchy leaf and
+    records enough history for undo and redo to restore the exact tags."""
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    alternate_parent = db.add_keyword("Desert birds")
+    alternate_nested = db.add_keyword("Verdin", parent_id=alternate_parent)
+    db.tag_photo(photo_id, nested)
+    db.tag_photo(photo_id, alternate_nested)
+    _seed_encounter_cache(
+        app, db, [photo_id], confirmed_species="Verdin",
+    )
+
+    response = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+
+    assert response.status_code == 200
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Verdin" not in names
+    assert "Blue Jay" in names
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert nested not in tagged_ids
+    assert alternate_nested not in tagged_ids
+    history = db.get_edit_history()
+    assert history[0]["action_type"] == "species_replace"
+
+    db.undo_last_edit()
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Verdin" in names
+    assert "Blue Jay" not in names
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert nested in tagged_ids
+    assert alternate_nested in tagged_ids
+
+    db.redo_last_undo()
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Verdin" not in names
+    assert "Blue Jay" in names
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert nested not in tagged_ids
+    assert alternate_nested not in tagged_ids
+
+
 def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
     """Old-species lookup must be scoped to root species keywords only."""
     app, db = app_and_db
