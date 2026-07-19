@@ -1849,14 +1849,24 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                 "SELECT id FROM folders WHERE path = ?", (destination,)
             ).fetchone()["id"]
     workspace_linked = False
-    destination_stem_origins = {
-        os.path.splitext(row["filename"])[0]: None
-        for row in db.conn.execute(
-            "SELECT filename FROM photos WHERE folder_id = ?",
-            (dest_folder_id,),
-        )
-    }
     no_destination_stem = object()
+    destination_stem_origins = {}
+    for row in db.conn.execute(
+        "SELECT filename, last_move_source_folder_id "
+        "FROM photos WHERE folder_id = ?",
+        (dest_folder_id,),
+    ):
+        stem = os.path.splitext(row["filename"])[0]
+        origin = row["last_move_source_folder_id"]
+        known_origin = destination_stem_origins.get(
+            stem, no_destination_stem,
+        )
+        if known_origin is no_destination_stem:
+            destination_stem_origins[stem] = origin
+        elif known_origin != origin:
+            # Conflicting or partly unknown provenance cannot prove that a
+            # new same-stem photo shares the existing developed render.
+            destination_stem_origins[stem] = None
 
     photos_map = db.get_photos_by_ids(photo_ids)
     source_stem_counts = {}
@@ -1900,7 +1910,6 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                 stem, no_destination_stem,
             )
             if existing_origin is not no_destination_stem \
-                    and existing_origin is not None \
                     and existing_origin != photo["folder_id"]:
                 log.warning(
                     "Move skipped for %s: developed render stem collides at "
@@ -1964,15 +1973,14 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             # Update DB before deleting originals
             # This ensures a crash leaves duplicates (safe) rather than orphans
             db.conn.execute(
-                "UPDATE photos SET folder_id = ? WHERE id = ?",
-                (dest_folder_id, pid),
+                "UPDATE photos SET folder_id = ?, "
+                "last_move_source_folder_id = ? WHERE id = ?",
+                (dest_folder_id, photo["folder_id"], pid),
             )
             db.conn.commit()
-            # An existing destination stem starts with an unknown historical
-            # origin (None). Allow the first incoming sibling in this call —
-            # required for incremental RAW/JPEG moves and retries — then pin
-            # the stem to that source folder so a second, distinct source in
-            # the same batch is still rejected.
+            # Pin the stem to the proven source folder so a same-source
+            # sibling can follow in this call while a distinct source is
+            # still rejected.
             destination_stem_origins[stem] = photo["folder_id"]
 
             # Rebase this photo's developed-output file(s) for the new folder

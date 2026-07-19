@@ -944,6 +944,40 @@ def test_move_photos_allows_incremental_same_stem_siblings(tmp_path):
     assert not jpeg.exists()
 
 
+def test_move_photos_rejects_unknown_destination_same_stem_origin(tmp_path):
+    """A pre-existing same-stem photo is not assumed to be a moved sibling."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    source_fid = db.add_folder(str(source), name="source")
+    destination_fid = db.add_folder(str(destination), name="destination")
+    incoming = source / "IMG.CR3"
+    existing = destination / "IMG.JPG"
+    incoming.write_bytes(b"unrelated-raw")
+    existing.write_bytes(b"existing-jpeg")
+    incoming_pid = db.add_photo(
+        folder_id=source_fid, filename=incoming.name, extension=".cr3",
+        file_size=incoming.stat().st_size, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=destination_fid, filename=existing.name, extension=".jpg",
+        file_size=existing.stat().st_size, file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming.read_bytes() == b"unrelated-raw"
+    assert existing.read_bytes() == b"existing-jpeg"
+    assert db.get_photo(incoming_pid)["folder_id"] == source_fid
+
+
 def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
     """Regression: ``os.makedirs(destination, exist_ok=True)`` raises
     ``FileExistsError`` when the path exists as a regular file, so a

@@ -605,6 +605,7 @@ class Database:
                 working_copy_failed_at   TEXT,
                 working_copy_failed_mtime REAL,
                 working_copy_failed_source TEXT,
+                last_move_source_folder_id INTEGER,
                 eye_x                    REAL,
                 eye_y                    REAL,
                 eye_conf                 REAL,
@@ -1329,6 +1330,19 @@ class Database:
         except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN working_copy_failed_source TEXT"
+            )
+        # Record the folder a photo most recently moved from. This lets
+        # per-photo moves prove that a same-stem file already at the
+        # destination is a RAW/JPEG sibling from the same source instead of
+        # an unrelated photo whose developed render would be overwritten.
+        try:
+            self.conn.execute(
+                "SELECT last_move_source_folder_id FROM photos LIMIT 0"
+            )
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos "
+                "ADD COLUMN last_move_source_folder_id INTEGER"
             )
         # Migration: add eye_kp_fingerprint column. Set to NULL for new
         # photos; populated when the eye-keypoint stage runs. Phase 1 also
