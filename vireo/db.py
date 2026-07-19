@@ -9520,15 +9520,32 @@ class Database:
             # NULL taxon_id because the historic is_species=True insert path
             # skipped taxonomy lookup. Backfill opportunistically whenever
             # such a row is resolved so future identity checks use taxon_id.
+            # When the preferred lookup returns a species-rank taxon and the
+            # row is already bound to a non-species-rank homonym (e.g. an
+            # older catalog stamped ``Puma`` with the genus taxon before
+            # ``prefer_species`` existed), overwrite that binding. Without
+            # this rebind the row stays flagged is_species/taxonomy while
+            # its taxon_id points at a genus/family, so every downstream
+            # ``t.rank = 'species'`` filter (Life List, Compare, Explorer)
+            # silently drops photos carrying the accepted keyword.
             if is_species or kw_type == 'taxonomy':
                 taxon_id = self._lookup_taxon_id_for_keyword(
                     name, prefer_species=True,
                 )
                 if taxon_id:
                     self.conn.execute(
-                        "UPDATE keywords SET taxon_id = COALESCE(taxon_id, ?) "
-                        "WHERE id = ? AND type IN ('general', 'taxonomy')",
-                        (taxon_id, existing["id"]),
+                        "UPDATE keywords SET taxon_id = ? "
+                        "WHERE id = ? AND type IN ('general', 'taxonomy') "
+                        "AND ("
+                        "  taxon_id IS NULL "
+                        "  OR ("
+                        "    (SELECT rank FROM taxa WHERE id = ?) = 'species' "
+                        "    AND COALESCE("
+                        "      (SELECT rank FROM taxa WHERE id = keywords.taxon_id), ''"
+                        "    ) != 'species'"
+                        "  )"
+                        ")",
+                        (taxon_id, existing["id"], taxon_id),
                     )
             if kw_type is None and not is_species and existing["type"] == "general":
                 taxon_id = self._lookup_taxon_id_for_keyword(
@@ -9537,9 +9554,15 @@ class Database:
                 if taxon_id:
                     self.conn.execute(
                         "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
-                        "taxon_id = COALESCE(taxon_id, ?) "
+                        "taxon_id = CASE "
+                        "  WHEN taxon_id IS NULL THEN ? "
+                        "  WHEN (SELECT rank FROM taxa WHERE id = ?) = 'species' "
+                        "    AND COALESCE("
+                        "      (SELECT rank FROM taxa WHERE id = keywords.taxon_id), ''"
+                        "    ) != 'species' THEN ? "
+                        "  ELSE taxon_id END "
                         "WHERE id = ? AND type = 'general'",
-                        (taxon_id, existing["id"]),
+                        (taxon_id, taxon_id, taxon_id, existing["id"]),
                     )
                     if _commit:
                         self.conn.commit()
@@ -12861,25 +12884,49 @@ class Database:
             # (legacy general ``Robin`` alongside taxonomy ``robin``) are
             # genuinely different species — a stored highlight for
             # ``Robin`` must not become eligible for a photo whose
-            # accepted keyword resolves to ``robin``. Prediction fallback
-            # compares NOCASE: the classifier emits an external
-            # vocabulary spelling (e.g. ``Common Waxbill``) while
-            # sh.species stores the canonical keyword spelling
-            # (``Common waxbill``), so an exact compare would drop every
-            # highlight starred from an unconfirmed bucket. Applying
-            # NOCASE only to the fallback keeps the ambiguous-homonym
-            # boundary intact.
+            # accepted keyword resolves to ``robin``. The taxon-linked
+            # fallback below (mirroring
+            # :meth:`get_species_representative_lists`) preserves that
+            # boundary: it only matches when a photo keyword's
+            # ``taxon_id`` links back to a root species keyword whose
+            # name equals ``sh.species``, so a photo carrying only
+            # ``robin`` still cannot satisfy a ``Robin`` highlight
+            # unless the two keywords share a taxon. It rescues the
+            # case where ``repair_duplicate_photo_species`` detached
+            # the redundant root and the surviving hierarchical leaf
+            # has a different stored spelling from the canonical root
+            # (``verdin`` vs ``Verdin``), so a preserved highlight
+            # under ``Verdin`` still applies to that photo. Prediction
+            # fallback compares NOCASE: the classifier emits an
+            # external vocabulary spelling (e.g. ``Common Waxbill``)
+            # while sh.species stores the canonical keyword spelling
+            # (``Common waxbill``), so an exact compare would drop
+            # every highlight starred from an unconfirmed bucket.
+            # Applying NOCASE only to the fallback keeps the
+            # ambiguous-homonym boundary intact.
             eligibility_filter = """
                  AND COALESCE(p.flag, 'none') != 'rejected'
                  AND (
-                     sh.species = (
-                         SELECT k.name
+                     EXISTS (
+                         SELECT 1
                          FROM photo_keywords pk
                          JOIN keywords k ON k.id = pk.keyword_id
                           AND (k.is_species = 1 OR k.type = 'taxonomy')
                          WHERE pk.photo_id = sh.photo_id
-                         ORDER BY pk.rowid DESC
-                         LIMIT 1
+                           AND (
+                               k.name = sh.species
+                               OR (
+                                   k.taxon_id IS NOT NULL
+                                   AND EXISTS (
+                                       SELECT 1 FROM keywords root
+                                       WHERE root.parent_id IS NULL
+                                         AND (root.is_species = 1
+                                              OR root.type = 'taxonomy')
+                                         AND root.taxon_id = k.taxon_id
+                                         AND root.name = sh.species
+                                   )
+                               )
+                           )
                      )
                      OR (
                          NOT EXISTS (

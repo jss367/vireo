@@ -17577,3 +17577,257 @@ def test_rename_keyword_to_matching_taxon_prefers_species_rank(tmp_path):
     assert row["type"] == "taxonomy"
     assert row["is_species"] == 1
     assert row["taxon_id"] == species_taxon
+
+
+def test_add_species_rebinds_existing_row_from_higher_rank_to_species(tmp_path):
+    """A pre-existing keyword row already bound to a higher-rank taxon
+    (e.g. a legacy catalog that stamped ``Puma`` with the genus taxon
+    before ``prefer_species`` existed) must be rebound to the species-
+    rank taxon on the next species accept. Without the rebind the row
+    stays flagged is_species/taxonomy while its taxon_id points at the
+    genus, and every downstream ``t.rank = 'species'`` filter (Life
+    List, Compare, Explorer) silently drops photos carrying it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    # Legacy row: correctly typed taxonomy species but bound to the
+    # non-species-rank genus taxon.
+    kid = db.add_keyword("Puma", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (genus_taxon, kid),
+    )
+    db.conn.commit()
+    pre = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert pre["taxon_id"] == genus_taxon
+
+    # Accepting the species again should rebind onto the species-rank
+    # taxon rather than leaving the higher-rank homonym in place.
+    same = db.add_keyword("Puma", is_species=True)
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["is_species"] == 1
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == species_taxon
+
+
+def test_add_species_preserves_species_taxon_over_species_taxon(tmp_path):
+    """A row already bound to a species-rank taxon must NOT be rebound
+    when a different species-rank taxon shares the name — same-NOCASE
+    homonyms preserved by the migration are genuinely different species,
+    so the existing binding is authoritative.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, 'species', 'Animalia')",
+        [
+            (7000, "Aythya affinis", "Robin"),
+            (7001, "Turdus migratorius", "Robin"),
+        ],
+    )
+    db.conn.commit()
+    original_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 7000"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (original_taxon, kid),
+    )
+    db.conn.commit()
+
+    same = db.add_keyword("Robin", is_species=True)
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["taxon_id"] == original_taxon
+
+
+def test_promote_general_row_with_higher_rank_taxon_rebinds_to_species(tmp_path):
+    """A legacy 'general' row already carrying a higher-rank taxon_id
+    is promoted to taxonomy on the next taxonomy lookup and its
+    taxon_id must be rebound to the species-rank homonym. Without the
+    rebind the promoted row would be stamped is_species=1/taxonomy but
+    still bound to the genus, and Life List/Compare rank filters would
+    drop photos tagged with it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    # Simulate a legacy general row bound to the genus taxon. add_keyword
+    # normally auto-promotes on insert, so bypass it with direct SQL.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'general', 0, ?)",
+        (genus_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    same = db.add_keyword("Puma")
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon
+
+
+def test_repair_duplicate_photo_species_preserves_highlight_eligibility(tmp_path):
+    """After ``repair_duplicate_photo_species`` detaches the redundant
+    root, ``get_species_highlights(eligible_only=True)`` must still
+    surface highlights stored under the canonical root name for a
+    photo whose only remaining species keyword is a differently-cased
+    hierarchy leaf (``verdin`` vs ``Verdin``). The taxon-linked
+    fallback matches the leaf back to the root without loosening the
+    ambiguous-homonym boundary.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], root),
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Highlight stored under the canonical root spelling — the same
+    # string curation is keyed on and the photo carried via the root
+    # tag before repair detached it.
+    db.add_species_highlight("Verdin", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    # Only the differently-spelled hierarchy leaf remains attached.
+    attached_names = {
+        row["name"] for row in db.conn.execute(
+            """SELECT k.name FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pk.photo_id = ?""",
+            (pid,),
+        ).fetchall()
+    }
+    assert "verdin" in attached_names
+    assert "Verdin" not in attached_names
+
+    # Highlight under the canonical root name still applies.
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights.get("Verdin", {}), (
+        "highlight under root spelling must remain eligible for a photo "
+        "whose only species keyword is a differently-spelled hierarchy leaf"
+    )
+    # Same result via the single-species selector used by the UI.
+    single = db.get_species_highlights(species="Verdin", eligible_only=True)
+    assert pid in single.get("Verdin", {})
+
+
+def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
+    """The new taxon-linked fallback must only match the leaf back to a
+    root whose taxon_id shares identity with the leaf's taxon_id. A
+    photo whose only species keyword links to taxon A must not satisfy
+    a highlight whose canonical root name resolves to taxon B, even if
+    the leaf keyword's spelling happens to match the root name.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (2912, "Auriparus flaviceps", "Verdin"),
+        (7000, "Turdus migratorius", "American Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries only a Verdin hierarchy leaf.
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.tag_photo(pid, nested)
+    # Root named "American Robin" bound to that species' taxon — its
+    # taxon_id does NOT match the leaf's taxon, so the taxon-linked
+    # fallback must reject the pairing.
+    robin_root = db.add_keyword("American Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], robin_root),
+    )
+    db.add_species_highlight("American Robin", pid)
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(
+        species="American Robin", eligible_only=True,
+    )
+    assert "American Robin" not in highlights, (
+        "highlight stored under one species must not become eligible "
+        "for a photo whose only species keyword links to a different taxon"
+    )
