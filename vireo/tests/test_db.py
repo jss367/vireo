@@ -1500,6 +1500,44 @@ def test_mark_species_keywords_preserves_explicit_location_homonym(tmp_path):
     assert dict(leaf) == {"type": "location", "parent_id": location_id}
 
 
+def test_mark_species_keywords_clears_stale_is_species_on_non_taxonomy(tmp_path):
+    """Legacy rows with an explicit non-taxonomy type must not keep is_species=1.
+
+    Downstream species queries OR ``is_species=1`` with ``type='taxonomy'``,
+    so a location/individual/genre row that carries the legacy species flag
+    silently acts as taxonomy. ``mark_species_keywords`` repairs that.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    loc_id = db.add_keyword("California", kw_type="location")
+    ind_id = db.add_keyword("Robin", kw_type="individual")
+    genre_id = db.add_keyword("Portrait", kw_type="genre")
+    # Simulate stale legacy state — direct row edit rather than going through
+    # add_keyword, since the API paths intentionally reject this combination.
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 1 WHERE id IN (?, ?, ?)",
+        (loc_id, ind_id, genre_id),
+    )
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            return None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+
+    assert updated == 3
+    rows = {
+        row["id"]: dict(row) for row in db.conn.execute(
+            "SELECT id, type, is_species FROM keywords WHERE id IN (?, ?, ?)",
+            (loc_id, ind_id, genre_id),
+        ).fetchall()
+    }
+    assert rows[loc_id] == {"id": loc_id, "type": "location", "is_species": 0}
+    assert rows[ind_id] == {"id": ind_id, "type": "individual", "is_species": 0}
+    assert rows[genre_id] == {"id": genre_id, "type": "genre", "is_species": 0}
+
+
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
     """mark_species_keywords links keywords.taxon_id when taxa table has a match."""
     from db import Database

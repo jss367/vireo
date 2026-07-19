@@ -16745,6 +16745,14 @@ class Database:
         Matching rows get ``is_species=1``, ``type='taxonomy'``, and (if the
         local taxa table is populated) a ``taxon_id`` link by iNaturalist id.
 
+        Also clears the stale legacy ``is_species=1`` flag on any keyword
+        whose explicit type is ``location``, ``genre``, or ``individual`` —
+        those combinations are unreachable through the normal retype path
+        but can survive on legacy rows or from earlier bugs, and downstream
+        code that ORs ``is_species=1`` into "species candidate" queries
+        (``filter_out_subject_tagged``, ``backfill_wildlife``, and similar)
+        would otherwise silently treat a location homonym as taxonomy.
+
         Uses the local taxonomy only (no network requests).
 
         Args:
@@ -16762,7 +16770,17 @@ class Database:
             "  AND (is_species = 0 OR type IS NULL OR type != 'taxonomy' "
             "       OR taxon_id IS NULL)"
         ).fetchall()
-        updated = 0
+        # Clear stale is_species=1 on explicit non-taxonomy types. This is
+        # a repair pass for the illegal (type, is_species) combination — no
+        # taxon lookup is involved, so a location "California" is left with
+        # type='location' but is_species=0, restoring the invariant that
+        # is_species=1 implies "treat as taxonomy."
+        stale_cursor = self.conn.execute(
+            "UPDATE keywords SET is_species = 0 "
+            "WHERE is_species = 1 "
+            "  AND type IN ('location', 'genre', 'individual')"
+        )
+        updated = stale_cursor.rowcount if stale_cursor.rowcount > 0 else 0
         for kw in keywords:
             taxon = taxonomy.lookup(kw["name"])
             if not taxon:
