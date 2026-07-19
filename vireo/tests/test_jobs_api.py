@@ -3413,6 +3413,119 @@ def test_import_photos_happy_path(app_and_db, tmp_path):
     assert result["safe_to_format"] is True
 
 
+def _save_nas_target(tmp_path, local_root=None):
+    import config as cfg
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos", "mount_path": str(tmp_path / "mnt"),
+    }
+    if local_root is not None:
+        target["local_archive_root"] = str(local_root)
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    return target
+
+
+def test_after_process_move_requires_after_import(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    local_root = tmp_path / "archive"
+    _save_nas_target(tmp_path, local_root=local_root)
+    card = _import_card(tmp_path)
+    dest = local_root / "sub"
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(dest),
+        "after_import": None,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "after_import" in resp.get_json()["error"]
+
+
+def test_after_process_move_unknown_target(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "archive"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nope"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "nope" in resp.get_json()["error"]
+
+
+def test_after_process_move_target_without_root(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    _save_nas_target(tmp_path)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "archive"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "local archive root" in resp.get_json()["error"]
+
+
+def test_after_process_move_destination_outside_root(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    local_root = tmp_path / "archive"
+    _save_nas_target(tmp_path, local_root=local_root)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "elsewhere"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "archive root" in resp.get_json()["error"]
+
+
+def test_after_process_move_rejected_for_remote_destination(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    _save_nas_target(tmp_path, local_root=tmp_path / "archive")
+    card = _import_card(tmp_path)
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "remote_target_id": "nas1",
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "local archive destination" in resp.get_json()["error"]
+
+
+def test_import_in_place_rejects_after_process_move(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    _save_nas_target(tmp_path, local_root=tmp_path / "archive")
+    card = _import_card(tmp_path)
+
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [card],
+        "after_import": None,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "import-in-place" in resp.get_json()["error"]
+
+
 def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()

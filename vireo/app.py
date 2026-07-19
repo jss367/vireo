@@ -20349,6 +20349,53 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(f"unknown process id: {value}")
         return None
 
+    def _validate_after_process_move(value, after_import, destination):
+        """Validate an after_process_move spec; return (target_snapshot, error).
+
+        ``None`` value → (None, None). Otherwise the value must name a saved
+        remote target that has a local_archive_root containing ``destination``,
+        and the run must chain a process (the move fires from the process
+        job's completion hook — an import-only move is just the Move page).
+        The returned target dict is the enqueue-time snapshot: a Settings
+        edit mid-chain must not redirect the move (same rationale as
+        remote_target_snapshot).
+        """
+        if value is None:
+            return None, None
+        if not isinstance(value, dict):
+            return None, json_error(
+                "after_process_move must be an object or null, got "
+                f"{type(value).__name__}")
+        target_id = (value.get("remote_target_id") or "").strip()
+        if not target_id:
+            return None, json_error(
+                "after_process_move.remote_target_id required")
+        if after_import is None:
+            return None, json_error(
+                "after_process_move requires after_import — the move chains "
+                "off the processing run; for a move without processing use "
+                "the Move page")
+        import config as cfg
+        target = cfg.get_remote_target(target_id)
+        if target is None:
+            return None, json_error(f"unknown remote target: {target_id}")
+        root = (target.get("local_archive_root") or "").strip()
+        if not root:
+            return None, json_error(
+                "this remote target has no local archive root — set one "
+                "under Settings → Remote targets")
+        try:
+            inside = os.path.commonpath([
+                os.path.realpath(destination), os.path.realpath(root),
+            ]) == os.path.realpath(root)
+        except ValueError:
+            inside = False
+        if not inside:
+            return None, json_error(
+                "destination is not inside the remote target's local "
+                f"archive root ({root})")
+        return target, None
+
     def _create_import_collection(thread_db, photo_ids):
         """Create the static collection that records one completed import.
 
@@ -20395,6 +20442,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from image_loader import is_excluded_scan_path
 
         body = request.get_json(silent=True) or {}
+        if body.get("after_process_move") is not None:
+            return json_error(
+                "after_process_move is not supported for import-in-place — "
+                "photos stay where they are; use Copy to archive"
+            )
         sources = body.get("sources")
         if isinstance(sources, str):
             sources = [sources]
@@ -20763,6 +20815,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         if remote_subpath and not remote_target_id:
             return json_error("remote_subpath requires remote_target_id")
+        after_process_move = body.get("after_process_move")
+        if after_process_move is not None and remote_target_id:
+            return json_error(
+                "after_process_move requires a local archive destination — "
+                "a remote-destination import already lands on the NAS"
+            )
         if remote_target_id:
             # Refuse at request time when no GNU rsync exists or the
             # target is unknown/unsafe — starting a job guaranteed to
@@ -20963,6 +21021,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except ValueError as e:
                 return json_error(str(e), 404)
 
+        # Validate the optional NAS move that chains after processing
+        # completes. Requires after_import (the move fires from the process
+        # job's completion hook) and a destination inside the target's
+        # local archive root; snapshotted now so a mid-chain Settings edit
+        # can't redirect the move.
+        move_target_snapshot, move_err = _validate_after_process_move(
+            after_process_move, after_import, destination,
+        )
+        if move_err is not None:
+            return move_err
+
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_cache_dir)
@@ -21004,6 +21073,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "workspace_id": active_ws,
             "created_workspace": created_workspace,
         }
+        if move_target_snapshot is not None:
+            job_config["after_process_move"] = {
+                "remote_target_id": move_target_snapshot["id"],
+                "target_name": move_target_snapshot["name"],
+            }
 
         def _chain_after_import(job, result):
             """Create the import collection and optionally enqueue processing.
