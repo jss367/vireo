@@ -17480,3 +17480,100 @@ def test_curation_setters_canonicalize_species_casing(tmp_path):
         assert removed == 1
     finally:
         db.close()
+
+
+def test_add_species_keyword_prefers_species_rank_over_genus_homonym(tmp_path):
+    """Adding an is_species=True keyword whose name matches both a species
+    and a higher-rank homonym (e.g. species Puma vs genus Puma) must bind
+    the row to the species-rank taxon. Otherwise Life List, Compare, and
+    Explorer queries — which filter on ``t.rank = 'species'`` — silently
+    drop photos carrying the just-added keyword.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Puma", is_species=True)
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert dict(row) == {
+        "is_species": 1, "type": "taxonomy", "taxon_id": species_taxon,
+    }
+
+
+def test_add_general_keyword_promoted_to_species_prefers_species_rank(tmp_path):
+    """When add_keyword auto-detects a general name as taxonomy via a
+    taxa lookup, the resulting is_species=1 row must still land on a
+    species-rank taxon so the rank-filtered queries don't drop it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Puma")
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon
+
+
+def test_rename_keyword_to_matching_taxon_prefers_species_rank(tmp_path):
+    """Renaming a general keyword to a name that matches both a species
+    and a higher-rank homonym auto-promotes to taxonomy on the
+    species-rank taxon so rank-filtered queries still see the row.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Cougar")
+    db.update_keyword(kid, name="Puma")
+
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon

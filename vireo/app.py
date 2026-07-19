@@ -9974,9 +9974,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 1, min(int(photos_per_species), 100)
             )
 
+        # Canonicalize each row's species to the root keyword's stored
+        # spelling. After repair_duplicate_photo_species detaches a
+        # redundant root row, a photo may only carry the hierarchy leaf
+        # (``verdin``) whose spelling differs from the curation-keyed
+        # root (``Verdin``); without canonicalization, that photo would
+        # sit in its own ``verdin`` bucket, its curation on
+        # ``Verdin`` would never apply, and single-species API loads
+        # for ``Verdin`` would return an entry named ``verdin``.
+        canonicalize = _species_canonicalizer(db)
+        merged_locations = {}
+        for raw_species, locations in locations_by_species.items():
+            canonical = canonicalize(raw_species) or raw_species
+            existing = merged_locations.setdefault(canonical, [])
+            for loc in locations:
+                if loc not in existing:
+                    existing.append(loc)
+        locations_by_species = merged_locations
+
         buckets = {}
         for row in rows:
             r = dict(row)
+            r["species"] = canonicalize(r["species"]) or r["species"]
             entry = buckets.setdefault(r["species"], {
                 "scientific_name": None,
                 "common_name": None,

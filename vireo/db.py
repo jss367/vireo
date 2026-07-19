@@ -9363,24 +9363,46 @@ class Database:
             return self._apply_case_convention(name, convention)
         return name
 
-    def _lookup_taxon_id_for_keyword(self, name):
-        """Return the local taxa.id matching a keyword name, if any."""
+    def _lookup_taxon_id_for_keyword(self, name, prefer_species=False):
+        """Return the local taxa.id matching a keyword name, if any.
+
+        When ``prefer_species`` is true, break ties in favor of a
+        ``rank='species'`` taxon. A catalog can hold homonyms across ranks
+        (for example a common species ``Puma`` alongside the genus
+        ``Puma``); without a preference, an unordered ``LIMIT 1`` can bind
+        an ``is_species=True`` keyword to the non-species taxon, and every
+        downstream ``rank='species'`` filter (Life List, Compare, Explorer)
+        then silently drops the photo even though the accept appeared to
+        succeed.
+        """
+        species_order = " ORDER BY (t.rank = 'species') DESC, t.id ASC" if prefer_species else ""
         for variant in _taxon_lookup_variants(name):
             taxon = self.conn.execute(
-                """SELECT t.id FROM taxa t
+                f"""SELECT t.id FROM taxa t
                    WHERE t.common_name = ? COLLATE NOCASE
                       OR t.name = ? COLLATE NOCASE
+                   {species_order}
                    LIMIT 1""",
                 (variant, variant),
             ).fetchone()
             if taxon:
                 return taxon["id"]
-            taxon = self.conn.execute(
-                """SELECT t.taxon_id AS id FROM taxa_common_names t
-                   WHERE t.name = ? COLLATE NOCASE
-                   LIMIT 1""",
-                (variant,),
-            ).fetchone()
+            if prefer_species:
+                taxon = self.conn.execute(
+                    """SELECT tcn.taxon_id AS id FROM taxa_common_names tcn
+                       JOIN taxa t ON t.id = tcn.taxon_id
+                       WHERE tcn.name = ? COLLATE NOCASE
+                       ORDER BY (t.rank = 'species') DESC, t.id ASC
+                       LIMIT 1""",
+                    (variant,),
+                ).fetchone()
+            else:
+                taxon = self.conn.execute(
+                    """SELECT t.taxon_id AS id FROM taxa_common_names t
+                       WHERE t.name = ? COLLATE NOCASE
+                       LIMIT 1""",
+                    (variant,),
+                ).fetchone()
             if taxon:
                 return taxon["id"]
         return None
@@ -9499,7 +9521,9 @@ class Database:
             # skipped taxonomy lookup. Backfill opportunistically whenever
             # such a row is resolved so future identity checks use taxon_id.
             if is_species or kw_type == 'taxonomy':
-                taxon_id = self._lookup_taxon_id_for_keyword(name)
+                taxon_id = self._lookup_taxon_id_for_keyword(
+                    name, prefer_species=True,
+                )
                 if taxon_id:
                     self.conn.execute(
                         "UPDATE keywords SET taxon_id = COALESCE(taxon_id, ?) "
@@ -9507,7 +9531,9 @@ class Database:
                         (taxon_id, existing["id"]),
                     )
             if kw_type is None and not is_species and existing["type"] == "general":
-                taxon_id = self._lookup_taxon_id_for_keyword(name)
+                taxon_id = self._lookup_taxon_id_for_keyword(
+                    name, prefer_species=True,
+                )
                 if taxon_id:
                     self.conn.execute(
                         "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
@@ -9570,9 +9596,13 @@ class Database:
         # The earlier kw_type reconciliation turns is_species=True into
         # kw_type='taxonomy'; limiting lookup to kw_type is None therefore
         # created new confirmed-species rows with taxon_id=NULL, defeating
-        # taxon-aware dedupe against hierarchical XMP leaves.
+        # taxon-aware dedupe against hierarchical XMP leaves. Prefer a
+        # species-rank taxon here — the INSERT below stamps is_species=1 as
+        # soon as any taxon is found, and downstream rank filters would then
+        # drop the just-linked keyword if we bound it to a genus/family
+        # homonym.
         taxon_id = (
-            self._lookup_taxon_id_for_keyword(name)
+            self._lookup_taxon_id_for_keyword(name, prefer_species=True)
             if kw_type == 'taxonomy'
             else None
         )
@@ -9582,7 +9612,9 @@ class Database:
             if is_species:
                 kw_type = 'taxonomy'
             else:
-                taxon_id = self._lookup_taxon_id_for_keyword(name)
+                taxon_id = self._lookup_taxon_id_for_keyword(
+                    name, prefer_species=True,
+                )
                 if taxon_id:
                     kw_type = 'taxonomy'
 
@@ -12250,13 +12282,36 @@ class Database:
         API layer ranks each species' photos with the highlights scorer,
         which falls back gracefully when metric columns are NULL.
 
-        When ``species`` is provided, return only that exact keyword bucket.
-        This keeps incremental Life List pages proportional to the species
-        being browsed instead of rescanning every tagged photo in a catalog.
+        When ``species`` is provided, return the bucket for that species.
+        A photo's surviving hierarchy leaf can have a different stored
+        spelling from the canonical root keyword (``verdin`` vs
+        ``Verdin``) after ``repair_duplicate_photo_species`` detaches the
+        redundant root row, but curation stays keyed on the root spelling
+        — so the filter also accepts any keyword whose ``taxon_id`` links
+        back to a root species keyword named ``species``. Otherwise
+        ``/api/life-list/species?species=Verdin`` would 404 for photos
+        whose only remaining tag is the hierarchy leaf.
         """
         ws = self._ws_id()
-        species_filter = " AND k.name = ?" if species is not None else ""
-        params = (ws, species) if species is not None else (ws,)
+        if species is not None:
+            species_filter = """
+                 AND (
+                     k.name = ?
+                     OR (
+                         k.taxon_id IS NOT NULL
+                         AND EXISTS (
+                             SELECT 1 FROM keywords rk
+                             WHERE rk.parent_id IS NULL
+                               AND rk.taxon_id = k.taxon_id
+                               AND (rk.is_species = 1 OR rk.type = 'taxonomy')
+                               AND rk.name = ?
+                         )
+                     )
+                 )"""
+            params = (ws, species, species)
+        else:
+            species_filter = ""
+            params = (ws,)
         return self.conn.execute(
             f"""SELECT p.id, p.folder_id, p.filename, p.timestamp,
                       p.rating, p.flag, p.quality_score,
@@ -12511,14 +12566,31 @@ class Database:
 
         When ``species`` is given, only that species is scanned — used by
         the single-species paging endpoint so incremental loads don't do
-        catalog-wide work.
+        catalog-wide work. Matching mirrors
+        :meth:`get_life_list_candidates`: raw ``k.name`` first, then a
+        taxon-linked root fallback so a hierarchy leaf surviving repair
+        (``verdin`` vs canonical root ``Verdin``) still contributes its
+        location keywords to the requested bucket.
         """
         ws = self._ws_id()
         species_filter = ""
         params = []
         if species:
-            species_filter = " AND k.name = ?"
-            params.append(species)
+            species_filter = """
+                 AND (
+                     k.name = ?
+                     OR (
+                         k.taxon_id IS NOT NULL
+                         AND EXISTS (
+                             SELECT 1 FROM keywords rk
+                             WHERE rk.parent_id IS NULL
+                               AND rk.taxon_id = k.taxon_id
+                               AND (rk.is_species = 1 OR rk.type = 'taxonomy')
+                               AND rk.name = ?
+                         )
+                     )
+                 )"""
+            params.extend([species, species])
         params.append(ws)
         rows = self.conn.execute(
             f"""SELECT DISTINCT k.name AS species, lk.name AS location
@@ -13325,9 +13397,15 @@ class Database:
                 name_changed = new_name != current["name"]
                 # Resolve taxon match lazily: only a rename needs it (both
                 # for auto-promotion below and for the effective type when
-                # no explicit type is passed).
+                # no explicit type is passed). Prefer species rank: the
+                # auto-promotion below stamps is_species=1 on a taxonomy
+                # match, so binding to a genus/family homonym would then
+                # get filtered out by the rank='species' Life List /
+                # Compare queries.
                 taxon_id = (
-                    self._lookup_taxon_id_for_keyword(new_name)
+                    self._lookup_taxon_id_for_keyword(
+                        new_name, prefer_species=True,
+                    )
                     if name_changed else None
                 )
                 # Peer lookup must use the EFFECTIVE type, not the pre-update
