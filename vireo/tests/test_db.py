@@ -17718,6 +17718,148 @@ def test_promote_general_row_with_higher_rank_taxon_rebinds_to_species(tmp_path)
     assert row["taxon_id"] == species_taxon
 
 
+def test_add_species_prefers_alternate_common_name_over_higher_rank_direct(tmp_path):
+    """When a submitted label collides with a higher-rank taxon on the
+    direct ``taxa`` lookup but also appears in ``taxa_common_names`` as an
+    alternate for a species-rank taxon, the species-rank alternate must
+    win. Otherwise the new rank filters (Life List, Compare) silently drop
+    every photo carrying the accepted keyword even though the accept
+    reported success.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    # Direct match on `Boa` is the genus; the species Boa constrictor
+    # registers `Boa` as an alternate English name via taxa_common_names.
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank, kingdom) "
+        "VALUES (1, 'Boa', 'Boa', 'genus', 'Animalia')"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank, kingdom) "
+        "VALUES (2, 'Boa constrictor', 'Boa Constrictor', 'species', 'Animalia')"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa_common_names (taxon_id, name) VALUES (2, 'Boa')"
+    )
+    db.conn.commit()
+
+    kid = db.add_keyword("Boa", is_species=True)
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == 2
+
+
+def test_mark_species_keywords_rebinds_higher_rank_taxonomy_link(tmp_path):
+    """A keyword row already typed ``taxonomy`` and linked by the old
+    species-agnostic lookup to a genus/family taxon must be rebound to a
+    species-rank taxon on the next ``mark_species_keywords`` pass. Without
+    the rebind, upgraded catalogs keep the higher-rank binding and the new
+    ``t.rank = 'species'`` filter (Life List, Compare, Explorer) silently
+    drops every photo carrying the accepted keyword.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    # Simulate a legacy row: fully typed taxonomy but bound to the
+    # non-species-rank genus taxon. add_keyword normally auto-promotes on
+    # insert, so bypass it with direct SQL.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'taxonomy', 1, ?)",
+        (genus_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            if name.lower() == "puma":
+                return {"taxon_id": 41963}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 1
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon
+
+
+def test_mark_species_keywords_keeps_species_taxon_when_only_higher_rank_available(tmp_path):
+    """``mark_species_keywords`` must not clobber an existing species-rank
+    binding just because the taxonomy lookup only resolves to a higher-rank
+    homonym. A row already correctly bound stays bound and no update fires.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'taxonomy', 1, ?)",
+        (species_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        # Taxonomy only knows the genus id here — the rebind must NOT fire
+        # because there is no species-rank alternative.
+        def lookup(self, name):
+            if name.lower() == "puma":
+                return {"taxon_id": 46272}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 0
+    row = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["taxon_id"] == species_taxon
+
+
 def test_repair_duplicate_photo_species_preserves_highlight_eligibility(tmp_path):
     """After ``repair_duplicate_photo_species`` detaches the redundant
     root, ``get_species_highlights(eligible_only=True)`` must still

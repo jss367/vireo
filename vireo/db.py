@@ -9374,37 +9374,66 @@ class Database:
         downstream ``rank='species'`` filter (Life List, Compare, Explorer)
         then silently drops the photo even though the accept appeared to
         succeed.
+
+        When ``prefer_species`` is true, the direct ``taxa`` match is only
+        returned immediately if it is species-rank. Otherwise the
+        ``taxa_common_names`` fallback is still consulted for a species-rank
+        alternate name before the higher-rank direct hit wins. Without this,
+        an alternate English species name that collides with a genus/family
+        (``populate_taxa_db_from_json`` explicitly indexes alternates in
+        ``taxa_common_names``) would silently bind a species accept to the
+        non-species direct hit and the new rank filters would hide the tag.
         """
-        species_order = " ORDER BY (t.rank = 'species') DESC, t.id ASC" if prefer_species else ""
         for variant in _taxon_lookup_variants(name):
-            taxon = self.conn.execute(
-                f"""SELECT t.id FROM taxa t
-                   WHERE t.common_name = ? COLLATE NOCASE
-                      OR t.name = ? COLLATE NOCASE
-                   {species_order}
-                   LIMIT 1""",
-                (variant, variant),
-            ).fetchone()
-            if taxon:
-                return taxon["id"]
             if prefer_species:
-                taxon = self.conn.execute(
-                    """SELECT tcn.taxon_id AS id FROM taxa_common_names tcn
+                direct = self.conn.execute(
+                    """SELECT t.id, t.rank FROM taxa t
+                       WHERE t.common_name = ? COLLATE NOCASE
+                          OR t.name = ? COLLATE NOCASE
+                       ORDER BY (t.rank = 'species') DESC, t.id ASC
+                       LIMIT 1""",
+                    (variant, variant),
+                ).fetchone()
+                if direct and direct["rank"] == "species":
+                    return direct["id"]
+                # Direct match (if any) is not species-rank. Consult the
+                # common-names index for a species-rank alternate before
+                # returning the higher-rank direct hit.
+                common = self.conn.execute(
+                    """SELECT tcn.taxon_id AS id, t.rank FROM taxa_common_names tcn
                        JOIN taxa t ON t.id = tcn.taxon_id
                        WHERE tcn.name = ? COLLATE NOCASE
                        ORDER BY (t.rank = 'species') DESC, t.id ASC
                        LIMIT 1""",
                     (variant,),
                 ).fetchone()
+                if common and common["rank"] == "species":
+                    return common["id"]
+                # No species-rank match on this variant; prefer the direct
+                # (higher-rank) hit, otherwise fall back to the common-name
+                # hit if one exists.
+                if direct:
+                    return direct["id"]
+                if common:
+                    return common["id"]
             else:
+                taxon = self.conn.execute(
+                    """SELECT t.id FROM taxa t
+                       WHERE t.common_name = ? COLLATE NOCASE
+                          OR t.name = ? COLLATE NOCASE
+                       LIMIT 1""",
+                    (variant, variant),
+                ).fetchone()
+                if taxon:
+                    return taxon["id"]
                 taxon = self.conn.execute(
                     """SELECT t.taxon_id AS id FROM taxa_common_names t
                        WHERE t.name = ? COLLATE NOCASE
                        LIMIT 1""",
                     (variant,),
                 ).fetchone()
-            if taxon:
-                return taxon["id"]
+                if taxon:
+                    return taxon["id"]
         return None
 
     def add_keyword(self, name, parent_id=None, is_species=False, kw_type=None, _commit=True):
@@ -17261,6 +17290,11 @@ class Database:
 
         Matching rows get ``is_species=1``, ``type='taxonomy'``, and (if the
         local taxa table is populated) a ``taxon_id`` link by iNaturalist id.
+        A ``type='taxonomy'`` row whose ``taxon_id`` was bound by the old
+        species-agnostic lookup to a non-species-rank taxon (genus/family)
+        is rebound to the species-rank taxon whenever ``taxonomy.lookup``
+        resolves to one; otherwise the new ``rank = 'species'`` filters
+        would silently drop every photo carrying the accepted keyword.
 
         Uses the local taxonomy only (no network requests).
 
@@ -17270,14 +17304,22 @@ class Database:
         # Also include already-typed taxonomy keywords whose taxon_id is
         # still NULL — those were created before the local taxa table was
         # populated (e.g. via add_keyword(..., is_species=True) from the
-        # classifier), and still need their hierarchy link filled in. Deliberate
-        # non-taxonomy types are excluded before lookup so a taxon homonym can
-        # never silently retype them.
+        # classifier), and still need their hierarchy link filled in. Also
+        # revisit already-typed taxonomy keywords whose taxon_id points at a
+        # non-species-rank taxon so we can rebind them to a species-rank
+        # taxon when one exists. Deliberate non-taxonomy types are excluded
+        # before lookup so a taxon homonym can never silently retype them.
         keywords = self.conn.execute(
-            "SELECT id, name, type, taxon_id, is_species FROM keywords "
-            "WHERE (type IS NULL OR type IN ('general', 'taxonomy')) "
-            "  AND (is_species = 0 OR type IS NULL OR type != 'taxonomy' "
-            "       OR taxon_id IS NULL)"
+            "SELECT k.id, k.name, k.type, k.taxon_id, k.is_species, "
+            "       t.rank AS taxon_rank "
+            "FROM keywords k "
+            "LEFT JOIN taxa t ON t.id = k.taxon_id "
+            "WHERE (k.type IS NULL OR k.type IN ('general', 'taxonomy')) "
+            "  AND ("
+            "    k.is_species = 0 OR k.type IS NULL OR k.type != 'taxonomy' "
+            "    OR k.taxon_id IS NULL "
+            "    OR (t.rank IS NOT NULL AND t.rank != 'species')"
+            "  )"
         ).fetchall()
         updated = 0
         for kw in keywords:
@@ -17285,28 +17327,57 @@ class Database:
             if not taxon:
                 continue
             local_taxon_id = kw["taxon_id"]
+            lookup_local_id = None
+            lookup_rank = None
+            inat_id = taxon.get("taxon_id")
+            if inat_id is not None:
+                row = self.conn.execute(
+                    "SELECT id, rank FROM taxa WHERE inat_id = ?", (inat_id,)
+                ).fetchone()
+                if row:
+                    lookup_local_id = row["id"]
+                    lookup_rank = row["rank"]
             if local_taxon_id is None:
-                inat_id = taxon.get("taxon_id")
-                if inat_id is not None:
-                    row = self.conn.execute(
-                        "SELECT id FROM taxa WHERE inat_id = ?", (inat_id,)
-                    ).fetchone()
-                    if row:
-                        local_taxon_id = row["id"]
+                local_taxon_id = lookup_local_id
+            # Rebind an existing higher-rank link when the taxonomy lookup
+            # resolves to a species-rank local taxon. Without this pass,
+            # mark_species_keywords skipped fully typed rows and legacy
+            # keywords bound by the old species-agnostic lookup to a
+            # genus/family stayed bound; the new ``t.rank = 'species'``
+            # filter (Life List, Compare) then silently dropped every
+            # photo carrying those keywords after upgrade.
+            rebind_taxon_id = None
+            if (
+                kw["taxon_id"] is not None
+                and kw["taxon_rank"] is not None
+                and kw["taxon_rank"] != "species"
+                and lookup_local_id is not None
+                and lookup_rank == "species"
+                and lookup_local_id != kw["taxon_id"]
+            ):
+                rebind_taxon_id = lookup_local_id
             # Skip no-op updates so the "updated" count reflects real
             # changes. A matched row is fully consistent when type is
-            # 'taxonomy', is_species is 1, and (taxon_id is already set
-            # OR we have no local id to link it to).
+            # 'taxonomy', is_species is 1, and (taxon_id is already set to
+            # a species-rank id OR we have no local id to link it to).
             is_type_change = kw["type"] != "taxonomy"
             is_species_fix = kw["is_species"] != 1
             is_taxon_link = kw["taxon_id"] is None and local_taxon_id is not None
-            if not (is_type_change or is_species_fix or is_taxon_link):
+            is_rebind = rebind_taxon_id is not None
+            if not (is_type_change or is_species_fix or is_taxon_link or is_rebind):
                 continue
-            self.conn.execute(
-                "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
-                "taxon_id = COALESCE(taxon_id, ?) WHERE id = ?",
-                (local_taxon_id, kw["id"]),
-            )
+            if is_rebind:
+                self.conn.execute(
+                    "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+                    "taxon_id = ? WHERE id = ?",
+                    (rebind_taxon_id, kw["id"]),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+                    "taxon_id = COALESCE(taxon_id, ?) WHERE id = ?",
+                    (local_taxon_id, kw["id"]),
+                )
             updated += 1
         if updated:
             self.conn.commit()
