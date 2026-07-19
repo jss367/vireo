@@ -14839,14 +14839,12 @@ class Database:
                         if target_row["taxon_id"] is not None:
                             if row["taxon_id"] == target_row["taxon_id"]:
                                 return True
-                            if (
+                            return (
                                 row["taxon_id"] is None
                                 and not _target_homonym_conflict
                                 and keyword_match_key(row["name"])
                                 == _target_key
-                            ):
-                                return True
-                            return False
+                            )
                         return (
                             keyword_match_key(row["name"]) == _target_key
                         )
