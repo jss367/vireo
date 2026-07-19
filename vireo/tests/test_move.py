@@ -2432,6 +2432,33 @@ def test_move_folder_prefers_discovered_gnu_rsync(move_env, monkeypatch):
     assert result["moved"] == 0
 
 
+def test_move_folder_windows_skips_discovered_rsync(move_env, monkeypatch):
+    """Native Windows paths must not be passed to auto-discovered POSIX rsync."""
+    import move as move_mod
+
+    env = move_env
+    captured = {}
+    monkeypatch.setattr(move_mod.sys, "platform", "win32")
+
+    def unexpected_resolve(configured=""):
+        raise AssertionError("Windows local moves must not discover rsync")
+
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", unexpected_resolve)
+
+    def fake_run(*args, **kwargs):
+        captured["rsync_bin"] = kwargs.get("rsync_bin")
+        return 1, "simulated failure", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_run)
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+    )
+
+    assert captured["rsync_bin"] == "rsync"
+    assert result["moved"] == 0
+
+
 def test_move_folder_stall_preserves_rsync_diagnostic(move_env, monkeypatch):
     """A watchdog timeout includes stderr's filename/root cause instead of
     replacing it with a generic 30-minute stall message."""

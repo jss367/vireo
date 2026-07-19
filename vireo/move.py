@@ -2092,14 +2092,18 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # from `.rsync-partial/` instead of treating it as already-moved (which
     # would then fail the --checksum verify forever, stranding the partial
     # until the user manually deletes it).
-    # Prefer a discovered GNU rsync even for local moves.  Finder-launched
+    # Prefer a discovered GNU rsync for local moves on POSIX. Finder-launched
     # macOS apps usually inherit a sparse PATH, so a bare ``rsync`` resolves
     # to Apple's legacy openrsync even when Homebrew GNU rsync is installed.
     # openrsync has been observed spinning after a transient SMB short read;
-    # GNU rsync exits with a useful error instead.  Keep the bare-name
-    # fallback for machines where GNU rsync is unavailable (and retain the
+    # GNU rsync exits with a useful error instead. Windows rsync distributions
+    # expect POSIX-style paths and can misread a native ``C:\...`` source as
+    # remote-shell syntax, so retain the prior bare-name behavior there. Keep
+    # the bare-name fallback on POSIX when GNU rsync is unavailable (and the
     # shutil fallback below when no rsync exists at all).
-    rsync_bin = resolve_rsync_bin() or "rsync"
+    rsync_bin = "rsync"
+    if sys.platform != "win32":
+        rsync_bin = resolve_rsync_bin() or rsync_bin
     extra_args = None
     if remote:
         rsync_bin = remote.get("rsync_bin")
