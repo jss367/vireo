@@ -12323,11 +12323,16 @@ class Database:
                 list(chunk),
             ).fetchall()
             for r in rows:
-                identity = (
-                    ("taxon", r["taxon_id"])
-                    if r["taxon_id"] is not None
-                    else ("name", keyword_match_key(r["name"]))
-                )
+                if r["taxon_id"] is not None:
+                    identity = ("taxon", r["taxon_id"])
+                else:
+                    # Preserve exact spelling for NULL-taxon rows: unlinked
+                    # curation compares by exact ``k.name``, so a root ``Foo``
+                    # and a hierarchy leaf ``foo`` on the same photo must
+                    # both appear here — folding by ``keyword_match_key``
+                    # would drop the root and strand its representative /
+                    # highlight lookups.
+                    identity = ("name", r["name"])
                 chosen.setdefault(r["photo_id"], {}).setdefault(identity, r["name"])
         taxon_ids = {
             identity[1]

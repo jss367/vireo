@@ -14504,6 +14504,42 @@ def test_species_keywords_canonicalize_hierarchy_leaf_to_root_spelling(tmp_path)
     assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
 
 
+def test_species_keywords_preserves_unlinked_case_variant_spellings(tmp_path):
+    """A photo carrying two NULL-taxon species rows that differ only by
+    SQLite NOCASE spelling (root ``Foo`` plus hierarchy leaf ``foo``) must
+    surface both names. The repair path deliberately leaves those attached
+    because unlinked eligibility compares exact ``k.name``; folding them
+    by ``keyword_match_key`` here would drop the root spelling, so
+    ``_attach_species_representatives``/highlight lookups miss the
+    curation stored under ``Foo``."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    nested = db.add_keyword("foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+
+    # Both distinct spellings survive the dedup so downstream lookups
+    # (species_representatives, species_highlights) can match either key.
+    result = db.get_species_keywords_for_photos([pid])
+    assert set(result[pid]) == {"Foo", "foo"}
+
+
 def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
     tmp_path,
 ):
