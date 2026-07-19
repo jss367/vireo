@@ -119,6 +119,48 @@ def test_find_exiftool_falls_back_to_path_when_bundled_broken(monkeypatch, tmp_p
     assert "-json" in calls[2]
 
 
+def test_find_exiftool_finds_homebrew_off_path_on_macos(monkeypatch, tmp_path):
+    """PATH-miss on macOS falls back to standard Homebrew locations.
+
+    GUI-launched .app processes usually don't inherit a Homebrew PATH, so
+    a fresh ``brew install exiftool`` triggered by the in-app Repair
+    button succeeds but ``shutil.which("exiftool")`` still returns
+    ``None``. Without this probe, readiness stays red until the user
+    restarts Vireo with a shell-inherited PATH.
+    """
+    import metadata
+
+    metadata.clear_exiftool_cache()
+    monkeypatch.setattr(metadata.sys, "platform", "darwin")
+    monkeypatch.delattr(metadata.sys, "_MEIPASS", raising=False)
+    monkeypatch.setattr(metadata.shutil, "which", lambda _name: None)
+
+    def _fake_isfile(path):
+        return path == "/opt/homebrew/bin/exiftool"
+
+    def _fake_access(path, _mode):
+        return path == "/opt/homebrew/bin/exiftool"
+
+    monkeypatch.setattr(metadata.os.path, "isfile", _fake_isfile)
+    monkeypatch.setattr(metadata.os, "access", _fake_access)
+
+    assert metadata.find_exiftool() == "/opt/homebrew/bin/exiftool"
+
+
+def test_find_exiftool_off_path_ignored_on_non_darwin(monkeypatch, tmp_path):
+    """The Homebrew-path fallback stays macOS-only."""
+    import metadata
+
+    metadata.clear_exiftool_cache()
+    monkeypatch.setattr(metadata.sys, "platform", "linux")
+    monkeypatch.delattr(metadata.sys, "_MEIPASS", raising=False)
+    monkeypatch.setattr(metadata.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(metadata.os.path, "isfile", lambda _path: True)
+    monkeypatch.setattr(metadata.os, "access", lambda _path, _mode: True)
+
+    assert metadata.find_exiftool() is None
+
+
 def test_find_exiftool_bundled_probe_is_cached(monkeypatch, tmp_path):
     """The bundled ``-ver`` probe is cached so scan batches don't reprobe."""
     import metadata

@@ -45,6 +45,14 @@ def find_exiftool() -> str | None:
     button rescues both readiness and downstream scan reads without an
     app restart. The bundled probe result is cached per-path so hot scan
     batches don't reprobe every invocation.
+
+    On macOS, standard Homebrew locations are also probed when PATH
+    lookup misses. A GUI-launched .app's ``PATH`` usually does not
+    include ``/opt/homebrew/bin`` (Apple Silicon) or ``/usr/local/bin``
+    (Intel), so a ``brew install exiftool`` triggered by the in-app
+    Repair button succeeds but ``shutil.which("exiftool")`` still
+    returns ``None`` — readiness would stay red until the user restarts
+    with a shell-inherited PATH.
     """
     bundle_root = getattr(sys, "_MEIPASS", None)
     if bundle_root:
@@ -57,12 +65,19 @@ def find_exiftool() -> str | None:
                 # Bundled copy is present but broken — fall through to PATH.
                 break
     try:
-        return shutil.which("exiftool")
+        found = shutil.which("exiftool")
     except (AttributeError, OSError):
         # Defensive for restricted Windows runtimes where executable lookup
         # itself is unavailable. Callers that execute the fallback still
         # receive the normal FileNotFoundError handling.
-        return None
+        found = None
+    if found:
+        return found
+    if sys.platform == "darwin":
+        for candidate in ("/opt/homebrew/bin/exiftool", "/usr/local/bin/exiftool"):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    return None
 
 
 def _bundled_exiftool_works(path: str) -> bool:
