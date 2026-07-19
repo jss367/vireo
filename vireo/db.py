@@ -15359,27 +15359,27 @@ class Database:
                     # layout migrates. Sidecar removes above still use
                     # the raw ``old_name`` because the XMP file carries
                     # the alias, not the root spelling.
-                    # Dedupe with the same ASCII-only case fold SQLite
-                    # applies via COLLATE NOCASE (``keyword_match_key``).
-                    # Python's ``str.lower()`` collapses non-ASCII case
-                    # distinctions — ``"Éclair".lower() == "éclair"`` —
-                    # even though ``add_keyword``/the ``keywords`` uniqueness
-                    # constraint intentionally treats those as separate
-                    # rows. Using ``.lower()`` here would drop the second
-                    # distinct removed row's spelling from the curation
-                    # rename source list, leaving highlights or
-                    # representatives keyed on it stranded under a species
-                    # the photo no longer carries.
+                    # Dedupe by exact source name. Both Python's
+                    # ``str.lower()`` and the ASCII-fold ``keyword_match_key``
+                    # collapse intentionally distinct rows: ``str.lower()``
+                    # folds non-ASCII case (``"Éclair".lower() == "éclair"``),
+                    # and ``keyword_match_key`` folds ASCII case-variant
+                    # homonyms like legacy ``Robin`` vs taxonomy ``robin``
+                    # that ``add_keyword`` deliberately keeps as separate
+                    # rows. Either fold would drop the second distinct
+                    # removed row's spelling from the curation rename source
+                    # list, leaving highlights / representatives keyed on it
+                    # stranded under a species the photo no longer carries.
+                    # Curation rows are keyed by the exact stored species
+                    # name, so exact-string dedup preserves every distinct
+                    # source without renaming the same source twice.
                     curation_sources = []
                     seen_sources = set()
                     for row in to_remove:
                         for candidate in (row["name"], self._species_root_name_for_taxon(row["taxon_id"])):
-                            if not candidate:
+                            if not candidate or candidate in seen_sources:
                                 continue
-                            key = keyword_match_key(candidate)
-                            if not key or key in seen_sources:
-                                continue
-                            seen_sources.add(key)
+                            seen_sources.add(candidate)
                             curation_sources.append(candidate)
                     for source_name in curation_sources:
                         self.rename_species_highlights_species(
@@ -16633,8 +16633,8 @@ class Database:
                             old_meta.get('curation'),
                         )
                 if entry['action_type'] == 'prediction_accept' and old_val:
-                    pred_id = self._edit_prediction_id(old_meta, old_val)
-                    if pred_id is None:
+                    pred_ids = self._edit_prediction_ids(old_meta, old_val)
+                    if not pred_ids:
                         continue
                     ws = self._ws_id()
                     # Restore predictions to pre-accept state. Scope by
@@ -16643,13 +16643,29 @@ class Database:
                     # produced under a different fingerprint and could
                     # promote the wrong fingerprint's top-confidence row
                     # back to 'pending'.
-                    pred_row = self.conn.execute(
-                        """SELECT detection_id, classifier_model AS model,
-                                  labels_fingerprint
-                           FROM predictions WHERE id = ?""",
-                        (pred_id,),
-                    ).fetchone()
-                    if pred_row:
+                    #
+                    # Accept-subject no-tag accepts can span multiple
+                    # classifier models on one detection, so iterate and
+                    # dedupe by (detection, model, fingerprint) so each
+                    # unique sibling scope is reset exactly once.
+                    seen_scopes = set()
+                    touched = False
+                    for pred_id in pred_ids:
+                        pred_row = self.conn.execute(
+                            """SELECT detection_id, classifier_model AS model,
+                                      labels_fingerprint
+                               FROM predictions WHERE id = ?""",
+                            (pred_id,),
+                        ).fetchone()
+                        if not pred_row:
+                            continue
+                        scope = (
+                            pred_row["detection_id"], pred_row["model"],
+                            pred_row["labels_fingerprint"],
+                        )
+                        if scope in seen_scopes:
+                            continue
+                        seen_scopes.add(scope)
                         # Identify every sibling prediction for
                         # (detection, classifier_model, labels_fingerprint).
                         siblings = self.conn.execute(
@@ -16658,8 +16674,7 @@ class Database:
                                  AND classifier_model = ?
                                  AND labels_fingerprint = ?
                                ORDER BY confidence DESC""",
-                            (pred_row["detection_id"], pred_row["model"],
-                             pred_row["labels_fingerprint"]),
+                            scope,
                         ).fetchall()
                         # Flip any accepted/rejected review rows in this
                         # workspace back to 'alternative' — scoped to the
@@ -16676,8 +16691,7 @@ class Database:
                                       AND classifier_model = ?
                                       AND labels_fingerprint = ?
                                  )""",
-                            (ws, pred_row["detection_id"], pred_row["model"],
-                             pred_row["labels_fingerprint"]),
+                            (ws, *scope),
                         )
                         # Promote highest-confidence sibling back to 'pending'
                         # in this workspace.
@@ -16692,6 +16706,8 @@ class Database:
                                                  reviewed_at = datetime('now')""",
                                 (top_id, ws),
                             )
+                        touched = True
+                    if touched:
                         self.conn.commit()
             elif entry['action_type'] == 'keyword_remove':
                 self.tag_photo(pid, int(entry['new_value']))
@@ -16812,34 +16828,52 @@ class Database:
                             old_meta.get('curation'),
                         )
                 if entry['action_type'] == 'prediction_accept' and item['old_value']:
-                    pred_id = self._edit_prediction_id(old_meta, item['old_value'])
-                    if pred_id is None:
+                    pred_ids = self._edit_prediction_ids(old_meta, item['old_value'])
+                    if not pred_ids:
                         continue
                     ws = self._ws_id()
-                    self.update_prediction_status(pred_id, 'accepted')
-                    # Re-reject siblings, scoped to the same labels_fingerprint
-                    # so the redo matches the original accept's scope and
-                    # doesn't touch predictions from other label sets.
-                    pred_row = self.conn.execute(
-                        """SELECT detection_id, classifier_model AS model,
-                                  labels_fingerprint
-                           FROM predictions WHERE id = ?""",
-                        (pred_id,),
-                    ).fetchone()
-                    if pred_row:
+                    # Accept-subject no-tag accepts can span multiple
+                    # classifier models on one detection, so re-accept
+                    # every recorded id and reject its siblings within
+                    # that classifier's fingerprint scope. Track which
+                    # ids acted as the accepted row per scope so we
+                    # don't reject a prediction that was itself part of
+                    # the original accept batch.
+                    accepted_by_scope = {}
+                    for pred_id in pred_ids:
+                        pred_row = self.conn.execute(
+                            """SELECT detection_id, classifier_model AS model,
+                                      labels_fingerprint
+                               FROM predictions WHERE id = ?""",
+                            (pred_id,),
+                        ).fetchone()
+                        if not pred_row:
+                            continue
+                        scope = (
+                            pred_row["detection_id"], pred_row["model"],
+                            pred_row["labels_fingerprint"],
+                        )
+                        self.update_prediction_status(pred_id, 'accepted')
+                        accepted_by_scope.setdefault(scope, set()).add(pred_id)
+                    for scope, accepted_ids in accepted_by_scope.items():
+                        placeholders = ",".join("?" * len(accepted_ids))
+                        # Re-reject siblings, scoped to the same
+                        # labels_fingerprint so the redo matches the
+                        # original accept's scope and doesn't touch
+                        # predictions from other label sets. Exclude
+                        # every id that was itself accepted in this batch.
                         sibs = self.conn.execute(
-                            """SELECT pr.id FROM predictions pr
+                            f"""SELECT pr.id FROM predictions pr
                                LEFT JOIN prediction_review pr_rev
                                  ON pr_rev.prediction_id = pr.id
                                 AND pr_rev.workspace_id = ?
                                WHERE pr.detection_id = ?
                                  AND pr.classifier_model = ?
                                  AND pr.labels_fingerprint = ?
-                                 AND pr.id != ?
+                                 AND pr.id NOT IN ({placeholders})
                                  AND COALESCE(pr_rev.status, 'pending')
                                      IN ('pending', 'alternative')""",
-                            (ws, pred_row["detection_id"], pred_row["model"],
-                             pred_row["labels_fingerprint"], pred_id),
+                            (ws, *scope, *accepted_ids),
                         ).fetchall()
                         for s in sibs:
                             self.conn.execute(
@@ -16851,6 +16885,7 @@ class Database:
                                                  reviewed_at = datetime('now')""",
                                 (s["id"], ws),
                             )
+                    if accepted_by_scope:
                         self.conn.commit()
             elif entry['action_type'] == 'keyword_remove':
                 self.untag_photo(pid, int(entry['new_value']))
@@ -17206,23 +17241,46 @@ class Database:
         except (TypeError, ValueError):
             return {"keyword_id": None, "keyword_ids": []}
 
+    def _edit_prediction_ids(self, meta, fallback):
+        """Return every accepted prediction id captured on this edit item.
+
+        Accept-subject can accept agreeing predictions from multiple
+        classifier models on one detection, so the ``no_tag`` variant
+        stashes the full list under ``prediction_ids``. Those siblings
+        do not share a single ``(detection_id, classifier_model,
+        labels_fingerprint)`` scope, so undo/redo must reset every
+        recorded id — using only the first drops the other classifiers'
+        accepted rows on undo. Regular accepts still carry a singular
+        ``prediction_id`` or a bare-int ``old_value`` fallback.
+        """
+        ids = []
+        seen = set()
+
+        def _push(raw):
+            if raw is None:
+                return
+            try:
+                pid = int(raw)
+            except (TypeError, ValueError):
+                return
+            if pid in seen:
+                return
+            seen.add(pid)
+            ids.append(pid)
+
+        if meta:
+            _push(meta.get("prediction_id"))
+            raw_ids = meta.get("prediction_ids")
+            if isinstance(raw_ids, list):
+                for raw in raw_ids:
+                    _push(raw)
+        if not ids:
+            _push(fallback)
+        return ids
+
     def _edit_prediction_id(self, meta, fallback):
-        raw = meta.get("prediction_id") if meta else None
-        # ``no_tag`` accept-subject entries stash the full list of
-        # agreeing prediction ids under ``prediction_ids`` (all share
-        # one detection/labels_fingerprint). Undo only needs one id to
-        # look up the shared sibling scope, so pull the first entry
-        # when the singular key is absent.
-        if raw is None and meta:
-            ids = meta.get("prediction_ids")
-            if isinstance(ids, list) and ids:
-                raw = ids[0]
-        if raw is None:
-            raw = fallback
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return None
+        ids = self._edit_prediction_ids(meta, fallback)
+        return ids[0] if ids else None
 
     def _restore_edit_prediction_status(self, meta):
         pred_id = meta.get("prediction_id")

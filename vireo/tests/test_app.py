@@ -1527,6 +1527,101 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
     assert root not in ids_after_undo
 
 
+def test_subject_accept_undo_restores_every_classifier_scope_on_no_tag(app_and_db):
+    """Accept-subject on a photo that already carries the target species
+    accepts agreeing predictions from EVERY classifier model on one
+    detection. Each classifier owns its own ``labels_fingerprint`` scope,
+    so undo must reset every recorded prediction id — not just the first.
+    Only iterating the head of ``prediction_ids`` would leave the other
+    classifiers' accepted rows accepted after undo.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    folder_id = db.get_folder_tree()[0]["id"]
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="verdin-multi.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo already carries Verdin through a hierarchy leaf so every
+    # per-model accept below runs the no_tag path.
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    db.tag_photo(photo_id, nested)
+    db.add_keyword("Verdin", is_species=True)
+
+    detection_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    # Verdin predictions from two DIFFERENT classifier models — each
+    # owns its own labels fingerprint, so each accept covers a distinct
+    # sibling scope on the same detection.
+    db.add_prediction(
+        detection_id, "Verdin", 0.9, "bioclip", labels_fingerprint="fp1",
+    )
+    db.add_prediction(
+        detection_id, "Verdin", 0.87, "inat", labels_fingerprint="fp2",
+    )
+    # A rival top-confidence sibling in each classifier scope so the
+    # undo path has something to promote back to 'pending'.
+    db.add_prediction(
+        detection_id, "Other", 0.5, "bioclip", labels_fingerprint="fp1",
+    )
+    db.add_prediction(
+        detection_id, "Other", 0.4, "inat", labels_fingerprint="fp2",
+    )
+    target_pred = next(
+        row for row in db.get_predictions()
+        if row["classifier_model"] == "bioclip" and row["species"] == "Verdin"
+    )
+
+    response = client.post(
+        f"/api/predictions/{target_pred['id']}/accept-subject",
+    )
+    assert response.status_code == 200, response.get_data(as_text=True)
+
+    # Both models' Verdin predictions are accepted.
+    statuses_by_model = {
+        row["classifier_model"]: row["status"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+        if row["species"] == "Verdin"
+    }
+    assert statuses_by_model == {"bioclip": "accepted", "inat": "accepted"}
+
+    # A single ``prediction_accept`` edit is recorded — it should carry
+    # both prediction ids under ``prediction_ids``.
+    accept_rows = [
+        row for row in db.get_edit_history()
+        if row["action_type"] == "prediction_accept"
+    ]
+    assert len(accept_rows) == 1
+
+    # Undo must reset BOTH classifier scopes. Without iterating every
+    # recorded prediction id, the inat scope stays accepted.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "prediction_accept"
+
+    statuses_after_undo = {
+        row["classifier_model"]: row["status"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+        if row["species"] == "Verdin"
+    }
+    for model, status in statuses_after_undo.items():
+        assert status != "accepted", (
+            f"undo must reset the {model!r} Verdin prediction; a still-"
+            "accepted sibling scope means the second recorded prediction "
+            "id was skipped"
+        )
+
+
 def test_encounter_species_records_only_newly_tagged(app_and_db):
     """A mixed set (some already carry the species, some don't) records edit
     items ONLY for the newly-tagged photos.

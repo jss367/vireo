@@ -19533,3 +19533,94 @@ def test_curation_eligibility_rejects_higher_rank_taxonomy_homonym(tmp_path):
     assert reps_after.get("Puma") == [pid]
     highlights_after = db.get_species_highlights(eligible_only=True)
     assert pid in highlights_after.get("Puma", {})
+
+
+def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_path):
+    """Replace Keywords must migrate curation for every distinct removed
+    row's exact spelling. Legacy ``Robin`` and taxonomy ``robin`` coexist
+    as separate keyword rows (the ``UNIQUE(name, parent_id)`` index on
+    ``keywords`` is case-sensitive), and both can carry
+    ``species_highlights`` / ``photo_preferences`` rows keyed by the
+    exact stored name. Deduping the curation-source list by
+    ``keyword_match_key`` — an ASCII-only NOCASE fold — collapses those
+    two spellings into one, so only one migrates onto the new species
+    and the other stays stranded under a species keyword the photo no
+    longer carries after ``replace_species``.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._ws_id()
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Two DISTINCT NULL-taxon species keyword rows differing only by
+    # ASCII case. Insert directly to bypass ``add_keyword``'s NOCASE
+    # dedupe and confirm ``keywords`` allows both to coexist.
+    upper_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('Robin', NULL, 1, 'general')"
+    ).lastrowid
+    lower_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('robin', NULL, 1, 'general')"
+    ).lastrowid
+    db.tag_photo(pid, upper_id)
+    db.tag_photo(pid, lower_id)
+
+    # Curation rows keyed to BOTH exact stored names. ``species_highlights``
+    # has PK (workspace_id, species, photo_id) with case-sensitive TEXT,
+    # so both can coexist.
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Robin', ?, 0)",
+        (ws_id, pid),
+    )
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'robin', ?, 1)",
+        (ws_id, pid),
+    )
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Sparrow", 0.95, "bioclip")
+    pred_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?",
+        (detection_id,),
+    ).fetchone()["id"]
+
+    db.accept_prediction(pred_id, replace_species=True)
+
+    # Both stale Robin rows must have been detached.
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert upper_id not in tagged_ids
+    assert lower_id not in tagged_ids
+
+    remaining_species = {
+        row["species"] for row in db.conn.execute(
+            "SELECT species FROM species_highlights "
+            "WHERE workspace_id = ? AND photo_id = ?",
+            (ws_id, pid),
+        ).fetchall()
+    }
+    # Under the ``keyword_match_key`` dedup only one of ``Robin`` /
+    # ``robin`` would land in curation_sources, so the other exact
+    # spelling would still appear here. Neither may survive: both
+    # highlight rows must migrate onto the new species.
+    assert "Robin" not in remaining_species, (
+        "'Robin' highlight row must have migrated onto 'Sparrow'"
+    )
+    assert "robin" not in remaining_species, (
+        "'robin' highlight row must have migrated onto 'Sparrow' — "
+        "an ASCII case-fold dedup would collapse 'Robin' and 'robin' "
+        "so only one of the two distinct spellings got renamed"
+    )
+    assert "Sparrow" in remaining_species
