@@ -13428,7 +13428,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 **no_window_kwargs(),
             )
             if result.returncode == 0:
-                return jsonify({"success": True, "message": "exiftool installed successfully"})
+                # A GUI-launched app may not inherit Homebrew's bin directory
+                # on PATH. Re-resolve and probe the installed tool before
+                # claiming Repair succeeded; ``find_exiftool`` also checks
+                # Homebrew's standard off-PATH locations on macOS.
+                clear_exiftool_cache()
+                installed = exiftool_status()
+                if installed["available"]:
+                    return jsonify({
+                        "success": True,
+                        "message": "exiftool installed successfully",
+                        "exiftool": installed,
+                    })
+                return jsonify({
+                    "success": False,
+                    "error": (
+                        "Homebrew finished, but Vireo could not run ExifTool. "
+                        "Run 'brew install exiftool' in Terminal, then retry."
+                    ),
+                    "exiftool": installed,
+                })
             else:
                 return jsonify({
                     "success": False,

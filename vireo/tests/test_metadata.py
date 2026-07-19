@@ -606,6 +606,7 @@ def test_exiftool_available_requires_runnable_binary(monkeypatch):
         returncode = 0
         stdout = "12.76\n"
 
+    monkeypatch.setattr(metadata, "_MACOS_HOMEBREW_BIN_DIRS", ())
     monkeypatch.setattr(metadata.shutil, "which", lambda name: "/usr/bin/exiftool")
     monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _Ok())
     assert metadata.exiftool_available() is True
@@ -633,6 +634,7 @@ def test_exiftool_status_missing(monkeypatch):
     """When exiftool is absent, status reports unavailable with an install hint."""
     import metadata
 
+    monkeypatch.setattr(metadata, "_MACOS_HOMEBREW_BIN_DIRS", ())
     monkeypatch.setattr(metadata.shutil, "which", lambda name: None)
     status = metadata.exiftool_status()
 
@@ -702,6 +704,7 @@ def test_scan_metadata_warning_warns_when_missing(monkeypatch):
     """scan_metadata_warning returns a user-facing string when exiftool is gone."""
     import metadata
 
+    monkeypatch.setattr(metadata, "_MACOS_HOMEBREW_BIN_DIRS", ())
     monkeypatch.setattr(metadata.shutil, "which", lambda name: None)
     warning = metadata.scan_metadata_warning()
     assert warning is not None

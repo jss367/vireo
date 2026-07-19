@@ -670,6 +670,11 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/local/bin/brew" if cmd == "brew" else (None if cmd == "exiftool" else original_which(cmd)))
     monkeypatch.setattr(metadata, "find_homebrew", lambda: "/usr/local/bin/brew")
+    statuses = iter([
+        {"available": False, "path": "", "version": None, "error": None, "hint": ""},
+        {"available": True, "path": "/usr/local/bin/exiftool", "version": "13.59", "error": None, "hint": ""},
+    ])
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: next(statuses))
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0, "stderr": ""})())
     app, _ = app_and_db
     with app.test_client() as client:
@@ -677,6 +682,38 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
         assert resp.status_code == 200
         data = resp.get_json()
         assert data.get("success") is True
+        assert data["exiftool"]["path"] == "/usr/local/bin/exiftool"
+
+
+def test_install_exiftool_verifies_homebrew_result(app_and_db, monkeypatch):
+    """A successful brew exit must not mask an undiscoverable ExifTool."""
+    import subprocess
+    import sys
+
+    import metadata
+
+    unavailable = {
+        "available": False,
+        "path": "",
+        "version": None,
+        "error": "not found",
+        "hint": "",
+    }
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: unavailable)
+    monkeypatch.setattr(metadata, "find_homebrew", lambda: "/opt/homebrew/bin/brew")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **kw: type("R", (), {"returncode": 0, "stderr": ""})(),
+    )
+
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/system/install-exiftool")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is False
+        assert "could not run ExifTool" in data["error"]
 
 
 def test_install_exiftool_fails_without_brew(app_and_db, monkeypatch):
@@ -688,6 +725,10 @@ def test_install_exiftool_fails_without_brew(app_and_db, monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: None if cmd in ("brew", "exiftool") else original_which(cmd))
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": False, "path": "", "version": None,
+        "error": None, "hint": "",
+    })
     monkeypatch.setattr(metadata, "find_homebrew", lambda: None)
     app, _ = app_and_db
     with app.test_client() as client:

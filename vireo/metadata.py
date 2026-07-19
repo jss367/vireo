@@ -24,6 +24,7 @@ _BATCH_SIZE = 100
 _EXIFTOOL_TIMEOUT = 120
 _MAX_TIMEOUT_SPLIT_ATTEMPTS = 16
 _TIMEOUT = object()
+_MACOS_HOMEBREW_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
 
 # Cached ``-ver`` probe results for bundled ExifTool paths. Repeating the
 # probe on every scan batch (~100/scan) would add subprocess overhead, so
@@ -40,19 +41,12 @@ def find_exiftool() -> str | None:
     Windows distribution.  Development installs continue to use PATH.
 
     If the bundled binary is present but fails a ``-ver`` probe (for
-    example its ``lib`` directory was corrupted), PATH is consulted as a
-    fallback so a Homebrew ExifTool installed via the in-app Repair
-    button rescues both readiness and downstream scan reads without an
-    app restart. The bundled probe result is cached per-path so hot scan
-    batches don't reprobe every invocation.
-
-    On macOS, standard Homebrew locations are also probed when PATH
-    lookup misses. A GUI-launched .app's ``PATH`` usually does not
-    include ``/opt/homebrew/bin`` (Apple Silicon) or ``/usr/local/bin``
-    (Intel), so a ``brew install exiftool`` triggered by the in-app
-    Repair button succeeds but ``shutil.which("exiftool")`` still
-    returns ``None`` — readiness would stay red until the user restarts
-    with a shell-inherited PATH.
+    example its ``lib`` directory was corrupted), PATH and Homebrew's
+    standard macOS locations are consulted as fallbacks. GUI-launched
+    apps often inherit a PATH without ``/opt/homebrew/bin``, even though
+    the Repair action can invoke Homebrew there directly. The bundled
+    probe result is cached per-path so hot scan batches don't reprobe
+    every invocation.
     """
     bundle_root = getattr(sys, "_MEIPASS", None)
     if bundle_root:
@@ -74,9 +68,7 @@ def find_exiftool() -> str | None:
     if found:
         return found
     if sys.platform == "darwin":
-        for candidate in ("/opt/homebrew/bin/exiftool", "/usr/local/bin/exiftool"):
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
+        return _find_standard_homebrew_tool("exiftool")
     return None
 
 
@@ -149,7 +141,13 @@ def find_homebrew() -> str | None:
     found = shutil.which("brew")
     if found:
         return found
-    for candidate in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+    return _find_standard_homebrew_tool("brew")
+
+
+def _find_standard_homebrew_tool(name: str) -> str | None:
+    """Find an executable in Homebrew's Apple Silicon or Intel prefix."""
+    for bin_dir in _MACOS_HOMEBREW_BIN_DIRS:
+        candidate = os.path.join(bin_dir, name)
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None
