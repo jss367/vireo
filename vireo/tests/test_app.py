@@ -2197,6 +2197,88 @@ def test_encounter_species_replacement_scopes_hierarchy_fallback_to_submitted_ph
     assert "Verdin" not in names
 
 
+def test_encounter_species_replacement_resolves_hierarchy_fallback_per_photo(
+    app_and_db,
+):
+    """When submitted photos carry same-name hierarchy leaves under DIFFERENT
+    taxa, the replacement removal loop must resolve each photo's old row on
+    its own taxon.
+
+    Regression: the previous fix scoped the fallback to attached leaves but
+    still picked one ``best_taxon`` covering the most photos. In a batch
+    that spans two taxa under the same hierarchy alias (an ambiguous name
+    with distinct parents — for example ``Verdin`` nested under both
+    ``Penduline tits`` linked to taxon A and ``Other family`` linked to
+    taxon B), the removal loop only matched the winning taxon. Every
+    photo carrying a leaf under the losing taxon kept its old species
+    attached while the new one was added on top — a stale duplicate.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) VALUES "
+        "(9201, 'Auriparus flaviceps', 'Verdin', 'species'),"
+        "(9202, 'Fakelatus fake', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_rows = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 2"
+    ).fetchall()
+    photo_a = photo_rows[0]["id"]
+    photo_b = photo_rows[1]["id"]
+
+    # Two hierarchy leaves, both named ``Verdin`` but under different
+    # parents pointing at different taxa. Both submitted photos carry
+    # SEPARATE leaves — one under each taxon. The removal loop matches
+    # attached rows by ``taxon_id``, so a whole-batch ``best_taxon`` pick
+    # would leave one of the two photos with the old leaf still tagged.
+    parent_a = db.add_keyword("Penduline tits")
+    leaf_a = db.add_keyword("Verdin", parent_id=parent_a)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9201, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (leaf_a,),
+    )
+    parent_b = db.add_keyword("Other family")
+    leaf_b = db.add_keyword("Verdin", parent_id=parent_b)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9202, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (leaf_b,),
+    )
+    db.conn.commit()
+    db.tag_photo(photo_a, leaf_a)
+    db.tag_photo(photo_b, leaf_b)
+    _seed_encounter_cache(
+        app, db, [photo_a, photo_b], confirmed_species="Verdin",
+    )
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_a, photo_b]},
+    )
+    assert resp.status_code == 200
+
+    kids_a = {row["id"] for row in db.get_photo_keywords(photo_a)}
+    kids_b = {row["id"] for row in db.get_photo_keywords(photo_b)}
+    # Each photo's own hierarchy leaf must be gone — not just the one for
+    # the taxon that happened to cover the most photos.
+    assert leaf_a not in kids_a, (
+        "photo_a's Verdin leaf (taxon 9201) must be untagged even though "
+        "the batch also contains a Verdin leaf on another taxon"
+    )
+    assert leaf_b not in kids_b, (
+        "photo_b's Verdin leaf (taxon 9202) must be untagged — a batch-wide "
+        "``best_taxon`` pick would leave one of the two photos stranded"
+    )
+    names_a = {row["name"] for row in db.get_photo_keywords(photo_a)}
+    names_b = {row["name"] for row in db.get_photo_keywords(photo_b)}
+    assert "Blue Jay" in names_a
+    assert "Blue Jay" in names_b
+    assert "Verdin" not in names_a
+    assert "Verdin" not in names_b
+
+
 def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
     """Old-species lookup must be scoped to root species keywords only."""
     app, db = app_and_db
@@ -10870,6 +10952,103 @@ def test_highlights_relabel_canonicalizes_hierarchy_leaf_source(app_and_db):
     assert reps.get("Verdin") != pid, (
         "root-key representative must not remain under the old species"
     )
+
+
+def test_highlights_relabel_canonicalizes_prediction_source(app_and_db):
+    """When a photo has no attached species tag but a prediction whose label
+    is a hierarchy alias (e.g. ``Desert Verdin``), the prediction snapshot
+    used to accept curation-source rows must canonicalize through
+    ``resolve_species_display_name``.
+
+    Regression: highlight buckets canonicalize the prediction label to its
+    unique-taxon root before saving (via ``add_species_highlight``), so a
+    starred unconfirmed alias bucket keyed on ``Desert Verdin`` lands under
+    ``Verdin``. The relabel path built ``predicted_species_by_pid`` from
+    the raw prediction label only. In the prediction-only branch
+    (no attached species tag), ``_accept_curation_source`` then rejected
+    the saved ``Verdin`` highlight/representative rows as stale because
+    ``verdin`` was not in the ``{desertverdin}`` set — leaving the user's
+    curation stranded under the old bucket after relabel.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/predcanon', 'predcanon', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    # Species-rank taxon shared by a top-level ``Verdin`` root and a
+    # hierarchy alias ``Desert Verdin`` — one canonical taxon, so
+    # ``resolve_species_display_name('Desert Verdin')`` returns ``Verdin``.
+    verdin_taxon = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (2913, 'Auriparus flaviceps', 'Verdin', 'species', 'Animalia')"
+    ).lastrowid
+    root_kid = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+        (verdin_taxon, root_kid),
+    )
+    parent_kid = db.add_keyword("Penduline tits")
+    leaf_kid = db.add_keyword("Desert Verdin", parent_id=parent_kid)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (verdin_taxon, leaf_kid),
+    )
+    db.add_keyword("Common Raven", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'predcanon.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # No species keyword tag on the photo — the prediction is the only
+    # source that ties the photo to ``Verdin``. This puts the relabel on
+    # the ``keyword_add``/prediction-only branch of the source filter.
+    det = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}, "confidence": 0.9}],
+        detector_model="MDV6",
+    )[0]
+    # Raw prediction label uses the hierarchy alias.
+    db.add_prediction(det, "Desert Verdin", 0.88, "m")
+    # Curation was saved against the alias but ``add_species_highlight``
+    # /``set_species_representative`` canonicalize to the root spelling —
+    # matching what ``_collect_highlight_buckets`` and the buckets UI
+    # would show for this photo.
+    db.add_species_highlight("Desert Verdin", pid)
+    db.set_species_representative("Desert Verdin", pid)
+    hl_before = db.get_species_highlights()
+    assert pid in (hl_before.get("Verdin") or {}), (
+        "sanity: add_species_highlight should canonicalize to the root "
+        "spelling for a unique-taxon hierarchy alias"
+    )
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Common Raven"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Common Raven") or {}), (
+        "root-key highlight must migrate when the raw prediction label is "
+        "a hierarchy alias that canonicalizes to the same root — otherwise "
+        "the accept-source filter would reject 'Verdin' as stale"
+    )
+    assert pid not in (hl.get("Verdin") or {}), (
+        "canonical-root highlight must not remain under the old bucket"
+    )
+    reps = db.get_species_representatives()
+    assert reps.get("Common Raven") == pid, (
+        "root-key representative must migrate to the relabel target"
+    )
+    assert reps.get("Verdin") != pid
 
 
 def test_highlights_relabel_does_not_fold_non_ascii_case_variants(app_and_db):
