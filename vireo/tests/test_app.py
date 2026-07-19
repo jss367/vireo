@@ -1370,7 +1370,8 @@ def test_encounter_species_no_op_when_all_already_tagged(app_and_db):
 
 def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db):
     """Accepting a prediction already represented by a hierarchical species
-    changes review status without creating redoable root-tag history."""
+    changes review status and records a status-only prediction_accept edit
+    that undo/redo respect without re-tagging the pre-existing keyword."""
     app, db = app_and_db
     client = app.test_client()
     db.conn.execute(
@@ -1410,11 +1411,14 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
     response = client.post(f"/api/predictions/{prediction_id}/accept")
 
     assert response.status_code == 200
-    after = len([
+    # A prediction_accept entry IS recorded so the user-visible accept is
+    # auditable and undoable — the entry carries a ``no_tag`` payload so
+    # undo/redo touch only the prediction review status.
+    accept_rows = [
         row for row in db.get_edit_history()
         if row["action_type"] == "prediction_accept"
-    ])
-    assert after == before
+    ]
+    assert len(accept_rows) == before + 1
     names = [row["name"] for row in db.get_photo_keywords(photo_id)]
     assert names.count("Verdin") == 1
     assert db.conn.execute(
@@ -1423,10 +1427,41 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
         (prediction_id, db._active_workspace_id),
     ).fetchone()["status"] == "accepted"
 
+    # Undo reverses the review-status flip without untagging the
+    # pre-existing hierarchical keyword.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "prediction_accept"
+    assert db.conn.execute(
+        "SELECT COALESCE(status, 'pending') AS status FROM prediction_review "
+        "WHERE prediction_id = ? AND workspace_id = ?",
+        (prediction_id, db._active_workspace_id),
+    ).fetchone()["status"] == "pending"
+    names_after_undo = [row["name"] for row in db.get_photo_keywords(photo_id)]
+    # The hierarchy leaf (parent nested Verdin) is still attached; the
+    # root Verdin was never tagged so it must not appear now.
+    assert nested in {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert root not in {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert names_after_undo.count("Verdin") == 1
+
+    # Redo re-flips the review status without tagging the root Verdin.
+    redone = db.redo_last_undo()
+    assert redone is not None
+    assert redone["action_type"] == "prediction_accept"
+    assert db.conn.execute(
+        "SELECT status FROM prediction_review WHERE prediction_id = ? "
+        "AND workspace_id = ?",
+        (prediction_id, db._active_workspace_id),
+    ).fetchone()["status"] == "accepted"
+    assert root not in {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert nested in {row["id"] for row in db.get_photo_keywords(photo_id)}
+
 
 def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db):
     """Additional-subject acceptance mirrors regular acceptance when the
-    species already exists through a hierarchy leaf."""
+    species already exists through a hierarchy leaf: a status-only
+    prediction_accept entry is recorded that undo/redo respect without
+    touching the pre-existing keyword association."""
     app, db = app_and_db
     client = app.test_client()
     db.conn.execute(
@@ -1442,6 +1477,7 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
     parent = db.add_keyword("Penduline tits")
     nested = db.add_keyword("Verdin", parent_id=parent)
     db.tag_photo(photo_id, nested)
+    root = db.add_keyword("Verdin", is_species=True)
     detection_id = db.save_detections(
         photo_id,
         [{
@@ -1460,10 +1496,14 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
     response = client.post(f"/api/predictions/{prediction_id}/accept-subject")
 
     assert response.status_code == 200
-    assert not [
+    # Exactly one status-only prediction_accept edit is recorded — it
+    # exists so the accept is auditable/undoable but its payload marks
+    # ``no_tag`` so undo/redo do not touch the pre-existing keyword.
+    accept_rows = [
         row for row in db.get_edit_history()
         if row["action_type"] == "prediction_accept"
     ]
+    assert len(accept_rows) == 1
     names = [row["name"] for row in db.get_photo_keywords(photo_id)]
     assert names.count("Verdin") == 1
     assert db.conn.execute(
@@ -1471,6 +1511,20 @@ def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db
         "AND workspace_id = ?",
         (prediction_id, db._active_workspace_id),
     ).fetchone()["status"] == "accepted"
+
+    # Undo reverses the status flip without untagging the hierarchy leaf
+    # or attaching the root spelling.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "prediction_accept"
+    assert db.conn.execute(
+        "SELECT COALESCE(status, 'pending') AS status FROM prediction_review "
+        "WHERE prediction_id = ? AND workspace_id = ?",
+        (prediction_id, db._active_workspace_id),
+    ).fetchone()["status"] == "pending"
+    ids_after_undo = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert nested in ids_after_undo
+    assert root not in ids_after_undo
 
 
 def test_encounter_species_records_only_newly_tagged(app_and_db):

@@ -13383,6 +13383,24 @@ class Database:
                                      -- the raw ``pr.species`` so buckets
                                      -- key on the ambiguous label instead
                                      -- of an arbitrary root.
+                                     -- Ambiguity count and the target-leaf
+                                     -- restriction here must mirror
+                                     -- ``resolve_species_display_name`` — the
+                                     -- canonicalizer ``add_species_highlight``
+                                     -- and ``_collect_highlight_buckets`` use
+                                     -- when writing ``sh.species``. That
+                                     -- helper considers all linked hierarchy
+                                     -- taxa regardless of rank. If this
+                                     -- subquery restricted the count to
+                                     -- species-rank taxa, a mixed
+                                     -- species+higher-rank alias (e.g.
+                                     -- species ``Puma`` and genus ``Puma``)
+                                     -- would count as 1 here and canonicalize
+                                     -- to the species root while
+                                     -- ``add_species_highlight`` kept the raw
+                                     -- ``pr.species`` — the eligibility
+                                     -- compare below would then drop the
+                                     -- highlight on reload.
                                      SELECT root.name
                                      FROM keywords k_pred
                                      JOIN keywords root
@@ -13392,8 +13410,6 @@ class Database:
                                           root.is_species = 1
                                           OR root.type = 'taxonomy'
                                       )
-                                     LEFT JOIN taxa t_root
-                                       ON t_root.id = root.taxon_id
                                      WHERE k_pred.name = pr.species COLLATE NOCASE
                                        AND k_pred.parent_id IS NOT NULL
                                        AND k_pred.taxon_id IS NOT NULL
@@ -13402,24 +13418,14 @@ class Database:
                                            OR k_pred.type = 'taxonomy'
                                        )
                                        AND (
-                                           t_root.rank = 'species'
-                                           OR t_root.rank IS NULL
-                                       )
-                                       AND (
                                            SELECT COUNT(DISTINCT k2.taxon_id)
                                            FROM keywords k2
-                                           LEFT JOIN taxa t2
-                                             ON t2.id = k2.taxon_id
                                            WHERE k2.name = pr.species COLLATE NOCASE
                                              AND k2.parent_id IS NOT NULL
                                              AND k2.taxon_id IS NOT NULL
                                              AND (
                                                  k2.is_species = 1
                                                  OR k2.type = 'taxonomy'
-                                             )
-                                             AND (
-                                                 t2.rank = 'species'
-                                                 OR t2.rank IS NULL
                                              )
                                        ) = 1
                                      ORDER BY root.id
@@ -15348,20 +15354,46 @@ class Database:
                 if changed_tag:
                     self.tag_photo(photo_id, kid, _commit=False)
                     self.queue_change(photo_id, "keyword_add", species, _commit=False)
-                # Record every photo that actually mutated — either the
-                # target tag was newly added, or replace_species stripped
-                # stale species rows. Without this, a replace-keywords
-                # accept on a photo that already carried the target via
-                # a hierarchical row would delete the stale species and
-                # queue its keyword_remove but be excluded from
-                # ``affected``; the API builds edit-history items from
-                # ``affected`` alone, so the audit trail (and any undo)
-                # for the removed species would be lost.
+                # Record every mutation, and — for regular accepts — also
+                # record status-only no-ops so the prediction-status flip
+                # is auditable and undoable. Three cases feed ``affected``:
+                #   * ``changed_tag`` — the target species tag was newly
+                #     added and undo must untag it;
+                #   * ``old_species`` — replace_species stripped stale
+                #     species rows and undo must retag them;
+                #   * neither, with ``replace_species=False`` — the photo
+                #     already carried the target via an equivalent
+                #     hierarchical/root row so nothing was tagged or
+                #     untagged, but ``update_prediction_status`` still
+                #     flipped this prediction to ``accepted``. The accept
+                #     API records ``prediction_accept`` history from
+                #     ``affected`` alone, so without this branch the
+                #     status change would be silently non-auditable and
+                #     undo could not restore ``pending`` on the accepted
+                #     prediction (or its siblings). ``changed_tag=False``
+                #     with empty ``old_species`` marks the entry as
+                #     status-only so ``_apply_undo`` / ``_apply_redo``
+                #     skip tag mutations while still reversing the review
+                #     state.
+                # For ``replace_species=True``, a total no-op (photo
+                # already has the target and nothing to remove) is left
+                # out — the replace endpoint records
+                # ``prediction_replace_species``, which is not undoable,
+                # so a status-only aggregate would only produce a
+                # misleading audit entry with an empty ``old_value``.
                 if changed_tag or old_species:
                     affected.append({
                         "photo_id": photo_id,
                         "prediction_id": this_pred_id,
                         "old_species": old_species,
+                        "changed_tag": changed_tag,
+                    })
+                elif not replace_species:
+                    affected.append({
+                        "photo_id": photo_id,
+                        "prediction_id": this_pred_id,
+                        "old_species": [],
+                        "changed_tag": False,
                     })
 
             # If grouped, accept all predictions in the group (in this workspace).
@@ -16532,11 +16564,21 @@ class Database:
                 )
             elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
                 old_meta = self._edit_old_value_meta(old_val)
-                self.untag_photo(pid, int(entry['new_value']))
+                # ``no_tag`` marks a prediction_accept where the photo
+                # already carried an equivalent species, so no tag was
+                # actually added. Undo must not untag a keyword the user
+                # deliberately kept — only the prediction status flip
+                # below is reversed.
+                _skip_tag_undo = (
+                    entry['action_type'] == 'prediction_accept'
+                    and old_meta.get('no_tag')
+                )
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
                                        (int(entry['new_value']),)).fetchone()
-                if kw:
-                    self.remove_pending_changes(pid, 'keyword_add', kw['name'])
+                if not _skip_tag_undo:
+                    self.untag_photo(pid, int(entry['new_value']))
+                    if kw:
+                        self.remove_pending_changes(pid, 'keyword_add', kw['name'])
                 if entry['action_type'] == 'keyword_add':
                     self._restore_edit_prediction_status(old_meta)
                     # Predicted-only relabels (no prior species tag)
@@ -16703,11 +16745,21 @@ class Database:
                 )
             elif entry['action_type'] in ('keyword_add', 'prediction_accept'):
                 old_meta = self._edit_old_value_meta(item['old_value'])
-                self.tag_photo(pid, int(entry['new_value']))
+                # Symmetric with the undo branch: a ``no_tag``
+                # prediction_accept records only the status flip, so
+                # redo must not re-tag or re-queue a keyword that was
+                # never touched — the photo already carried the species
+                # through an equivalent hierarchical/root row.
+                _skip_tag_redo = (
+                    entry['action_type'] == 'prediction_accept'
+                    and old_meta.get('no_tag')
+                )
                 kw = self.conn.execute("SELECT name FROM keywords WHERE id = ?",
                                        (int(entry['new_value']),)).fetchone()
-                if kw:
-                    self.queue_change(pid, 'keyword_add', kw['name'])
+                if not _skip_tag_redo:
+                    self.tag_photo(pid, int(entry['new_value']))
+                    if kw:
+                        self.queue_change(pid, 'keyword_add', kw['name'])
                 if entry['action_type'] == 'keyword_add':
                     self._reject_edit_prediction(old_meta)
                     # Mirror of the `keyword_add` undo branch: predicted-
@@ -17116,6 +17168,15 @@ class Database:
 
     def _edit_prediction_id(self, meta, fallback):
         raw = meta.get("prediction_id") if meta else None
+        # ``no_tag`` accept-subject entries stash the full list of
+        # agreeing prediction ids under ``prediction_ids`` (all share
+        # one detection/labels_fingerprint). Undo only needs one id to
+        # look up the shared sibling scope, so pull the first entry
+        # when the singular key is absent.
+        if raw is None and meta:
+            ids = meta.get("prediction_ids")
+            if isinstance(ids, list) and ids:
+                raw = ids[0]
         if raw is None:
             raw = fallback
         try:

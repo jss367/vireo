@@ -5766,7 +5766,15 @@ def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_pa
 
     assert result["species"] == "Blue-winged Teal"
     assert len(result["prediction_ids"]) == 2
-    assert len(result["affected"]) == 1
+    # Each underlying accept_prediction call reports an entry: the first
+    # tags Blue-winged Teal (``changed_tag=True``), the second sees the
+    # photo already carrying it and records a status-only accept
+    # (``changed_tag=False``) so the aggregate accept-subject history
+    # can still reverse every sibling status on undo.
+    assert len(result["affected"]) == 2
+    changed = [a["changed_tag"] for a in result["affected"]]
+    assert changed.count(True) == 1
+    assert changed.count(False) == 1
     assert {row["name"] for row in db.get_photo_keywords(photo_id)} >= {
         "American Wigeon", "Blue-winged Teal",
     }

@@ -10513,14 +10513,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         for confirm_pid in confirmable_photo_ids_by_key.get(key, [pid])
                     )
                     continue
-                items = [
-                    {
+                # Mirror api_accept_prediction: encode ``no_tag`` for
+                # entries where the photo already carried the target via
+                # an equivalent hierarchical/root row so undo/redo do not
+                # untag a keyword the user deliberately kept.
+                items = []
+                for a in result["affected"]:
+                    if a.get("changed_tag", True):
+                        old_value = str(a["prediction_id"])
+                    else:
+                        old_value = json.dumps({
+                            "prediction_id": a["prediction_id"],
+                            "no_tag": True,
+                        })
+                    items.append({
                         "photo_id": a["photo_id"],
-                        "old_value": str(a["prediction_id"]),
+                        "old_value": old_value,
                         "new_value": str(result["keyword_id"]),
-                    }
-                    for a in result["affected"]
-                ]
+                    })
                 desc = f'Accepted prediction: added "{result["species"]}"'
                 if len(items) > 1:
                     desc += f" to {len(items)} photos"
@@ -12400,10 +12410,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         result = db.accept_prediction(pred_id)
         if result and result["affected"]:
-            items = [{'photo_id': a['photo_id'],
-                      'old_value': str(a['prediction_id']),
-                      'new_value': str(result['keyword_id'])}
-                     for a in result['affected']]
+            # ``changed_tag=False`` means the photo already carried an
+            # equivalent species (hierarchical or root) so the accept only
+            # flipped ``prediction_review.status``. Encode that as a JSON
+            # ``no_tag`` payload so undo/redo can reverse the status change
+            # without untagging (or re-tagging) a keyword the user
+            # deliberately kept. Regular accepts still use the compact
+            # ``str(prediction_id)`` form so existing edit-history rows
+            # keep parsing unchanged.
+            def _make_item(a):
+                if a.get('changed_tag', True):
+                    old_value = str(a['prediction_id'])
+                else:
+                    old_value = json.dumps({
+                        'prediction_id': a['prediction_id'],
+                        'no_tag': True,
+                    })
+                return {
+                    'photo_id': a['photo_id'],
+                    'old_value': old_value,
+                    'new_value': str(result['keyword_id']),
+                }
+            items = [_make_item(a) for a in result['affected']]
             is_batch = len(result['affected']) > 1
             desc = f'Accepted prediction: added "{result["species"]}"'
             if is_batch:
@@ -12419,15 +12447,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if result is None:
             return json_error("prediction not found", 404)
         if result["affected"]:
+            # If every underlying accept was a no-op (photo already
+            # carried the target species via an equivalent hierarchical
+            # or root row), only the prediction-review statuses flipped
+            # and the aggregate history item must not untag on undo.
+            # Encode ``no_tag`` in that case, aggregating all prediction
+            # ids so undo/redo still restore every sibling status.
+            _all_no_tag = all(
+                not a.get("changed_tag", True) for a in result["affected"]
+            )
+            if _all_no_tag:
+                old_value = json.dumps({
+                    "prediction_ids": [
+                        int(pred_id) for pred_id in result["prediction_ids"]
+                    ],
+                    "no_tag": True,
+                })
+            else:
+                old_value = ",".join(
+                    str(pred_id) for pred_id in result["prediction_ids"]
+                )
             db.record_edit(
                 "prediction_accept",
                 f'Accepted additional subject species: added "{result["species"]}"',
                 str(result["keyword_id"]),
                 [{
                     "photo_id": result["photo_id"],
-                    "old_value": ",".join(
-                        str(pred_id) for pred_id in result["prediction_ids"]
-                    ),
+                    "old_value": old_value,
                     "new_value": str(result["keyword_id"]),
                 }],
             )
