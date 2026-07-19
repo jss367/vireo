@@ -12409,7 +12409,15 @@ class Database:
                     # would drop the root and strand its representative /
                     # highlight lookups.
                     identity = ("name", r["name"])
-                chosen.setdefault(r["photo_id"], {}).setdefault(identity, r["name"])
+                # Track whether the chosen row is itself a root: attached root
+                # rows must keep their own stored spelling (curation is keyed
+                # by the actually attached ``k.name``, so a same-taxon sibling
+                # root row must not rewrite it). Only hierarchy leaves need the
+                # root-name fallback.
+                is_root = r["parent_id"] is None
+                chosen.setdefault(r["photo_id"], {}).setdefault(
+                    identity, (r["name"], is_root)
+                )
         taxon_ids = {
             identity[1]
             for by_identity in chosen.values()
@@ -12433,8 +12441,8 @@ class Database:
         result = {}
         for photo_id, by_identity in chosen.items():
             names = []
-            for identity, name in by_identity.items():
-                if identity[0] == "taxon":
+            for identity, (name, is_root) in by_identity.items():
+                if identity[0] == "taxon" and not is_root:
                     names.append(canonical_roots.get(identity[1], name))
                 else:
                     names.append(name)

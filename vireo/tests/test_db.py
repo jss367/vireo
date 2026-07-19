@@ -14512,6 +14512,43 @@ def test_species_keywords_canonicalize_hierarchy_leaf_to_root_spelling(tmp_path)
     assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
 
 
+def test_species_keywords_preserves_attached_root_alias_spelling(tmp_path):
+    """When a photo carries a top-level species alias root for a taxon that
+    also has a differently-spelled sibling root row, the returned name must
+    be the *attached* root's stored spelling, not whichever sibling root
+    happens to sort first. Curation writes still go through
+    ``resolve_species_display_name()``, which preserves an exact root-name
+    match, so Browse/Compare and representative attachment would otherwise
+    report the sibling root while representative/highlight rows are keyed
+    under the actually attached alias. Only hierarchy leaves need the root
+    fallback; attached root rows should keep their own stored spelling."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Create the sibling root first so it has the lower id and would win a
+    # naive ``ORDER BY id`` canonicalization.
+    db.add_keyword("Verdin", is_species=True)
+    sci_root = db.add_keyword("Auriparus flaviceps", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], sci_root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, sci_root)
+
+    # The attached row's own stored spelling wins so downstream curation
+    # lookups match the actually-attached name.
+    assert db.get_species_keywords_for_photos([pid]) == {
+        pid: ["Auriparus flaviceps"]
+    }
+
+
 def test_species_keywords_preserves_unlinked_case_variant_spellings(tmp_path):
     """A photo carrying two NULL-taxon species rows that differ only by
     SQLite NOCASE spelling (root ``Foo`` plus hierarchy leaf ``foo``) must
