@@ -12007,9 +12007,12 @@ class Database:
             return set()
         result = set()
         ids = list(dict.fromkeys(int(pid) for pid in photo_ids))
+        target_key = keyword_match_key(target["name"])
         for chunk in _chunks(ids):
             placeholders = ",".join("?" for _ in chunk)
             if target["taxon_id"] is not None:
+                # Match rows linked to the same taxon first — the fast,
+                # authoritative case that survives any display-name rename.
                 rows = self.conn.execute(
                     f"""SELECT DISTINCT pk.photo_id
                         FROM photo_keywords pk
@@ -12020,6 +12023,30 @@ class Database:
                     [*chunk, target["taxon_id"]],
                 ).fetchall()
                 result.update(row["photo_id"] for row in rows)
+                # Fallback: upgraded libraries can carry a hierarchical
+                # species leaf typed as taxonomy/is_species that
+                # mark_species_keywords hasn't yet linked to a taxon_id
+                # (see the explicit ``taxon_id IS NULL`` branch it
+                # handles). A strict taxon_id equality above would miss
+                # those legacy leaves, so a follow-up
+                # confirm/accept-species after add_keyword created a
+                # linked top-level root would not recognize the existing
+                # hierarchy and would queue a duplicate root tag plus
+                # sidecar add. Match unlinked rows by normalized display
+                # name to preserve the hierarchy.
+                rows = self.conn.execute(
+                    f"""SELECT pk.photo_id, k.name
+                        FROM photo_keywords pk
+                        JOIN keywords k ON k.id = pk.keyword_id
+                        WHERE pk.photo_id IN ({placeholders})
+                          AND k.taxon_id IS NULL
+                          AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                    chunk,
+                ).fetchall()
+                result.update(
+                    row["photo_id"] for row in rows
+                    if keyword_match_key(row["name"]) == target_key
+                )
                 continue
             rows = self.conn.execute(
                 f"""SELECT pk.photo_id, k.name
@@ -12029,7 +12056,6 @@ class Database:
                       AND (k.is_species = 1 OR k.type = 'taxonomy')""",
                 chunk,
             ).fetchall()
-            target_key = keyword_match_key(target["name"])
             result.update(
                 row["photo_id"] for row in rows
                 if keyword_match_key(row["name"]) == target_key

@@ -382,13 +382,18 @@ def load_photo_features(db, collection_id=None, config=None,
 
     # Load user-confirmed species keywords (alphabetically first wins
     # for photos with multiple species tags — rare but deterministic)
+    # Match the backend species definition used by
+    # db.get_species_keywords_for_photos and api_encounter_species:
+    # (is_species = 1 OR type = 'taxonomy'). Checking only is_species = 1
+    # here would miss keywords a user explicitly set to type 'taxonomy'
+    # via the UI (which updates keywords.type but leaves is_species = 0).
     species_kw_rows = db.conn.execute(
         f"""SELECT pk.photo_id, k.name
            FROM photo_keywords pk
            JOIN photos p ON p.id = pk.photo_id
            JOIN keywords k ON k.id = pk.keyword_id
            LEFT JOIN taxa t ON t.id = k.taxon_id
-           WHERE k.is_species = 1
+           WHERE (k.is_species = 1 OR k.type = 'taxonomy')
              AND (t.rank = 'species' OR t.rank IS NULL)
              {scope_sql}
            ORDER BY k.name""",
