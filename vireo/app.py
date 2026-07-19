@@ -23996,18 +23996,55 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # prior confirmation may therefore be represented only by a
                 # nested leaf after duplicate repair; use that leaf as the
                 # identity target when no root row exists.
-                old_kid_row = db.conn.execute(
-                    """SELECT k.id, k.name, k.taxon_id
-                       FROM keywords k
-                       LEFT JOIN taxa t ON t.id = k.taxon_id
-                       WHERE k.name = ? COLLATE NOCASE
-                         AND (k.is_species = 1 OR k.type = 'taxonomy')
-                         AND (t.rank = 'species' OR t.rank IS NULL)
-                       ORDER BY CASE WHEN k.parent_id IS NULL THEN 0 ELSE 1 END,
-                                k.id
-                       LIMIT 1""",
-                    (previous_species,),
-                ).fetchone()
+                #
+                # Scope the fallback to keywords actually attached to one of
+                # the submitted photos. Multiple same-name hierarchy leaves
+                # can exist in the catalog under different parents pointing
+                # at unrelated taxa (e.g. a legacy homonym nested elsewhere);
+                # an unscoped ``LIMIT 1`` could pick one of those unattached
+                # rows, and because the removal loop below matches attached
+                # rows by ``taxon_id``, the actual old hierarchy tag on the
+                # submitted photos would never be removed while the new
+                # species is still added — leaving a duplicate. Prefer a row
+                # whose taxon covers every same-name species-rank tag on the
+                # submitted photos so the removal loop can catch all of them.
+                candidate_rows = []
+                for chunk in _chunked(photo_ids):
+                    placeholders_ids = ",".join("?" for _ in chunk)
+                    candidate_rows.extend(
+                        db.conn.execute(
+                            f"""SELECT k.id, k.name, k.taxon_id, pk.photo_id
+                                FROM photo_keywords pk
+                                JOIN keywords k ON k.id = pk.keyword_id
+                                LEFT JOIN taxa t ON t.id = k.taxon_id
+                                WHERE pk.photo_id IN ({placeholders_ids})
+                                  AND k.name = ? COLLATE NOCASE
+                                  AND (k.is_species = 1 OR k.type = 'taxonomy')
+                                  AND (t.rank = 'species' OR t.rank IS NULL)
+                                ORDER BY CASE WHEN k.parent_id IS NULL
+                                              THEN 0 ELSE 1 END,
+                                         k.id""",
+                            [*chunk, previous_species],
+                        ).fetchall()
+                    )
+                if candidate_rows:
+                    # Prefer a candidate whose taxon (or NULL when nothing
+                    # is linked) matches the largest number of submitted
+                    # photos carrying an equivalent same-name tag: that
+                    # minimizes the number of photos the removal loop
+                    # leaves with a stale old species.
+                    taxon_photos = {}
+                    first_by_taxon = {}
+                    for row in candidate_rows:
+                        taxon_key = row["taxon_id"]
+                        taxon_photos.setdefault(taxon_key, set()).add(
+                            row["photo_id"]
+                        )
+                        first_by_taxon.setdefault(taxon_key, row)
+                    best_taxon = max(
+                        taxon_photos, key=lambda t: len(taxon_photos[t])
+                    )
+                    old_kid_row = first_by_taxon[best_taxon]
 
         # Run all mutations in a single transaction so that a mid-loop failure
         # (SQLite lock, disk error, etc.) can't leave half the photos retagged

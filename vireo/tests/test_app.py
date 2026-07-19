@@ -2120,6 +2120,83 @@ def test_encounter_species_replacement_preserves_legacy_homonym(app_and_db):
     assert legacy_leaf in tagged_ids
 
 
+def test_encounter_species_replacement_scopes_hierarchy_fallback_to_submitted_photos(
+    app_and_db,
+):
+    """The hierarchy-fallback old-species lookup must be scoped to keywords
+    actually attached to the submitted photos.
+
+    Regression: when ``previous_species`` only exists as a hierarchical
+    keyword and multiple same-name nested rows live in the catalog under
+    different parents pointing at different taxa (a homonym elsewhere), an
+    unscoped ``LIMIT 1`` could pick the row that belongs to some other
+    photo. The subsequent removal loop matches attached rows by
+    ``taxon_id`` — so if the fallback picks a taxon the submitted photo
+    does not actually carry, the real hierarchy tag survives while the
+    new species is added on top, leaving a stale duplicate.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) VALUES "
+        "(9101, 'Auriparus flaviceps', 'Verdin', 'species'),"
+        "(9102, 'Fakelatus fake', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    # Hierarchy leaf actually attached to the submitted photo. Points at
+    # taxon 9101.
+    attached_parent = db.add_keyword("Penduline tits")
+    attached_leaf = db.add_keyword("Verdin", parent_id=attached_parent)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9101, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (attached_leaf,),
+    )
+    # A DIFFERENT same-name hierarchy leaf in the catalog that is NOT
+    # attached to this photo and points at an unrelated taxon 9102. An
+    # unscoped LIMIT 1 could pick this row first (the ``k.id`` tiebreaker
+    # is deterministic but incidental), and the removal loop would then
+    # look for taxon 9102 on the submitted photo — miss — and leave the
+    # real ``Verdin`` tag attached.
+    unrelated_parent = db.add_keyword("Nonexistent group")
+    unrelated_leaf = db.add_keyword("Verdin", parent_id=unrelated_parent)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9102, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (unrelated_leaf,),
+    )
+    db.conn.commit()
+    db.tag_photo(photo_id, attached_leaf)
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Verdin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    # The attached hierarchy leaf on the submitted photo must be gone.
+    assert attached_leaf not in tagged_ids, (
+        "Scoped hierarchy fallback should have picked the attached leaf "
+        "(taxon 9101) so the removal loop matches and untags it."
+    )
+    # The unrelated same-name leaf must remain untouched — it was not
+    # attached to this photo in the first place, and nothing should have
+    # touched it.
+    unrelated_still_exists = db.conn.execute(
+        "SELECT 1 FROM keywords WHERE id = ?", (unrelated_leaf,),
+    ).fetchone()
+    assert unrelated_still_exists is not None
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Blue Jay" in names
+    assert "Verdin" not in names
+
+
 def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
     """Old-species lookup must be scoped to root species keywords only."""
     app, db = app_and_db
