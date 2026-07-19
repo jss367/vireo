@@ -14619,6 +14619,47 @@ def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
     assert db.get_photo_life_list_species(pid) == ["Verdin"]
 
 
+def test_photo_life_list_species_preserves_attached_root_alias(tmp_path):
+    """When a photo is tagged with an attached top-level alias for a taxon
+    (for example ``Auriparus flaviceps``) and another root row for the same
+    taxon (``Verdin``) exists but is not attached, ``api_photo_detail`` must
+    report the actually attached spelling. Curation writes preserve exact
+    root-name matches, so rewriting the attached alias to the arbitrarily
+    first same-taxon root would make representative/highlight state keyed to
+    the attached name appear missing (or be updated under the wrong species).
+    Only hierarchy leaves should fall back to the canonical root spelling."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Root alias (attached to the photo) must survive dedup; ``add_keyword``
+    # would collapse the second same-key row, so create the two roots with
+    # distinct spellings and back-link both to the same taxon directly.
+    alias = db.add_keyword("Auriparus flaviceps", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], alias),
+    )
+    other_root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], other_root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, alias)
+
+    assert db.get_photo_life_list_species(pid) == ["Auriparus flaviceps"]
+
+
 def test_species_display_name_uses_leaf_spelling_when_no_root_exists(tmp_path):
     """When a linked hierarchy leaf's canonical taxon has no top-level
     root keyword (for example a hierarchy-only accept whose top-level
