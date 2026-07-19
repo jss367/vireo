@@ -83,13 +83,17 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
         # both sides together whenever the user picks either.
         kw_index = defaultdict(list)
         for c in changes:
-            if c["change_type"] in ("keyword_add", "keyword_remove") and c["value"]:
+            if c["change_type"] in (
+                "keyword_add", "keyword_remove", "keyword_remove_flat",
+            ) and c["value"]:
                 key = (c["photo_id"], keyword_match_key(c["value"]))
                 kw_index[key].append(c["id"])
         for c in changes:
             if c["id"] not in selected_ids:
                 continue
-            if c["change_type"] not in ("keyword_add", "keyword_remove"):
+            if c["change_type"] not in (
+                "keyword_add", "keyword_remove", "keyword_remove_flat",
+            ):
                 continue
             if not c["value"]:
                 continue
@@ -132,6 +136,14 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
             # Collect keyword adds/removes and rating/flag changes
             keywords_to_add = set()
             keywords_to_remove = set()
+            # ``keyword_remove_flat`` is queued by
+            # ``repair_duplicate_photo_species`` when a detached root
+            # spelling still appears as an ancestor segment of a
+            # preserved hierarchy leaf. A regular hierarchical
+            # ``keyword_remove`` would strip that preserved
+            # ``lr:hierarchicalSubject`` entry; flat-only removal
+            # touches only the stale ``dc:subject`` line.
+            keywords_to_remove_flat = set()
             new_rating = None
             new_flag = None
             edit_recipe_json = None
@@ -146,6 +158,9 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
                     supported_ids.append(c["id"])
                 elif c["change_type"] == "keyword_remove":
                     keywords_to_remove.add(c["value"])
+                    supported_ids.append(c["id"])
+                elif c["change_type"] == "keyword_remove_flat":
+                    keywords_to_remove_flat.add(c["value"])
                     supported_ids.append(c["id"])
                 elif c["change_type"] == "rating":
                     new_rating = int(c["value"])
@@ -186,7 +201,7 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
             # touches the flat `dc:subject` legacy entry. Solo removes keep
             # hierarchical semantics so real keyword deletions still drop
             # pipe-segment matches.
-            if keywords_to_remove:
+            if keywords_to_remove or keywords_to_remove_flat:
                 paired_keys = {
                     keyword_match_key(kw) for kw in keywords_to_add
                 }
@@ -198,9 +213,13 @@ def sync_to_xmp(db, progress_callback=None, change_ids=None):
                 solo_removes = keywords_to_remove - paired_removes
                 if solo_removes:
                     remove_keywords(xmp_path, solo_removes)
-                if paired_removes:
+                # Merge repair-queued flat-only removes with the
+                # rename-paired flat removes: both take exactly the
+                # ``hierarchical=False`` code path.
+                flat_removes = paired_removes | keywords_to_remove_flat
+                if flat_removes:
                     remove_keywords(
-                        xmp_path, paired_removes, hierarchical=False,
+                        xmp_path, flat_removes, hierarchical=False,
                     )
 
             # Strip any sidecar dc:subject entry that normalizes to a

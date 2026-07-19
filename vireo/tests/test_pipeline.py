@@ -1502,6 +1502,49 @@ def test_load_photo_features_confirmed_species(tmp_path):
     assert len(unconfirmed) == len(ids[1])
 
 
+def test_load_photo_features_includes_taxonomy_type_without_species_flag(tmp_path):
+    """Taxonomy-typed legacy rows remain confirmed species even when their
+    redundant is_species flag is unset."""
+    from pipeline import load_photo_features
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    pid = ids[0][0]
+    keyword_id = db.add_keyword("Verdin")
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 0 "
+        "WHERE id = ?",
+        (keyword_id,),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, keyword_id)
+
+    photo = next(p for p in load_photo_features(db) if p["id"] == pid)
+    assert photo["confirmed_species"] == "Verdin"
+
+
+def test_load_photo_features_ignores_taxonomy_ancestors_as_species(tmp_path):
+    """A family keyword may be taxonomy-typed, but only the species-rank
+    hierarchy leaf should become confirmed_species."""
+    from pipeline import load_photo_features
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) VALUES "
+        "(38595, 'Remizidae', 'Penduline tits', 'family'), "
+        "(2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    birds = db.add_keyword("1Birds")
+    family = db.add_keyword("Penduline tits", parent_id=birds)
+    species = db.add_keyword("Verdin", parent_id=family)
+    pid = ids[0][0]
+    db.tag_photo(pid, family)
+    db.tag_photo(pid, species)
+
+    photo = next(p for p in load_photo_features(db) if p["id"] == pid)
+    assert photo["confirmed_species"] == "Verdin"
+
+
 def test_confirmed_species_deterministic_with_multiple_tags(tmp_path):
     """When a photo has multiple species tags, confirmed_species is deterministic (alphabetically first)."""
     from pipeline import load_photo_features
@@ -1520,6 +1563,77 @@ def test_confirmed_species_deterministic_with_multiple_tags(tmp_path):
         photos = load_photo_features(db)
         photo = next(p for p in photos if p["id"] == pid)
         assert photo["confirmed_species"] == "Blue Jay"
+
+
+def test_confirmed_species_canonicalizes_same_taxon_across_encounter(tmp_path):
+    """A photo carrying only a hierarchy leaf and a sibling still on the
+    canonical root — same taxon — must resolve to the same confirmed
+    species string, so the encounter stays confirmed after regroup.
+
+    Regression for the Codex feedback on pipeline.py:395: without
+    canonicalizing hierarchy leaves to the shared taxon root before
+    building confirmed_by_photo, ``serialize_pipeline_results`` sees a
+    mixed ``confirmed_set`` (e.g. ``{"verdin", "Verdin"}``) and marks
+    the encounter unconfirmed, so already-reviewed groups reappear.
+    """
+    from pipeline import (
+        load_photo_features,
+        run_full_pipeline,
+        serialize_results,
+    )
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) VALUES "
+        "(2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+
+    # Canonical top-level root, linked to the species taxon.
+    root_kid = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 2912 WHERE id = ?",
+        (root_kid,),
+    )
+    # Hierarchy leaf under a family container, same taxon, differently
+    # cased stored name — the shape duplicate-repair leaves behind when
+    # it detaches the redundant root association from that photo.
+    birds = db.add_keyword("Birds")
+    leaf_kid = db.add_keyword("verdin", parent_id=birds)
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+        "taxon_id = 2912 WHERE id = ?",
+        (leaf_kid,),
+    )
+    db.conn.commit()
+
+    enc_ids = ids[0]
+    assert len(enc_ids) >= 2
+    # Half the encounter still carries the root; the other half was
+    # migrated to the hierarchy leaf spelling.
+    db.tag_photo(enc_ids[0], root_kid)
+    for pid in enc_ids[1:]:
+        db.tag_photo(pid, leaf_kid)
+
+    photos = load_photo_features(db)
+    tagged = {p["id"]: p for p in photos if p["id"] in enc_ids}
+    assert set(tagged) == set(enc_ids)
+    # Every photo in the encounter reports the canonical root spelling,
+    # regardless of which keyword row is actually attached.
+    assert {p["confirmed_species"] for p in tagged.values()} == {"Verdin"}
+
+    results = run_full_pipeline(photos)
+    serialized = serialize_results(results)
+    matching = [
+        e for e in serialized["encounters"]
+        if set(e["photo_ids"]) == set(enc_ids)
+    ]
+    assert len(matching) == 1, (
+        "expected a single encounter matching the tagged photo group"
+    )
+    enc = matching[0]
+    assert enc["confirmed_species"] == "Verdin"
+    assert enc["species_confirmed"] is True
 
 
 def test_serialize_results_includes_species_predictions(tmp_path):

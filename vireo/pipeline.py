@@ -380,21 +380,30 @@ def load_photo_features(db, collection_id=None, config=None,
     )
     mdv6_passing_photo_ids = {pid for pid, dets in mdv6_dets.items() if dets}
 
-    # Load user-confirmed species keywords (alphabetically first wins
-    # for photos with multiple species tags — rare but deterministic)
-    species_kw_rows = db.conn.execute(
-        f"""SELECT pk.photo_id, k.name
-           FROM photo_keywords pk
-           JOIN photos p ON p.id = pk.photo_id
-           JOIN keywords k ON k.id = pk.keyword_id
-           WHERE k.is_species = 1
-             {scope_sql}
-           ORDER BY k.name""",
-        scope_params,
-    ).fetchall()
-    confirmed_by_photo = {}
-    for row in species_kw_rows:
-        confirmed_by_photo.setdefault(row["photo_id"], row["name"])
+    # Load user-confirmed species keywords, canonicalizing hierarchy
+    # leaves to the same-taxon root's stored spelling. Without this
+    # collapse a photo carrying only the repaired ``verdin`` hierarchy
+    # leaf and a sibling still on the canonical ``Verdin`` root read as
+    # different confirmed species; serialize_pipeline_results then sees
+    # a mixed confirmed_set and marks an already-confirmed encounter or
+    # burst as unconfirmed, so already-reviewed groups reappear for
+    # review even though every photo carries the same taxon.
+    # ``get_species_keywords_for_photos`` applies the same rank filter
+    # ``(is_species = 1 OR type = 'taxonomy')`` and
+    # ``(t.rank = 'species' OR t.rank IS NULL)`` this query used to run
+    # inline, deduplicates by ``taxon_id``, and maps hierarchy leaves to
+    # the canonical root spelling — so life-list, highlights, and the
+    # encounter confirmation flag all key off the same string. For
+    # photos with multiple species tags we keep the alphabetically-first
+    # entry so the choice stays deterministic across runs.
+    species_names_by_photo = db.get_species_keywords_for_photos(
+        photo_ids_for_dets,
+    )
+    confirmed_by_photo = {
+        pid: names[0]
+        for pid, names in species_names_by_photo.items()
+        if names
+    }
 
     # Only accept embeddings written with the currently configured DINOv2
     # variant. Without this check, switching variants leaves stale embeddings

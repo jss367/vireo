@@ -453,18 +453,14 @@ def test_failed_job_history_preserves_structured_result(tmp_path):
 
     job_id = runner.start('pipeline', failing_pipeline_like)
 
-    # Poll for the persisted row rather than sleeping a fixed interval —
-    # the worker thread sets status='failed' before the finally block runs
-    # _persist_job, so a fixed sleep races on slow runners.
-    row = None
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        row = db.conn.execute(
-            "SELECT result, error_count FROM job_history WHERE id = ?", (job_id,)
-        ).fetchone()
-        if row is not None:
-            break
-        time.sleep(0.05)
+    # Wait until _persist_job has flushed the row to SQLite. The prior
+    # manual 5s poll raced Windows CI, where WAL contention pushed the
+    # write past the deadline; wait_for_job_via_runner blocks on the
+    # runner's own _persisted flag with a 30s default budget.
+    wait_for_job_via_runner(runner, job_id, wait_for_history=True)
+    row = db.conn.execute(
+        "SELECT result, error_count FROM job_history WHERE id = ?", (job_id,)
+    ).fetchone()
     assert row is not None
 
     stored = _json.loads(row["result"])

@@ -967,3 +967,106 @@ def test_life_list_export_rejects_unknown_format(life_app):
     app, _, _ = life_app
     resp = app.test_client().get("/api/life-list/export?format=pdf")
     assert resp.status_code == 400
+
+
+def test_life_list_bucket_survives_root_repair_spelling_drift(tmp_path, monkeypatch):
+    """After ``repair_duplicate_photo_species`` detaches a redundant root
+    keyword, a photo may only carry the hierarchy leaf whose stored
+    spelling differs from the canonical root (``verdin`` vs ``Verdin``).
+    The Life List must bucket that photo under the canonical root name so
+    curation on the root key applies and
+    ``/api/life-list/species?species=Verdin`` still returns the photo.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import config as cfg
+    import models
+    from app import create_app
+    from db import Database
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setattr(
+        models, "DEFAULT_MODELS_DIR", str(tmp_path / "vireo-models"),
+    )
+    monkeypatch.setattr(models, "CONFIG_PATH", str(tmp_path / "models.json"))
+
+    db_path = str(tmp_path / "test.db")
+    thumb_dir = str(tmp_path / "thumbs")
+    os.makedirs(thumb_dir)
+
+    db = Database(db_path)
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    taxon_id = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species', 'Animalia')"
+    ).lastrowid
+    db.conn.commit()
+
+    pid_hier = db.add_photo(
+        folder_id=fid, filename="verdin1.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+        timestamp="2024-01-05T09:00:00",
+    )
+    pid_root = db.add_photo(
+        folder_id=fid, filename="verdin2.jpg", extension=".jpg",
+        file_size=100, file_mtime=2.0,
+        timestamp="2024-02-10T09:00:00",
+    )
+    Image.new("RGB", (100, 100)).save(os.path.join(thumb_dir, f"{pid_hier}.jpg"))
+    Image.new("RGB", (100, 100)).save(os.path.join(thumb_dir, f"{pid_root}.jpg"))
+
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxon_id, nested),
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?", (taxon_id, root),
+    )
+    db.tag_photo(pid_hier, nested)
+    db.tag_photo(pid_hier, root)
+    db.tag_photo(pid_root, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    # The hierarchical photo now only carries the lower-cased leaf.
+    hier_names = {
+        row["name"] for row in db.get_photo_keywords(pid_hier)
+    }
+    assert "verdin" in hier_names and "Verdin" not in hier_names
+
+    app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir)
+    client = app.test_client()
+
+    resp = client.get("/api/life-list")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    verdin_entries = [
+        e for e in data["species"]
+        if e["species"].lower() == "verdin"
+    ]
+    assert len(verdin_entries) == 1, (
+        "hierarchy leaf and root must share one bucket keyed on canonical root"
+    )
+    verdin = verdin_entries[0]
+    assert verdin["species"] == "Verdin"
+    photo_ids = {p["id"] for p in verdin["photos"]}
+    assert photo_ids == {pid_hier, pid_root}
+
+    single = client.get(
+        "/api/life-list/species", query_string={"species": "Verdin"},
+    )
+    assert single.status_code == 200
+    single_data = single.get_json()
+    assert single_data["species"] == "Verdin"
+    assert {p["id"] for p in single_data["photos"]} == {pid_hier, pid_root}
+
+    db.close()

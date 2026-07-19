@@ -5392,6 +5392,338 @@ def test_accept_prediction_tags_photo(tmp_path):
     assert any(k["name"] == "Elk" for k in kws)
 
 
+def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
+    """Replacing stale species leaves an equivalent hierarchical target in
+    place instead of flattening it to the root keyword."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    stale = db.add_keyword("Sparrow", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, stale)
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Verdin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    root = result["keyword_id"]
+    tagged = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged
+    assert root not in tagged
+    assert stale not in tagged
+
+
+def test_replace_prediction_records_affected_when_only_removals_occur(tmp_path):
+    """Replace Keywords on a photo that already carries the accepted target
+    via a hierarchy leaf must still record the photo in ``affected`` when
+    stale species are removed.
+
+    ``/api/predictions/<id>/replace-keywords`` builds its edit-history items
+    from ``result['affected']`` alone, so a photo that gets stale species
+    stripped but no new tag added must still surface; otherwise the removed
+    species has no audit entry and undo cannot restore it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    stale = db.add_keyword("Sparrow", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, stale)
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Verdin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    # Even though no new tag was added (hierarchy leaf already satisfies the
+    # target), the stale Sparrow removal must be visible in ``affected`` so
+    # the API layer can record it.
+    assert len(result["affected"]) == 1
+    entry = result["affected"][0]
+    assert entry["photo_id"] == pid
+    assert entry["old_species"] == ["Sparrow"]
+    # And the keyword_remove pending change was actually queued.
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Sparrow") in removed
+
+
+def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_path):
+    """When Replace Keywords strips a hierarchy alias whose taxon has curation
+    keyed on the canonical root spelling, highlights and representative
+    preferences must migrate onto the newly-tagged species.
+
+    ``repair_duplicate_photo_species`` leaves the alias leaf attached (say
+    ``Desert Verdin`` under ``Penduline tits``) and detaches the top-level
+    ``Verdin`` — but curation was preserved under the canonical root name
+    ``Verdin`` because that is where ``_canonical_curation_species`` keeps
+    it. Renaming the curation from only the raw alias ``Desert Verdin``
+    would leave ``species_highlights`` / ``photo_preferences`` stranded
+    under ``Verdin`` after the photo is retagged to a different species.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(
+        db,
+        [
+            (2912, "Auriparus flaviceps", "Verdin"),
+            (19860, "Campylorhynchus brunneicapillus", "Cactus Wren"),
+        ],
+    )
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    # Root species row exists (canonical curation key) but is NOT tagged on
+    # the photo — the post-repair layout after the redundant root was
+    # detached.
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+
+    # Curation lives under the canonical root spelling that repair kept as
+    # the species key, not under the raw hierarchy alias name.
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+             (workspace_id, purpose, species, photo_id)
+           VALUES (?, ?, ?, ?)""",
+        (ws_id, "highlights", "Verdin", pid),
+    )
+    db.conn.execute(
+        """INSERT INTO species_highlights
+             (workspace_id, species, photo_id, rank,
+              created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws_id, "Verdin", pid),
+    )
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Cactus Wren", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Cactus Wren" in names
+    assert "Desert Verdin" not in names
+
+    # Sidecar remove still uses the raw alias name (XMP carries it, not the
+    # canonical root spelling).
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Desert Verdin") in removed
+    assert result["affected"][0]["old_species"] == ["Desert Verdin"]
+
+    # Curation migrated from the canonical root Verdin onto Cactus Wren.
+    pref_species = {
+        row["species"] for row in db.conn.execute(
+            "SELECT species FROM photo_preferences WHERE photo_id = ?",
+            (pid,),
+        ).fetchall()
+    }
+    assert "Cactus Wren" in pref_species
+    assert "Verdin" not in pref_species
+
+    hl_species = {
+        row["species"] for row in db.conn.execute(
+            "SELECT species FROM species_highlights WHERE photo_id = ?",
+            (pid,),
+        ).fetchall()
+    }
+    assert "Cactus Wren" in hl_species
+    assert "Verdin" not in hl_species
+
+
+def test_replace_prediction_removes_ambiguous_legacy_homonym_row(tmp_path):
+    """When Replace Keywords accepts a linked target and the photo carries
+    an unlinked same-key homonym row, the ambiguous row must be treated as
+    a stale species and removed.
+
+    Regression: the target-species check treated any NULL-taxon same-key row
+    as equivalent to the linked target, so with a legacy ``Robin`` alongside
+    taxonomy ``robin``/``ROBIN`` bound to different taxa, the legacy row was
+    kept while the correct linked target was added, leaving the wrong
+    species attached.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (18001, "Erithacus rubecula", "European Robin"),
+            (18002, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "robin.jpg", ".jpg", 100, 1.0)
+
+    # Two distinct linked species keywords share the NOCASE match key
+    # "robin" but resolve to different taxa. add_keyword dedupes case-
+    # insensitively so INSERT directly to preserve both rows.
+    european = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["European Robin"],),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    )
+    # An unlinked, typed legacy row with the same match key. It could be
+    # either species; Replace Keywords must not treat it as authoritatively
+    # equivalent to the target and must strip it as a stale species.
+    legacy = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('ROBIN', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    db.tag_photo(pid, legacy)
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "robin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    tagged = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert european in tagged, (
+        "Linked target must be attached even though a same-key legacy row "
+        "existed"
+    )
+    assert legacy not in tagged, (
+        "Ambiguous NULL-taxon same-key row must be removed — its identity "
+        "cannot be assumed to equal the linked target"
+    )
+    assert len(result["affected"]) == 1
+    entry = result["affected"][0]
+    assert entry["photo_id"] == pid
+    assert "ROBIN" in entry["old_species"]
+
+
+def test_replace_prediction_unlinked_target_preserves_linked_homonym(tmp_path):
+    """When the accept target is an unlinked legacy species row and the
+    photo also carries a distinct LINKED same-key homonym, Replace Keywords
+    must not fold the linked row into the target.
+
+    Regression: the target-species check treated any same-key row as the
+    target in the unlinked-target branch, so a linked ``robin`` on the
+    photo was silently kept as "already the target" (excluded from
+    ``to_remove``) while the intended unlinked target was added alongside,
+    leaving the wrong species attached.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (18101, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "robin.jpg", ".jpg", 100, 1.0)
+
+    # An unlinked legacy species keyword — this is the accept target.
+    legacy_target = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    # A distinct linked same-key row exists in the catalog and is
+    # attached to the photo. Its identity is a different species; the
+    # unlinked target cannot claim it.
+    linked_homonym = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    ).lastrowid
+    db.tag_photo(pid, linked_homonym)
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Robin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    # ``add_keyword`` NOCASE-dedupes among same-parent taxonomy rows and
+    # tie-breaks by id, so the earlier-inserted ``legacy_target`` wins and
+    # becomes the resolved accept target ``kid``. The replace-species
+    # branch must recognise that the linked ``robin`` on the photo is a
+    # distinct species, not the unlinked target — and untag it.
+    db.accept_prediction(prediction_id, replace_species=True)
+
+    tagged = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert legacy_target in tagged, (
+        "Unlinked accept target must be attached to the photo"
+    )
+    assert linked_homonym not in tagged, (
+        "Linked same-key homonym is a distinct species and must not be "
+        "folded into the unlinked target: it must be included in "
+        "to_remove and untagged from the photo"
+    )
+
+
 def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_path):
     """An additional subject species is added without replacing the original.
 
@@ -5434,6 +5766,15 @@ def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_pa
 
     assert result["species"] == "Blue-winged Teal"
     assert len(result["prediction_ids"]) == 2
+    # Each underlying accept_prediction call reports an entry: the first
+    # tags Blue-winged Teal (``changed_tag=True``), the second sees the
+    # photo already carrying it and records a status-only accept
+    # (``changed_tag=False``) so the aggregate accept-subject history
+    # can still reverse every sibling status on undo.
+    assert len(result["affected"]) == 2
+    changed = [a["changed_tag"] for a in result["affected"]]
+    assert changed.count(True) == 1
+    assert changed.count(False) == 1
     assert {row["name"] for row in db.get_photo_keywords(photo_id)} >= {
         "American Wigeon", "Blue-winged Teal",
     }
@@ -13946,6 +14287,1417 @@ def test_get_species_keywords_includes_taxonomy_typed_without_is_species(tmp_pat
     assert db.get_species_keywords_for_photos([pid]) == {pid: ["Lesser Scaup"]}
 
 
+def test_species_queries_use_taxon_rank_and_dedupe_hierarchy_by_taxon(tmp_path):
+    """A hierarchy ancestor is taxonomy, not a species badge; duplicate
+    hierarchy/root leaves for one species collapse by taxon identity."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (2912, "Auriparus flaviceps", "Verdin"),
+    ])
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) "
+        "VALUES (38595, 'Remizidae', 'Penduline tits', 'family')"
+    )
+    db.conn.commit()
+
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    birds = db.add_keyword("1Birds")
+    family = db.add_keyword("Penduline tits", parent_id=birds)
+    nested = db.add_keyword("Verdin", parent_id=family)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, family)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+
+    assert db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (root,)
+    ).fetchone()["taxon_id"] == taxa["Verdin"]
+    assert db.is_keyword_species(family) is False
+    assert db.is_keyword_species(nested) is True
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+    assert db.get_photos_with_equivalent_species([pid], root) == {pid}
+
+    rows = {row["id"]: row for row in db.get_keywords_for_photos([pid])[pid]}
+    assert rows[family]["taxon_rank"] == "family"
+    assert rows[nested]["taxon_rank"] == "species"
+
+
+def test_equivalent_species_matches_unlinked_legacy_hierarchy_by_name(tmp_path):
+    """A linked root target still matches a typed legacy hierarchy leaf whose
+    taxon link has not yet been backfilled."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL, is_species = 1, "
+        "type = 'taxonomy' WHERE id = ?",
+        (nested,),
+    )
+    db.tag_photo(pid, nested)
+
+    assert db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (root,),
+    ).fetchone()["taxon_id"] == taxa["Verdin"]
+    assert db.get_photos_with_equivalent_species([pid], root) == {pid}
+
+
+def test_equivalent_species_skips_unlinked_row_when_homonym_taxon_exists(tmp_path):
+    """When two distinct taxonomy rows share a NOCASE match key but link to
+    different taxa (legacy `Robin` vs taxonomy `robin`), an unlinked same-key
+    row on a photo must not satisfy the target species — the row is ambiguous
+    and treating it as equivalent would let accept/confirm skip tagging the
+    intended species keyword."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (18001, "Erithacus rubecula", "European Robin"),
+            (18002, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Two intentionally-distinct linked species keywords share the NOCASE
+    # match key "robin" but resolve to different taxa. add_keyword dedupes
+    # case-insensitively so INSERT directly to preserve both rows.
+    european = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["European Robin"],),
+    ).lastrowid
+    american = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    ).lastrowid
+    # An unlinked, typed legacy row with the same match key. The user
+    # tagged this row before taxonomy was populated; it could be either
+    # species, so equivalence lookups must not accept it as the target.
+    legacy = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('ROBIN', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    db.tag_photo(pid, legacy)
+
+    # Neither linked target should treat the unlinked homonym as equivalent.
+    assert db.get_photos_with_equivalent_species([pid], european) == set()
+    assert db.get_photos_with_equivalent_species([pid], american) == set()
+
+    # Once the ambiguous legacy row is linked to the taxon that the target
+    # resolves to, equivalence is authoritative again.
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], legacy),
+    )
+    assert db.get_photos_with_equivalent_species([pid], american) == {pid}
+    assert db.get_photos_with_equivalent_species([pid], european) == set()
+
+
+def test_equivalent_species_unlinked_target_skips_linked_homonym(tmp_path):
+    """When the accept target is an unlinked legacy species keyword and a
+    distinct taxonomy-linked keyword shares its NOCASE match key (e.g.
+    upgraded/offline catalog with legacy ``Robin`` alongside taxonomy
+    ``robin``), the name-only fallback must not treat the linked homonym on
+    a photo as the target. Folding them would let accept/confirm skip
+    ``tag_photo``/``queue_change`` for the unlinked target while marking the
+    prediction accepted, leaving the intended keyword row absent."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(19001, "Turdus migratorius", "American Robin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Distinct linked taxonomy row that intentionally shares the match key
+    # with the unlinked legacy target below.
+    linked = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    ).lastrowid
+    # An intentionally-preserved legacy row with no taxon_id — the target.
+    legacy_target = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    # The photo carries the LINKED homonym, not the legacy target.
+    db.tag_photo(pid, linked)
+
+    # Accepting/confirming the unlinked legacy target must not fold in the
+    # linked homonym row, or the confirm would skip tagging.
+    assert db.get_photos_with_equivalent_species(
+        [pid], legacy_target,
+    ) == set()
+
+    # If the same photo actually carries the legacy target row, that
+    # exact-row match is still recognized.
+    other = db.add_photo(
+        folder_id=fid, filename="b.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.tag_photo(other, legacy_target)
+    assert db.get_photos_with_equivalent_species(
+        [pid, other], legacy_target,
+    ) == {other}
+
+
+def test_species_display_name_resolves_hierarchy_alias_through_taxon(tmp_path):
+    """A differently-spelled hierarchy leaf canonicalizes to the root species
+    row linked to the same unique taxon."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+
+    assert db.resolve_species_display_name("Desert Verdin") == "Verdin"
+
+
+def test_species_keywords_canonicalize_hierarchy_leaf_to_root_spelling(tmp_path):
+    """After repair leaves only a differently-spelled hierarchy leaf, the
+    per-photo species list must still surface the canonical root spelling so
+    `_attach_species_representatives` can match `species_representatives`
+    rows keyed on that root. Otherwise browse/review/pipeline cards drop the
+    representative badge for a taxon that is still eligibly attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+
+    # Only the leaf is attached (repair detached the redundant root), but
+    # both root and leaf share the taxon — the returned name must be the
+    # canonical root spelling used by species_representatives.
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+
+
+def test_species_keywords_preserves_attached_root_alias_spelling(tmp_path):
+    """When a photo carries a top-level species alias root for a taxon that
+    also has a differently-spelled sibling root row, the returned name must
+    be the *attached* root's stored spelling, not whichever sibling root
+    happens to sort first. Curation writes still go through
+    ``resolve_species_display_name()``, which preserves an exact root-name
+    match, so Browse/Compare and representative attachment would otherwise
+    report the sibling root while representative/highlight rows are keyed
+    under the actually attached alias. Only hierarchy leaves need the root
+    fallback; attached root rows should keep their own stored spelling."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Create the sibling root first so it has the lower id and would win a
+    # naive ``ORDER BY id`` canonicalization.
+    db.add_keyword("Verdin", is_species=True)
+    sci_root = db.add_keyword("Auriparus flaviceps", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], sci_root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, sci_root)
+
+    # The attached row's own stored spelling wins so downstream curation
+    # lookups match the actually-attached name.
+    assert db.get_species_keywords_for_photos([pid]) == {
+        pid: ["Auriparus flaviceps"]
+    }
+
+
+def test_species_keywords_preserves_unlinked_case_variant_spellings(tmp_path):
+    """A photo carrying two NULL-taxon species rows that differ only by
+    SQLite NOCASE spelling (root ``Foo`` plus hierarchy leaf ``foo``) must
+    surface both names. The repair path deliberately leaves those attached
+    because unlinked eligibility compares exact ``k.name``; folding them
+    by ``keyword_match_key`` here would drop the root spelling, so
+    ``_attach_species_representatives``/highlight lookups miss the
+    curation stored under ``Foo``."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    nested = db.add_keyword("foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+
+    # Both distinct spellings survive the dedup so downstream lookups
+    # (species_representatives, species_highlights) can match either key.
+    result = db.get_species_keywords_for_photos([pid])
+    assert set(result[pid]) == {"Foo", "foo"}
+
+
+def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
+    tmp_path,
+):
+    """After repair leaves only a differently-spelled hierarchy leaf, the
+    photo-detail life-list species must still surface the canonical root
+    spelling. Otherwise ``api_photo_detail`` compares the leaf spelling
+    against ``get_species_representative_lists`` (keyed on the root) and the
+    lightbox/context menu drops the "current representative" flag and offers
+    to set it again for a taxon that is still eligibly attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+
+    assert db.get_photo_life_list_species(pid) == ["Verdin"]
+
+
+def test_photo_life_list_species_preserves_attached_root_alias(tmp_path):
+    """When a photo is tagged with an attached top-level alias for a taxon
+    (for example ``Auriparus flaviceps``) and another root row for the same
+    taxon (``Verdin``) exists but is not attached, ``api_photo_detail`` must
+    report the actually attached spelling. Curation writes preserve exact
+    root-name matches, so rewriting the attached alias to the arbitrarily
+    first same-taxon root would make representative/highlight state keyed to
+    the attached name appear missing (or be updated under the wrong species).
+    Only hierarchy leaves should fall back to the canonical root spelling."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Root alias (attached to the photo) must survive dedup; ``add_keyword``
+    # would collapse the second same-key row, so create the two roots with
+    # distinct spellings and back-link both to the same taxon directly.
+    alias = db.add_keyword("Auriparus flaviceps", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], alias),
+    )
+    other_root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], other_root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, alias)
+
+    assert db.get_photo_life_list_species(pid) == ["Auriparus flaviceps"]
+
+
+def test_species_display_name_uses_leaf_spelling_when_no_root_exists(tmp_path):
+    """When a linked hierarchy leaf's canonical taxon has no top-level
+    root keyword (for example a hierarchy-only accept whose top-level
+    ``Black Phoebe`` was never created), ``resolve_species_display_name``
+    must return the matched leaf's stored spelling. The case-convention
+    fallback would otherwise mint ``Black Phoebe`` from a submitted
+    ``black phoebe`` while the photo only carries the leaf ``black
+    phoebe``, so highlight / preference eligibility (still keyed on
+    exact ``k.name`` for hierarchy-only tags) would drop the bucket on
+    reload."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db, [(9876, "Sayornis nigricans", "Black Phoebe")]
+    )
+    parent = db.add_keyword("Tyrant flycatchers")
+    leaf = db.add_keyword("black phoebe", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Black Phoebe"], leaf),
+    )
+    db.conn.commit()
+
+    assert db.resolve_species_display_name("black phoebe") == "black phoebe"
+
+
+def test_photo_life_list_species_preserves_linked_homonyms(tmp_path):
+    """When a photo carries two linked species rows whose canonical
+    roots share a SQLite-NOCASE key but point at different taxa (for
+    example a legacy ``Robin`` bound to the American robin taxon and a
+    taxonomy ``robin`` bound to the European robin taxon), both must
+    surface in the per-photo life-list species so ``api_photo_detail``
+    can match either against its ``species_representative_lists`` /
+    ``species_highlights`` state. Folding by an ASCII-case-fold match
+    key would hide one taxon even though its keyword remains
+    attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(
+        db,
+        [
+            (5001, "Turdus migratorius", "American Robin"),
+            (5002, "Erithacus rubecula", "European Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # ``add_keyword`` collapses NOCASE duplicates through its typed
+    # lookup, so create the two homonym rows directly to reproduce a
+    # legacy catalog that preserved both distinct spellings.
+    upper = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES (?, 'taxonomy', 1, ?)",
+        ("Robin", taxa["American Robin"]),
+    ).lastrowid
+    lower = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES (?, 'taxonomy', 1, ?)",
+        ("robin", taxa["European Robin"]),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(pid, upper)
+    db.tag_photo(pid, lower)
+
+    assert set(db.get_photo_life_list_species(pid)) == {"Robin", "robin"}
+
+
+def test_photo_life_list_species_preserves_unlinked_case_variants(tmp_path):
+    """A photo carrying two NULL-taxon species rows that differ only by
+    SQLite-NOCASE spelling (root ``Foo`` plus hierarchy leaf ``foo``,
+    both preserved by the duplicate-repair path) must surface both
+    names. Unlinked highlight / representative curation compares by
+    exact ``k.name``; folding by ASCII case-fold here would drop one
+    spelling and strand its curation lookups even though the keyword
+    remains attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    nested = db.add_keyword("foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+
+    assert set(db.get_photo_life_list_species(pid)) == {"Foo", "foo"}
+
+
+def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path):
+    """The one-shot repair detaches only the redundant root association."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    # Simulate the legacy confirmed-species insert path, which left root
+    # taxonomy rows unlinked even when the local taxon was known.
+    db.conn.execute("UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,))
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.queue_change(pid, "keyword_add", "Verdin")
+    keyword_edit_id = db.record_edit(
+        "keyword_add", 'Confirmed species "Verdin"', str(root),
+        [{"photo_id": pid, "old_value": "", "new_value": str(root)}],
+    )
+    rating_edit_id = db.record_edit(
+        "rating", "Changed rating", "5",
+        [{
+            "photo_id": pid,
+            "old_value": str(root),
+            "new_value": str(root),
+        }],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE id = ?", (root,)
+    ).fetchone() is not None
+    assert not [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid and row["value"] == "Verdin"
+    ]
+    history_item = db.conn.execute(
+        "SELECT new_value FROM edit_history_items WHERE edit_id = ?",
+        (keyword_edit_id,),
+    ).fetchone()
+    assert history_item is None
+    rating_item = db.conn.execute(
+        "SELECT old_value, new_value FROM edit_history_items WHERE edit_id = ?",
+        (rating_edit_id,),
+    ).fetchone()
+    assert dict(rating_item) == {
+        "old_value": str(root),
+        "new_value": str(root),
+    }
+    assert db.repair_duplicate_photo_species() == 0
+
+
+def test_repair_duplicate_photo_species_drops_root_redo_history(tmp_path):
+    """Undo/redo after repair must not recreate the detached root species."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.record_edit(
+        "keyword_add", 'Confirmed species "Verdin"', str(root),
+        [{"photo_id": pid, "old_value": "", "new_value": str(root)}],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    assert db.get_edit_history() == []
+    assert db.undo_last_edit() is None
+    assert db.redo_last_undo() is None
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+
+
+def test_repair_duplicate_photo_species_preserves_no_tag_prediction_accepts(tmp_path):
+    """A ``prediction_accept`` recorded with a ``no_tag`` JSON old_value
+    already skips tag mutations on undo/redo (see the ``_skip_tag_undo``
+    / ``_skip_tag_redo`` branches keyed by ``old_meta['no_tag']``), so
+    keeping the item cannot reattach the detached root. Deleting it
+    would erase the only audit/undo record of the accepted prediction-
+    status flip — the repair must leave those items intact."""
+    import json as _json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Simulate an accept where the photo already carried the equivalent
+    # hierarchy leaf: the API records ``prediction_accept`` with
+    # ``old_value`` = JSON payload including ``no_tag: true``. Its
+    # ``new_value`` still points at the root keyword id so it would
+    # match the repair's numeric filter without the no_tag guard.
+    payload = _json.dumps({"prediction_id": 42, "no_tag": True})
+    no_tag_edit_id = db.record_edit(
+        "prediction_accept", 'Accepted "Verdin"', str(root),
+        [{"photo_id": pid, "old_value": payload,
+          "new_value": str(root)}],
+    )
+    # A regular tag-mutating prediction_accept for the same root must
+    # still be dropped so its undo/redo cannot reattach the detached
+    # root.
+    regular_edit_id = db.record_edit(
+        "prediction_accept", 'Accepted "Verdin" (tagged)', str(root),
+        [{"photo_id": pid, "old_value": "17",
+          "new_value": str(root)}],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+    # The no_tag accept survives — its audit/undo path is intact.
+    surviving = db.conn.execute(
+        "SELECT old_value, new_value FROM edit_history_items "
+        "WHERE edit_id = ? AND photo_id = ?",
+        (no_tag_edit_id, pid),
+    ).fetchone()
+    assert surviving is not None
+    assert surviving["old_value"] == payload
+    assert surviving["new_value"] == str(root)
+    # The tag-mutating accept is dropped so redo can't reattach root.
+    dropped = db.conn.execute(
+        "SELECT 1 FROM edit_history_items "
+        "WHERE edit_id = ? AND photo_id = ?",
+        (regular_edit_id, pid),
+    ).fetchone()
+    assert dropped is None
+
+
+def test_repair_duplicate_photo_species_guards_against_unlinked_homonyms(tmp_path):
+    """A legacy NULL-taxon leaf whose key collides with a linked root but
+    represents a different species (e.g. legacy ``Robin`` alongside
+    taxonomy ``Robin`` linked to a different taxon) must not be folded
+    into the linked root's group and cause the repair to detach the
+    accepted taxonomy species."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (100, "Erithacus rubecula", "Robin"),
+            (200, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Linked accepted species (Erithacus rubecula / Robin).
+    root_linked = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Robin"], root_linked),
+    )
+    # A DIFFERENT species (American Robin) also exists in the catalog under
+    # the same normalized display key — legacy hierarchy leaves under the
+    # same name were common before disambiguation.
+    other_root = db.add_keyword("Robin", parent_id=None, is_species=True)
+    # Manually make the "other_root" a taxonomy-linked homonym pointing at
+    # a different taxon. add_keyword may already have merged into the
+    # existing "Robin" row; if so, seed a separate linked keyword.
+    other_root_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ? AND parent_id IS NULL "
+        "AND id != ?",
+        ("Robin", root_linked),
+    ).fetchone()
+    if other_root_row is None:
+        db.conn.execute(
+            "INSERT INTO keywords (name, is_species, type, taxon_id) "
+            "VALUES (?, 1, 'taxonomy', ?)",
+            ("Robin (alt)", taxa["American Robin"]),
+        )
+        other_row = db.conn.execute(
+            "SELECT id FROM keywords WHERE name = ?", ("Robin (alt)",)
+        ).fetchone()
+        # Restore the same match_key so the ambiguity guard triggers.
+        db.conn.execute(
+            "UPDATE keywords SET name = ? WHERE id = ?",
+            ("Robin", other_row["id"]),
+        )
+    parent = db.add_keyword("Songbirds")
+    # An unlinked hierarchy leaf named "Robin" under Songbirds — intent
+    # ambiguous, could be either taxon.
+    unlinked_leaf = db.add_keyword("Robin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+        "taxon_id = NULL WHERE id = ?",
+        (unlinked_leaf,),
+    )
+    db.tag_photo(pid, root_linked)
+    db.tag_photo(pid, unlinked_leaf)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    # The repair must leave the linked root attached; the unlinked leaf
+    # cannot safely be folded into the linked group because the key is a
+    # known homonym.
+    db.repair_duplicate_photo_species()
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert root_linked in tagged_ids
+
+
+def test_repair_duplicate_photo_species_deletes_json_species_replace_history(tmp_path):
+    """species_replace items can store ``old_value`` as JSON with
+    ``keyword_ids``. A bare-string equality misses those, so undo/redo
+    of that entry would re-tag the detached root. The repair must parse
+    JSON payloads and delete species_replace items that reference any
+    of the removed root keyword ids."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute("UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,))
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Craft a species_replace item whose old_value is a JSON payload
+    # referencing the redundant root via ``keyword_ids``.
+    import json as _json
+    new_kw = db.add_keyword("Sparrow", is_species=True)
+    edit_id = db.record_edit(
+        "species_replace", "swap species", str(new_kw),
+        [{
+            "photo_id": pid,
+            "old_value": _json.dumps({"keyword_ids": [root, 999]}),
+            "new_value": str(new_kw),
+        }],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    # The species_replace item that referenced the detached root via JSON
+    # must be dropped so undo/redo cannot re-tag the root.
+    remaining = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM edit_history_items WHERE edit_id = ?",
+        (edit_id,),
+    ).fetchone()["n"]
+    assert remaining == 0
+
+
+def test_repair_duplicate_photo_species_queues_sidecar_remove_for_orphaned_alias(tmp_path):
+    """When the surviving hierarchy leaf is spelled differently from the
+    detached root (e.g. root ``Verdin`` and nested ``Desert Verdin`` for
+    the same taxon), a previously synced ``dc:subject: Verdin`` in the
+    sidecar would let a later re-scan re-attach the root. The repair must
+    queue a ``keyword_remove`` for the orphaned root spelling so
+    ``sync_to_xmp`` can clear it."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    removes = [
+        row for row in pending
+        if row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ]
+    assert len(removes) == 1, (
+        f"expected a queued keyword_remove for 'Verdin', got: {pending}"
+    )
+    # The surviving alias must not be scheduled for removal.
+    assert not [
+        row for row in pending
+        if row["change_type"] == "keyword_remove"
+        and row["value"] == "Desert Verdin"
+    ]
+
+
+def test_repair_duplicate_photo_species_skips_sidecar_remove_when_survivor_matches(tmp_path):
+    """When the surviving hierarchy leaf shares a normalized name with
+    the detached root (both ``Verdin``), the scanner's per-photo dedup
+    already skips the flat entry on re-import — queueing a keyword_remove
+    would let ``sync_to_xmp`` hierarchically strip the surviving
+    ``Birds|Verdin`` from the sidecar too."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+    assert not [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid and row["change_type"] == "keyword_remove"
+    ]
+
+
+def test_repair_duplicate_photo_species_skips_remove_when_survivor_ancestor_matches(tmp_path):
+    """When the surviving hierarchy leaf has a distinct leaf name but the
+    detached root's spelling matches one of its ancestor segments (e.g.
+    root ``Verdin`` detached while ``Verdin|Desert Verdin`` is kept), the
+    repair must NOT queue a plain ``keyword_remove`` for ``Verdin``:
+    ``sync_to_xmp`` applies keyword_remove hierarchically (``remove_keywords``
+    strips any ``lr:hierarchicalSubject`` whose segment matches), so the
+    next sync would delete the very ``Verdin|Desert Verdin`` hierarchy the
+    repair kept in the DB. Queue a ``keyword_remove_flat`` instead so the
+    stale ``dc:subject: Verdin`` still gets stripped — otherwise the
+    scanner reimports it on the next XMP scan (its per-photo dedup only
+    considers attached leaf names, not ancestor segments) and recreates
+    the duplicate root."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Surviving hierarchy: Verdin -> Desert Verdin. The leaf is what
+    # gets tagged, but the parent chain includes the ``Verdin`` segment.
+    hier_parent = db.add_keyword("Verdin")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=hier_parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    assert not [
+        row for row in pending
+        if row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ], (
+        f"expected no plain keyword_remove for 'Verdin' (it appears as "
+        f"an ancestor segment of the preserved 'Verdin|Desert Verdin' "
+        f"hierarchy — a hierarchical sync remove would strip that "
+        f"preserved entry from the sidecar), got: {pending}"
+    )
+    # A flat-only cleanup must still be queued so ``sync_to_xmp`` strips
+    # the stale ``dc:subject: Verdin`` line without touching the
+    # preserved hierarchical entry. Without it, the next XMP scan
+    # reimports ``Verdin`` and reattaches the duplicate root.
+    flat_removes = [
+        row for row in pending
+        if row["change_type"] == "keyword_remove_flat"
+        and row["value"] == "Verdin"
+    ]
+    assert flat_removes, (
+        f"expected a queued keyword_remove_flat for 'Verdin' to strip "
+        f"the stale flat root from dc:subject without touching the "
+        f"preserved 'Verdin|Desert Verdin' hierarchy, got: {pending}"
+    )
+
+
+def test_repair_duplicate_photo_species_cancels_unsynced_root_add(tmp_path):
+    """When a still-unsynced ``keyword_add`` for the detached root name
+    is pending, the repair must cancel it and NOT queue a
+    ``keyword_remove`` — the sidecar has not received the flat root, so
+    there is nothing to strip and a stale remove would only cause
+    unnecessary XMP churn."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.queue_change(pid, "keyword_add", "Verdin")
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    assert not [row for row in pending if row["value"] == "Verdin"], (
+        f"expected the pending Verdin add to be cancelled with no "
+        f"replacement remove, got: {pending}"
+    )
+
+
+def test_repair_duplicate_photo_species_preserves_leaf_pending_add(tmp_path):
+    """A pending ``keyword_add`` for a surviving hierarchy leaf must not
+    be cancelled when the repair detaches the redundant root. Cancelling
+    the leaf's add would leave ``sync_to_xmp`` writing only the root
+    cleanup and never surfacing the preserved hierarchy in XMP; a
+    subsequent scan would then see the DB and sidecar diverge."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # The leaf's add is still pending sidecar sync when repair fires.
+    db.queue_change(pid, "keyword_add", "Desert Verdin")
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    leaf_adds = [
+        row for row in pending
+        if row["change_type"] == "keyword_add"
+        and row["value"] == "Desert Verdin"
+    ]
+    assert len(leaf_adds) == 1, (
+        f"expected the preserved leaf's pending keyword_add to survive "
+        f"the repair, got: {pending}"
+    )
+
+
+def test_repair_duplicate_photo_species_queues_sidecar_remove_in_photo_workspace(tmp_path):
+    """When the photo's folder lives only in a workspace other than the
+    active one, the sidecar ``keyword_remove`` must be queued under that
+    workspace. ``get_pending_changes`` filters by the active workspace,
+    so a remove queued under the wrong workspace would leave the stale
+    root spelling in the sidecar for the real workspace's next sync."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace("Other")
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    # Move the folder out of the active workspace and into "Other".
+    db.remove_workspace_folder(active_ws, fid)
+    db.add_workspace_folder(other_ws, fid)
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    # No remove should appear in the active workspace's queue…
+    assert not [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+        and row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ], (
+        "expected no queued remove in the (empty) active workspace"
+    )
+
+    # …but the "Other" workspace (which actually contains the photo)
+    # must have exactly one queued keyword_remove for the orphaned root.
+    db.set_active_workspace(other_ws)
+    removes = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+        and row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ]
+    assert len(removes) == 1, (
+        f"expected a queued keyword_remove for 'Verdin' in the "
+        f"photo's workspace, got: {removes}"
+    )
+
+
+def test_repair_duplicate_photo_species_queues_sidecar_remove_in_every_photo_workspace(tmp_path):
+    """When a photo's folder is shared across multiple workspaces, the
+    sidecar keyword_remove must be queued in each so any workspace that
+    later syncs strips the orphaned root spelling from the sidecar."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace("Other")
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(other_ws, fid)
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    for ws_id in (active_ws, other_ws):
+        db.set_active_workspace(ws_id)
+        removes = [
+            row for row in db.get_pending_changes()
+            if row["photo_id"] == pid
+            and row["change_type"] == "keyword_remove"
+            and row["value"] == "Verdin"
+        ]
+        assert len(removes) == 1, (
+            f"workspace {ws_id} should have exactly one queued "
+            f"keyword_remove for 'Verdin', got: {removes}"
+        )
+
+
+def test_repair_duplicate_photo_species_waits_for_local_taxa(tmp_path):
+    """An empty taxa table must not consume the one-shot repair marker."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 0
+    assert db.get_meta(db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) is None
+
+
+def test_repair_duplicate_photo_species_keeps_curation_on_root_key(tmp_path):
+    """Hierarchy spelling differences do not move curation away from the
+    canonical root species key used by subsequent API requests."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.add_species_highlight("Verdin", pid)
+    db.set_photo_preference("highlights", "Verdin", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    for table in (
+        "species_highlights", "photo_preferences", "species_representatives",
+    ):
+        species = {
+            row["species"] for row in db.conn.execute(
+                f"SELECT species FROM {table} WHERE photo_id = ?", (pid,),
+            ).fetchall()
+        }
+        assert species == {"Verdin"}
+
+
+def test_repair_duplicate_photo_species_preserves_curation_eligibility(tmp_path):
+    """Root-key curation stays eligible after repair when the surviving
+    hierarchy leaf's stored spelling differs from the root.
+
+    ``get_species_representative_lists(eligible_only=True)`` and the
+    life-list preference validator previously required an exact
+    ``k.name = sr.species`` match. After repair detaches the redundant
+    root row but leaves the hierarchical leaf attached with a differently
+    spelled name, an existing "Verdin" representative would be silently
+    dropped and updating the preserved root-key preference would fail
+    eligibility even though the same taxon is still attached via
+    hierarchy.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], root),
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.set_species_representative("Verdin", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    # Root keyword row is no longer attached, only the differently-spelled
+    # hierarchy leaf remains.
+    attached_names = {
+        row["name"] for row in db.conn.execute(
+            """SELECT k.name FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pk.photo_id = ?""",
+            (pid,),
+        ).fetchall()
+    }
+    assert "verdin" in attached_names
+    assert "Verdin" not in attached_names
+
+    # The stored representative under the canonical "Verdin" key must
+    # still surface under eligible_only=True even though only the lower-
+    # cased hierarchy leaf is attached.
+    eligible = db.get_species_representative_lists(eligible_only=True)
+    assert eligible.get("Verdin") == [pid]
+    assert db.get_species_representatives(eligible_only=True) == {"Verdin": pid}
+
+    # The life-list preference validator that gates /api/photo-preferences
+    # writes must accept the same photo for the preserved root key so a
+    # user updating their "Verdin" representative doesn't get an
+    # eligibility error after repair.
+    from app import create_app  # noqa: WPS433 (test-scoped import)
+
+    app = create_app(str(tmp_path / "test.db"), str(tmp_path / "thumbs"))
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/photo-preferences",
+            json={
+                "purpose": "species_representative",
+                "species": "Verdin",
+                "photo_id": pid,
+            },
+        )
+        assert resp.status_code == 200, resp.get_json()
+
+
+def test_repair_duplicate_photo_species_skips_unlinked_case_variants(tmp_path):
+    """Unlinked (NULL-taxon) same-key duplicates with different spellings
+    must stay attached. Curation/eligibility for unlinked species keys is
+    compared with exact ``k.name`` — there is no taxon fallback that maps
+    a differently-spelled leaf back to the root spelling. Detaching root
+    ``Foo`` while only leaf ``foo`` remains would strand the
+    representative/highlight stored under ``Foo``. Same-spelling unlinked
+    duplicates are still repaired because the surviving leaf carries the
+    exact root name.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    # A species row is required so the repair's early-exit does not fire;
+    # the seeded taxon is unrelated to the unlinked "Foo" keywords under
+    # test.
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    # Unlinked hierarchy leaf spelled "foo"; taxonomy-typed without a
+    # taxon link (mark_species_keywords stamps this on legacy upgrades).
+    nested = db.add_keyword("foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    # Unlinked root spelled "Foo" — different spelling, same match_key.
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Curation stored under the root spelling — the exact string the
+    # unlinked eligibility queries compare against.
+    db.set_species_representative("Foo", pid)
+    db.add_species_highlight("Foo", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    # The unlinked case-variant duplicate is left alone — there is no
+    # safe canonicalization when both rows have NULL taxon_id.
+    assert db.repair_duplicate_photo_species() == 0
+    attached_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert root in attached_ids, (
+        "unlinked root spelling must stay attached so exact-name curation "
+        "keeps applying"
+    )
+    assert nested in attached_ids
+
+    # Root-spelled representative and highlight remain eligible because
+    # the exact ``k.name = 'Foo'`` row is still attached.
+    assert db.get_species_representatives(eligible_only=True) == {"Foo": pid}
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights.get("Foo", {})
+
+
+def test_repair_duplicate_photo_species_repairs_unlinked_same_spelling(tmp_path):
+    """Unlinked duplicates whose root and surviving leaf share the same
+    exact spelling are still repaired: the leaf carries the same
+    ``k.name`` after the root is detached, so exact-name eligibility keeps
+    matching.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    nested = db.add_keyword("Foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.set_species_representative("Foo", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    attached_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in attached_ids
+    assert root not in attached_ids
+    # The surviving leaf carries the same "Foo" name, so root-spelled
+    # curation still resolves.
+    assert db.get_species_representatives(eligible_only=True) == {"Foo": pid}
+
+
 def test_update_keyword_rename_general_no_match_stays_general(tmp_path):
     """Renaming a 'general' keyword to a name with no taxon match leaves
     it as 'general' with NULL taxon_id."""
@@ -17120,3 +18872,1186 @@ def test_curation_setters_canonicalize_species_casing(tmp_path):
         assert removed == 1
     finally:
         db.close()
+
+
+def test_add_species_keyword_prefers_species_rank_over_genus_homonym(tmp_path):
+    """Adding an is_species=True keyword whose name matches both a species
+    and a higher-rank homonym (e.g. species Puma vs genus Puma) must bind
+    the row to the species-rank taxon. Otherwise Life List, Compare, and
+    Explorer queries — which filter on ``t.rank = 'species'`` — silently
+    drop photos carrying the just-added keyword.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Puma", is_species=True)
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert dict(row) == {
+        "is_species": 1, "type": "taxonomy", "taxon_id": species_taxon,
+    }
+
+
+def test_add_general_keyword_promoted_to_species_prefers_species_rank(tmp_path):
+    """When add_keyword auto-detects a general name as taxonomy via a
+    taxa lookup, the resulting is_species=1 row must still land on a
+    species-rank taxon so the rank-filtered queries don't drop it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Puma")
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon
+
+
+def test_rename_keyword_to_matching_taxon_prefers_species_rank(tmp_path):
+    """Renaming a general keyword to a name that matches both a species
+    and a higher-rank homonym auto-promotes to taxonomy on the
+    species-rank taxon so rank-filtered queries still see the row.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Cougar")
+    db.update_keyword(kid, name="Puma")
+
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon
+
+
+def test_add_species_rebinds_existing_row_from_higher_rank_to_species(tmp_path):
+    """A pre-existing keyword row already bound to a higher-rank taxon
+    (e.g. a legacy catalog that stamped ``Puma`` with the genus taxon
+    before ``prefer_species`` existed) must be rebound to the species-
+    rank taxon on the next species accept. Without the rebind the row
+    stays flagged is_species/taxonomy while its taxon_id points at the
+    genus, and every downstream ``t.rank = 'species'`` filter (Life
+    List, Compare, Explorer) silently drops photos carrying it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    # Legacy row: correctly typed taxonomy species but bound to the
+    # non-species-rank genus taxon.
+    kid = db.add_keyword("Puma", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (genus_taxon, kid),
+    )
+    db.conn.commit()
+    pre = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert pre["taxon_id"] == genus_taxon
+
+    # Accepting the species again should rebind onto the species-rank
+    # taxon rather than leaving the higher-rank homonym in place.
+    same = db.add_keyword("Puma", is_species=True)
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["is_species"] == 1
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == species_taxon
+
+
+def test_add_species_preserves_species_taxon_over_species_taxon(tmp_path):
+    """A row already bound to a species-rank taxon must NOT be rebound
+    when a different species-rank taxon shares the name — same-NOCASE
+    homonyms preserved by the migration are genuinely different species,
+    so the existing binding is authoritative.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, 'species', 'Animalia')",
+        [
+            (7000, "Aythya affinis", "Robin"),
+            (7001, "Turdus migratorius", "Robin"),
+        ],
+    )
+    db.conn.commit()
+    original_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 7000"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (original_taxon, kid),
+    )
+    db.conn.commit()
+
+    same = db.add_keyword("Robin", is_species=True)
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["taxon_id"] == original_taxon
+
+
+def test_promote_general_row_with_higher_rank_taxon_rebinds_to_species(tmp_path):
+    """A legacy 'general' row already carrying a higher-rank taxon_id
+    is promoted to taxonomy on the next taxonomy lookup and its
+    taxon_id must be rebound to the species-rank homonym. Without the
+    rebind the promoted row would be stamped is_species=1/taxonomy but
+    still bound to the genus, and Life List/Compare rank filters would
+    drop photos tagged with it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    # Simulate a legacy general row bound to the genus taxon. add_keyword
+    # normally auto-promotes on insert, so bypass it with direct SQL.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'general', 0, ?)",
+        (genus_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    same = db.add_keyword("Puma")
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon
+
+
+def test_add_species_prefers_alternate_common_name_over_higher_rank_direct(tmp_path):
+    """When a submitted label collides with a higher-rank taxon on the
+    direct ``taxa`` lookup but also appears in ``taxa_common_names`` as an
+    alternate for a species-rank taxon, the species-rank alternate must
+    win. Otherwise the new rank filters (Life List, Compare) silently drop
+    every photo carrying the accepted keyword even though the accept
+    reported success.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    # Direct match on `Boa` is the genus; the species Boa constrictor
+    # registers `Boa` as an alternate English name via taxa_common_names.
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank, kingdom) "
+        "VALUES (1, 'Boa', 'Boa', 'genus', 'Animalia')"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank, kingdom) "
+        "VALUES (2, 'Boa constrictor', 'Boa Constrictor', 'species', 'Animalia')"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa_common_names (taxon_id, name) VALUES (2, 'Boa')"
+    )
+    db.conn.commit()
+
+    kid = db.add_keyword("Boa", is_species=True)
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == 2
+
+
+def test_add_species_leaves_taxon_null_when_only_higher_rank_matches(tmp_path):
+    """When a species-typed add finds only a higher-rank taxon (no
+    species-rank direct or common-name match), ``taxon_id`` must be left
+    NULL. Binding the row to a genus/family would satisfy the caller's
+    reconciliation (``is_species = 1``/``type = 'taxonomy'`` still get
+    stamped) while making the row invisible to every rank-filtered reader
+    (Life List, Compare, Explorer, highlight/preference eligibility) that
+    restricts to ``t.rank = 'species' OR t.rank IS NULL``.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (10001, "Corvidae", "Corvids", "family"),
+        ],
+    )
+    db.conn.commit()
+
+    kid = db.add_keyword("Corvidae", is_species=True)
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] is None
+
+
+def test_add_species_clears_higher_rank_taxon_when_no_species_match(tmp_path):
+    """A pre-existing keyword row bound to a higher-rank taxon
+    (e.g. a legacy row stamped with the genus/family taxon before
+    ``prefer_species`` existed) must have that stale non-species
+    ``taxon_id`` cleared to NULL when the next species accept cannot
+    find a species-rank match. Without the clear the reuse branch
+    leaves the higher-rank binding in place while the taxonomy
+    promotion below still stamps ``is_species = 1``/``type =
+    'taxonomy'``, so every rank-filtered reader (Life List,
+    Compare, Explorer, highlight/preference eligibility) that
+    restricts to ``t.rank = 'species' OR t.rank IS NULL`` silently
+    hides the just-accepted keyword.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (10001, "Corvidae", "Corvids", "family"),
+        ],
+    )
+    db.conn.commit()
+    family_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'family'"
+    ).fetchone()["id"]
+
+    # Legacy row: correctly typed taxonomy species but bound to the
+    # non-species-rank family taxon by the old species-agnostic lookup.
+    kid = db.add_keyword("Corvidae", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (family_taxon, kid),
+    )
+    db.conn.commit()
+    pre = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert pre["taxon_id"] == family_taxon
+
+    # Accepting again with is_species=True should clear the stale
+    # higher-rank binding rather than leaving it in place.
+    same = db.add_keyword("Corvidae", is_species=True)
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["is_species"] == 1
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] is None
+
+
+def test_mark_species_keywords_rebinds_higher_rank_taxonomy_link(tmp_path):
+    """A keyword row already typed ``taxonomy`` and linked by the old
+    species-agnostic lookup to a genus/family taxon must be rebound to a
+    species-rank taxon on the next ``mark_species_keywords`` pass. Without
+    the rebind, upgraded catalogs keep the higher-rank binding and the new
+    ``t.rank = 'species'`` filter (Life List, Compare, Explorer) silently
+    drops every photo carrying the accepted keyword.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    # Simulate a legacy row: fully typed taxonomy but bound to the
+    # non-species-rank genus taxon. add_keyword normally auto-promotes on
+    # insert, so bypass it with direct SQL.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'taxonomy', 1, ?)",
+        (genus_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            if name.lower() == "puma":
+                return {"taxon_id": 41963}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 1
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon
+
+
+def test_mark_species_keywords_leaves_taxon_null_when_only_higher_rank_available(tmp_path):
+    """A legacy accepted species keyword (``type='taxonomy'``,
+    ``is_species=1``, ``taxon_id=NULL``) whose name only resolves to a
+    higher-rank taxon (genus/family) must NOT be bound to that
+    non-species taxon on the next ``mark_species_keywords`` pass. Binding
+    the row to a genus/family would satisfy the marking pass while making
+    the row invisible to every rank-filtered reader (Life List, Compare,
+    highlight/preference eligibility) that restricts to
+    ``t.rank = 'species' OR t.rank IS NULL``, so upgraded catalogs would
+    silently lose every photo carrying the accepted keyword.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+        ],
+    )
+    db.conn.commit()
+
+    # Simulate an accepted species keyword created before the local taxa
+    # table was populated: fully typed as species but with a NULL taxon
+    # link. add_keyword's species path already refuses to bind to a
+    # higher-rank taxon, so bypass it with direct SQL.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'taxonomy', 1, NULL)",
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        # Only the genus is known — no species-rank alternative exists.
+        def lookup(self, name):
+            if name.lower() == "puma":
+                return {"taxon_id": 46272}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 0
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] is None
+
+
+def test_mark_species_keywords_keeps_species_taxon_when_only_higher_rank_available(tmp_path):
+    """``mark_species_keywords`` must not clobber an existing species-rank
+    binding just because the taxonomy lookup only resolves to a higher-rank
+    homonym. A row already correctly bound stays bound and no update fires.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'taxonomy', 1, ?)",
+        (species_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        # Taxonomy only knows the genus id here — the rebind must NOT fire
+        # because there is no species-rank alternative.
+        def lookup(self, name):
+            if name.lower() == "puma":
+                return {"taxon_id": 46272}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 0
+    row = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["taxon_id"] == species_taxon
+
+
+def test_mark_species_keywords_clears_higher_rank_taxon_when_no_species_match(tmp_path):
+    """A fully typed taxonomy row already bound by the old species-agnostic
+    lookup to a higher-rank taxon (genus/family) must have its stale
+    non-species ``taxon_id`` cleared to NULL on the next
+    ``mark_species_keywords`` pass when no species-rank replacement is
+    available. Leaving the higher-rank link in place would satisfy the
+    marking pass but make the row invisible to every rank-filtered reader
+    (Life List, Compare, Explorer, highlight/preference eligibility) that
+    restricts to ``t.rank = 'species' OR t.rank IS NULL`` — clearing the
+    binding keeps the accepted keyword visible via the ``rank IS NULL``
+    fallback until a species-rank taxon becomes available. Mirrors
+    ``add_keyword``'s reuse-path clearing (see
+    ``test_add_species_clears_higher_rank_taxon_when_no_species_match``).
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (10001, "Corvidae", "Corvids", "family"),
+        ],
+    )
+    db.conn.commit()
+    family_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'family'"
+    ).fetchone()["id"]
+
+    # Legacy row: fully typed taxonomy species but bound to the
+    # non-species-rank family taxon by the old species-agnostic lookup.
+    # add_keyword auto-promotes/clears on insert, so bypass it with
+    # direct SQL to simulate the upgraded catalog.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Corvidae', 'taxonomy', 1, ?)",
+        (family_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        # Only the family is known — no species-rank alternative exists.
+        def lookup(self, name):
+            if name.lower() == "corvidae":
+                return {"taxon_id": 10001}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 1
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] is None
+
+
+def test_repair_duplicate_photo_species_preserves_highlight_eligibility(tmp_path):
+    """After ``repair_duplicate_photo_species`` detaches the redundant
+    root, ``get_species_highlights(eligible_only=True)`` must still
+    surface highlights stored under the canonical root name for a
+    photo whose only remaining species keyword is a differently-cased
+    hierarchy leaf (``verdin`` vs ``Verdin``). The taxon-linked
+    fallback matches the leaf back to the root without loosening the
+    ambiguous-homonym boundary.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], root),
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Highlight stored under the canonical root spelling — the same
+    # string curation is keyed on and the photo carried via the root
+    # tag before repair detached it.
+    db.add_species_highlight("Verdin", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    # Only the differently-spelled hierarchy leaf remains attached.
+    attached_names = {
+        row["name"] for row in db.conn.execute(
+            """SELECT k.name FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pk.photo_id = ?""",
+            (pid,),
+        ).fetchall()
+    }
+    assert "verdin" in attached_names
+    assert "Verdin" not in attached_names
+
+    # Highlight under the canonical root name still applies.
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights.get("Verdin", {}), (
+        "highlight under root spelling must remain eligible for a photo "
+        "whose only species keyword is a differently-spelled hierarchy leaf"
+    )
+    # Same result via the single-species selector used by the UI.
+    single = db.get_species_highlights(species="Verdin", eligible_only=True)
+    assert pid in single.get("Verdin", {})
+
+
+def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
+    """``resolve_species_display_name`` routes a linked hierarchy alias
+    (e.g. ``Desert Verdin`` bound to the ``Verdin`` species taxon) to the
+    canonical root spelling, so ``add_species_highlight`` /
+    ``_collect_highlight_buckets`` store an unconfirmed prediction's
+    highlight under ``Verdin``. The prediction-fallback branch of
+    ``get_species_highlights(eligible_only=True)`` must apply the same
+    canonicalization when it looks up the photo's top prediction —
+    otherwise the highlight vanishes on reload because ``pr.species``
+    is still the raw ``Desert Verdin`` label.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Root "Verdin" + hierarchy leaf "Desert Verdin" both bound to the
+    # same species taxon. resolve_species_display_name canonicalizes
+    # "Desert Verdin" through the shared taxon to root "Verdin".
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], root),
+    )
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], leaf),
+    )
+
+    # Photo has NO species keyword tagged (unconfirmed) but has a top
+    # classifier prediction labelled with the hierarchy alias.
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Desert Verdin', 0.95)",
+        (did,),
+    )
+    db.conn.commit()
+
+    # add_species_highlight canonicalizes the label via
+    # resolve_species_display_name — the leaf's linked taxon resolves
+    # back to root "Verdin", so the highlight lands under "Verdin".
+    db.add_species_highlight("Desert Verdin", pid)
+    stored = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE photo_id = ?", (pid,)
+    ).fetchone()
+    assert stored["species"] == "Verdin"
+
+    # Prediction-fallback eligibility must canonicalize pr.species the
+    # same way, so the stored highlight remains eligible on reload.
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights.get("Verdin", {}), (
+        "highlight canonicalized to root spelling must still match a photo "
+        "whose top prediction is the linked hierarchy alias"
+    )
+    single = db.get_species_highlights(species="Verdin", eligible_only=True)
+    assert pid in single.get("Verdin", {})
+
+
+def test_get_species_highlights_prediction_fallback_rejects_wrong_taxon(tmp_path):
+    """Canonicalizing pr.species through the leaf's taxon must not
+    loosen the taxon boundary: an unconfirmed photo whose top prediction
+    is a leaf linked to taxon A must NOT satisfy a highlight stored
+    under a canonical root name resolving to taxon B, even when the
+    strings would collide after case-folding.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (2912, "Auriparus flaviceps", "Verdin"),
+        (7000, "Turdus migratorius", "American Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Leaf "Desert Verdin" bound to the Verdin species taxon.
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], leaf),
+    )
+    verdin_root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], verdin_root),
+    )
+    # Unrelated root "American Robin" bound to a different species taxon.
+    robin_root = db.add_keyword("American Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], robin_root),
+    )
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Desert Verdin', 0.95)",
+        (did,),
+    )
+    # A highlight under a different root — must not become eligible for
+    # a photo whose top prediction canonicalizes to another root.
+    db.add_species_highlight("American Robin", pid)
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(
+        species="American Robin", eligible_only=True,
+    )
+    assert "American Robin" not in highlights, (
+        "prediction-fallback canonicalization must respect the taxon "
+        "boundary — a highlight under 'American Robin' must not be "
+        "eligible for a photo whose top prediction resolves to 'Verdin'"
+    )
+
+
+def test_get_species_highlights_prediction_fallback_skips_ambiguous_alias(tmp_path):
+    """When multiple linked hierarchy leaves share a predicted label but point
+    at DIFFERENT taxa, the prediction-fallback canonicalization must NOT pick
+    an arbitrary root for the alias — that would silently promote an
+    ambiguous prediction into a specific root bucket. ``_collect_highlight_buckets``
+    keeps such ambiguous labels raw, so the eligibility reload path must too:
+    highlights saved under either root name must not become eligible for a
+    photo whose top prediction is the ambiguous shared label.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (30001, "Turdus migratorius", "American Robin"),
+        (30002, "Erithacus rubecula", "European Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Two hierarchy leaves both named "Robin" but linked to distinct taxa.
+    parent_a = db.add_keyword("Old World")
+    leaf_a = db.add_keyword("Robin", parent_id=parent_a)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["European Robin"], leaf_a),
+    )
+    parent_b = db.add_keyword("New World")
+    leaf_b = db.add_keyword("Robin", parent_id=parent_b)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["American Robin"], leaf_b),
+    )
+    # Corresponding roots for each linked taxon.
+    american_root = db.add_keyword("American Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], american_root),
+    )
+    european_root = db.add_keyword("European Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["European Robin"], european_root),
+    )
+    # A prediction on the photo carries the ambiguous shared label.
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Robin', 0.95)",
+        (did,),
+    )
+    # Simulate highlights saved directly under each root's canonical name.
+    db.conn.execute(
+        "INSERT INTO species_highlights (species, photo_id, rank, workspace_id) "
+        "VALUES ('American Robin', ?, 0, 1)",
+        (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO species_highlights (species, photo_id, rank, workspace_id) "
+        "VALUES ('European Robin', ?, 0, 1)",
+        (pid,),
+    )
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid not in highlights.get("American Robin", {}), (
+        "ambiguous prediction label must not silently canonicalize to an "
+        "arbitrary root — the 'American Robin' highlight must not become "
+        "eligible when the top prediction 'Robin' resolves to multiple taxa"
+    )
+    assert pid not in highlights.get("European Robin", {}), (
+        "ambiguous prediction label must not silently canonicalize to an "
+        "arbitrary root — the 'European Robin' highlight must not become "
+        "eligible when the top prediction 'Robin' resolves to multiple taxa"
+    )
+
+
+def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
+    """The new taxon-linked fallback must only match the leaf back to a
+    root whose taxon_id shares identity with the leaf's taxon_id. A
+    photo whose only species keyword links to taxon A must not satisfy
+    a highlight whose canonical root name resolves to taxon B, even if
+    the leaf keyword's spelling happens to match the root name.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (2912, "Auriparus flaviceps", "Verdin"),
+        (7000, "Turdus migratorius", "American Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries only a Verdin hierarchy leaf.
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.tag_photo(pid, nested)
+    # Root named "American Robin" bound to that species' taxon — its
+    # taxon_id does NOT match the leaf's taxon, so the taxon-linked
+    # fallback must reject the pairing.
+    robin_root = db.add_keyword("American Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], robin_root),
+    )
+    db.add_species_highlight("American Robin", pid)
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(
+        species="American Robin", eligible_only=True,
+    )
+    assert "American Robin" not in highlights, (
+        "highlight stored under one species must not become eligible "
+        "for a photo whose only species keyword links to a different taxon"
+    )
+
+
+def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_path):
+    """The prediction-only highlight fallback must mirror
+    ``resolve_species_display_name``'s root-first preference: when a
+    top-level species root shares the prediction label with a hierarchy
+    leaf that points at a different taxon, the reload canonicalization
+    must return the root's stored spelling, not the leaf's root spelling.
+
+    Without this, ``add_species_highlight`` stores the highlight under
+    the root name (case 1) but the eligibility reload canonicalizes
+    through the mismatched leaf's taxon and drops the saved highlight.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (40001, "Turdus migratorius", "American Robin"),
+        (40002, "Erithacus rubecula", "European Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Top-level species root named "Robin" linked to the American Robin
+    # taxon (this is the row ``resolve_species_display_name`` case 1
+    # returns for the label "Robin").
+    root = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], root),
+    )
+    # A hierarchy leaf also named "Robin" but linked to a DIFFERENT taxon
+    # (European Robin), plus a canonical root for that taxon whose
+    # stored spelling differs from the prediction label.
+    parent = db.add_keyword("Old World")
+    leaf = db.add_keyword("Robin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["European Robin"], leaf),
+    )
+    european_root = db.add_keyword("European Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["European Robin"], european_root),
+    )
+    # The photo carries only the American Robin root — its taxon matches
+    # the "Robin" root and highlights saved under "Robin" belong to it.
+    db.tag_photo(pid, root)
+    # A prediction on the photo carries the shared label "Robin"; the
+    # reload canonicalization runs against this string.
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Robin', 0.95)",
+        (did,),
+    )
+    # ``add_species_highlight`` funnels through
+    # ``resolve_species_display_name``, which returns "Robin" (root-first)
+    # for the label "Robin".
+    db.add_species_highlight("Robin", pid)
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(
+        species="Robin", eligible_only=True,
+    )
+    assert pid in highlights.get("Robin", {}), (
+        "highlight stored under root 'Robin' must remain eligible when "
+        "the prediction label 'Robin' also matches a hierarchy leaf "
+        "pointing at a different taxon — the reload path must prefer the "
+        "same-name root rather than canonicalizing through the leaf"
+    )
+
+
+def test_curation_eligibility_rejects_higher_rank_taxonomy_homonym(tmp_path):
+    """A linked higher-rank taxonomy keyword (e.g. a genus row named
+    ``Puma``) must not satisfy species-curation eligibility for the
+    matching species highlight or representative.
+
+    ``mark_species_keywords`` stamps ``is_species=1``/``type='taxonomy'``
+    regardless of the linked taxon's rank, so without the same
+    ``(t.rank = 'species' OR t.rank IS NULL)`` guard used by sibling
+    species queries (``get_life_list_candidates``,
+    ``get_species_keywords_for_photos`` etc.), a genus-linked keyword
+    named ``Puma`` would keep a species ``Puma`` curation row eligible
+    for a photo that is no longer in the species bucket.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # A pre-existing keyword row named "Puma" bound to the genus (as if
+    # stamped by a legacy catalog before ``prefer_species`` existed and
+    # not yet rebound). ``mark_species_keywords`` would rebind it during
+    # a startup pass, but until then it stays higher-rank while still
+    # flagged is_species/taxonomy.
+    kid = db.add_keyword("Puma")
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (genus_taxon, kid),
+    )
+    db.tag_photo(pid, kid)
+
+    # Curation rows stored under the canonical "Puma" species key.
+    db.set_species_representative("Puma", pid)
+    db.add_species_highlight("Puma", pid)
+    db.conn.commit()
+
+    # Sibling species queries already exclude the photo from the "Puma"
+    # species bucket because of the (t.rank='species' OR NULL) guard.
+    # The curation eligibility EXISTS must exclude it too — otherwise
+    # the representative/highlight remains eligible for a photo that
+    # nothing else considers a Puma species record.
+    reps = db.get_species_representative_lists(eligible_only=True)
+    assert reps.get("Puma") in (None, []), (
+        "genus-rank taxonomy row named 'Puma' must not satisfy species "
+        "'Puma' representative eligibility"
+    )
+    assert db.get_species_representatives(eligible_only=True) == {}
+
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid not in highlights.get("Puma", {}), (
+        "genus-rank taxonomy row named 'Puma' must not satisfy species "
+        "'Puma' highlight eligibility"
+    )
+    single = db.get_species_highlights(species="Puma", eligible_only=True)
+    assert pid not in single.get("Puma", {})
+
+    # Sanity check: when the row is rebound to the species-rank taxon,
+    # eligibility flips back on. Confirms the guard, not something
+    # else, is what excludes the row.
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (species_taxon, kid),
+    )
+    db.conn.commit()
+
+    reps_after = db.get_species_representative_lists(eligible_only=True)
+    assert reps_after.get("Puma") == [pid]
+    highlights_after = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights_after.get("Puma", {})
+
+
+def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_path):
+    """Replace Keywords must migrate curation for every distinct removed
+    row's exact spelling. Legacy ``Robin`` and taxonomy ``robin`` coexist
+    as separate keyword rows (the ``UNIQUE(name, parent_id)`` index on
+    ``keywords`` is case-sensitive), and both can carry
+    ``species_highlights`` / ``photo_preferences`` rows keyed by the
+    exact stored name. Deduping the curation-source list by
+    ``keyword_match_key`` — an ASCII-only NOCASE fold — collapses those
+    two spellings into one, so only one migrates onto the new species
+    and the other stays stranded under a species keyword the photo no
+    longer carries after ``replace_species``.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._ws_id()
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Two DISTINCT NULL-taxon species keyword rows differing only by
+    # ASCII case. Insert directly to bypass ``add_keyword``'s NOCASE
+    # dedupe and confirm ``keywords`` allows both to coexist.
+    upper_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('Robin', NULL, 1, 'general')"
+    ).lastrowid
+    lower_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('robin', NULL, 1, 'general')"
+    ).lastrowid
+    db.tag_photo(pid, upper_id)
+    db.tag_photo(pid, lower_id)
+
+    # Curation rows keyed to BOTH exact stored names. ``species_highlights``
+    # has PK (workspace_id, species, photo_id) with case-sensitive TEXT,
+    # so both can coexist.
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Robin', ?, 0)",
+        (ws_id, pid),
+    )
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'robin', ?, 1)",
+        (ws_id, pid),
+    )
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Sparrow", 0.95, "bioclip")
+    pred_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?",
+        (detection_id,),
+    ).fetchone()["id"]
+
+    db.accept_prediction(pred_id, replace_species=True)
+
+    # Both stale Robin rows must have been detached.
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert upper_id not in tagged_ids
+    assert lower_id not in tagged_ids
+
+    remaining_species = {
+        row["species"] for row in db.conn.execute(
+            "SELECT species FROM species_highlights "
+            "WHERE workspace_id = ? AND photo_id = ?",
+            (ws_id, pid),
+        ).fetchall()
+    }
+    # Under the ``keyword_match_key`` dedup only one of ``Robin`` /
+    # ``robin`` would land in curation_sources, so the other exact
+    # spelling would still appear here. Neither may survive: both
+    # highlight rows must migrate onto the new species.
+    assert "Robin" not in remaining_species, (
+        "'Robin' highlight row must have migrated onto 'Sparrow'"
+    )
+    assert "robin" not in remaining_species, (
+        "'robin' highlight row must have migrated onto 'Sparrow' — "
+        "an ASCII case-fold dedup would collapse 'Robin' and 'robin' "
+        "so only one of the two distinct spellings got renamed"
+    )
+    assert "Sparrow" in remaining_species

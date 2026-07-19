@@ -1417,9 +1417,11 @@ function openCompareLightbox(photoId) {
 }
 
 function isSpeciesKeyword(k) {
-  // Mirror the backend species definition (get_species_keywords_for_photos):
-  // upgraded/legacy taxonomy tags can be type='taxonomy' with is_species=0.
-  return !!k.is_species || k.type === 'taxonomy';
+  // Mirror the backend species definition. A linked family/genus is a
+  // taxonomy keyword, but not a species; unresolved legacy tags retain the
+  // old flag/type fallback.
+  var markedTaxonomy = !!k.is_species || k.type === 'taxonomy';
+  return markedTaxonomy && (!k.taxon_rank || k.taxon_rank === 'species');
 }
 
 function renderKeywordCell(photo) {
