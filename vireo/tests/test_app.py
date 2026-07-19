@@ -10711,6 +10711,90 @@ def test_highlights_relabel_preserves_higher_rank_taxonomy_curation(app_and_db):
     )
 
 
+def test_highlights_relabel_canonicalizes_hierarchy_leaf_source(app_and_db):
+    """When a photo's only attached species tag is a linked hierarchy leaf
+    (e.g. ``Desert Verdin``) but existing curation is stored under the
+    canonical root spelling for the shared taxon (``Verdin`` — where
+    ``repair_duplicate_photo_species`` deliberately left the root highlight
+    row in place), the source-curation snapshot must canonicalize the leaf
+    to the root spelling before filtering.
+
+    Otherwise ``_accept_curation_source`` sees only the leaf key
+    (``desertverdin``) and rejects the root-key highlight/representative row
+    as stale. The relabel would then untag the old species and tag the new
+    one while leaving the user's curation rows stranded under the old root.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/leaf', 'leaf', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    # Species-rank taxon shared by both a top-level root ``Verdin`` and a
+    # hierarchical leaf ``Desert Verdin``. The photo carries only the leaf,
+    # mirroring the state after ``repair_duplicate_photo_species`` detaches
+    # a redundant root.
+    verdin_taxon = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species', 'Animalia')"
+    ).lastrowid
+    root_kid = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+        (verdin_taxon, root_kid),
+    )
+    parent_kid = db.add_keyword("Penduline tits")
+    leaf_kid = db.add_keyword("Desert Verdin", parent_id=parent_kid)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (verdin_taxon, leaf_kid),
+    )
+    db.add_keyword("Common Raven", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'leaf.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, leaf_kid)
+    # Curation is keyed under the canonical root spelling — this is how
+    # existing highlight/representative rows survive duplicate repair.
+    db.add_species_highlight("Verdin", pid)
+    db.set_species_representative("Verdin", pid)
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Common Raven"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    # The root-key highlight/representative rows must have been migrated
+    # onto the relabel target, not left stranded under 'Verdin' — the
+    # photo no longer carries any Verdin species tag.
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Common Raven") or {}), (
+        "root-key highlight must migrate to the relabel target when the "
+        "attached hierarchy leaf canonicalizes to the same taxon"
+    )
+    assert pid not in (hl.get("Verdin") or {}), (
+        "root-key highlight must not remain under the old species after "
+        "the leaf was untagged"
+    )
+    reps = db.get_species_representatives()
+    assert reps.get("Common Raven") == pid, (
+        "root-key representative must migrate to the relabel target"
+    )
+    assert reps.get("Verdin") != pid, (
+        "root-key representative must not remain under the old species"
+    )
+
+
 def test_highlights_relabel_does_not_fold_non_ascii_case_variants(app_and_db):
     """`_accept_curation_source` must key by ``keyword_match_key`` (SQLite's
     ASCII-only NOCASE fold), not Python's ``str.lower()``. SQLite/add_keyword

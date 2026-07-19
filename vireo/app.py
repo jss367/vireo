@@ -10647,23 +10647,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # the relabel, so treating them as "current" would migrate their
         # curation onto the new species while leaving the higher-rank
         # keyword attached with its curation stripped.
+        #
+        # Route through get_species_keywords_for_photos so taxon-linked
+        # hierarchy leaves canonicalize to the same-taxon root spelling
+        # (e.g. an attached ``Desert Verdin`` reads as ``Verdin``).
+        # Existing curation is keyed under that root, so a raw-name
+        # snapshot would reject the root-key highlight/representative row
+        # as stale after duplicate repair left only the hierarchy leaf,
+        # stranding it under a species the photo no longer carries by
+        # name.
         current_species_by_pid = {}
-        for chunk in _chunked(photo_ids):
-            placeholders = ",".join("?" for _ in chunk)
-            rows = db.conn.execute(
-                f"""SELECT pk.photo_id, k.name
-                    FROM photo_keywords pk
-                    JOIN keywords k ON k.id = pk.keyword_id
-                    LEFT JOIN taxa t ON t.id = k.taxon_id
-                    WHERE pk.photo_id IN ({placeholders})
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')
-                      AND (t.rank = 'species' OR t.rank IS NULL)""",
-                chunk,
-            ).fetchall()
-            for row in rows:
-                key = keyword_match_key(row["name"])
+        for pid, names in db.get_species_keywords_for_photos(photo_ids).items():
+            for name in names:
+                key = keyword_match_key(name)
                 if key:
-                    current_species_by_pid.setdefault(row["photo_id"], set()).add(key)
+                    current_species_by_pid.setdefault(pid, set()).add(key)
 
         def _accept_curation_source(pid, old_species_name):
             """Shared filter for the highlight, preference, and rep passes.
