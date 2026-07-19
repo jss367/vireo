@@ -36,3 +36,22 @@ def test_folder_outside_root_skipped(tmp_path):
 def test_root_itself_skipped(tmp_path):
     root = str(tmp_path)
     assert minimal_move_set(root, [(1, root)]) == []
+
+
+def test_prefix_sibling_not_treated_as_nested(tmp_path):
+    # "trip2" starts with "trip" as a string but is a sibling, not a child.
+    # Guards against a startswith-based "simplification" of the coverage check.
+    root = str(tmp_path)
+    trip = os.path.join(root, "2026", "trip")
+    trip2 = os.path.join(root, "2026", "trip2")
+    out = minimal_move_set(root, [(1, trip), (2, trip2)])
+    assert {e["subpath"] for e in out} == {"2026/trip", "2026/trip2"}
+
+
+def test_three_level_chain_collapses_to_top(tmp_path):
+    root = str(tmp_path)
+    a = os.path.join(root, "a")
+    b = os.path.join(a, "b")
+    c = os.path.join(b, "c")
+    out = minimal_move_set(root, [(1, a), (2, b), (3, c)])
+    assert out == [{"folder_id": 1, "subpath": "a"}]
