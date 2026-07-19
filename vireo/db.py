@@ -12836,6 +12836,15 @@ class Database:
             # silently drop that photo from Life List / Representative
             # eligibility even though curation was intentionally preserved
             # on the root key.
+            # Restrict the eligibility EXISTS to species-rank taxonomy rows.
+            # `mark_species_keywords` stamps `is_species=1`/`type='taxonomy'`
+            # regardless of the linked taxon's rank, so a genus/family
+            # keyword whose display name happens to match a species curation
+            # key (e.g. a genus row named `Puma`) would otherwise satisfy
+            # eligibility for the `Puma` species representative even though
+            # sibling queries (get_life_list_candidates, get_species_keywords_for_photos,
+            # etc.) exclude the photo from the species bucket via the same
+            # `(t.rank = 'species' OR t.rank IS NULL)` guard.
             eligibility_filter = """
                  AND COALESCE(p.flag, 'none') != 'rejected'
                  AND f.status IN ('ok', 'partial')
@@ -12844,7 +12853,9 @@ class Database:
                      FROM photo_keywords pk
                      JOIN keywords k ON k.id = pk.keyword_id
                       AND (k.is_species = 1 OR k.type = 'taxonomy')
+                     LEFT JOIN taxa t ON t.id = k.taxon_id
                      WHERE pk.photo_id = sr.photo_id
+                       AND (t.rank = 'species' OR t.rank IS NULL)
                        AND (
                            k.name = sr.species
                            OR (
@@ -13057,6 +13068,17 @@ class Database:
             # every highlight starred from an unconfirmed bucket.
             # Applying NOCASE only to the fallback keeps the
             # ambiguous-homonym boundary intact.
+            # The accepted-keyword branch mirrors
+            # :meth:`get_species_representative_lists`: restrict to
+            # species-rank taxonomy rows so a genus/family keyword named
+            # identically to a species curation key (e.g. a genus `Puma`
+            # row named `Puma`) does not satisfy a species highlight —
+            # sibling species queries already exclude that photo from the
+            # species bucket via `(t.rank = 'species' OR t.rank IS NULL)`.
+            # The prediction-fallback branch below stays unfiltered:
+            # taxonomy rows do not participate there, and the fallback is
+            # explicitly conditioned on the photo carrying no accepted
+            # species/taxonomy keyword.
             eligibility_filter = """
                  AND COALESCE(p.flag, 'none') != 'rejected'
                  AND (
@@ -13065,7 +13087,9 @@ class Database:
                          FROM photo_keywords pk
                          JOIN keywords k ON k.id = pk.keyword_id
                           AND (k.is_species = 1 OR k.type = 'taxonomy')
+                         LEFT JOIN taxa t ON t.id = k.taxon_id
                          WHERE pk.photo_id = sh.photo_id
+                           AND (t.rank = 'species' OR t.rank IS NULL)
                            AND (
                                k.name = sh.species
                                OR (

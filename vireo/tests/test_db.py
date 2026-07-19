@@ -18326,3 +18326,93 @@ def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
         "highlight stored under one species must not become eligible "
         "for a photo whose only species keyword links to a different taxon"
     )
+
+
+def test_curation_eligibility_rejects_higher_rank_taxonomy_homonym(tmp_path):
+    """A linked higher-rank taxonomy keyword (e.g. a genus row named
+    ``Puma``) must not satisfy species-curation eligibility for the
+    matching species highlight or representative.
+
+    ``mark_species_keywords`` stamps ``is_species=1``/``type='taxonomy'``
+    regardless of the linked taxon's rank, so without the same
+    ``(t.rank = 'species' OR t.rank IS NULL)`` guard used by sibling
+    species queries (``get_life_list_candidates``,
+    ``get_species_keywords_for_photos`` etc.), a genus-linked keyword
+    named ``Puma`` would keep a species ``Puma`` curation row eligible
+    for a photo that is no longer in the species bucket.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # A pre-existing keyword row named "Puma" bound to the genus (as if
+    # stamped by a legacy catalog before ``prefer_species`` existed and
+    # not yet rebound). ``mark_species_keywords`` would rebind it during
+    # a startup pass, but until then it stays higher-rank while still
+    # flagged is_species/taxonomy.
+    kid = db.add_keyword("Puma")
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (genus_taxon, kid),
+    )
+    db.tag_photo(pid, kid)
+
+    # Curation rows stored under the canonical "Puma" species key.
+    db.set_species_representative("Puma", pid)
+    db.add_species_highlight("Puma", pid)
+    db.conn.commit()
+
+    # Sibling species queries already exclude the photo from the "Puma"
+    # species bucket because of the (t.rank='species' OR NULL) guard.
+    # The curation eligibility EXISTS must exclude it too — otherwise
+    # the representative/highlight remains eligible for a photo that
+    # nothing else considers a Puma species record.
+    reps = db.get_species_representative_lists(eligible_only=True)
+    assert reps.get("Puma") in (None, []), (
+        "genus-rank taxonomy row named 'Puma' must not satisfy species "
+        "'Puma' representative eligibility"
+    )
+    assert db.get_species_representatives(eligible_only=True) == {}
+
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid not in highlights.get("Puma", {}), (
+        "genus-rank taxonomy row named 'Puma' must not satisfy species "
+        "'Puma' highlight eligibility"
+    )
+    single = db.get_species_highlights(species="Puma", eligible_only=True)
+    assert pid not in single.get("Puma", {})
+
+    # Sanity check: when the row is rebound to the species-rank taxon,
+    # eligibility flips back on. Confirms the guard, not something
+    # else, is what excludes the row.
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (species_taxon, kid),
+    )
+    db.conn.commit()
+
+    reps_after = db.get_species_representative_lists(eligible_only=True)
+    assert reps_after.get("Puma") == [pid]
+    highlights_after = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights_after.get("Puma", {})
