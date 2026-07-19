@@ -345,6 +345,51 @@ def test_move_folder_by_date_rebases_default_developed_renders(tmp_path):
     assert not default_developed.exists()
 
 
+def test_move_folder_by_date_preserves_tracked_developed_child(tmp_path):
+    """A tracked child named ``developed`` contains originals, not renders."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    tracked_child = src / "developed"
+    tracked_child.mkdir(parents=True)
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+    child_fid = db.add_folder(
+        str(tracked_child), name="developed", parent_id=fid,
+    )
+
+    # Matching stems reproduce the bug: moving the parent's bird first used
+    # to mistake the child's tracked original for a generated render.
+    (src / "bird.jpg").write_bytes(b"parent")
+    (tracked_child / "bird.jpg").write_bytes(b"child")
+    db.add_photo(
+        folder_id=fid, filename="bird.jpg", extension=".jpg",
+        file_size=6, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    child_pid = db.add_photo(
+        folder_id=child_fid, filename="bird.jpg", extension=".jpg",
+        file_size=5, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    result = move_folder_by_date(db, fid, str(archive), "%Y-%m-%d")
+
+    assert result["errors"] == []
+    assert result["moved"] == 2
+    assert (archive / "2026-07-12" / "bird.jpg").read_bytes() == b"parent"
+    assert (archive / "2026-07-13" / "bird.jpg").read_bytes() == b"child"
+    child_row = db.conn.execute(
+        """SELECT f.path FROM photos p
+           JOIN folders f ON f.id = p.folder_id
+           WHERE p.id = ?""",
+        (child_pid,),
+    ).fetchone()
+    assert child_row["path"] == str(archive / "2026-07-13")
+
+
 def test_move_folder_by_date_lists_developed_dir_once_per_source(
     tmp_path, monkeypatch,
 ):

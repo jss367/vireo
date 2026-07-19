@@ -1742,6 +1742,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     total = len(photo_ids)
     moved = 0
     errors = []
+    managed_default_developed = {}
 
     # Ensure destination folder record exists (workspace link deferred until first successful move)
     dest_row = db.conn.execute("SELECT id FROM folders WHERE path = ?", (destination,)).fetchone()
@@ -1870,9 +1871,24 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                     developed_dir, src_dir, destination, stem,
                     developed_listing_cache,
                 )
-            relocate_default_developed_file(
-                src_dir, destination, stem, developed_listing_cache,
-            )
+            default_developed_path = os.path.join(src_dir, "developed")
+            if src_dir not in managed_default_developed:
+                # A real catalog folder may legitimately be named
+                # ``developed``. Treating its matching-stem originals as
+                # generated renders would move them before their own folder
+                # group is processed. Skip the default-layout relocation
+                # whenever that directory is managed (or contains another
+                # managed folder); its tracked photos move through the normal
+                # catalog path instead.
+                managed_default_developed[src_dir] = bool(
+                    _tracked_destination_overlap(
+                        db, photo["folder_id"], default_developed_path,
+                    )
+                )
+            if not managed_default_developed[src_dir]:
+                relocate_default_developed_file(
+                    src_dir, destination, stem, developed_listing_cache,
+                )
 
             # Now safe to delete originals. The catalog and developed
             # outputs are already at the new location, so a cleanup failure
