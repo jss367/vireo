@@ -2,6 +2,8 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -1551,3 +1553,55 @@ def test_remote_target_relative_mount_path_keeps_archive_root(tmp_path, monkeypa
     ))
     assert coerced is not None
     assert coerced["local_archive_root"] == archive_root
+
+
+def test_remote_target_archive_root_case_alias_of_mount_is_blanked(
+    tmp_path, monkeypatch,
+):
+    """On a case-insensitive volume, a local_archive_root that differs from
+    mount_path only by case is the same directory: the archive root must be
+    blanked so the target does not later fail chained moves as a
+    source/destination overlap. A byte-wise commonpath compare would miss
+    this alias."""
+    import config as cfg
+
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("requires a case-insensitive filesystem")
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    mount = tmp_path / "Photos"
+    mount.mkdir()
+    alias_archive = str(tmp_path / "photos")  # same directory, different case
+    coerced = cfg._coerce_remote_target(_base_target(
+        mount_path=str(mount), local_archive_root=alias_archive,
+    ))
+    assert coerced is not None
+    assert coerced["local_archive_root"] == ""
+    assert coerced["mount_path"] == str(mount)
+
+
+def test_remote_target_archive_root_inside_mount_via_case_alias_is_blanked(
+    tmp_path, monkeypatch,
+):
+    """A local_archive_root strictly *inside* the mount via a case-alias
+    ancestor (mount `/Volumes/Photos`, archive `/volumes/photos/staging`)
+    must be blanked too — same directory-tree overlap as the equal case."""
+    import config as cfg
+
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("requires a case-insensitive filesystem")
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    mount = tmp_path / "Photos"
+    (mount / "staging").mkdir(parents=True)
+    alias_sub = str(tmp_path / "photos" / "staging")
+    coerced = cfg._coerce_remote_target(_base_target(
+        mount_path=str(mount), local_archive_root=alias_sub,
+    ))
+    assert coerced is not None
+    assert coerced["local_archive_root"] == ""
+    assert coerced["mount_path"] == str(mount)

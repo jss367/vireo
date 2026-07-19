@@ -722,14 +722,26 @@ def _coerce_remote_target(entry):
             # server happened to be launched — it could blank a perfectly
             # valid archive root. Relative mounts are unusable for
             # transfers anyway, so skip the check instead of resolving.
+            #
+            # Containment goes through move._path_equal_or_descends so
+            # case-only aliases on case-insensitive volumes (default macOS
+            # APFS, Windows NTFS: "/Volumes/Photos" vs "/volumes/photos")
+            # are recognized as the same directory. A byte-wise
+            # commonpath would miss this and leave a target eligible for
+            # chained moves whose archive root is really the mount, and
+            # the accepted chain would later fail as a source/destination
+            # overlap. The same helper the move guards use is authoritative.
             try:
-                if os.path.commonpath([
-                    os.path.realpath(local_archive_root),
-                    os.path.realpath(mount_path),
-                ]) == os.path.realpath(mount_path):
+                from move import _path_equal_or_descends
+                if _path_equal_or_descends(local_archive_root, mount_path):
                     local_archive_root = ""
-            except ValueError:
-                pass  # different drives (Windows) — cannot be inside
+            except (OSError, ValueError):
+                # Different drives on Windows / unreadable realpath: cannot
+                # be inside. Blanking the archive root here would drop a
+                # perfectly valid config on a transient FS hiccup, so leave
+                # it as saved and let the runtime move guards catch a real
+                # overlap.
+                pass
     return {
         "id": tid,
         "name": name,
