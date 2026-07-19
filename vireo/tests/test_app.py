@@ -12493,6 +12493,8 @@ def test_native_shell_owns_external_navigation_policy():
     assert "navigation::handle_navigation(&navigation_app, url)" in lib
     assert ".on_new_window(" in lib
     assert "NewWindowResponse::Deny" in lib
+    assert ".on_download(" in lib
+    assert "handle_download(&download_app, event)" in lib
 
 
 def test_pipeline_plan_accepts_folder_scope(app_and_db):

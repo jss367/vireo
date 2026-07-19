@@ -127,6 +127,10 @@ def test_page_renders(life_app):
     assert b"Renumber for each view" in resp.data
     assert b"Taxonomic group" in resp.data
     assert b"Identification level" in resp.data
+    assert b'id="exportColumns"' in resp.data
+    assert b"Representative filename" in resp.data
+    assert b"Quality score" in resp.data
+    assert b"link.download = ''" in resp.data
 
 
 def test_groups_by_species_and_counts(life_app):
@@ -771,6 +775,58 @@ def test_life_list_export_species_csv_with_locations(life_app):
     cardinal = next(r for r in rows if r["species"] == "Northern Cardinal")
     assert cardinal["locations"] == "Backyard"
     assert cardinal["best_filename"] == "card2.jpg"
+
+
+def test_life_list_export_species_csv_selected_columns(life_app):
+    app, _, _ = life_app
+    resp = app.test_client().get(
+        "/api/life-list/export?format=csv"
+        "&columns=species,photo_count,best_filename"
+    )
+    assert resp.status_code == 200
+
+    reader = csv.DictReader(io.StringIO(resp.get_data(as_text=True)))
+    assert reader.fieldnames == ["species", "photo_count", "best_filename"]
+    rows = list(reader)
+    cardinal = next(r for r in rows if r["species"] == "Northern Cardinal")
+    assert cardinal == {
+        "species": "Northern Cardinal",
+        "photo_count": "2",
+        "best_filename": "card2.jpg",
+    }
+
+
+def test_life_list_export_photo_csv_selected_columns(life_app):
+    app, _, ids = life_app
+    resp = app.test_client().get(
+        "/api/life-list/export?format=csv&detail=photos&photos=all"
+        "&columns=species,photo_id,filename"
+    )
+    assert resp.status_code == 200
+
+    reader = csv.DictReader(io.StringIO(resp.get_data(as_text=True)))
+    assert reader.fieldnames == ["species", "photo_id", "filename"]
+    rows = list(reader)
+    assert [int(row["photo_id"]) for row in rows] == [
+        ids["p3"], ids["p2"], ids["p1"]
+    ]
+
+
+@pytest.mark.parametrize(
+    "query, message",
+    [
+        ("format=csv&columns=", "select at least one csv column"),
+        ("format=csv&columns=species,not_a_column", "unknown csv columns"),
+        ("format=json&columns=species", "only supported for csv"),
+    ],
+)
+def test_life_list_export_rejects_invalid_column_selection(
+    life_app, query, message
+):
+    app, _, _ = life_app
+    resp = app.test_client().get("/api/life-list/export?" + query)
+    assert resp.status_code == 400
+    assert message in resp.get_json()["error"]
 
 
 def test_life_list_export_csv_escapes_formula_leading_cells(life_app):

@@ -25,9 +25,14 @@
   .publish-option { display:flex; gap:8px; align-items:flex-start; margin-top:12px; font-size:13px; color:var(--text-secondary); }
   .publish-status { min-height:16px; margin-top:10px; font-size:12px; color:var(--text-secondary); }
   .export-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .export-columns-wrap { grid-column:1 / -1; }
+  .export-columns { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:7px 16px; padding:10px; border:1px solid var(--border-primary); border-radius:6px; background:var(--bg-tertiary); }
+  .export-column-option { display:flex; align-items:flex-start; gap:7px; font-size:12px; color:var(--text-secondary); cursor:pointer; }
+  .export-column-option input { margin:1px 0 0; }
   @media (max-width: 640px) {
     .lifelist-actions { margin-left:0; width:100%; justify-content:flex-end; }
     .export-grid { grid-template-columns:1fr; }
+    .export-columns { grid-template-columns:1fr; }
   }
 
   .lifelist-meta { padding:8px 24px; font-size:12px; color:var(--text-secondary); }
@@ -209,7 +214,11 @@
           <option value="all">All listed photos</option>
         </select>
       </div>
-      <label class="publish-option" style="margin-top:22px;">
+      <div id="exportColumnsWrap" class="export-columns-wrap" style="display:none;">
+        <span class="modal-label">Columns</span>
+        <div id="exportColumns" class="export-columns"></div>
+      </div>
+      <label id="exportLocationsWrap" class="publish-option" style="margin-top:22px;">
         <input id="exportLocations" type="checkbox">
         <span>Include location keywords.</span>
       </label>
@@ -273,6 +282,33 @@ var currentData = null;
 var debounceTimer = null;
 var LIFE_LIST_SORT_STORAGE_KEY = 'vireo.lifeList.sort';
 var LIFE_LIST_RENUMBER_STORAGE_KEY = 'vireo.lifeList.renumber';
+var LIFE_LIST_EXPORT_COLUMNS = {
+  species: [
+    ['number', 'Life-list number'],
+    ['species', 'Displayed species name'],
+    ['scientific_name', 'Scientific name'],
+    ['common_name', 'Common name'],
+    ['photo_count', 'Photo count'],
+    ['first_seen', 'First seen date'],
+    ['last_seen', 'Last seen date'],
+    ['locations', 'Locations'],
+    ['best_photo_id', 'Representative photo ID'],
+    ['best_filename', 'Representative filename'],
+  ],
+  photos: [
+    ['number', 'Life-list number'],
+    ['species', 'Displayed species name'],
+    ['scientific_name', 'Scientific name'],
+    ['common_name', 'Common name'],
+    ['photo_id', 'Photo ID'],
+    ['filename', 'Filename'],
+    ['timestamp', 'Date and time'],
+    ['is_life_list_photo', 'Life-list photo'],
+    ['quality_score', 'Quality score'],
+    ['locations', 'Locations'],
+  ],
+};
+var lifeListExportColumnSelections = {species: null, photos: null};
 var LIFE_LIST_SORTS = ['newest', 'life-order', 'alpha', 'most-photos'];
 var LIFE_LIST_PAGE_SIZE = 100;
 var lifeListLightboxSpecies = null;
@@ -633,15 +669,71 @@ function closeExportModal() {
   document.getElementById('exportModal').classList.remove('open');
 }
 
+function exportColumnSelection(detail) {
+  if (!lifeListExportColumnSelections[detail]) {
+    var selection = {};
+    LIFE_LIST_EXPORT_COLUMNS[detail].forEach(function(column) {
+      selection[column[0]] = true;
+    });
+    lifeListExportColumnSelections[detail] = selection;
+  }
+  return lifeListExportColumnSelections[detail];
+}
+
+function selectedExportColumns(detail) {
+  var selection = exportColumnSelection(detail);
+  return LIFE_LIST_EXPORT_COLUMNS[detail]
+    .map(function(column) { return column[0]; })
+    .filter(function(column) { return selection[column]; });
+}
+
+function updateExportLocationsVisibility() {
+  var format = document.getElementById('exportFormat').value;
+  var detail = document.getElementById('exportDetail').value;
+  var showLocations = format === 'json' || format === 'txt';
+  if (format === 'csv') {
+    showLocations = selectedExportColumns(detail).indexOf('locations') !== -1;
+  }
+  document.getElementById('exportLocationsWrap').style.display = showLocations ? '' : 'none';
+}
+
+function renderExportColumns(detail) {
+  var container = document.getElementById('exportColumns');
+  var selection = exportColumnSelection(detail);
+  container.textContent = '';
+  LIFE_LIST_EXPORT_COLUMNS[detail].forEach(function(column) {
+    var label = document.createElement('label');
+    label.className = 'export-column-option';
+    var checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = column[0];
+    checkbox.checked = selection[column[0]];
+    checkbox.addEventListener('change', function() {
+      selection[column[0]] = checkbox.checked;
+      document.getElementById('exportStatus').textContent = '';
+      updateExportLocationsVisibility();
+    });
+    var text = document.createElement('span');
+    text.textContent = column[1];
+    label.appendChild(checkbox);
+    label.appendChild(text);
+    container.appendChild(label);
+  });
+}
+
 function updateExportControls() {
   var format = document.getElementById('exportFormat').value;
   var detailWrap = document.getElementById('exportDetailWrap');
   var photosWrap = document.getElementById('exportPhotosWrap');
+  var columnsWrap = document.getElementById('exportColumnsWrap');
   var detail = document.getElementById('exportDetail').value;
   detailWrap.style.display = format === 'csv' ? '' : 'none';
   photosWrap.style.display = (
     format === 'files' || (format === 'csv' && detail === 'photos')
   ) ? '' : 'none';
+  columnsWrap.style.display = format === 'csv' ? '' : 'none';
+  if (format === 'csv') renderExportColumns(detail);
+  updateExportLocationsVisibility();
 }
 
 function downloadLifeListExport() {
@@ -649,15 +741,29 @@ function downloadLifeListExport() {
   var detail = document.getElementById('exportDetail').value;
   var photos = document.getElementById('exportPhotos').value;
   var includeLocations = document.getElementById('exportLocations').checked ? '1' : '0';
+  var columns = format === 'csv' ? selectedExportColumns(detail) : [];
+  if (format === 'csv' && !columns.length) {
+    document.getElementById('exportStatus').textContent = 'Select at least one column.';
+    return;
+  }
   var params = new URLSearchParams({
     format: format,
     detail: detail,
     include_locations: includeLocations,
   });
+  if (format === 'csv') params.set('columns', columns.join(','));
   if (format === 'files' || (format === 'csv' && detail === 'photos')) {
     params.set('photos', photos);
   }
-  window.location.href = '/api/life-list/export?' + params.toString();
+  var link = document.createElement('a');
+  link.href = '/api/life-list/export?' + params.toString();
+  // Explicitly mark this as a download. WKWebView otherwise treats showable
+  // formats such as CSV as a normal page navigation even when the response
+  // carries Content-Disposition: attachment.
+  link.download = '';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
   closeExportModal();
 }
 

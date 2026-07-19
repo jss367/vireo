@@ -10126,6 +10126,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         best = entry.get("best")
         return [best] if best else []
 
+    _LIFE_LIST_SPECIES_CSV_COLUMNS = (
+        "number",
+        "species",
+        "scientific_name",
+        "common_name",
+        "photo_count",
+        "first_seen",
+        "last_seen",
+        "locations",
+        "best_photo_id",
+        "best_filename",
+    )
+    _LIFE_LIST_PHOTO_CSV_COLUMNS = (
+        "number",
+        "species",
+        "scientific_name",
+        "common_name",
+        "photo_id",
+        "filename",
+        "timestamp",
+        "is_life_list_photo",
+        "quality_score",
+        "locations",
+    )
+
     def _life_list_export_response(body, mimetype, extension):
         today = datetime.now(UTC).date().isoformat()
         resp = make_response(body)
@@ -10144,21 +10169,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "'" + text
         return text
 
-    def _life_list_species_csv(payload):
+    def _life_list_species_csv(payload, fieldnames=None):
         out = io.StringIO()
-        fieldnames = [
-            "number",
-            "species",
-            "scientific_name",
-            "common_name",
-            "photo_count",
-            "first_seen",
-            "last_seen",
-            "locations",
-            "best_photo_id",
-            "best_filename",
-        ]
-        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        fieldnames = fieldnames or _LIFE_LIST_SPECIES_CSV_COLUMNS
+        writer = csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for entry in payload.get("species", []):
             best = entry.get("best") or {}
@@ -10178,21 +10192,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             })
         return out.getvalue()
 
-    def _life_list_photos_csv(payload, photo_mode):
+    def _life_list_photos_csv(payload, photo_mode, fieldnames=None):
         out = io.StringIO()
-        fieldnames = [
-            "number",
-            "species",
-            "scientific_name",
-            "common_name",
-            "photo_id",
-            "filename",
-            "timestamp",
-            "is_life_list_photo",
-            "quality_score",
-            "locations",
-        ]
-        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        fieldnames = fieldnames or _LIFE_LIST_PHOTO_CSV_COLUMNS
+        writer = csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for entry in payload.get("species", []):
             for photo in _life_list_export_photos(entry, photo_mode):
@@ -10264,6 +10267,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if photo_mode not in {"best", "all"}:
             return json_error("photos must be best or all")
 
+        csv_columns = None
+        if "columns" in request.args:
+            if fmt != "csv":
+                return json_error("columns is only supported for csv exports")
+            available_columns = (
+                _LIFE_LIST_PHOTO_CSV_COLUMNS
+                if detail == "photos"
+                else _LIFE_LIST_SPECIES_CSV_COLUMNS
+            )
+            requested_columns = {
+                column.strip()
+                for column in request.args.get("columns", "").split(",")
+                if column.strip()
+            }
+            if not requested_columns:
+                return json_error("select at least one csv column")
+            unknown_columns = requested_columns.difference(available_columns)
+            if unknown_columns:
+                return json_error(
+                    "unknown csv columns: " + ", ".join(sorted(unknown_columns))
+                )
+            csv_columns = [
+                column for column in available_columns
+                if column in requested_columns
+            ]
+
         db = _get_db()
         uses_photo_scope = fmt == "files" or (fmt == "csv" and detail == "photos")
         payload_photos_per_species = (
@@ -10282,9 +10311,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return _life_list_export_response(body, "application/json", "json")
         if fmt == "csv":
             body = (
-                _life_list_photos_csv(payload, photo_mode)
+                _life_list_photos_csv(payload, photo_mode, csv_columns)
                 if detail == "photos"
-                else _life_list_species_csv(payload)
+                else _life_list_species_csv(payload, csv_columns)
             )
             return _life_list_export_response(body, "text/csv; charset=utf-8", "csv")
         if fmt == "files":
