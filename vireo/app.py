@@ -23978,6 +23978,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # replacement must remove and record all of them for undo/redo.
             old_rows_by_photo = {}
             if is_replacement and old_kid_row is not None:
+                old_kid_id = old_kid_row["id"]
                 old_target_taxon_id = old_kid_row["taxon_id"]
                 old_target_key = keyword_match_key(old_kid_row["name"])
                 # When the previous species is linked to a taxon and another
@@ -23988,6 +23989,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Treating it as the old species would queue a legacy
                 # homonym tag for removal. Mirror the guard in
                 # get_photos_with_equivalent_species.
+                #
+                # The same guard applies when the *previous species* is
+                # unlinked: any distinct linked same-key row is a different
+                # species, and folding it in would let encounter replacement
+                # delete a taxonomy species from the photo.
                 old_homonym_conflict = False
                 if old_target_taxon_id is not None:
                     for hrow in db.conn.execute(
@@ -23996,6 +24002,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                              AND taxon_id IS NOT NULL
                              AND taxon_id != ?""",
                         (old_target_taxon_id,),
+                    ).fetchall():
+                        if keyword_match_key(hrow["name"]) == old_target_key:
+                            old_homonym_conflict = True
+                            break
+                else:
+                    for hrow in db.conn.execute(
+                        """SELECT name FROM keywords
+                           WHERE (is_species = 1 OR type = 'taxonomy')
+                             AND taxon_id IS NOT NULL
+                             AND id != ?""",
+                        (old_kid_id,),
                     ).fetchall():
                         if keyword_match_key(hrow["name"]) == old_target_key:
                             old_homonym_conflict = True
@@ -24017,9 +24034,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     ).fetchall()
                     for row in rows:
                         if old_target_taxon_id is None:
-                            same_species = (
-                                keyword_match_key(row["name"]) == old_target_key
-                            )
+                            if old_homonym_conflict:
+                                # Unlinked previous species with a linked
+                                # same-key homonym in the catalog: only the
+                                # exact resolved old row is safe to remove.
+                                same_species = row["id"] == old_kid_id
+                            else:
+                                same_species = (
+                                    keyword_match_key(row["name"]) == old_target_key
+                                )
                         else:
                             same_species = (
                                 row["taxon_id"] == old_target_taxon_id

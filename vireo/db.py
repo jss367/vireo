@@ -15158,6 +15158,12 @@ class Database:
                     # would leave the wrong species attached while adding
                     # the correct one. Detect the homonym conflict once and
                     # gate the NULL-taxon fallback below.
+                    #
+                    # The same guard applies when the *target* is unlinked:
+                    # a linked same-key row is a distinct species that must
+                    # not be folded into the unlinked target, or Replace
+                    # Keywords would exclude the linked homonym from
+                    # ``to_remove`` and leave the wrong species attached.
                     _target_key = keyword_match_key(target_row["name"])
                     _target_homonym_conflict = False
                     if target_row["taxon_id"] is not None:
@@ -15167,6 +15173,17 @@ class Database:
                                  AND taxon_id IS NOT NULL
                                  AND taxon_id != ?""",
                             (target_row["taxon_id"],),
+                        ).fetchall():
+                            if keyword_match_key(_hrow["name"]) == _target_key:
+                                _target_homonym_conflict = True
+                                break
+                    else:
+                        for _hrow in self.conn.execute(
+                            """SELECT name FROM keywords
+                               WHERE (is_species = 1 OR type = 'taxonomy')
+                                 AND taxon_id IS NOT NULL
+                                 AND id != ?""",
+                            (kid,),
                         ).fetchall():
                             if keyword_match_key(_hrow["name"]) == _target_key:
                                 _target_homonym_conflict = True
@@ -15182,6 +15199,11 @@ class Database:
                                 and keyword_match_key(row["name"])
                                 == _target_key
                             )
+                        # Unlinked target: when a distinct linked row shares
+                        # this match key, only the exact target keyword row
+                        # is safe to treat as equivalent.
+                        if _target_homonym_conflict:
+                            return row["id"] == kid
                         return (
                             keyword_match_key(row["name"]) == _target_key
                         )

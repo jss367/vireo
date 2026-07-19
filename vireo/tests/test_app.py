@@ -1728,6 +1728,61 @@ def test_encounter_species_replacement_retags_same_taxon_alias(app_and_db):
     assert redone == ["Auriparus flaviceps"]
 
 
+def test_encounter_species_replacement_preserves_linked_homonym(app_and_db):
+    """When ``previous_species`` resolves to an unlinked legacy row and the
+    photo carries a distinct linked same-key homonym, the linked row is a
+    different species and must not be scheduled for removal.
+
+    Regression: the ``old_target_taxon_id is None`` branch matched every
+    species row on the photo by display key, so an encounter replacement
+    where the cache's confirmed species was legacy ``Robin`` (NULL taxon)
+    would delete a taxonomy-linked ``robin`` from the same photo.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (400, 'Turdus migratorius', 'American Robin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    # Unlinked legacy species row — this becomes ``old_kid_row``.
+    legacy_root = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL, type = 'taxonomy' WHERE id = ?",
+        (legacy_root,),
+    )
+    # Distinct linked same-key row anywhere in the catalog. add_keyword's
+    # (name, parent_id, type) UNIQUE constraint dedupes at parent_id=NULL,
+    # so insert this one under a hierarchy parent to make it a separate row.
+    hierarchy_parent = db.add_keyword("Turdidae")
+    linked_homonym = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Robin', ?, 1, 'taxonomy', 400)",
+        (hierarchy_parent,),
+    ).lastrowid
+    db.tag_photo(photo_id, linked_homonym)
+    db.conn.commit()
+
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Robin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    assert linked_homonym in tagged_ids, (
+        "Linked same-key homonym is a distinct species — it must survive "
+        "an encounter replacement whose previous species is unlinked and "
+        "only coincidentally shares the normalized name"
+    )
+
+
 def test_encounter_species_replacement_preserves_legacy_homonym(app_and_db):
     """When the previous species is a linked taxon and the catalog also
     holds another taxonomy row with the SAME normalized key bound to a

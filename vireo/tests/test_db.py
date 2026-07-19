@@ -5656,6 +5656,74 @@ def test_replace_prediction_removes_ambiguous_legacy_homonym_row(tmp_path):
     assert "ROBIN" in entry["old_species"]
 
 
+def test_replace_prediction_unlinked_target_preserves_linked_homonym(tmp_path):
+    """When the accept target is an unlinked legacy species row and the
+    photo also carries a distinct LINKED same-key homonym, Replace Keywords
+    must not fold the linked row into the target.
+
+    Regression: the target-species check treated any same-key row as the
+    target in the unlinked-target branch, so a linked ``robin`` on the
+    photo was silently kept as "already the target" (excluded from
+    ``to_remove``) while the intended unlinked target was added alongside,
+    leaving the wrong species attached.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (18101, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "robin.jpg", ".jpg", 100, 1.0)
+
+    # An unlinked legacy species keyword — this is the accept target.
+    legacy_target = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    # A distinct linked same-key row exists in the catalog and is
+    # attached to the photo. Its identity is a different species; the
+    # unlinked target cannot claim it.
+    linked_homonym = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    ).lastrowid
+    db.tag_photo(pid, linked_homonym)
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Robin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    # ``add_keyword`` NOCASE-dedupes among same-parent taxonomy rows and
+    # tie-breaks by id, so the earlier-inserted ``legacy_target`` wins and
+    # becomes the resolved accept target ``kid``. The replace-species
+    # branch must recognise that the linked ``robin`` on the photo is a
+    # distinct species, not the unlinked target — and untag it.
+    db.accept_prediction(prediction_id, replace_species=True)
+
+    tagged = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert legacy_target in tagged, (
+        "Unlinked accept target must be attached to the photo"
+    )
+    assert linked_homonym not in tagged, (
+        "Linked same-key homonym is a distinct species and must not be "
+        "folded into the unlinked target: it must be included in "
+        "to_remove and untagged from the photo"
+    )
+
+
 def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_path):
     """An additional subject species is added without replacing the original.
 
