@@ -434,6 +434,7 @@ let browserSelectAnchorPath = '';
 let activeImportMode = 'in_place';
 let importRemoteTargets = [];
 let importRsyncAvailable = false;
+let importSshAvailable = false;
 let destStructureSeq = 0;
 // Monotonic sequence for the import preview / duplicate-check flow so a
 // slow older previewImport() response can't overwrite the summary text
@@ -725,9 +726,11 @@ async function loadImportRemoteTargets() {
     const data = await resp.json();
     importRemoteTargets = (data && data.targets) || [];
     importRsyncAvailable = !!(data && data.rsync_available);
+    importSshAvailable = !!(data && data.ssh_available);
   } catch (e) {
     importRemoteTargets = [];
     importRsyncAvailable = false;
+    importSshAvailable = false;
   }
   const sel = document.getElementById('destMode');
   if (!sel) return;
@@ -906,7 +909,12 @@ async function browseForDestination() {
     if (result) {
       const path = Array.isArray(result) ? result[0] : result;
       if (path) {
-        document.getElementById('destInput').value = path;
+        const destination = document.getElementById('destInput');
+        destination.value = path;
+        // Notify destInput listeners (dest-structure invalidation, NAS-move
+        // row) exactly like a manual edit would — matches
+        // selectRecentDestination().
+        destination.dispatchEvent(new Event('input', { bubbles: true }));
         hideDestStructure();
         scheduleImportPreview();
       }
@@ -1191,7 +1199,12 @@ function updateImportBrowserSelection() {
 function selectImportBrowserFolder() {
   if (browserMode === 'destination') {
     if (!browserPath) return;
-    document.getElementById('destInput').value = browserPath;
+    const destination = document.getElementById('destInput');
+    destination.value = browserPath;
+    // Notify destInput listeners (dest-structure invalidation, NAS-move
+    // row) exactly like a manual edit would — matches
+    // selectRecentDestination().
+    destination.dispatchEvent(new Event('input', { bubbles: true }));
     hideDestStructure();
     scheduleImportPreview();
   } else {
@@ -1351,14 +1364,18 @@ function updateAfterMoveUI() {
   preview.appendChild(line);
   if (!importRsyncAvailable) {
     preview.appendChild(remotePreviewWarn(
-      'Warning: no GNU rsync found, so the move would fail. Install GNU rsync or set its path under Settings > Paths.'));
+      'Warning: no GNU rsync found, so the move to NAS would fail. Install GNU rsync or set its path under Settings > Paths.'));
+  }
+  if (!importSshAvailable) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: no OpenSSH client found, so the move to NAS would fail.'));
   }
   if (!target.mount_path) {
     preview.appendChild(remotePreviewWarn(
-      'Warning: this target needs a local mount path so moved photos stay in your library. Add one under Settings > Remote targets.'));
+      'Warning: the move to NAS would fail: this target has no local mount path — add one under Settings > Remote targets.'));
   } else if (!importIsAbsolutePath(target.mount_path)) {
     preview.appendChild(remotePreviewWarn(
-      'Warning: this target local mount path must be absolute.'));
+      'Warning: the move to NAS would fail: this target\'s local mount path must be absolute — fix it under Settings > Remote targets.'));
   }
   preview.style.display = '';
 }
@@ -1683,7 +1700,13 @@ function useStagingAsImportSource(result) {
     updateImportMode();
   }
   if (result.inferred_destination) {
-    document.getElementById('destInput').value = result.inferred_destination;
+    const destination = document.getElementById('destInput');
+    destination.value = result.inferred_destination;
+    // Dispatch AFTER the value is set so every destInput listener
+    // (dest-structure invalidation, NAS-move row) re-evaluates against the
+    // inferred destination — updateImportMode() above ran while destInput
+    // still held its previous value.
+    destination.dispatchEvent(new Event('input', { bubbles: true }));
     hideDestStructure();
   }
   scheduleImportPreview();
