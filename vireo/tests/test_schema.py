@@ -312,6 +312,7 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
             [
                 (300, workspace_id, "prediction_accept", "accepted Robin", "1"),
                 (301, workspace_id, "keyword_add", "added Sparrow", "1"),
+                (302, workspace_id, "prediction_accept", "accepted subject Sparrow", "1"),
             ],
         )
         db.conn.executemany(
@@ -330,6 +331,18 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
                         {
                             "prediction_id": 202,
                             "prediction_status": "pending",
+                        }
+                    ),
+                    "1",
+                ),
+                (
+                    402,
+                    302,
+                    photo_id,
+                    json.dumps(
+                        {
+                            "prediction_ids": [201, 202, 203, 999],
+                            "no_tag": True,
                         }
                     ),
                     "1",
@@ -383,8 +396,18 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
 
         bare_history = conn.execute("SELECT old_value FROM edit_history_items WHERE id = 400").fetchone()[0]
         json_history = json.loads(conn.execute("SELECT old_value FROM edit_history_items WHERE id = 401").fetchone()[0])
+        subject_history = json.loads(conn.execute("SELECT old_value FROM edit_history_items WHERE id = 402").fetchone()[0])
         assert bare_history == "200"
         assert json_history["prediction_id"] == by_species["Sparrow"]["id"]
+        assert subject_history == {
+            "prediction_ids": [
+                by_species["Robin"]["id"],
+                by_species["Sparrow"]["id"],
+                by_species["Hawk"]["id"],
+                999,
+            ],
+            "no_tag": True,
+        }
 
         detector_runs = conn.execute(
             """

@@ -368,13 +368,38 @@ def _merge_legacy_detector_alias(conn):
     for item_id, raw_value in json_history:
         try:
             payload = json.loads(raw_value)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        changed = False
+        try:
             old_prediction_id = int(payload.get("prediction_id"))
-        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError):
+            pass
+        else:
+            survivor_id = prediction_id_map.get(old_prediction_id)
+            if survivor_id is not None:
+                payload["prediction_id"] = survivor_id
+                changed = True
+
+        prediction_ids = payload.get("prediction_ids")
+        if isinstance(prediction_ids, list):
+            remapped_ids = []
+            for value in prediction_ids:
+                try:
+                    prediction_id = int(value)
+                except (TypeError, ValueError):
+                    remapped_ids.append(value)
+                    continue
+                survivor_id = prediction_id_map.get(prediction_id)
+                remapped_ids.append(survivor_id if survivor_id is not None else value)
+                changed = changed or survivor_id is not None
+            payload["prediction_ids"] = remapped_ids
+
+        if not changed:
             continue
-        survivor_id = prediction_id_map.get(old_prediction_id)
-        if survivor_id is None:
-            continue
-        payload["prediction_id"] = survivor_id
         conn.execute(
             "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
             (json.dumps(payload, separators=(",", ":")), item_id),
