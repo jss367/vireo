@@ -3572,7 +3572,7 @@ def test_after_process_move_rejects_root_destination_empty_template(
 
 
 def test_after_process_move_allows_root_destination_with_dated_template(
-        app_and_db, tmp_path):
+        app_and_db, tmp_path, stub_move):
     """Destination == local_archive_root is fine when the folder template
     resolves to a real subfolder — only the empty/dot case fails silently."""
     app, db = app_and_db
@@ -3590,6 +3590,17 @@ def test_after_process_move_allows_root_destination_with_dated_template(
         "after_process_move": {"remote_target_id": "nas1"},
     })
     assert resp.status_code == 200, resp.get_json()
+    # The accepted request starts a real import → process → move chain.
+    # Drain it (with move_folder stubbed) before the test ends, or the
+    # lingering move job's thread outlives this test and calls a LATER
+    # test's monkeypatched move_folder — polluting that test's stub with
+    # this test's destinations.
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed", import_job
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    for mid in process_job["result"].get("move_job_ids", []):
+        wait_for_job_via_client(client, mid)
 
 
 def test_after_process_move_failure_does_not_create_workspace(
