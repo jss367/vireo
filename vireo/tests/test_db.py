@@ -14518,6 +14518,146 @@ def test_repair_duplicate_photo_species_drops_root_redo_history(tmp_path):
     assert root not in tagged_ids
 
 
+def test_repair_duplicate_photo_species_queues_sidecar_remove_for_orphaned_alias(tmp_path):
+    """When the surviving hierarchy leaf is spelled differently from the
+    detached root (e.g. root ``Verdin`` and nested ``Desert Verdin`` for
+    the same taxon), a previously synced ``dc:subject: Verdin`` in the
+    sidecar would let a later re-scan re-attach the root. The repair must
+    queue a ``keyword_remove`` for the orphaned root spelling so
+    ``sync_to_xmp`` can clear it."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    removes = [
+        row for row in pending
+        if row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ]
+    assert len(removes) == 1, (
+        f"expected a queued keyword_remove for 'Verdin', got: {pending}"
+    )
+    # The surviving alias must not be scheduled for removal.
+    assert not [
+        row for row in pending
+        if row["change_type"] == "keyword_remove"
+        and row["value"] == "Desert Verdin"
+    ]
+
+
+def test_repair_duplicate_photo_species_skips_sidecar_remove_when_survivor_matches(tmp_path):
+    """When the surviving hierarchy leaf shares a normalized name with
+    the detached root (both ``Verdin``), the scanner's per-photo dedup
+    already skips the flat entry on re-import — queueing a keyword_remove
+    would let ``sync_to_xmp`` hierarchically strip the surviving
+    ``Birds|Verdin`` from the sidecar too."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+    assert not [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid and row["change_type"] == "keyword_remove"
+    ]
+
+
+def test_repair_duplicate_photo_species_cancels_unsynced_root_add(tmp_path):
+    """When a still-unsynced ``keyword_add`` for the detached root name
+    is pending, the repair must cancel it and NOT queue a
+    ``keyword_remove`` — the sidecar has not received the flat root, so
+    there is nothing to strip and a stale remove would only cause
+    unnecessary XMP churn."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.queue_change(pid, "keyword_add", "Verdin")
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    assert not [row for row in pending if row["value"] == "Verdin"], (
+        f"expected the pending Verdin add to be cancelled with no "
+        f"replacement remove, got: {pending}"
+    )
+
+
 def test_repair_duplicate_photo_species_waits_for_local_taxa(tmp_path):
     """An empty taxa table must not consume the one-shot repair marker."""
     from db import Database

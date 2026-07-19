@@ -10760,6 +10760,19 @@ class Database:
         spelling would incorrectly erase the surviving XMP keyword. Cancel
         matching adds/removes; the hierarchical association originated from
         that sidecar and remains the source of truth.
+
+        When a detached root's spelling does not survive on the photo (for
+        example a root ``Verdin`` is detached because a hierarchical alias
+        ``Birds|Desert Verdin`` is kept), the sidecar's previously synced
+        ``dc:subject: Verdin`` still names a keyword the DB no longer
+        carries. Left alone, the next XMP-to-DB scan would flat-import
+        ``Verdin`` and re-attach the top-level row this repair just
+        removed. Queue a ``keyword_remove`` for those orphaned spellings
+        so ``sync_to_xmp`` clears them from the sidecar; skip the queue
+        when a surviving row (species or general, hierarchical or not)
+        already carries the same normalized name, since the scanner's
+        per-photo dedup keeps the flat entry from re-tagging in that case
+        and a hierarchical remove would strip the surviving keyword.
         """
         if self.get_meta(self._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) == "1":
             return 0
@@ -10882,20 +10895,57 @@ class Database:
 
                 names = {keyword_match_key(row["name"]) for row in group}
                 pending = self.conn.execute(
-                    """SELECT id, value FROM pending_changes
+                    """SELECT id, change_type, value FROM pending_changes
                        WHERE photo_id = ?
                          AND change_type IN ('keyword_add', 'keyword_remove')""",
                     (photo_id,),
                 ).fetchall()
-                pending_ids = [
-                    row["id"] for row in pending
-                    if keyword_match_key(row["value"] or "") in names
-                ]
+                pending_ids = []
+                cancelled_add_keys = set()
+                for row in pending:
+                    key = keyword_match_key(row["value"] or "")
+                    if key not in names:
+                        continue
+                    pending_ids.append(row["id"])
+                    if row["change_type"] == "keyword_add":
+                        cancelled_add_keys.add(key)
                 for chunk in _chunks(pending_ids):
                     pending_placeholders = ",".join("?" for _ in chunk)
                     self.conn.execute(
                         f"DELETE FROM pending_changes WHERE id IN ({pending_placeholders})",
                         chunk,
+                    )
+
+                # Any keyword name still tagged on the photo (species or
+                # general, root or hierarchical) means the scanner's flat
+                # dedup during a later XMP re-import already skips the
+                # matching ``dc:subject`` entry, so no sidecar remove is
+                # needed — a hierarchical remove would additionally strip
+                # a surviving hierarchical entry that shares a segment
+                # name. Read the post-repair state so a detached root
+                # whose spelling matches a surviving nested leaf is
+                # correctly treated as "still present".
+                surviving_keys = {
+                    keyword_match_key(row["name"])
+                    for row in self.conn.execute(
+                        """SELECT k.name FROM photo_keywords pk
+                           JOIN keywords k ON k.id = pk.keyword_id
+                           WHERE pk.photo_id = ?""",
+                        (photo_id,),
+                    ).fetchall()
+                }
+                for removed in remove:
+                    key = keyword_match_key(removed["name"])
+                    if not key or key in surviving_keys:
+                        continue
+                    if key in cancelled_add_keys:
+                        # The flat root add was still pending — cancelling
+                        # it above already prevents the sidecar from ever
+                        # receiving it, so no remove is required.
+                        continue
+                    self.queue_change(
+                        photo_id, "keyword_remove", removed["name"],
+                        _commit=False,
                     )
 
             self.set_meta(
