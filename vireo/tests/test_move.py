@@ -390,6 +390,44 @@ def test_move_folder_by_date_preserves_tracked_developed_child(tmp_path):
     assert child_row["path"] == str(archive / "2026-07-13")
 
 
+def test_move_folder_by_date_copies_shared_stem_render_to_each_date(tmp_path):
+    """Same-stem photo rows fanned to different dates share one render."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "IMG.raw").write_bytes(b"raw")
+    (src / "IMG.jpg").write_bytes(b"jpeg")
+    db.add_photo(
+        folder_id=fid, filename="IMG.raw", extension=".raw",
+        file_size=3, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid, filename="IMG.jpg", extension=".jpg",
+        file_size=4, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+    default_developed = src / "developed"
+    default_developed.mkdir()
+    (default_developed / "IMG.tiff").write_bytes(b"shared-render")
+
+    result = move_folder_by_date(db, fid, str(archive), "%Y-%m-%d")
+
+    assert result["errors"] == []
+    assert result["moved"] == 2
+    for date in ("2026-07-12", "2026-07-13"):
+        assert (
+            archive / date / "developed" / "IMG.tiff"
+        ).read_bytes() == b"shared-render"
+    assert not default_developed.exists()
+
+
 def test_move_folder_by_date_lists_developed_dir_once_per_source(
     tmp_path, monkeypatch,
 ):

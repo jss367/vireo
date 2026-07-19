@@ -600,7 +600,10 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
 
     ``listing_cache`` is an optional dict mapping ``old_subdir`` to its
     cached ``os.listdir`` result (or ``None`` for a missing/unreadable
-    directory). Reuses cached listings across per-photo calls so
+    directory). It also remembers the first destination of each relocated
+    file so another catalog photo with the same stem can copy that render to
+    a different destination after the source has moved. Reuses cached
+    listings across per-photo calls so
     ``move_folder_by_date`` — which routes every photo in a source folder
     through ``move_photos`` — doesn't rescan the same developed
     directory once per photo (a quadratic hazard on large libraries).
@@ -635,12 +638,17 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
         if entry_stem != stem:
             continue
         src_file = os.path.join(old_subdir, name)
+        prior_destination = None
+        relocation_key = ("relocated-developed-file", old_subdir, name)
         if not os.path.exists(src_file):
-            # Stale cache entry: a prior per-photo call in this batch
-            # already renamed this file (two catalog rows sharing a stem,
-            # e.g. RAW+JPEG). Skip silently — the render is already at
-            # the new location.
-            continue
+            # A prior per-photo call may already have moved this shared-stem
+            # render (e.g. a RAW+JPEG pair). If the rows fan out to different
+            # date folders, the later destination needs its own copy; the
+            # render is only already in place when both rows share a target.
+            if listing_cache is not None:
+                prior_destination = listing_cache.get(relocation_key)
+            if not prior_destination or not os.path.isfile(prior_destination):
+                continue
         dst_file = os.path.join(new_subdir, name)
         if os.path.exists(dst_file):
             # Preserve the existing render at the destination — matches
@@ -653,12 +661,17 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
             continue
         try:
             os.makedirs(new_subdir, exist_ok=True)
-            # Date-organized moves commonly cross from local storage to a
-            # mounted archive. shutil.move keeps the fast atomic rename on a
-            # single filesystem and falls back to copy+remove on EXDEV,
-            # while the existence check above preserves our no-overwrite
-            # policy.
-            shutil.move(src_file, dst_file)
+            if prior_destination:
+                shutil.copy2(prior_destination, dst_file)
+            else:
+                # Date-organized moves commonly cross from local storage to a
+                # mounted archive. shutil.move keeps the fast atomic rename on
+                # a single filesystem and falls back to copy+remove on EXDEV,
+                # while the existence check above preserves our no-overwrite
+                # policy.
+                shutil.move(src_file, dst_file)
+                if listing_cache is not None:
+                    listing_cache[relocation_key] = dst_file
             relocated += 1
         except OSError as exc:
             log.warning(
@@ -669,8 +682,9 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
         try:
             if not os.listdir(old_subdir):
                 os.rmdir(old_subdir)
-                if listing_cache is not None:
-                    listing_cache[old_subdir] = None
+                # Keep the cached names for the rest of this batch. A later
+                # same-stem photo may need to copy a render from the first
+                # destination even though the source directory is now gone.
         except OSError:
             pass
     return relocated
