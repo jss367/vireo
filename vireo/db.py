@@ -9363,6 +9363,30 @@ class Database:
             return self._apply_case_convention(name, convention)
         return name
 
+    def _species_root_name_for_taxon(self, taxon_id):
+        """Canonical root keyword spelling for a species taxon, if any.
+
+        ``resolve_species_display_name`` uses the same lookup to route
+        curation keys through the canonical root when only a hierarchy
+        alias is stored (e.g. a leaf ``Desert Verdin`` after
+        ``repair_duplicate_photo_species`` detached the top-level
+        ``Verdin``). Callers with the taxon id in hand can skip the
+        name-based lookup and go straight to the root row.
+        """
+        if taxon_id is None:
+            return None
+        row = self.conn.execute(
+            """SELECT name FROM keywords
+               WHERE parent_id IS NULL
+                 AND taxon_id = ?
+                 AND (is_species = 1 OR type = 'taxonomy')
+               ORDER BY id LIMIT 1""",
+            (taxon_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["name"] or None
+
     def _lookup_taxon_id_for_keyword(self, name, prefer_species=False):
         """Return the local taxa.id matching a keyword name, if any.
 
@@ -14917,13 +14941,38 @@ class Database:
                     # it no longer carries, so it stops driving Highlights
                     # and Life List for the new species. Mirrors the
                     # migration in api_highlights_relabel.
-                    for old_name in old_species:
+                    #
+                    # Curation is canonicalized on write, so when
+                    # ``repair_duplicate_photo_species`` detaches the
+                    # root ``Verdin`` and leaves a hierarchy alias like
+                    # ``Desert Verdin`` attached, existing highlights and
+                    # representatives remain keyed on the canonical root
+                    # ``Verdin``. Renaming only from the raw removed row
+                    # name (the alias) would miss those rows and strand
+                    # the curation under the old species. Look up the
+                    # canonical root spelling for each removed row's
+                    # taxon and rename from both source names so either
+                    # layout migrates. Sidecar removes above still use
+                    # the raw ``old_name`` because the XMP file carries
+                    # the alias, not the root spelling.
+                    curation_sources = []
+                    seen_sources = set()
+                    for row in to_remove:
+                        for candidate in (row["name"], self._species_root_name_for_taxon(row["taxon_id"])):
+                            if not candidate:
+                                continue
+                            key = candidate.lower()
+                            if key in seen_sources:
+                                continue
+                            seen_sources.add(key)
+                            curation_sources.append(candidate)
+                    for source_name in curation_sources:
                         self.rename_species_highlights_species(
-                            old_name, species, [(photo_id, ws)],
+                            source_name, species, [(photo_id, ws)],
                             _commit=False,
                         )
                         self.rename_photo_preferences_species(
-                            old_name, species, [(photo_id, ws)],
+                            source_name, species, [(photo_id, ws)],
                             _commit=False,
                         )
                 changed_tag = not already_has_species

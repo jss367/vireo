@@ -5476,6 +5476,111 @@ def test_replace_prediction_records_affected_when_only_removals_occur(tmp_path):
     assert (pid, "Sparrow") in removed
 
 
+def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_path):
+    """When Replace Keywords strips a hierarchy alias whose taxon has curation
+    keyed on the canonical root spelling, highlights and representative
+    preferences must migrate onto the newly-tagged species.
+
+    ``repair_duplicate_photo_species`` leaves the alias leaf attached (say
+    ``Desert Verdin`` under ``Penduline tits``) and detaches the top-level
+    ``Verdin`` — but curation was preserved under the canonical root name
+    ``Verdin`` because that is where ``_canonical_curation_species`` keeps
+    it. Renaming the curation from only the raw alias ``Desert Verdin``
+    would leave ``species_highlights`` / ``photo_preferences`` stranded
+    under ``Verdin`` after the photo is retagged to a different species.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(
+        db,
+        [
+            (2912, "Auriparus flaviceps", "Verdin"),
+            (19860, "Campylorhynchus brunneicapillus", "Cactus Wren"),
+        ],
+    )
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    # Root species row exists (canonical curation key) but is NOT tagged on
+    # the photo — the post-repair layout after the redundant root was
+    # detached.
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+
+    # Curation lives under the canonical root spelling that repair kept as
+    # the species key, not under the raw hierarchy alias name.
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+             (workspace_id, purpose, species, photo_id)
+           VALUES (?, ?, ?, ?)""",
+        (ws_id, "highlights", "Verdin", pid),
+    )
+    db.conn.execute(
+        """INSERT INTO species_highlights
+             (workspace_id, species, photo_id, rank,
+              created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws_id, "Verdin", pid),
+    )
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Cactus Wren", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Cactus Wren" in names
+    assert "Desert Verdin" not in names
+
+    # Sidecar remove still uses the raw alias name (XMP carries it, not the
+    # canonical root spelling).
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Desert Verdin") in removed
+    assert result["affected"][0]["old_species"] == ["Desert Verdin"]
+
+    # Curation migrated from the canonical root Verdin onto Cactus Wren.
+    pref_species = {
+        row["species"] for row in db.conn.execute(
+            "SELECT species FROM photo_preferences WHERE photo_id = ?",
+            (pid,),
+        ).fetchall()
+    }
+    assert "Cactus Wren" in pref_species
+    assert "Verdin" not in pref_species
+
+    hl_species = {
+        row["species"] for row in db.conn.execute(
+            "SELECT species FROM species_highlights WHERE photo_id = ?",
+            (pid,),
+        ).fetchall()
+    }
+    assert "Cactus Wren" in hl_species
+    assert "Verdin" not in hl_species
+
+
 def test_replace_prediction_removes_ambiguous_legacy_homonym_row(tmp_path):
     """When Replace Keywords accepts a linked target and the photo carries
     an unlinked same-key homonym row, the ambiguous row must be treated as
