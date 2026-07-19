@@ -1606,18 +1606,50 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
         root = folder["path"].replace("\\", "/").rstrip("/").lower()
         prefix = root + "/"
         path_expr = "LOWER_UNICODE(REPLACE(f.path, '\\', '/'))"
+        descendant_predicate = f"substr({path_expr}, 1, ?) = ?"
+        descendant_params = (len(prefix), prefix)
     else:
         root = folder["path"].rstrip("/")
         prefix = root + "/"
         path_expr = "f.path"
+        case_insensitive_root = _case_insensitive_root(folder["path"])
+        if case_insensitive_root:
+            # On default macOS APFS and other case-folding POSIX volumes,
+            # lexical SQL prefixes can omit a real descendant whose stored
+            # path differs only by case. Reuse the alias-aware containment
+            # helper so the fold stays scoped to the filesystem that was
+            # actually probed as case-insensitive (important for mixed mount
+            # trees). Cache by folder path because the join can visit the
+            # same folder once per photo.
+            descendant_cache = {}
+
+            def _date_move_descends(candidate):
+                if candidate not in descendant_cache:
+                    descendant_cache[candidate] = int(
+                        _path_equal_or_descends(
+                            candidate,
+                            folder["path"],
+                            case_insensitive_root=case_insensitive_root,
+                        )
+                    )
+                return descendant_cache[candidate]
+
+            db.conn.create_function(
+                "VIREO_DATE_MOVE_DESCENDS", 1, _date_move_descends,
+            )
+            descendant_predicate = "VIREO_DATE_MOVE_DESCENDS(f.path) = 1"
+            descendant_params = ()
+        else:
+            descendant_predicate = f"substr({path_expr}, 1, ?) = ?"
+            descendant_params = (len(prefix), prefix)
     photos = db.conn.execute(
         f"""SELECT p.*, f.path AS folder_path
            FROM photos p
            JOIN folders f ON f.id = p.folder_id
            WHERE f.id = ?
-              OR substr({path_expr}, 1, ?) = ?
+              OR {descendant_predicate}
            ORDER BY p.id""",
-        (folder_id, len(prefix), prefix),
+        (folder_id, *descendant_params),
     ).fetchall()
 
     groups = {}
@@ -1868,6 +1900,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                 stem, no_destination_stem,
             )
             if existing_origin is not no_destination_stem \
+                    and existing_origin is not None \
                     and existing_origin != photo["folder_id"]:
                 log.warning(
                     "Move skipped for %s: developed render stem collides at "
@@ -1935,7 +1968,12 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                 (dest_folder_id, pid),
             )
             db.conn.commit()
-            destination_stem_origins.setdefault(stem, photo["folder_id"])
+            # An existing destination stem starts with an unknown historical
+            # origin (None). Allow the first incoming sibling in this call —
+            # required for incremental RAW/JPEG moves and retries — then pin
+            # the stem to that source folder so a second, distinct source in
+            # the same batch is still rejected.
+            destination_stem_origins[stem] = photo["folder_id"]
 
             # Rebase this photo's developed-output file(s) for the new folder
             # BEFORE removing originals. Both develop-job layouts need to

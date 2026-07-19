@@ -866,6 +866,84 @@ def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
     )
 
 
+def test_plan_folder_date_moves_matches_case_alias_on_casefolding_posix(
+    tmp_path, monkeypatch,
+):
+    """Case-only aliases on a case-insensitive POSIX volume are descendants."""
+    import move as move_mod
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    parent_disk = tmp_path / "Photos"
+    child_disk = parent_disk / "2026"
+    child_disk.mkdir(parents=True)
+    parent_fid = db.add_folder(str(parent_disk), name="Photos")
+    child_fid = db.add_folder(str(child_disk), name="2026")
+    parent_path = str(parent_disk)
+    child_alias = str(tmp_path / "photos" / "2026")
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        (child_alias, child_fid),
+    )
+    db.conn.commit()
+    child_pid = db.add_photo(
+        folder_id=child_fid, filename="child.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    # Simulate a case-insensitive POSIX filesystem while retaining the
+    # host's POSIX path implementation. Root-scoped fallback in
+    # _path_equal_or_descends then folds the case-only alias safely.
+    monkeypatch.setattr(move_mod, "_case_insensitive_root", lambda path: "/")
+
+    plan = move_mod.plan_folder_date_moves(
+        db, parent_fid, str(tmp_path / "archive"), "%Y-%m-%d",
+    )
+
+    assert parent_path != child_alias
+    assert [pid for item in plan for pid in item["photo_ids"]] == [child_pid]
+
+
+def test_move_photos_allows_incremental_same_stem_siblings(tmp_path):
+    """A RAW/JPEG pair may be moved to one destination in separate calls."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    destination = tmp_path / "destination"
+    raw = src / "IMG.CR3"
+    jpeg = src / "IMG.JPG"
+    raw.write_bytes(b"raw")
+    jpeg.write_bytes(b"jpeg")
+    raw_pid = db.add_photo(
+        folder_id=db.add_folder(str(src), name="src"),
+        filename=raw.name, extension=".cr3", file_size=3, file_mtime=1.0,
+    )
+    source_fid = db.get_photo(raw_pid)["folder_id"]
+    jpeg_pid = db.add_photo(
+        folder_id=source_fid, filename=jpeg.name, extension=".jpg",
+        file_size=4, file_mtime=2.0,
+    )
+    developed = src / "developed"
+    developed.mkdir()
+    (developed / "IMG.jpg").write_bytes(b"render")
+
+    first = move_photos(db, [raw_pid], str(destination))
+    second = move_photos(db, [jpeg_pid], str(destination))
+
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    assert second["moved"] == 1
+    assert second["errors"] == []
+    assert (destination / raw.name).read_bytes() == b"raw"
+    assert (destination / jpeg.name).read_bytes() == b"jpeg"
+    assert not raw.exists()
+    assert not jpeg.exists()
+
+
 def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
     """Regression: ``os.makedirs(destination, exist_ok=True)`` raises
     ``FileExistsError`` when the path exists as a regular file, so a
