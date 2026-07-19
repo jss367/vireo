@@ -345,6 +345,12 @@ body { display: flex; flex-direction: column; height: 100vh; }
         </select>
       </div>
       <div class="hint">Processing runs as its own job when the import finishes — a processing failure never touches imported photos.</div>
+      <div class="row" id="afterMoveRow" style="display:none; margin-top:10px;">
+        <label><input type="checkbox" id="chkAfterMove" onchange="updateAfterMoveUI()"> Then move to NAS</label>
+        <select id="afterMoveTarget" style="max-width:220px;" onchange="updateAfterMoveUI()"></select>
+      </div>
+      <div class="hint" id="afterMoveUnavailable" style="display:none;"></div>
+      <div class="remote-preview" id="afterMovePreview" style="display:none;"></div>
     </div>
 
     <div class="card">
@@ -505,6 +511,7 @@ function updateImportMode() {
   onImportDestModeChange();
   refreshSourceCounts();
   scheduleImportPreview();
+  updateAfterMoveUI();
 }
 
 function selectedFileTypes() {
@@ -589,6 +596,7 @@ function wireDestStructureInvalidation() {
     const onPreviewOptionChange = () => {
       hideDestStructure();
       scheduleImportPreview();
+      updateAfterMoveUI();
     };
     el.addEventListener('change', onPreviewOptionChange);
     el.addEventListener('input', onPreviewOptionChange);
@@ -609,6 +617,9 @@ function updateWorkspaceMode() {
   // which default (workspace-scoped vs global) the server will resolve
   // after_import against, so the After Import display must resync.
   updateAdvancedImportOptions();
+  // ...and the resync can change whether a process chains at all, which
+  // gates the "Then move to NAS" row.
+  updateAfterMoveUI();
 }
 
 function importRemoteTargetId() {
@@ -704,6 +715,7 @@ function onImportDestModeChange() {
   if (localRows) localRows.style.display = remoteId ? 'none' : '';
   if (remoteRows) remoteRows.style.display = remoteId ? '' : 'none';
   updateRemoteDestPreview();
+  updateAfterMoveUI();
 }
 
 async function loadImportRemoteTargets() {
@@ -727,6 +739,7 @@ async function loadImportRemoteTargets() {
     sel.appendChild(opt);
   });
   onImportDestModeChange();
+  updateAfterMoveUI();
 }
 
 function importEscapeHtml(s) {
@@ -1222,6 +1235,134 @@ function selectedAfterImport() {
   return Number.isNaN(n) ? null : n;
 }
 
+// True when a Start Import would chain a processing run — either the user
+// (or the workspace default prefill) has a real process selected, or the
+// "New workspace default" placeholder is masking a real global default the
+// server will apply after creating the workspace. The chained NAS move
+// fires from that processing run, so this gates the "Then move to NAS" row.
+function afterImportChainsProcess() {
+  const sel = document.getElementById('afterImportSelect');
+  if (!sel) return false;
+  if (sel.value === '__hidden_default__') {
+    const placeholder = document.getElementById('afterImportHiddenDefault');
+    return !!(placeholder && placeholder.dataset.maskedValue);
+  }
+  return selectedAfterImport() !== null;
+}
+
+// Normalize a path for prefix comparison: forward slashes, no trailing
+// slash. Case-sensitive compare is fine — the server re-validates with
+// realpath/commonpath at enqueue time and stays authoritative.
+function afterMoveNormPath(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function afterMovePathInsideRoot(destination, root) {
+  const d = afterMoveNormPath(destination);
+  const r = afterMoveNormPath(root);
+  return !!r && (d === r || d.indexOf(r + '/') === 0);
+}
+
+// A remote target can host the chained move only when the chosen archive
+// destination sits inside its local_archive_root. This client-side prefix
+// check mirrors the server's realpath/commonpath validation closely enough
+// for UI gating; the server remains the authority.
+function afterMoveEligibleTargets() {
+  const destination = (document.getElementById('destInput').value || '').trim();
+  if (!importIsAbsolutePath(destination)) return [];
+  return importRemoteTargets.filter(
+    (t) => t.local_archive_root
+      && afterMovePathInsideRoot(destination, t.local_archive_root));
+}
+
+function updateAfterMoveUI() {
+  const row = document.getElementById('afterMoveRow');
+  const unavailable = document.getElementById('afterMoveUnavailable');
+  const preview = document.getElementById('afterMovePreview');
+  const sel = document.getElementById('afterMoveTarget');
+  if (!row || !unavailable || !preview || !sel) return;
+  const hideAll = () => {
+    row.style.display = 'none';
+    unavailable.style.display = 'none';
+    preview.style.display = 'none';
+  };
+  // The chained move only exists for local-disk archive copies that chain
+  // a processing run — everything else hides the row entirely, and a
+  // hidden row means startImport() sends after_process_move: null no
+  // matter what the (stale) checkbox says.
+  if (selectedImportMode() !== 'copy' || importRemoteTargetId()
+      || !afterImportChainsProcess()) {
+    hideAll();
+    return;
+  }
+  const eligible = afterMoveEligibleTargets();
+  if (!eligible.length) {
+    hideAll();
+    // Only claim "unavailable" once there is a concrete destination to
+    // judge — an empty or relative destination isn't decidable yet.
+    const destination = (document.getElementById('destInput').value || '').trim();
+    if (importIsAbsolutePath(destination)) {
+      unavailable.textContent =
+        "Move to NAS unavailable: the destination is not inside any remote "
+        + "target's local archive root. Set one under Settings → Remote targets.";
+      unavailable.style.display = '';
+    }
+    return;
+  }
+  unavailable.style.display = 'none';
+  row.style.display = '';
+  // Repopulate with the currently-eligible targets, preserving the user's
+  // pick when it is still eligible; a single eligible target selects
+  // itself (a freshly-populated select shows its first option).
+  const previous = sel.value;
+  while (sel.options.length) sel.remove(0);
+  eligible.forEach((t) => {
+    const opt = document.createElement('option');
+    opt.value = t.id;
+    opt.textContent = t.name;
+    sel.appendChild(opt);
+  });
+  if (eligible.some((t) => t.id === previous)) sel.value = previous;
+  if (!document.getElementById('chkAfterMove').checked) {
+    preview.style.display = 'none';
+    preview.textContent = '';
+    return;
+  }
+  const target = eligible.find((t) => t.id === sel.value) || eligible[0];
+  const destination = afterMoveNormPath(
+    (document.getElementById('destInput').value || '').trim());
+  const root = afterMoveNormPath(target.local_archive_root);
+  const rel = destination === root ? '' : destination.slice(root.length + 1);
+  const remoteBase =
+    afterMoveNormPath(target.remote_path) + (rel ? '/' + rel : '');
+  const mountOk =
+    !!target.mount_path && importIsAbsolutePath(target.mount_path);
+  const mountBase = mountOk
+    ? afterMoveNormPath(target.mount_path) + (rel ? '/' + rel : '') : '';
+  preview.textContent = '';
+  const line = document.createElement('div');
+  line.textContent =
+    'After processing, each imported folder moves to '
+    + remoteBase + '/<imported folder>'
+    + (mountOk
+        ? ' and the catalog repoints to ' + mountBase + '/<imported folder>.'
+        : '.')
+    + " Photos leave this computer's archive.";
+  preview.appendChild(line);
+  if (!importRsyncAvailable) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: no GNU rsync found, so the move would fail. Install GNU rsync or set its path under Settings > Paths.'));
+  }
+  if (!target.mount_path) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: this target needs a local mount path so moved photos stay in your library. Add one under Settings > Remote targets.'));
+  } else if (!importIsAbsolutePath(target.mount_path)) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: this target local mount path must be absolute.'));
+  }
+  preview.style.display = '';
+}
+
 function retireHiddenDefaultOption(sel) {
   const placeholder = document.getElementById('afterImportHiddenDefault');
   if (!placeholder) return;
@@ -1297,6 +1438,10 @@ function updateAdvancedImportOptions() {
 
 window.addEventListener('advancedmodechange', updateAdvancedImportOptions);
 window.addEventListener('devmodechange', updateAdvancedImportOptions);
+// Registered after the resync handlers above so the move row re-evaluates
+// against the already-updated After Import selection.
+window.addEventListener('advancedmodechange', updateAfterMoveUI);
+window.addEventListener('devmodechange', updateAfterMoveUI);
 
 // True once initImportPage() has resolved the workspace's after-import
 // default into the select. Until then, the select still shows its HTML
@@ -2091,6 +2236,15 @@ async function startImport() {
   ) {
     body.after_import = selectedAfterImport();
   }
+  // The chained NAS move is only offered while its row is visible (local
+  // archive copy + chained process + eligible target) — a hidden row means
+  // a stale checkbox must not send anything.
+  body.after_process_move =
+    (document.getElementById('chkAfterMove').checked &&
+     document.getElementById('afterMoveRow').style.display !== 'none' &&
+     document.getElementById('afterMoveTarget').value)
+      ? {remote_target_id: document.getElementById('afterMoveTarget').value}
+      : null;
   document.getElementById('btnStart').disabled = true;
   try {
     const resp = await fetch(copyMode ? '/api/jobs/import-photos' : '/api/jobs/import-in-place', {
@@ -2268,13 +2422,22 @@ function renderTaggingInfo(res) {
 
 function renderChainInfo(res) {
   const chain = document.getElementById('chainInfo');
+  const parts = [];
   if (res.process_job_id) {
-    chain.textContent = 'Processing started as its own job: ' + res.process_job_id;
+    parts.push('Processing started as its own job: ' + res.process_job_id);
   } else if (res.after_import_skipped) {
-    chain.textContent = 'Processing not started: ' + res.after_import_skipped;
-  } else {
-    chain.textContent = '';
+    parts.push('Processing not started: ' + res.after_import_skipped);
   }
+  // Set only when the chained process job actually enqueued with a move
+  // plan, so this states what WILL happen, not what was merely requested.
+  if (res.after_process_move_planned) {
+    const n = (res.after_process_move_planned.folders || []).length;
+    parts.push(
+      'Processing will be followed by a move to NAS ('
+      + res.after_process_move_planned.target_name + '): '
+      + n + ' folder' + (n === 1 ? '' : 's') + '.');
+  }
+  chain.textContent = parts.join(' ');
 }
 
 function renderModelWarning(res) {
@@ -2400,6 +2563,7 @@ async function initImportPage() {
     // default (hidden)" placeholder is no longer relevant — retire it
     // so it doesn't clutter the dropdown on the next open.
     if (sel.value !== '__hidden_default__') retireHiddenDefaultOption(sel);
+    updateAfterMoveUI();
   });
   _afterImportHidingDefault = false;
   // Only mark the resolved default as trustworthy when BOTH config
