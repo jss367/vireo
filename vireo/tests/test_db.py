@@ -13118,6 +13118,90 @@ def test_get_species_keywords_includes_taxonomy_typed_without_is_species(tmp_pat
     assert db.get_species_keywords_for_photos([pid]) == {pid: ["Lesser Scaup"]}
 
 
+def test_species_queries_use_taxon_rank_and_dedupe_hierarchy_by_taxon(tmp_path):
+    """A hierarchy ancestor is taxonomy, not a species badge; duplicate
+    hierarchy/root leaves for one species collapse by taxon identity."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (2912, "Auriparus flaviceps", "Verdin"),
+    ])
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) "
+        "VALUES (38595, 'Remizidae', 'Penduline tits', 'family')"
+    )
+    db.conn.commit()
+
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    birds = db.add_keyword("1Birds")
+    family = db.add_keyword("Penduline tits", parent_id=birds)
+    nested = db.add_keyword("Verdin", parent_id=family)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, family)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+
+    assert db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (root,)
+    ).fetchone()["taxon_id"] == taxa["Verdin"]
+    assert db.is_keyword_species(family) is False
+    assert db.is_keyword_species(nested) is True
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+    assert db.get_photos_with_equivalent_species([pid], root) == {pid}
+
+    rows = {row["id"]: row for row in db.get_keywords_for_photos([pid])[pid]}
+    assert rows[family]["taxon_rank"] == "family"
+    assert rows[nested]["taxon_rank"] == "species"
+
+
+def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path):
+    """The one-shot repair detaches only the redundant root association."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    # Simulate the legacy confirmed-species insert path, which left root
+    # taxonomy rows unlinked even when the local taxon was known.
+    db.conn.execute("UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,))
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.queue_change(pid, "keyword_add", "Verdin")
+    db.record_edit(
+        "keyword_add", 'Confirmed species "Verdin"', str(root),
+        [{"photo_id": pid, "old_value": "", "new_value": str(root)}],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE id = ?", (root,)
+    ).fetchone() is not None
+    assert not [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid and row["value"] == "Verdin"
+    ]
+    history_item = db.conn.execute(
+        "SELECT new_value FROM edit_history_items WHERE photo_id = ?", (pid,)
+    ).fetchone()
+    assert history_item["new_value"] == str(nested)
+    assert db.repair_duplicate_photo_species() == 0
+
+
 def test_update_keyword_rename_general_no_match_stays_general(tmp_path):
     """Renaming a 'general' keyword to a name with no taxon match leaves
     it as 'general' with NULL taxon_id."""

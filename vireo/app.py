@@ -3021,6 +3021,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # tags or stale XMP. The method is idempotent (db_meta-gated) so
     # subsequent boots are a cheap SELECT.
     init_db.normalize_keyword_data()
+    # Remove same-photo, same-taxon duplicate associations left by the old
+    # hierarchy-import + top-level-confirmation interaction. Idempotent and
+    # db_meta-gated, so later boots only pay for a single marker lookup.
+    init_db.repair_duplicate_photo_species()
     # One-time rewrite of the previous miss-threshold defaults (0.25 / 0.15)
     # to the new defaults (0.20 / 0.12) in both ~/.vireo/config.json and
     # workspace overrides. Gated by a marker so it runs once; re-saved
@@ -10564,8 +10568,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     """SELECT k.id, k.name, k.is_species, k.type
                        FROM photo_keywords pk
                        JOIN keywords k ON k.id = pk.keyword_id
+                       LEFT JOIN taxa t ON t.id = k.taxon_id
                        WHERE pk.photo_id = ?
                          AND (k.is_species = 1 OR k.type = 'taxonomy')
+                         AND (t.rank = 'species' OR t.rank IS NULL)
                        ORDER BY k.is_species DESC, pk.rowid DESC""",
                     (pid,),
                 ).fetchall()
@@ -12273,18 +12279,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 ).fetchone()
                 if stored and stored["name"]:
                     species = stored["name"]
+                already_has_species = db.get_photos_with_equivalent_species(
+                    picks, kid
+                )
+                added_picks = []
                 for pid in picks:
                     db.update_photo_flag(pid, "flagged")
+                    if pid in already_has_species:
+                        continue
                     db.tag_photo(pid, kid)
                     db.queue_change(pid, "keyword_add", species)
+                    added_picks.append(pid)
 
                 # Record keyword_add history for picks
-                kw_items = [{'photo_id': pid, 'old_value': '', 'new_value': str(kid)}
-                            for pid in picks]
+                kw_items = [
+                    {'photo_id': pid, 'old_value': '', 'new_value': str(kid)}
+                    for pid in added_picks
+                ]
                 if kw_items:
                     db.record_edit('keyword_add',
-                                   f'Added "{species}" to {len(picks)} photos (group prediction)',
-                                   str(kid), kw_items, is_batch=len(picks) > 1)
+                                   f'Added "{species}" to {len(added_picks)} photos (group prediction)',
+                                   str(kid), kw_items, is_batch=len(added_picks) > 1)
             else:
                 # No species — still flag picks
                 for pid in picks:
@@ -23530,7 +23545,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
                 return hits
 
-            already_has_new = _photos_with_keyword(kid)
+            # A species can already be attached through a hierarchical
+            # keyword row with a different id/casing. Compare by taxon_id (or
+            # normalized name for taxonomy-less legacy rows), otherwise a
+            # confirmation creates a redundant top-level association.
+            already_has_new = db.get_photos_with_equivalent_species(photo_ids, kid)
             newly_tagged = [pid for pid in photo_ids if pid not in already_has_new]
 
             # For a replacement, only photos that actually carry the old

@@ -1502,6 +1502,29 @@ def test_load_photo_features_confirmed_species(tmp_path):
     assert len(unconfirmed) == len(ids[1])
 
 
+def test_load_photo_features_ignores_taxonomy_ancestors_as_species(tmp_path):
+    """A family keyword may be taxonomy-typed, but only the species-rank
+    hierarchy leaf should become confirmed_species."""
+    from pipeline import load_photo_features
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) VALUES "
+        "(38595, 'Remizidae', 'Penduline tits', 'family'), "
+        "(2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    birds = db.add_keyword("1Birds")
+    family = db.add_keyword("Penduline tits", parent_id=birds)
+    species = db.add_keyword("Verdin", parent_id=family)
+    pid = ids[0][0]
+    db.tag_photo(pid, family)
+    db.tag_photo(pid, species)
+
+    photo = next(p for p in load_photo_features(db) if p["id"] == pid)
+    assert photo["confirmed_species"] == "Verdin"
+
+
 def test_confirmed_species_deterministic_with_multiple_tags(tmp_path):
     """When a photo has multiple species tags, confirmed_species is deterministic (alphabetically first)."""
     from pipeline import load_photo_features

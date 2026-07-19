@@ -774,6 +774,52 @@ def test_encounter_species_confirm(app_and_db):
     assert len(kw_adds) == len(photo_ids)
 
 
+def test_encounter_species_confirm_reuses_hierarchical_taxon(app_and_db):
+    """Confirming Verdin must not attach a top-level duplicate to a photo
+    that already carries the hierarchical Verdin taxon."""
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_ids = [
+        row["id"] for row in db.conn.execute(
+            "SELECT id FROM photos ORDER BY id LIMIT 2"
+        ).fetchall()
+    ]
+    nested_photo, untagged_photo = photo_ids
+    birds = db.add_keyword("1Birds")
+    family = db.add_keyword("Penduline tits", parent_id=birds)
+    nested = db.add_keyword("Verdin", parent_id=family)
+    db.tag_photo(nested_photo, nested)
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Verdin", "photo_ids": photo_ids},
+    )
+    assert resp.status_code == 200
+    root = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = 'Verdin' AND parent_id IS NULL"
+    ).fetchone()["id"]
+
+    nested_ids = {row["id"] for row in db.get_photo_keywords(nested_photo)}
+    untagged_ids = {row["id"] for row in db.get_photo_keywords(untagged_photo)}
+    assert nested in nested_ids
+    assert root not in nested_ids
+    assert root in untagged_ids
+    assert db.get_species_keywords_for_photos(photo_ids) == {
+        nested_photo: ["Verdin"],
+        untagged_photo: ["Verdin"],
+    }
+    additions = [
+        row for row in db.get_pending_changes()
+        if row["change_type"] == "keyword_add" and row["value"] == "Verdin"
+    ]
+    assert [row["photo_id"] for row in additions] == [untagged_photo]
+
+
 def test_encounter_species_confirm_ignores_corrupt_pipeline_cache(app_and_db):
     """A bad pipeline cache must not turn species confirmation into a 500."""
     app, db = app_and_db
