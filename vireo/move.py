@@ -1592,9 +1592,17 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
     # '/photos/a/b/...' and drag unrelated rows into this move. This mirrors
     # the platform-aware treatment in ``ingest.py``.
     if sys.platform == "win32":
-        root = folder["path"].replace("\\", "/").rstrip("/")
+        # Windows paths are case-insensitive as well as separator-agnostic.
+        # Use the same Unicode-aware SQL fold as ingest's descendant
+        # prefilter so a catalog row such as ``c:\\photos\\2026`` is still
+        # included when its tracked parent is stored as ``C:\\Photos``.
+        db.conn.create_function(
+            "LOWER_UNICODE", 1,
+            lambda s: s.lower() if s is not None else None,
+        )
+        root = folder["path"].replace("\\", "/").rstrip("/").lower()
         prefix = root + "/"
-        path_expr = "REPLACE(f.path, '\\', '/')"
+        path_expr = "LOWER_UNICODE(REPLACE(f.path, '\\', '/'))"
     else:
         root = folder["path"].rstrip("/")
         prefix = root + "/"
@@ -1642,6 +1650,11 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
         if common != destination_root:
             raise ValueError(
                 f"folder template produced an unsafe path: {relative!r}"
+            )
+        if os.path.exists(candidate) and not os.path.isdir(candidate):
+            raise ValueError(
+                f"date destination already exists and is not a directory: "
+                f"{candidate}"
             )
         plans.append({
             "relative_path": relative,

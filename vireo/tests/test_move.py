@@ -711,6 +711,54 @@ def test_plan_folder_date_moves_rejects_template_that_escapes_destination(tmp_pa
         )
 
 
+def test_plan_folder_date_moves_rejects_destination_occupied_by_file(tmp_path):
+    """A rendered date path must be a directory or available to create."""
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-07-12").write_bytes(b"occupied")
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(archive), "%Y-%m-%d")
+
+
+def test_plan_folder_date_moves_case_folds_descendants_on_windows(
+    tmp_path, monkeypatch,
+):
+    """Windows descendant discovery ignores case and separator differences."""
+    import move as move_mod
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    root_id = db.add_folder(r"C:\Photos", name="Photos")
+    child_id = db.add_folder(r"c:\photos\2026", name="2026")
+    child_photo_id = db.add_photo(
+        folder_id=child_id, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    monkeypatch.setattr(move_mod.sys, "platform", "win32")
+
+    plan = move_mod.plan_folder_date_moves(
+        db, root_id, str(tmp_path / "archive"), "%Y-%m-%d",
+    )
+
+    assert [photo_id for item in plan for photo_id in item["photo_ids"]] == [
+        child_photo_id,
+    ]
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="Windows doesn't allow '\\' in folder names, so folding '\\' to '/' "

@@ -524,6 +524,31 @@ def test_move_folder_preflight_plans_multiple_capture_date_folders(
     ]
 
 
+def test_move_folder_preflight_rejects_date_destination_occupied_by_file(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    src = tmp_path / "dated-source"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="dated-source")
+    db.add_photo(
+        folder_id=fid, filename="bird.jpg", extension=".jpg",
+        file_size=4, file_mtime=1.0, timestamp="2026-07-12T10:00:00",
+    )
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-07-12").write_bytes(b"occupied")
+
+    resp = app.test_client().post("/api/move-folder/preflight", json={
+        "folder_id": fid,
+        "destination": str(archive),
+        "folder_template": "%Y-%m-%d",
+    })
+
+    assert resp.status_code == 400
+    assert "not a directory" in resp.get_json()["error"]
+
+
 def test_move_folder_preflight_rejects_invalid_destination_name(
     app_and_db, tmp_path,
 ):
