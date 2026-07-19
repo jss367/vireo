@@ -1532,3 +1532,22 @@ def test_remote_target_local_archive_root_rejects_inside_mount(tmp_path, monkeyp
     assert coerced is not None
     assert coerced["local_archive_root"] == ""
     assert coerced["mount_path"] == mount
+
+
+def test_remote_target_relative_mount_path_keeps_archive_root(tmp_path, monkeypatch):
+    """A relative mount_path must not blank a valid local_archive_root: the
+    inside-mount containment check would otherwise realpath the mount against
+    the server's CWD, making the outcome depend on where the server was
+    launched."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    archive_root = str(tmp_path / "archive")
+    # Relative mount spelled so a CWD of tmp_path would make archive_root
+    # look nested inside it.
+    monkeypatch.chdir(tmp_path)
+    coerced = cfg._coerce_remote_target(_base_target(
+        mount_path=".", local_archive_root=archive_root,
+    ))
+    assert coerced is not None
+    assert coerced["local_archive_root"] == archive_root

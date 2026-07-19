@@ -716,7 +716,12 @@ def _coerce_remote_target(entry):
     if local_archive_root:
         if not os.path.isabs(local_archive_root):
             local_archive_root = ""
-        elif mount_path:
+        elif mount_path and os.path.isabs(mount_path):
+            # A relative mount_path would realpath against the server's
+            # CWD here, making this containment check depend on where the
+            # server happened to be launched — it could blank a perfectly
+            # valid archive root. Relative mounts are unusable for
+            # transfers anyway, so skip the check instead of resolving.
             try:
                 if os.path.commonpath([
                     os.path.realpath(local_archive_root),
