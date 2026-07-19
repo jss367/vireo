@@ -317,6 +317,149 @@ def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path):
     assert plan[0]["relative_path"] == "unsorted"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows doesn't allow '\\' in folder names, so folding '\\' to '/' "
+    "in the descendants query is the correct Windows behavior; the leak only "
+    "affects POSIX where a literal backslash IS a legal filename character.",
+)
+def test_plan_folder_date_moves_does_not_leak_slash_siblings_on_posix(tmp_path):
+    """Regression: a POSIX folder whose name contains '\\' must not swallow
+    a sibling '/'-separated subtree.
+
+    ``/photos/a\\b`` and ``/photos/a/b/nested`` are distinct directories on
+    POSIX. If the descendants query folds '\\' to '/' before comparing
+    prefixes, the ``/photos/a\\b`` prefix becomes ``/photos/a/b/`` and matches
+    every row under ``/photos/a/b/…`` — pulling photos that don't belong to
+    the selected folder into the plan (and, worse, into the move that
+    executes it).
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    photos_root = tmp_path / "photos"
+    photos_root.mkdir()
+
+    backslash_dir = photos_root / "a\\b"
+    backslash_dir.mkdir()
+    (backslash_dir / "target.jpg").write_bytes(b"target")
+
+    slash_parent = photos_root / "a"
+    slash_parent.mkdir()
+    (slash_parent / "b").mkdir()
+    slash_nested = slash_parent / "b" / "nested"
+    slash_nested.mkdir()
+    (slash_nested / "sibling.jpg").write_bytes(b"sibling")
+
+    fid_target = db.add_folder(str(backslash_dir), name="a\\b")
+    fid_nested = db.add_folder(str(slash_nested), name="nested")
+    db.add_photo(
+        folder_id=fid_target, filename="target.jpg", extension=".jpg",
+        file_size=6, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid_nested, filename="sibling.jpg", extension=".jpg",
+        file_size=7, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    plan = plan_folder_date_moves(
+        db, fid_target, str(tmp_path / "archive"), "%Y-%m-%d",
+    )
+
+    # Only the photo actually under /photos/a\b appears in the plan.
+    planned_ids = {pid for group in plan for pid in group["photo_ids"]}
+    assert len(planned_ids) == 1
+    only_id = next(iter(planned_ids))
+    only_photo = db.get_photo(only_id)
+    assert only_photo["filename"] == "target.jpg"
+
+
+def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):
+    """A post-commit os.remove failure must not roll back the catalog and
+    must not abort remaining photos in the batch.
+
+    Before the fix, os.remove on a locked or read-only source file raised
+    out of the loop after the ``UPDATE photos`` commit — the catalog for
+    the current photo already pointed at the destination, its developed
+    render was still under the old folder key, and every subsequent photo
+    in the batch was skipped.
+    """
+    import move as move_mod
+
+    env = move_env
+
+    original_remove = move_mod.os.remove
+
+    def failing_remove(path):
+        if path.endswith("bird1.jpg") and env["src"].as_posix() in path:
+            raise OSError("permission denied")
+        return original_remove(path)
+
+    monkeypatch.setattr(move_mod.os, "remove", failing_remove)
+
+    result = move_mod.move_photos(
+        db=env["db"],
+        photo_ids=[env["p1"], env["p2"]],
+        destination=str(env["dst"]),
+    )
+
+    # The batch completes: bird1 counts as moved (destination has the file
+    # and the catalog is repointed) and bird2 is unaffected. bird1's
+    # leftover original is reported as a per-photo error.
+    assert result["moved"] == 2
+    assert any("bird1.jpg" in err for err in result["errors"])
+    assert (env["dst"] / "bird1.jpg").exists()
+    assert (env["dst"] / "bird2.jpg").exists()
+    # Catalog points at the new folder for both.
+    p1_row = env["db"].get_photo(env["p1"])
+    p2_row = env["db"].get_photo(env["p2"])
+    assert p1_row["folder_id"] == env["fid_dst"]
+    assert p2_row["folder_id"] == env["fid_dst"]
+
+
+def test_move_photos_rebases_developed_before_source_cleanup(
+    move_env, monkeypatch,
+):
+    """Regression: even when os.remove of the source fails, the developed
+    render must already be relocated to the new folder key so full-res /
+    export lookups don't silently fall back to RAW.
+    """
+    import move as move_mod
+    from export import developed_folder_key
+
+    env = move_env
+
+    developed = env["tmp_path"] / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(env["src"]))
+    new_key = developed_folder_key(str(env["dst"]))
+    (developed / old_key).mkdir()
+    (developed / old_key / "bird1.jpg").write_bytes(b"bird1-dev")
+
+    original_remove = move_mod.os.remove
+
+    def failing_remove(path):
+        if path.endswith("bird1.jpg") and env["src"].as_posix() in path:
+            raise OSError("permission denied")
+        return original_remove(path)
+
+    monkeypatch.setattr(move_mod.os, "remove", failing_remove)
+
+    move_mod.move_photos(
+        db=env["db"],
+        photo_ids=[env["p1"]],
+        destination=str(env["dst"]),
+        developed_dir=str(developed),
+    )
+
+    # Developed render followed the catalog even though source cleanup
+    # blew up mid-loop.
+    assert (developed / new_key / "bird1.jpg").read_bytes() == b"bird1-dev"
+
+
 def test_move_photos_collision_skips(move_env):
     """move_photos reports collision and skips conflicting files."""
     from move import move_photos

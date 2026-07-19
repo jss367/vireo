@@ -1586,14 +1586,25 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
     if not folder:
         raise ValueError("Folder not found")
 
-    root = folder["path"].replace("\\", "/").rstrip("/")
-    prefix = root + "/"
+    # Fold '\' to '/' only on Windows, where either separator can appear in
+    # stored paths. On POSIX '\' is a legal filename character — folding it
+    # would collapse a sibling like '/photos/a\b' onto the descendants of
+    # '/photos/a/b/...' and drag unrelated rows into this move. This mirrors
+    # the platform-aware treatment in ``ingest.py``.
+    if sys.platform == "win32":
+        root = folder["path"].replace("\\", "/").rstrip("/")
+        prefix = root + "/"
+        path_expr = "REPLACE(f.path, '\\', '/')"
+    else:
+        root = folder["path"].rstrip("/")
+        prefix = root + "/"
+        path_expr = "f.path"
     photos = db.conn.execute(
-        """SELECT p.*, f.path AS folder_path
+        f"""SELECT p.*, f.path AS folder_path
            FROM photos p
            JOIN folders f ON f.id = p.folder_id
            WHERE f.id = ?
-              OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?
+              OR substr({path_expr}, 1, ?) = ?
            ORDER BY p.id""",
         (folder_id, len(prefix), prefix),
     ).fetchall()
@@ -1816,18 +1827,15 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             )
             db.conn.commit()
 
-            # Now safe to delete originals
-            os.remove(src_file)
-            for comp in companions:
-                comp_src = os.path.join(src_dir, comp)
-                if os.path.isfile(comp_src):
-                    os.remove(comp_src)
-
             # Rebase this photo's developed-output file for the new folder
-            # key. `developed_folder_key` hashes the folder path, so the
-            # folder_id update above just invalidated the lookup — without
-            # this rebase, `_iter_developed_outputs` would look under the
-            # new hash, miss the render, and fall back to the RAW.
+            # key BEFORE removing originals. `developed_folder_key` hashes the
+            # folder path, so the folder_id update above just invalidated the
+            # lookup — without this rebase, `_iter_developed_outputs` would
+            # look under the new hash, miss the render, and fall back to the
+            # RAW. Doing it before cleanup means a subsequent os.remove
+            # failure (read-only source dir, locked file on Windows) still
+            # leaves the catalog and developed render pointing at the same
+            # (new) folder key.
             if developed_dir:
                 try:
                     from .export import relocate_developed_file
@@ -1836,6 +1844,29 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                 stem = os.path.splitext(photo["filename"])[0]
                 relocate_developed_file(
                     developed_dir, src_dir, destination, stem,
+                )
+
+            # Now safe to delete originals. The catalog and developed
+            # outputs are already at the new location, so a cleanup failure
+            # here is post-commit: report it as a per-photo error so the
+            # caller can surface the leftover originals, but keep the batch
+            # moving. Without this catch a single OSError (read-only source
+            # directory, locked file on Windows) would abort every remaining
+            # photo in the batch with the catalog already repointed for the
+            # ones processed so far.
+            try:
+                os.remove(src_file)
+                for comp in companions:
+                    comp_src = os.path.join(src_dir, comp)
+                    if os.path.isfile(comp_src):
+                        os.remove(comp_src)
+            except OSError as exc:
+                log.warning(
+                    "Post-commit cleanup of %s failed: %s",
+                    src_file, exc,
+                )
+                errors.append(
+                    f"{photo['filename']}: original not deleted ({exc})"
                 )
 
             moved += 1
