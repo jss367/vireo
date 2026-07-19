@@ -1373,16 +1373,24 @@ function afterImportChainsProcess() {
   return selectedAfterImport() !== null;
 }
 
-// Normalize a path for prefix comparison: forward slashes, no trailing
-// slash. Case-sensitive compare is fine — the server re-validates with
-// realpath/commonpath at enqueue time and stays authoritative.
+// Normalize a path for display and prefix math: forward slashes, no
+// trailing slash. Case is PRESERVED — this feeds the visible move preview
+// (NAS-side paths are case-sensitive) and the rel-subpath slicing.
 function afterMoveNormPath(p) {
   return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
+// Containment gate compares case-INSENSITIVELY, mirroring the server's
+// alias-folding check (_validate_after_process_move via
+// _path_equal_or_descends): on the default case-insensitive macOS/Windows
+// volumes "/volumes/photos/2026" IS inside "/Volumes/Photos", and a
+// case-sensitive gate here would hide the "Then move to NAS" row for a
+// request the server accepts. The server stays authoritative — on a
+// genuinely case-sensitive filesystem the worst case is a clear 400 at
+// Start Import instead of a silently missing option.
 function afterMovePathInsideRoot(destination, root) {
-  const d = afterMoveNormPath(destination);
-  const r = afterMoveNormPath(root);
+  const d = afterMoveNormPath(destination).toLowerCase();
+  const r = afterMoveNormPath(root).toLowerCase();
   return !!r && (d === r || d.indexOf(r + '/') === 0);
 }
 
