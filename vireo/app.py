@@ -20434,7 +20434,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(f"unknown process id: {value}")
         return None
 
-    def _validate_after_process_move(value, after_import, destination):
+    def _validate_after_process_move(
+        value, after_import, destination, folder_template,
+    ):
         """Validate an after_process_move spec; return (target_snapshot, error).
 
         ``None`` value → (None, None). Otherwise the value must name a saved
@@ -20475,15 +20477,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "this remote target has no local archive root — set one "
                 "under Settings → Remote targets")
         try:
-            inside = os.path.commonpath([
-                os.path.realpath(destination), os.path.realpath(root),
-            ]) == os.path.realpath(root)
+            dest_real = os.path.realpath(destination)
+            root_real = os.path.realpath(root)
+            inside = os.path.commonpath([dest_real, root_real]) == root_real
         except ValueError:
-            inside = False
+            return None, json_error(
+                "destination is not inside the remote target's local "
+                f"archive root ({root})")
         if not inside:
             return None, json_error(
                 "destination is not inside the remote target's local "
                 f"archive root ({root})")
+        # Root-level import with a folder template that resolves to "." lands
+        # photos on the local_archive_root itself. The chained move
+        # deliberately skips the root (moving it would sweep unrelated shoots
+        # into the transfer), so the chain would accept the request and later
+        # silently move nothing. Reject up front instead. Empty and "." both
+        # produce a rel of "." in the import job's ``or "."`` fallback.
+        template_stripped = (folder_template or "").strip()
+        if dest_real == root_real and template_stripped in ("", "."):
+            return None, json_error(
+                "after_process_move requires a folder_template when the "
+                "destination is the target's local archive root — a template "
+                "that resolves to \".\" would land photos on the root itself, "
+                "which the chained move deliberately skips")
         return target, None
 
     def _create_import_collection(thread_db, photo_ids):
@@ -21055,14 +21072,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # omitted -> default from the workspace's pipeline.default_process_id
         # (nullable, same vocabulary). Stored in the job config for the
         # PR 3 chaining hook; the import job itself never reads it.
-        # Preflight an explicit value before creating a workspace so a bad
-        # string doesn't leave an orphan Archive Import behind.
+        # Resolve and validate BEFORE creating any new workspace so a bad
+        # value doesn't leave an orphan Archive Import behind. When the
+        # request omits the key and asks to create a new workspace, we can't
+        # read the workspace-scoped default (the workspace doesn't exist yet,
+        # and reading get_effective_config off the previously-active
+        # workspace would leak its override into the new-workspace import).
+        # A brand-new workspace has no config_overrides, so the effective
+        # default is just the global config value — read that directly.
+        import config as cfg
+
         explicit_after_import = "after_import" in body
         if explicit_after_import:
             after_import = body.get("after_import")
-            err = _validate_after_import(after_import, db)
-            if err is not None:
-                return err
+        elif "new_workspace_name" in body:
+            after_import = (
+                cfg.load().get("pipeline", {}).get("default_process_id")
+            )
+        else:
+            effective_cfg = db.get_effective_config(cfg.load())
+            after_import = (
+                effective_cfg.get("pipeline", {}).get("default_process_id")
+            )
+        err = _validate_after_import(after_import, db)
+        if err is not None:
+            return err
 
         file_types = body.get("file_types", "both")
         skip_duplicates = bool(body.get("skip_duplicates", True))
@@ -21076,26 +21110,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         if tag_options_err is not None:
             return tag_options_err
-
-        active_ws, created_workspace, workspace_err = (
-            _prepare_import_workspace(db, body)
-        )
-        if workspace_err is not None:
-            return workspace_err
-
-        # Resolve the omitted-default AFTER the workspace switch. Reading
-        # pipeline.default_process_id off the previously-active workspace
-        # would leak that workspace's override into a new-workspace import.
-        if not explicit_after_import:
-            import config as cfg
-
-            effective_cfg = db.get_effective_config(cfg.load())
-            after_import = (
-                effective_cfg.get("pipeline", {}).get("default_process_id")
-            )
-            err = _validate_after_import(after_import, db)
-            if err is not None:
-                return err
 
         # Snapshot the chosen saved process's stage flags at enqueue time
         # so a mid-import edit or delete can't silently change (or void)
@@ -21115,12 +21129,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # completes. Requires after_import (the move fires from the process
         # job's completion hook) and a destination inside the target's
         # local archive root; snapshotted now so a mid-chain Settings edit
-        # can't redirect the move.
+        # can't redirect the move. Runs before workspace creation so a bad
+        # target/root/destination doesn't leave an orphan workspace behind.
         move_target_snapshot, move_err = _validate_after_process_move(
-            after_process_move, after_import, destination,
+            after_process_move, after_import, destination, folder_template,
         )
         if move_err is not None:
             return move_err
+
+        active_ws, created_workspace, workspace_err = (
+            _prepare_import_workspace(db, body)
+        )
+        if workspace_err is not None:
+            return workspace_err
 
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]

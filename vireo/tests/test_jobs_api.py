@@ -3544,6 +3544,85 @@ def test_import_in_place_rejects_after_process_move(app_and_db, tmp_path):
     assert "import-in-place" in resp.get_json()["error"]
 
 
+def test_after_process_move_rejects_root_destination_empty_template(
+        app_and_db, tmp_path):
+    """Root-level import with a rel-`.` folder template lands photos on the
+    local_archive_root itself. The chained move skips the root deliberately —
+    accepting the request would silently move nothing. Reject up front."""
+    app, db = app_and_db
+    client = app.test_client()
+    local_root = tmp_path / "archive"
+    local_root.mkdir()
+    _save_nas_target(tmp_path, local_root=local_root)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    for template in ("", ".", "   "):
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [card],
+            "destination": str(local_root),
+            "folder_template": template,
+            "after_import": cull_ready_id,
+            "after_process_move": {"remote_target_id": "nas1"},
+        })
+        assert resp.status_code == 400, (template, resp.get_json())
+        err = resp.get_json()["error"]
+        assert "local archive root" in err
+        assert "folder_template" in err
+
+
+def test_after_process_move_allows_root_destination_with_dated_template(
+        app_and_db, tmp_path):
+    """Destination == local_archive_root is fine when the folder template
+    resolves to a real subfolder — only the empty/dot case fails silently."""
+    app, db = app_and_db
+    client = app.test_client()
+    local_root = tmp_path / "archive"
+    local_root.mkdir()
+    _save_nas_target(tmp_path, local_root=local_root)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(local_root),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_after_process_move_failure_does_not_create_workspace(
+        app_and_db, tmp_path):
+    """new_workspace_name + an invalid after_process_move must leave no
+    orphan workspace behind: preflight the move before creating it."""
+    app, db = app_and_db
+    client = app.test_client()
+    _save_nas_target(tmp_path, local_root=tmp_path / "archive")
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+    before = {w["id"] for w in db.get_workspaces()}
+    old_ws = db._active_workspace_id
+
+    # Destination outside the target's local_archive_root — validated by
+    # _validate_after_process_move; must fail before workspace creation.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "elsewhere"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+        "new_workspace_name": "Should Not Exist",
+    })
+    assert resp.status_code == 400, resp.get_json()
+
+    after = {w["id"] for w in db.get_workspaces()}
+    assert after == before, (
+        "workspace was created before after_process_move validation ran")
+    assert db._active_workspace_id == old_ws
+    names = {w["name"] for w in db.get_workspaces()}
+    assert "Should Not Exist" not in names
+
+
 @pytest.fixture
 def stub_move(monkeypatch):
     """Stub the move machinery so chain tests exercise the chain, not rsync.
