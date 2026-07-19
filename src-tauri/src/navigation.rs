@@ -286,7 +286,10 @@ mod tests {
             Some(43127)
         ));
         assert!(!blob_allowed("blob:null/opaque", Some(43127)));
-        assert!(!blob_allowed("http://localhost:43127/not-a-blob", Some(43127)));
+        assert!(!blob_allowed(
+            "http://localhost:43127/not-a-blob",
+            Some(43127)
+        ));
     }
 
     #[test]
