@@ -1623,15 +1623,33 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
             raise ValueError("folder template produced an empty path")
         groups.setdefault(relative, []).append(int(photo["id"]))
 
-    return [
-        {
+    # Defense-in-depth: ``build_destination_path`` already rejects unsafe
+    # templates and unsafe rendered results (see ``ingest._is_unsafe_path``),
+    # but ``plan_folder_date_moves`` and ``move_folder_by_date`` are public
+    # functions that could be invoked without the API-layer template guard.
+    # Verify the joined absolute path really sits under ``destination`` so a
+    # traversal that slips past the string-level checks can't escape the
+    # chosen root.
+    destination_root = os.path.realpath(destination)
+    plans = []
+    for relative in sorted(groups):
+        candidate = os.path.join(destination, *relative.split("/"))
+        resolved = os.path.realpath(candidate)
+        try:
+            common = os.path.commonpath([destination_root, resolved])
+        except ValueError:
+            common = ""
+        if common != destination_root:
+            raise ValueError(
+                f"folder template produced an unsafe path: {relative!r}"
+            )
+        plans.append({
             "relative_path": relative,
-            "destination": os.path.join(destination, *relative.split("/")),
+            "destination": candidate,
             "photo_ids": groups[relative],
             "photo_count": len(groups[relative]),
-        }
-        for relative in sorted(groups)
-    ]
+        })
+    return plans
 
 
 def move_folder_by_date(db, folder_id, destination, folder_template,

@@ -680,6 +680,37 @@ def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path):
     assert plan[0]["relative_path"] == "unsorted"
 
 
+def test_plan_folder_date_moves_rejects_template_that_escapes_destination(tmp_path):
+    """Defense-in-depth: even when a caller reaches the underlying planner
+    without the API-layer template validator, a rendered path that
+    resolves outside ``destination`` must be rejected rather than
+    silently placing a group above the chosen root.
+
+    ``build_destination_path`` already rejects a template with a literal
+    ``..`` segment (``ingest._is_unsafe_path``); this test locks in the
+    belt-and-suspenders resolved-path check that catches anything that
+    slips past the string-level guard.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    (src / "photo.jpg").write_bytes(b"x")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+
+    with pytest.raises(ValueError):
+        plan_folder_date_moves(
+            db, fid, str(tmp_path / "archive"), "%Y/../%m",
+        )
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="Windows doesn't allow '\\' in folder names, so folding '\\' to '/' "
