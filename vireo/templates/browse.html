@@ -7302,7 +7302,7 @@ async function _submitLocationPlace(placeId, placeDetails) {
     }
     await _afterLocationMutation(ids, detailPhotoId);
   } catch(e) {
-    _showLocationError('Could not save location.');
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
   }
 }
 
@@ -7329,7 +7329,7 @@ async function _submitLocationKeyword(keyword) {
     }
     await _afterLocationMutation(ids, detailPhotoId);
   } catch(e) {
-    _showLocationError('Could not save location.');
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
   }
 }
 
@@ -7356,7 +7356,7 @@ async function _submitLocationText(name) {
       await _afterLocationMutation(ids, detailPhotoId);
     }
   } catch(e) {
-    _showLocationError('Could not save location.');
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
   }
 }
 
@@ -7369,7 +7369,7 @@ async function clearPhotoLocation() {
     renderLocationEmpty();
     await _afterLocationMutation([photoId], photoId);
   } catch(e) {
-    _showLocationError('Could not clear location.');
+    _showLocationError(e && e.message ? e.message : 'Could not clear location.');
   }
 }
 
@@ -7588,7 +7588,7 @@ async function acceptExifSuggestion(placeId) {
     clearExifSuggestion();
     await _afterLocationMutation(useBatch ? ids : [photoId], photoId);
   } catch(e) {
-    _showLocationError('Could not save location.');
+    _showLocationError(e && e.message ? e.message : 'Could not save location.');
   }
 }
 

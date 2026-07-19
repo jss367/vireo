@@ -862,7 +862,7 @@
     if (!resp.ok) {
       let body = {};
       try { body = await resp.json(); } catch(e) {}
-      _showLinkError(body.error || ('Failed (HTTP ' + resp.status + ')'));
+      _showLinkError(body.message || body.error || ('Failed (HTTP ' + resp.status + ')'));
       return;
     }
     let data = {};

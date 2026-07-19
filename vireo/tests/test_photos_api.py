@@ -7081,7 +7081,13 @@ def test_post_photo_location_returns_400_on_empty_api_key(app_and_db):
         json={"place_id": "ChIJ_x"},
     )
     assert resp.status_code == 400
-    assert resp.get_json()["error"] == "no_api_key"
+    body = resp.get_json()
+    assert body["error"] == "no_api_key"
+    assert body["code"] == "invalid_request"
+    assert body["message"] == (
+        "Google Maps isn’t configured. Add an API key in Settings to use "
+        "Google place search."
+    )
 
 
 def test_post_photo_location_returns_404_when_google_returns_none(app_and_db, monkeypatch):
@@ -7102,7 +7108,13 @@ def test_post_photo_location_returns_404_when_google_returns_none(app_and_db, mo
         json={"place_id": "ChIJ_unknown"},
     )
     assert resp.status_code == 404
-    assert resp.get_json()["error"] == "place_not_found"
+    body = resp.get_json()
+    assert body["error"] == "place_not_found"
+    assert body["code"] == "not_found"
+    assert body["message"] == (
+        "Google Maps couldn’t find that place. Search again and choose another "
+        "result."
+    )
 
 
 def test_post_photo_location_returns_409_on_name_conflict(app_and_db, monkeypatch):
@@ -7149,6 +7161,11 @@ def test_post_photo_location_returns_409_on_name_conflict(app_and_db, monkeypatc
     assert resp.status_code == 409
     body = resp.get_json()
     assert body["error"] == "name_conflict"
+    assert body["code"] == "name_conflict"
+    assert body["message"] == (
+        "Couldn’t assign this location because “New York County” is already "
+        "used by another keyword. Rename that keyword in Keywords, then try again."
+    )
     assert "New York County" in body["error_detail"]
 
 
@@ -7169,7 +7186,13 @@ def test_post_photo_location_returns_404_on_missing_photo(app_and_db, monkeypatc
         json={"place_id": "ChIJ_x"},
     )
     assert resp.status_code == 404
-    assert resp.get_json()["error"] == "photo_not_found"
+    body = resp.get_json()
+    assert body["error"] == "photo_not_found"
+    assert body["code"] == "not_found"
+    assert body["message"] == (
+        "This photo is no longer available in the active workspace. Refresh "
+        "the page and try again."
+    )
 
 
 def _add_out_of_workspace_photo(db):
@@ -8478,7 +8501,13 @@ def test_post_keyword_link_place_returns_404_on_missing_keyword(
         json={"place_id": "ChIJ_x"},
     )
     assert resp.status_code == 404
-    assert resp.get_json()["error"] == "keyword_not_found"
+    body = resp.get_json()
+    assert body["error"] == "keyword_not_found"
+    assert body["code"] == "not_found"
+    assert body["message"] == (
+        "That saved location no longer exists. Refresh the page and select "
+        "another location."
+    )
 
 
 def test_post_keyword_link_place_returns_400_on_wrong_keyword_type(
@@ -8509,6 +8538,10 @@ def test_post_keyword_link_place_returns_400_on_wrong_keyword_type(
     assert resp.status_code == 400
     body = resp.get_json()
     assert body["error"] == "wrong_keyword_type"
+    assert body["code"] == "invalid_request"
+    assert body["message"] == (
+        "Only location keywords can be linked to Google Maps places."
+    )
     assert "general" in body["error_detail"]
 
 
@@ -8605,6 +8638,9 @@ def test_post_keyword_link_place_returns_409_on_cross_type_collision(
     assert resp.status_code == 409, resp.get_json()
     body = resp.get_json()
     assert body["error"] == "name_conflict"
+    assert body["code"] == "name_conflict"
+    assert "“New York County”" in body["message"]
+    assert "Rename that keyword in Keywords" in body["message"]
     # The exception detail should mention the offending name for debugging.
     assert "New York County" in body.get("error_detail", "")
 
