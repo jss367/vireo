@@ -416,10 +416,14 @@ def test_scan_reports_metadata_phase_progress(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "test.db"))
     status_events = []
 
-    def fake_extract_metadata(paths, progress_callback=None):
+    def fake_extract_metadata(paths, progress_callback=None, checkpoint=None):
+        if checkpoint:
+            checkpoint()
         if progress_callback:
             progress_callback(2, len(paths))
             progress_callback(len(paths), len(paths))
+        if checkpoint:
+            checkpoint()
         return {}
 
     def status_cb(message, **kwargs):
@@ -2049,7 +2053,8 @@ def test_scan_accepts_portrait_raw_working_copy_with_exif_orientation(
         },
     }
 
-    def fake_metadata(paths, restricted_tags=None, progress_callback=None):
+    def fake_metadata(paths, restricted_tags=None, progress_callback=None,
+                      checkpoint=None):
         return {str(p): portrait_meta for p in paths}
 
     monkeypatch.setattr(scanner, "extract_metadata", fake_metadata)
@@ -2196,7 +2201,8 @@ def _setup_scanned_photo(tmp_path, pil_size=(640, 480)):
     db = Database(str(tmp_path / "test.db"))
     # Mock ExifTool so the first scan populates exif_data with real
     # dimensions, independent of whether exiftool is installed.
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         return {
             p: {"File": {"ImageWidth": pil_size[0], "ImageHeight": pil_size[1]},
                 "EXIF": {}, "Composite": {}}
@@ -2232,7 +2238,8 @@ def test_incremental_rescan_reextracts_when_timestamp_null(tmp_path, monkeypatch
     )
     db.conn.commit()
 
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
@@ -2264,7 +2271,8 @@ def test_incremental_rescan_reextracts_when_raw_dims_suspect(tmp_path, monkeypat
     )
     db.conn.commit()
 
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
@@ -2296,7 +2304,8 @@ def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch)
     db.conn.commit()
 
     called_with = []
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         called_with.append(list(paths))
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
@@ -2329,7 +2338,8 @@ def test_scan_restrict_files_ignores_files_not_in_list(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "test.db"))
 
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}
     monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
@@ -2381,7 +2391,8 @@ def test_incremental_rescan_respects_exif_extracted_guard(tmp_path, monkeypatch)
     db.conn.commit()
 
     called_with = []
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         called_with.append(list(paths))
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {}, "Composite": {}} for p in paths}

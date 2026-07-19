@@ -370,6 +370,7 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .bp-job-type { color: var(--text-secondary); font-weight: 600; text-transform: capitalize; }
 .bp-job-status { font-size: 11px; }
 .bp-job-status.running { color: var(--accent); }
+.bp-job-status.pausing, .bp-job-status.paused { color: var(--warning, #d99a24); }
 .bp-job-status.completed { color: var(--text-ghost); }
 .bp-job-status.failed { color: var(--danger); }
 .bp-job-elapsed { font-size: 11px; color: var(--text-invisible); margin-left: auto; font-variant-numeric: tabular-nums; }
@@ -420,14 +421,18 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   inset: 0;
   z-index: 9999;
   background: rgba(0,0,0,0.92);
-  align-items: center;
-  justify-content: center;
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-items: stretch;
+  justify-items: center;
+  gap: 12px;
+  padding: 4vh 24px 16px;
+  box-sizing: border-box;
   cursor: zoom-out;
 }
-.lightbox-overlay.active { display: flex; }
+.lightbox-overlay.active { display: grid; }
 .lightbox-img-wrap {
-  width: 95vw;
-  height: 92vh;
+  width: min(95vw, 100%);
+  height: 100%;
   overflow: hidden;
   position: relative;
 }
@@ -527,10 +532,8 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
   display: none !important;
 }
 .lightbox-bottom-bar {
-  position: absolute;
-  left: 24px;
-  right: 24px;
-  bottom: 16px;
+  position: relative;
+  width: 100%;
   z-index: 10000;
   display: flex;
   align-items: flex-end;
@@ -1458,7 +1461,9 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 }
 .missing-photo-row:last-child { border-bottom: none; }
 .missing-photo-thumb {
-  width: 56px; height: 56px; flex-shrink: 0;
+  width: var(--missing-thumb-size, 56px);
+  height: var(--missing-thumb-size, 56px);
+  flex-shrink: 0;
   background: var(--bg-tertiary);
   border-radius: 4px;
   display: flex; align-items: center; justify-content: center;
@@ -1870,6 +1875,7 @@ document.addEventListener('keydown', function(e) {
       const p = window.location.pathname;
       if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
       if (p.startsWith('/pipeline/review')) return 'pipeline_review';
+      if (p.startsWith('/locations/review')) return 'location_review';
       if (p === '/' || p.startsWith('/browse')) return 'browse';
       return (p.split('/')[1] || '').replace(/-/g, '_');
     })();
@@ -2226,6 +2232,13 @@ function sendReport() {
       <label><input type="checkbox" id="missingPhotosSelectAll" onchange="toggleAllMissingPhotos(this.checked)"> Select all</label>
       <span id="missingPhotosSelectedCount">0 selected</span>
       <span class="spacer"></span>
+      <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
+        <input type="range" id="missingPhotosThumbSizeSlider" min="40" max="160" step="8" value="56"
+               aria-label="Thumbnail size"
+               style="width:80px;accent-color:var(--accent);"
+               oninput="updateMissingPhotosThumbSize(this.value)">
+        <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
+      </label>
       <label title="Also delete the .xmp sidecar files left behind on disk."><input type="checkbox" id="missingPhotosDeleteSidecars" checked> Also delete leftover XMP sidecars</label>
     </div>
     <div id="missingPhotosList" style="flex:1;overflow-y:auto;"></div>
@@ -2350,6 +2363,8 @@ window.NAV_ALL_PAGES = [
   {id: 'browse',          label: 'Browse',          href: '/browse'},
   {id: 'edit',            label: 'Edit',            href: '/edit'},
   {id: 'map',             label: 'Map',             href: '/map'},
+  {id: 'location_review', label: 'Review Photo Locations', href: '/locations/review',
+   keywords: 'location review map coordinates collections gps places'},
   {id: 'variants',        label: 'Variants',        href: '/variants'},
   {id: 'dashboard',       label: 'Dashboard',       href: '/dashboard'},
   {id: 'storage',         label: 'Storage',         href: '/storage'},
@@ -2358,6 +2373,7 @@ window.NAV_ALL_PAGES = [
   {id: 'compare',         label: 'Compare',         href: '/compare'},
   {id: 'settings',        label: 'Settings',        href: '/settings'},
   {id: 'workspace',       label: 'Workspace',       href: '/workspace'},
+  {id: 'lightroom',       label: 'Lightroom',       href: '/lightroom'},
   {id: 'shortcuts',       label: 'Shortcuts',       href: '/shortcuts'},
   {id: 'keywords',        label: 'Keywords',        href: '/keywords'},
   {id: 'duplicates',      label: 'Duplicates',      href: '/duplicates'},
@@ -2390,6 +2406,7 @@ window.NAV_ALL_PAGES = [
     const p = window.location.pathname;
     if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
     if (p.startsWith('/pipeline/review')) return 'pipeline_review';
+    if (p.startsWith('/locations/review')) return 'location_review';
     if (p === '/' || p.startsWith('/browse')) return 'browse';
     const seg = (p.split('/')[1] || '').replace(/-/g, '_');
     return seg;
@@ -2825,7 +2842,7 @@ window.NAV_ALL_PAGES = [
 (function() {
   // Map from navigation shortcut key → href path
   var NAV_ROUTES = {
-    pipeline: '/pipeline', pipeline_review: '/pipeline/review',
+    pipeline: '/pipeline', lightroom: '/lightroom', pipeline_review: '/pipeline/review',
     review: '/review', cull: '/cull', browse: '/browse', map: '/map',
     variants: '/variants', dashboard: '/dashboard', storage: '/storage', audit: '/audit',
     compare: '/compare', workspace: '/workspace', shortcuts: '/shortcuts',
@@ -2833,7 +2850,7 @@ window.NAV_ALL_PAGES = [
   };
 
   var NAV_DEFAULTS = {
-    pipeline: '', pipeline_review: '', review: '',
+    pipeline: '', lightroom: '', pipeline_review: '', review: '',
     cull: '', browse: '', map: '', variants: '',
     dashboard: '', storage: '', audit: '', compare: '', workspace: '',
     shortcuts: '', settings: '', keywords: ''
@@ -7356,16 +7373,21 @@ function toggleLightboxZoom(e) {
   }, { passive: false });
 })();
 
-// Viewport resize: recompute nativeZoom while lightbox is open so fit ratio
-// stays accurate after window/devicePixelRatio changes.
+// Viewport and chrome resize: recompute nativeZoom while lightbox is open so
+// the fit ratio stays accurate after window/devicePixelRatio changes or the
+// bottom bar wraps, grows, or is hidden.
 (function() {
   var resizeTimer = null;
-  window.addEventListener('resize', function() {
+  var refreshSourceTier = false;
+  function scheduleLightboxLayoutRefresh(updateSourceTier) {
     var overlay = document.getElementById('lightboxOverlay');
     if (!overlay || !overlay.classList.contains('active')) return;
+    refreshSourceTier = refreshSourceTier || !!updateSourceTier;
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(function() {
       resizeTimer = null;
+      var shouldUpdateSourceTier = refreshSourceTier;
+      refreshSourceTier = false;
       _lbRecomputeNativeZoom();
       // A deferred 1:1 keeps _lbZoom at fit while the high-res source loads.
       // _lbSetZoom clears _lbPending1To1 (and its trailing reschedule retargets
@@ -7381,20 +7403,44 @@ function toggleLightboxZoom(e) {
         _lbPending1To1Anchor = pendingAnchor;
         _lbClampPan();
         _lbApplyTransform();
-        if (!pendingDesiredSource || pendingDesiredSource === _lbCurrentSrcKey) {
-          _lbScheduleSourceSwap(_lbNativeZoom || 4);
-        } else {
-          _lbDesiredSrcKey = pendingDesiredSource;
-        }
-        if (_lbDesiredSrcKey === _lbCurrentSrcKey) {
-          _lbApplyPendingOneToOneZoom();
+        if (shouldUpdateSourceTier) {
+          if (!pendingDesiredSource || pendingDesiredSource === _lbCurrentSrcKey) {
+            _lbScheduleSourceSwap(_lbNativeZoom || 4);
+          } else {
+            _lbDesiredSrcKey = pendingDesiredSource;
+          }
+          if (_lbDesiredSrcKey === _lbCurrentSrcKey) {
+            _lbApplyPendingOneToOneZoom();
+          }
         }
         return;
       }
-      // Current zoom may now violate clamps; re-run through _lbSetZoom to re-clamp & re-apply.
-      _lbSetZoom(_lbZoom, null, null);
+      if (shouldUpdateSourceTier) {
+        // Current zoom may now violate clamps; re-run through _lbSetZoom to
+        // re-clamp, apply, and select the best source for a new viewport size.
+        _lbSetZoom(_lbZoom, null, null);
+      } else {
+        // A chrome-only resize changes the fit box but must not cancel a
+        // source swap or preload that is already in flight.
+        _lbClampPan();
+        _lbApplyTransform();
+        _lbSaveViewportState(_lightboxCurrentId);
+      }
     }, 100);
+  }
+
+  window.addEventListener('resize', function() {
+    scheduleLightboxLayoutRefresh(true);
   });
+  if (window.ResizeObserver) {
+    var wrap = document.getElementById('lightboxWrap');
+    if (wrap) {
+      var lightboxLayoutObserver = new ResizeObserver(function() {
+        scheduleLightboxLayoutRefresh(false);
+      });
+      lightboxLayoutObserver.observe(wrap);
+    }
+  }
 })();
 
 // Drag to pan when zoomed; single click (no drag) zooms out
@@ -9558,6 +9604,8 @@ async function nativeMenuJob(endpoint, body, label) {
 function isLiveJob(job) {
   return !!job && (
     job.status === 'running' ||
+    job.status === 'pausing' ||
+    job.status === 'paused' ||
     job.status === 'queued' ||
     job.status === 'pending'
   );
@@ -10619,12 +10667,14 @@ function formatDuration(seconds) {
       // Queued/pending work gets a muted dot so the user can tell it apart
       // from jobs actually consuming the GPU.
       var isWaiting = isWaitingJob(j);
-      var waitingLabel = 'queued';
-      var dotBg = isWaiting ? 'var(--text-muted)' : 'var(--accent)';
+      var isPaused = j.status === 'pausing' || j.status === 'paused';
+      var waitingLabel = isPaused ? j.status : 'queued';
+      var dotBg = isPaused ? 'var(--warning, #d99a24)' :
+        (isWaiting ? 'var(--text-muted)' : 'var(--accent)');
       html += '<div class="bp-compact-job" style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">';
       html += '<span style="width:6px;height:6px;border-radius:50%;background:' + dotBg + ';flex-shrink:0;"></span>';
       html += '<span style="font-weight:600;">' + bpEscape(window.formatJobType(j.type)) + '</span>';
-      if (isWaiting) html += '<span style="color:var(--text-muted);">(' + waitingLabel + ')</span>';
+      if (isWaiting || isPaused) html += '<span style="color:var(--text-muted);">(' + waitingLabel + ')</span>';
       if (phase) html += '<span style="color:var(--text-muted);">\u2014 ' + bpEscape(phase) + '</span>';
       if (detail) html += '<span style="color:var(--text-muted);font-variant-numeric:tabular-nums;">' + detail + '</span>';
       html += '<a href="/jobs" style="margin-left:auto;color:var(--accent);text-decoration:none;font-size:11px;white-space:nowrap;">View \u2192</a>';
@@ -10639,6 +10689,18 @@ function formatDuration(seconds) {
     var attentionJobs = liveJobs.filter(countsForBadge);
     var running = attentionJobs.filter(function(j) { return j.status === 'running'; });
     var waiting = attentionJobs.filter(isWaitingJob);
+    var paused = attentionJobs.filter(function(j) {
+      return j.status === 'pausing' || j.status === 'paused';
+    });
+
+    if (running.length === 0 && waiting.length === 0 && paused.length > 0) {
+      summary.textContent = paused.length === 1
+        ? window.formatJobType(paused[0].type) + ' ' + paused[0].status
+        : paused.length + ' jobs paused';
+      summary.classList.add('idle');
+      summary.classList.remove('active');
+      return;
+    }
 
     if (running.length === 0 && waiting.length === 0) {
       if (liveJobs.length > 0) {
@@ -11675,6 +11737,11 @@ function _escapeAttr(s) {
 }
 function _escapeHtml(s) { return _escapeAttr(s); }
 
+function updateMissingPhotosThumbSize(value) {
+  const list = document.getElementById('missingPhotosList');
+  if (list) list.style.setProperty('--missing-thumb-size', value + 'px');
+}
+
 async function loadMissingPhotos() {
   const container = document.getElementById('missingPhotosList');
   const toolbar = document.getElementById('missingPhotosToolbar');
@@ -11926,6 +11993,7 @@ async function _deleteMissingPhotoIds(ids, deleteSidecars) {
     const p = window.location.pathname;
     if (p.startsWith('/pipeline/rapid-review')) return 'pipeline_rapid_review';
     if (p.startsWith('/pipeline/review')) return 'pipeline_review';
+    if (p.startsWith('/locations/review')) return 'location_review';
     if (p === '/' || p.startsWith('/browse')) return 'browse';
     return (p.split('/')[1] || '').replace(/-/g, '_');
   }

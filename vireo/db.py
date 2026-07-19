@@ -314,9 +314,9 @@ NO_LOCATION_INFORMATION_RULES = {
 ALL_NAV_IDS = frozenset({
     "import",
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-    "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
+    "misses", "highlights", "life_list", "browse", "edit", "map", "location_review", "variants",
     "dashboard", "storage", "audit", "move", "compare",
-    "settings", "workspace", "shortcuts",
+    "settings", "workspace", "lightroom", "shortcuts",
     "keywords", "duplicates", "logs",
 })
 
@@ -3804,11 +3804,13 @@ class Database:
         )
         self.conn.commit()
 
-    def move_folder_path(self, folder_id, new_path):
+    def move_folder_path(self, folder_id, new_path, new_name=None):
         """Update a folder's path and cascade to all children.
 
         Unlike relocate_folder (which only updates missing children),
-        this updates ALL child folders regardless of status.
+        this updates ALL child folders regardless of status. ``new_name`` is
+        used when the root folder is renamed as part of the move; descendants
+        keep their existing names.
         """
         old_row = self.conn.execute(
             "SELECT path FROM folders WHERE id = ?", (folder_id,)
@@ -3816,9 +3818,15 @@ class Database:
         if not old_row:
             return
         old_path = old_row["path"]
-        self.conn.execute(
-            "UPDATE folders SET path = ? WHERE id = ?", (new_path, folder_id)
-        )
+        if new_name is None:
+            self.conn.execute(
+                "UPDATE folders SET path = ? WHERE id = ?", (new_path, folder_id)
+            )
+        else:
+            self.conn.execute(
+                "UPDATE folders SET path = ?, name = ? WHERE id = ?",
+                (new_path, new_name, folder_id),
+            )
         children = self.conn.execute(
             """SELECT id, path FROM folders
                WHERE substr(REPLACE(path, '\\', '/'), 1, ?) = ?""",
@@ -5420,7 +5428,71 @@ class Database:
         ]
         return ",\n                ".join(parts)
 
-    def get_coverage_stats(self):
+    def _dashboard_scope_clause(
+        self,
+        folder_id=None,
+        collection_id=None,
+        date_from=None,
+        date_to=None,
+        table_alias="p",
+    ):
+        """Return an ``AND ...`` clause for Dashboard-scoped photo queries.
+
+        Unlike :meth:`_scope_clause`, this stays composable and does not
+        materialize every matching photo id in Python.  That matters for a
+        date-scoped dashboard over a million-photo workspace.  Collection
+        rules are embedded as a subquery using the same rule compiler as
+        Browse, so Dashboard and Browse agree about collection membership.
+        """
+        conditions = []
+        params = []
+
+        if folder_id is not None:
+            linked = self.conn.execute(
+                "SELECT 1 FROM workspace_folders "
+                "WHERE workspace_id = ? AND folder_id = ?",
+                (self._ws_id(), folder_id),
+            ).fetchone()
+            if not linked:
+                raise ValueError("folder not found in active workspace")
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            conditions.append(f"{table_alias}.folder_id IN ({placeholders})")
+            params.extend(subtree)
+
+        if collection_id is not None:
+            # Dashboard scope keeps offline photos in totals, so the collection
+            # subquery must not filter them out via the Browse-oriented
+            # ``f.status IN ('ok', 'partial')`` join. Callers that need the
+            # accessible-only view apply that filter in their outer query
+            # (e.g. get_coverage_stats), so it's fine to be permissive here.
+            parts = self._build_collection_query(
+                collection_id, include_offline_folders=True,
+            )
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            folder_join, join_clause, where, collection_params = parts
+            collection_query = (
+                "SELECT DISTINCT p.id FROM photos p "
+                f"{folder_join} {join_clause} {where}"
+            )
+            conditions.append(f"{table_alias}.id IN ({collection_query})")
+            params.extend(collection_params)
+
+        if date_from is not None:
+            conditions.append(f"{table_alias}.timestamp >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            conditions.append(f"{table_alias}.timestamp <= ?")
+            params.append(_inclusive_date_to(date_to))
+
+        if not conditions:
+            return "", []
+        return " AND " + " AND ".join(conditions), params
+
+    def get_coverage_stats(
+        self, folder_id=None, collection_id=None, date_from=None, date_to=None,
+    ):
         """Return per-stage coverage counts for the active workspace.
 
         ``total`` is the number of photos in active (status ``'ok'`` or
@@ -5434,6 +5506,9 @@ class Database:
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
         )
+        scope_sql, scope_params = self._dashboard_scope_clause(
+            folder_id, collection_id, date_from, date_to,
+        )
         photo_row = self.conn.execute(
             f"""SELECT
                 COUNT(*) AS total,
@@ -5441,29 +5516,29 @@ class Database:
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
             JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
-            WHERE wf.workspace_id = ?""",
-            (ws,),
+            WHERE wf.workspace_id = ?{scope_sql}""",
+            (ws, *scope_params),
         ).fetchone()
         detected = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
+            f"""SELECT COUNT(DISTINCT d.photo_id)
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?""",
-            (ws, min_conf),
+                 AND d.detector_confidence >= ?{scope_sql}""",
+            (ws, min_conf, *scope_params),
         ).fetchone()[0] or 0
         classified = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
+            f"""SELECT COUNT(DISTINCT d.photo_id)
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?""",
-            (ws, min_conf),
+                 AND d.detector_confidence >= ?{scope_sql}""",
+            (ws, min_conf, *scope_params),
         ).fetchone()[0] or 0
         result = {"total": photo_row["total"] or 0}
         for key, _ in self._COVERAGE_PHOTO_COLUMNS:
@@ -5472,7 +5547,9 @@ class Database:
         result["classified"] = classified
         return result
 
-    def get_folder_coverage_stats(self):
+    def get_folder_coverage_stats(
+        self, folder_id=None, collection_id=None, date_from=None, date_to=None,
+    ):
         """Return a list of per-folder coverage counts for the active workspace.
 
         One row per folder that is linked to the workspace and has
@@ -5487,6 +5564,30 @@ class Database:
         min_conf = self.get_effective_config(cfg.load()).get(
             "detector_confidence", 0.2
         )
+        scope_sql, scope_params = self._dashboard_scope_clause(
+            folder_id, collection_id, date_from, date_to,
+        )
+        # Date and collection constraints belong on the LEFT JOIN so folders
+        # with zero matching photos remain visible as 0 / 0. Folder scope is
+        # different: it controls which folder rows are enumerated, so keep it
+        # as an outer WHERE condition on ``f.id``.
+        photo_scope_sql, photo_scope_params = self._dashboard_scope_clause(
+            None, collection_id, date_from, date_to,
+        )
+        folder_filter_sql = ""
+        folder_filter_params = []
+        if folder_id is not None:
+            linked = self.conn.execute(
+                "SELECT 1 FROM workspace_folders "
+                "WHERE workspace_id = ? AND folder_id = ?",
+                (ws, folder_id),
+            ).fetchone()
+            if not linked:
+                raise ValueError("folder not found in active workspace")
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            folder_filter_sql = f" AND f.id IN ({placeholders})"
+            folder_filter_params = subtree
         photo_rows = self.conn.execute(
             f"""SELECT
                 f.id AS folder_id,
@@ -5496,26 +5597,26 @@ class Database:
                 {self._coverage_select_fragment()}
             FROM folders f
             JOIN workspace_folders wf ON wf.folder_id = f.id
-            LEFT JOIN photos p ON p.folder_id = f.id
-            WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')
+            LEFT JOIN photos p ON p.folder_id = f.id{photo_scope_sql}
+            WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial'){folder_filter_sql}
             GROUP BY f.id
             ORDER BY f.path""",
-            (ws,),
+            (*photo_scope_params, ws, *folder_filter_params),
         ).fetchall()
         det_rows = self.conn.execute(
-            """SELECT p.folder_id AS folder_id,
+            f"""SELECT p.folder_id AS folder_id,
                       COUNT(DISTINCT d.photo_id) AS detected
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ?{scope_sql}
                GROUP BY p.folder_id""",
-            (ws, min_conf),
+            (ws, min_conf, *scope_params),
         ).fetchall()
         cls_rows = self.conn.execute(
-            """SELECT p.folder_id AS folder_id,
+            f"""SELECT p.folder_id AS folder_id,
                       COUNT(DISTINCT d.photo_id) AS classified
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
@@ -5523,9 +5624,9 @@ class Database:
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?
+                 AND d.detector_confidence >= ?{scope_sql}
                GROUP BY p.folder_id""",
-            (ws, min_conf),
+            (ws, min_conf, *scope_params),
         ).fetchall()
         det_by_folder = {r["folder_id"]: r["detected"] for r in det_rows}
         cls_by_folder = {r["folder_id"]: r["classified"] for r in cls_rows}
@@ -6596,16 +6697,46 @@ class Database:
         ).fetchone()
         return row["n"] or 0
 
-    def get_dashboard_stats(self):
-        """Return aggregate statistics for the dashboard."""
+    def get_dashboard_stats(
+        self, folder_id=None, collection_id=None, date_from=None, date_to=None,
+    ):
+        """Return scoped aggregate statistics and actionable gaps.
+
+        Dashboard scope is metadata-only: photos remain countable while their
+        storage is offline.  Signals that require reading source files (such
+        as preview generation) separately restrict themselves to accessible
+        folders and expose that distinction through ``accessible_photos``.
+        """
         ws = self._ws_id()
         # Hoisted: multiple queries below need the workspace-effective
         # detector_confidence to keep classified_count / prediction_status /
         # detected_count in sync as the threshold moves.
         import config as cfg
-        min_conf = self.get_effective_config(cfg.load()).get(
-            "detector_confidence", 0.2
+        effective = self.get_effective_config(cfg.load())
+        min_conf = effective.get("detector_confidence", 0.2)
+        preview_size = effective.get("preview_max_size", 1920)
+        scope_sql, scope_params = self._dashboard_scope_clause(
+            folder_id, collection_id, date_from, date_to,
         )
+
+        overview = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id) AS total_photos,
+                       COUNT(DISTINCT p.folder_id) AS folder_count,
+                       COUNT(DISTINCT pk.keyword_id) AS keyword_count,
+                       COUNT(DISTINCT CASE
+                         WHEN f.status IN ('ok', 'partial') THEN p.id END
+                       ) AS accessible_photos,
+                       COUNT(DISTINCT CASE
+                         WHEN f.status NOT IN ('ok', 'partial') THEN f.id END
+                       ) AS missing_folder_count
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN folders f ON f.id = p.folder_id
+                LEFT JOIN photo_keywords pk ON pk.photo_id = p.id
+                WHERE 1=1{scope_sql}""",
+            (ws, *scope_params),
+        ).fetchone()
 
         # The four pure-metadata aggregates below (top_keywords,
         # photos_by_month, rating_dist, flag_dist) intentionally don't filter
@@ -6613,45 +6744,45 @@ class Database:
         # on disk access, so an unmounted drive shouldn't blank the charts —
         # the dashboard should still describe the full workspace inventory.
         top_keywords = self.conn.execute(
-            """SELECT k.name, k.is_species, COUNT(pk.photo_id) as photo_count
+            f"""SELECT k.name, k.is_species, COUNT(pk.photo_id) as photo_count
                FROM keywords k
                JOIN photo_keywords pk ON pk.keyword_id = k.id
                JOIN photos p ON p.id = pk.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-               WHERE wf.workspace_id = ?
+               WHERE wf.workspace_id = ?{scope_sql}
                GROUP BY k.id
                ORDER BY photo_count DESC
                LIMIT 30""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         photos_by_month = self.conn.execute(
-            """SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
+            f"""SELECT substr(p.timestamp, 1, 7) as month, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?
+            WHERE p.timestamp IS NOT NULL AND wf.workspace_id = ?{scope_sql}
             GROUP BY month
             ORDER BY month""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         rating_dist = self.conn.execute(
-            """SELECT p.rating, COUNT(*) as count
+            f"""SELECT p.rating, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?
+            WHERE wf.workspace_id = ?{scope_sql}
             GROUP BY p.rating
             ORDER BY p.rating""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         flag_dist = self.conn.execute(
-            """SELECT p.flag, COUNT(*) as count
+            f"""SELECT p.flag, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?
+            WHERE wf.workspace_id = ?{scope_sql}
             GROUP BY p.flag""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         # Review status lives in prediction_review (workspace-scoped).
@@ -6664,13 +6795,13 @@ class Database:
         # so stale-label predictions from a prior label set don't drift the
         # totals away from the active labeling context.
         prediction_status = self.conn.execute(
-            """SELECT COALESCE(pr_rev.status, 'pending') AS status,
+            f"""SELECT COALESCE(pr_rev.status, 'pending') AS status,
                       COUNT(*) AS count
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               JOIN photos ph ON ph.id = d.photo_id
+               JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf
-                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                LEFT JOIN prediction_review pr_rev
                  ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
                WHERE d.detector_confidence >= ?
@@ -6680,21 +6811,21 @@ class Database:
                       AND pr2.classifier_model = pr.classifier_model
                     ORDER BY pr2.created_at DESC, pr2.id DESC
                     LIMIT 1
-                 )
+                 ){scope_sql}
                GROUP BY COALESCE(pr_rev.status, 'pending')""",
-            (ws, ws, min_conf),
+            (ws, ws, min_conf, *scope_params),
         ).fetchall()
 
         # Same threshold + fingerprint rules as prediction_status above, so
         # classified_count can't drift above detected_count as the threshold
         # moves.
         classified_count = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
+            f"""SELECT COUNT(DISTINCT d.photo_id)
                FROM predictions pr
                JOIN detections d ON d.id = pr.detection_id
-               JOIN photos ph ON ph.id = d.photo_id
+               JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf
-                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
                WHERE d.detector_confidence >= ?
                  AND pr.labels_fingerprint = (
                     SELECT pr2.labels_fingerprint FROM predictions pr2
@@ -6702,24 +6833,48 @@ class Database:
                       AND pr2.classifier_model = pr.classifier_model
                     ORDER BY pr2.created_at DESC, pr2.id DESC
                     LIMIT 1
-                 )""",
-            (ws, min_conf),
+                 ){scope_sql}""",
+            (ws, min_conf, *scope_params),
+        ).fetchone()[0]
+
+        # Needs Attention links only open photos that are currently
+        # accessible. Keep the headline classification aggregate metadata-
+        # complete above, but use this reachable subset for operational work.
+        accessible_classified_count = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT d.photo_id)
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos p ON p.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+               JOIN folders f
+                 ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+               WHERE d.detector_confidence >= ?
+                 AND pr.labels_fingerprint = (
+                    SELECT pr2.labels_fingerprint FROM predictions pr2
+                    WHERE pr2.detection_id = pr.detection_id
+                      AND pr2.classifier_model = pr.classifier_model
+                    ORDER BY pr2.created_at DESC, pr2.id DESC
+                    LIMIT 1
+                 ){scope_sql}""",
+            (ws, min_conf, *scope_params),
         ).fetchone()[0]
 
         # photos_by_hour and quality_dist are also pure-metadata aggregates;
         # see the comment above the top_keywords block for the rationale.
         photos_by_hour = self.conn.execute(
-            """SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
+            f"""SELECT CAST(substr(p.timestamp, 12, 2) AS INTEGER) as hour, COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13 AND wf.workspace_id = ?
+            WHERE p.timestamp IS NOT NULL AND length(p.timestamp) >= 13
+              AND wf.workspace_id = ?{scope_sql}
             GROUP BY hour
             ORDER BY hour""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         quality_dist = self.conn.execute(
-            """SELECT
+            f"""SELECT
                 CASE
                     WHEN p.quality_score IS NULL THEN -1
                     ELSE CAST(p.quality_score * 10 AS INTEGER)
@@ -6727,10 +6882,10 @@ class Database:
                 COUNT(*) as count
             FROM photos p
             JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-            WHERE wf.workspace_id = ?
+            WHERE wf.workspace_id = ?{scope_sql}
             GROUP BY bucket
             ORDER BY bucket""",
-            (ws,),
+            (ws, *scope_params),
         ).fetchall()
 
         # min_conf already hoisted at top of get_dashboard_stats.
@@ -6740,14 +6895,72 @@ class Database:
         # dashboard's classified-vs-detected ratio internally consistent
         # when a folder is offline.
         detected_count = self.conn.execute(
-            """SELECT COUNT(DISTINCT d.photo_id)
+            f"""SELECT COUNT(DISTINCT d.photo_id)
                FROM detections d
                JOIN photos p ON p.id = d.photo_id
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
                WHERE wf.workspace_id = ?
-                 AND d.detector_confidence >= ?""",
-            (ws, min_conf),
+                 AND d.detector_confidence >= ?{scope_sql}""",
+            (ws, min_conf, *scope_params),
         ).fetchone()[0]
+
+        location_conditions = []
+        self._append_location_status_filter(location_conditions, "none")
+        missing_location = self.conn.execute(
+            f"""SELECT COUNT(DISTINCT p.id)
+                FROM photos p
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                JOIN folders f
+                  ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+                WHERE {' AND '.join(location_conditions)}{scope_sql}""",
+            (ws, *scope_params),
+        ).fetchone()[0]
+
+        pending_changes = self.conn.execute(
+            f"""SELECT COUNT(*)
+                FROM pending_changes pc
+                JOIN photos p ON p.id = pc.photo_id
+                JOIN workspace_folders wf
+                  ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                WHERE pc.workspace_id = ?{scope_sql}""",
+            (ws, ws, *scope_params),
+        ).fetchone()[0]
+
+        if preview_size:
+            missing_previews = self.conn.execute(
+                f"""SELECT COUNT(DISTINCT p.id)
+                    FROM photos p
+                    JOIN workspace_folders wf
+                      ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                    JOIN folders f
+                      ON f.id = p.folder_id
+                     AND f.status IN ('ok', 'partial')
+                    LEFT JOIN preview_cache pc
+                      ON pc.photo_id = p.id AND pc.size = ?
+                    WHERE pc.photo_id IS NULL{scope_sql}""",
+                (ws, preview_size, *scope_params),
+            ).fetchone()[0]
+        else:
+            missing_previews = 0
+
+        duplicate_groups = self.conn.execute(
+            f"""SELECT COUNT(*) FROM (
+                  SELECT p.file_hash
+                  FROM photos p
+                  JOIN workspace_folders wf
+                    ON wf.folder_id = p.folder_id AND wf.workspace_id = ?
+                  JOIN folders f
+                    ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+                  WHERE p.file_hash IS NOT NULL
+                    AND COALESCE(p.flag, 'none') != 'rejected'{scope_sql}
+                  GROUP BY p.file_hash
+                  HAVING COUNT(*) > 1
+                )""",
+            (ws, *scope_params),
+        ).fetchone()[0]
+
+        total_photos = overview["total_photos"] or 0
 
         return {
             "top_keywords": [dict(r) for r in top_keywords],
@@ -6759,6 +6972,25 @@ class Database:
             "photos_by_hour": [dict(r) for r in photos_by_hour],
             "quality_distribution": [dict(r) for r in quality_dist],
             "detected_count": detected_count,
+            "total_photos": total_photos,
+            "accessible_photos": overview["accessible_photos"] or 0,
+            "missing_folder_count": overview["missing_folder_count"] or 0,
+            "folder_count": overview["folder_count"] or 0,
+            "keyword_count": overview["keyword_count"] or 0,
+            "pending_changes": pending_changes,
+            "attention": {
+                "unclassified": max(
+                    0,
+                    (overview["accessible_photos"] or 0)
+                    - accessible_classified_count,
+                ),
+                "missing_location": missing_location,
+                "missing_previews": missing_previews,
+                "preview_size": preview_size,
+                "preview_enabled": bool(preview_size),
+                "pending_sync": pending_changes,
+                "duplicate_groups": duplicate_groups,
+            },
         }
 
     @staticmethod
@@ -6909,6 +7141,7 @@ class Database:
     def get_photos(
         self,
         folder_id=None,
+        collection_id=None,
         page=1,
         per_page=50,
         sort="date",
@@ -6932,6 +7165,17 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
+        if collection_id is not None:
+            parts = self._build_collection_query(collection_id)
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+            coll_subquery = (
+                "SELECT DISTINCT p.id FROM photos p "
+                f"{coll_folder_join} {coll_join_clause} {coll_where}"
+            )
+            conditions.append(f"p.id IN ({coll_subquery})")
+            where_params.extend(coll_params)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -7000,6 +7244,7 @@ class Database:
     def get_photo_ids(
         self,
         folder_id=None,
+        collection_id=None,
         sort="date",
         rating_min=None,
         date_from=None,
@@ -7021,6 +7266,17 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
+        if collection_id is not None:
+            parts = self._build_collection_query(collection_id)
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+            coll_subquery = (
+                "SELECT DISTINCT p.id FROM photos p "
+                f"{coll_folder_join} {coll_join_clause} {coll_where}"
+            )
+            conditions.append(f"p.id IN ({coll_subquery})")
+            where_params.extend(coll_params)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -7079,6 +7335,7 @@ class Database:
     def count_filtered_photos(
         self,
         folder_id=None,
+        collection_id=None,
         rating_min=None,
         date_from=None,
         date_to=None,
@@ -7099,6 +7356,17 @@ class Database:
             placeholders = ",".join("?" for _ in subtree)
             conditions.append(f"p.folder_id IN ({placeholders})")
             where_params.extend(subtree)
+        if collection_id is not None:
+            parts = self._build_collection_query(collection_id)
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+            coll_subquery = (
+                "SELECT DISTINCT p.id FROM photos p "
+                f"{coll_folder_join} {coll_join_clause} {coll_where}"
+            )
+            conditions.append(f"p.id IN ({coll_subquery})")
+            where_params.extend(coll_params)
         if rating_min is not None:
             conditions.append("p.rating >= ?")
             where_params.append(rating_min)
@@ -8976,40 +9244,97 @@ class Database:
             # First word capitalized, rest lowercase: "Black phoebe"
             words = name.split()
             if len(words) > 1:
-                return words[0].capitalize() + " " + " ".join(w.lower() for w in words[1:])
-            return name.capitalize()
+                first = self._sentence_case_first_word(words[0])
+                return first + " " + " ".join(w.lower() for w in words[1:])
+            return self._sentence_case_first_word(name)
         elif convention == "title":
             # Title Case: "Black Phoebe"
             return name.title()
         return name
+
+    @staticmethod
+    def _sentence_case_first_word(word):
+        """Capitalize a first word without mangling mixed-case eponyms.
+
+        ``str.capitalize()`` lowercases everything after the first letter,
+        so a classifier label like ``McKay's bunting`` would come out
+        ``Mckay's bunting``. Preserve existing internal casing unless the
+        word is ALL CAPS (shouty label files), which sentence-cases.
+        """
+        if not word:
+            return word
+        has_case = any(ch.lower() != ch.upper() for ch in word)
+        if has_case and word == word.upper():
+            chars = list(word.lower())
+            for idx, ch in enumerate(chars):
+                if ch.lower() != ch.upper():
+                    chars[idx] = ch.upper()
+                    break
+            return "".join(chars)
+        return word[0].upper() + word[1:]
 
     def resolve_species_display_name(self, name):
         """Predict the stored species name that add_keyword(is_species=True) would use.
 
         Species relabel endpoints snapshot curation dst_existed before
         add_keyword actually runs, so they need to know the final stored
-        spelling in advance. Two sources contribute:
+        spelling in advance. Cases:
 
-        1. If a root taxonomy/general keyword row already matches
-           (SQLite ASCII NOCASE), preserve that stored spelling — the
-           existing curation rows key on it.
-        2. Otherwise apply the same species-casing convention that
-           add_keyword applies for new species keywords, so pre-existing
-           curation from predictions (which inserted `Black Phoebe`) is
-           matched even when the request submits `black phoebe`.
+        1. A single species-bearing root keyword row matches (SQLite
+           ASCII NOCASE) → preserve that stored spelling; existing
+           curation rows key on it. A non-species general homonym with
+           the same NOCASE key (e.g. a hand-tagged ``Common Waxbill``
+           general alongside a taxonomy ``Common waxbill``) is ignored
+           here — add_keyword's typed lookup prefers the taxonomy row,
+           so returning the general's spelling would key curation onto a
+           string add_keyword never stores.
+        2. Multiple species-bearing stored spellings match the same
+           NOCASE key (intentional homonyms — e.g. legacy general
+           ``Robin`` (is_species=1) alongside taxonomy ``robin``) →
+           preserve the caller's spelling. Silently picking one would
+           route bucket/curation writes across genuinely different
+           species rows, so the eligibility check (which compares
+           ``bucket["species"]`` to this result exactly) would then
+           reject requests coming from the other homonym's bucket.
+           Bucket collection, API parse, and DB setters all funnel
+           through this call, so preserving keeps them agreeing on the
+           same string. (Callers that need the exact spelling
+           add_keyword will land on after promotion — e.g. relabel
+           snapshots — apply add_keyword's ORDER BY themselves.)
+        3. No species-bearing row but a non-species general row shares
+           the NOCASE key → return that general's spelling.
+           add_keyword(is_species=True) would find and promote that row
+           in place, keeping its name, so curation must key on the same
+           string.
+        4. No matching root keyword row → apply the same species-casing
+           convention that add_keyword applies for new species keywords,
+           so pre-existing curation from predictions (which inserted
+           `Black Phoebe`) is matched even when the request submits
+           `black phoebe`.
         """
         name = normalize_keyword_display(name)
         if not name:
             return name
-        existing = self.conn.execute(
-            "SELECT name FROM keywords "
+        rows = self.conn.execute(
+            "SELECT name, type, is_species FROM keywords "
             "WHERE name = ? COLLATE NOCASE AND parent_id IS NULL "
             "AND type IN ('taxonomy', 'general') "
-            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+            "ORDER BY (type = 'taxonomy') DESC, id ASC",
             (name,),
-        ).fetchone()
-        if existing and existing["name"]:
-            return existing["name"]
+        ).fetchall()
+        if rows:
+            species_rows = [
+                r for r in rows
+                if r["is_species"] or r["type"] == "taxonomy"
+            ]
+            if len(species_rows) == 1:
+                return species_rows[0]["name"]
+            if len(species_rows) > 1:
+                for r in species_rows:
+                    if r["name"] == name:
+                        return r["name"]
+                return name
+            return rows[0]["name"]
         import config as cfg
         override = cfg.get("keyword_case")
         if override and override != "auto":
@@ -10056,15 +10381,238 @@ class Database:
         the marker — so a failed run retries on the next open instead of
         leaving a half-normalized keyword table.
         """
-        if self.get_meta("keyword_names_normalized") == "1":
-            return
-        try:
-            self._normalize_keyword_data_once()
-            self.set_meta("keyword_names_normalized", "1", _commit=False)
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        if self.get_meta("keyword_names_normalized") != "1":
+            try:
+                self._normalize_keyword_data_once()
+                self.set_meta("keyword_names_normalized", "1", _commit=False)
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        # Second-generation curation case alignment. The v1 sweep above ran
+        # on databases before curation writes canonicalized their species
+        # input, so highlight/preference rows starred from prediction-cased
+        # bucket labels between the v1 run and that fix are still keyed with
+        # classifier casing (e.g. `Common Waxbill` vs the `Common waxbill`
+        # keyword). Re-run just the case-alignment pass once under its own
+        # marker; with the setters now canonicalizing on write, new
+        # mismatches cannot form afterwards.
+        if self.get_meta("curation_species_case_aligned_v2") != "1":
+            try:
+                aligned = self._align_curation_species_case()
+                # Edit-history snapshots created after v1 but before the
+                # setter canonicalization fix still carry prediction-cased
+                # species in hl_prev/pref_prev/rep_prev; without this a
+                # later undo would recreate the orphaned curation rows v2
+                # is meant to repair.
+                history_aligned = self._align_curation_history_species()
+                if aligned or history_aligned:
+                    log.info(
+                        "curation case alignment v2: moved %d row(s), "
+                        "rewrote %d history item(s)",
+                        aligned, history_aligned,
+                    )
+                self.set_meta(
+                    "curation_species_case_aligned_v2", "1", _commit=False
+                )
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+
+    def _align_curation_species_case(self):
+        """Re-key curation rows whose species differs from the canonical
+        spelling only by case.
+
+        ``normalize_keyword_display()`` preserves case, so the punctuation
+        sweep leaves a curation row keyed ``Saffron Finch`` untouched while
+        the species keyword row is ``Saffron finch`` — and the eligible
+        highlight/life-list queries compare those strings EXACT against
+        ``keywords.name``, so the curated selection silently drops out.
+
+        Two sources of the canonical spelling, mirroring
+        ``resolve_species_display_name`` (the function
+        ``_collect_highlight_buckets`` uses to canonicalize prediction
+        labels):
+
+        1. A single surviving root species keyword for the match_key.
+           Intentionally-distinct same-key homonyms (e.g. a legacy
+           ``type='general', is_species=1`` ``Robin`` alongside a taxonomy
+           ``robin``) must not have every curation row for the other
+           spelling rewritten onto the picked one — the joined queries
+           would then match a species keyword the photo doesn't carry.
+           Ambiguous case-variant homonyms are left as-is.
+        2. If no keyword row exists at all — e.g. a highlight starred from
+           an unconfirmed prediction bucket before the photo was accepted
+           — apply the detected case convention so the row lands on the
+           string the bucket will produce after this migration. Without
+           this, the bucket-side canonicalization drifts to (say)
+           ``Common waxbill`` while the highlight stays at
+           ``Common Waxbill``, silently un-starring the photo.
+
+        Returns the number of rows moved; caller commits.
+        """
+        moved = 0
+        unique_species_by_key, all_species_keys = self._species_keyword_maps()
+        for table, rename in (
+            ("photo_preferences", self.rename_photo_preferences_species),
+            ("species_representatives",
+             self.rename_species_representatives_species),
+            ("species_highlights", self.rename_species_highlights_species),
+        ):
+            names = [
+                r["species"] for r in self.conn.execute(
+                    f"SELECT DISTINCT species FROM {table}"
+                ).fetchall()
+            ]
+            for old in names:
+                stored = self._canonical_curation_species(
+                    old, unique_species_by_key, all_species_keys
+                )
+                if not stored or stored == old:
+                    continue
+                moved += rename(old, stored, _commit=False) or 0
+                self.conn.execute(
+                    f"DELETE FROM {table} WHERE species = ?", (old,)
+                )
+        return moved
+
+    def _align_curation_history_species(self):
+        """Rewrite curation species snapshots in edit_history_items.old_value.
+
+        Relabel undo/redo payloads carry snapshots of curation rows keyed
+        by species name. Normalizing only the live tables leaves those
+        JSON snapshots pointing at the legacy spelling, so a later undo
+        would recreate orphaned curation rows that no longer compare
+        equal to the string the bucket / eligibility queries expect.
+        Route every species value captured by hl_prev/pref_prev/rep_prev
+        through the same canonicalization ``_align_curation_species_case``
+        applies to the live tables (unambiguous stored spelling, ambiguous
+        homonyms left alone, no-keyword predictions case-converted).
+        Idempotent on already-normalized rows, so it's safe to re-run in
+        the v2 gate after v1 has already normalized the punctuation.
+        Returns the number of history rows rewritten; caller commits.
+        """
+        rewritten = 0
+        unique_species_by_key, all_species_keys = self._species_keyword_maps()
+
+        def _normalized_curation_species(value):
+            return self._canonical_curation_species(
+                value, unique_species_by_key, all_species_keys
+            )
+
+        history_rows = self.conn.execute(
+            "SELECT id, old_value FROM edit_history_items "
+            "WHERE old_value IS NOT NULL AND old_value LIKE ?",
+            ('{%curation%',),
+        ).fetchall()
+        for row in history_rows:
+            try:
+                payload = json.loads(row["old_value"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            curation = payload.get("curation")
+            if not isinstance(curation, dict):
+                continue
+            dirty = False
+            highlights = curation.get("hl_prev")
+            if isinstance(highlights, list):
+                for index, entry in enumerate(highlights):
+                    if isinstance(entry, str):
+                        normalized = _normalized_curation_species(entry)
+                        if normalized != entry:
+                            highlights[index] = normalized
+                            dirty = True
+                    elif isinstance(entry, dict):
+                        old = entry.get("species")
+                        if isinstance(old, str):
+                            normalized = _normalized_curation_species(old)
+                            if normalized != old:
+                                entry["species"] = normalized
+                                dirty = True
+            for key in ("pref_prev", "rep_prev"):
+                entries = curation.get(key)
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    old = entry.get("species")
+                    if not isinstance(old, str):
+                        continue
+                    normalized = _normalized_curation_species(old)
+                    if normalized != old:
+                        entry["species"] = normalized
+                        dirty = True
+            if dirty:
+                self.conn.execute(
+                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
+                    (json.dumps(payload, sort_keys=True), row["id"]),
+                )
+                rewritten += 1
+        return rewritten
+
+    def _species_keyword_maps(self):
+        """Return ``(unique_species_by_key, all_species_keys)`` for
+        curation alignment.
+
+        ``unique_species_by_key``: match_key → stored root species
+        spelling, ONLY for keys resolving to a single distinct spelling.
+        Homonyms (multiple distinct spellings for the same key) are
+        omitted so callers can't rewrite curation across genuinely
+        different keyword rows.
+
+        ``all_species_keys``: set of match_keys with any root species
+        keyword row (ambiguous or not). Used to distinguish "no keyword
+        row at all" — safe to canonicalize a curation species via the
+        detected case convention — from "ambiguous homonym", which
+        must be left alone.
+        """
+        species_by_key = {}
+        for row in self.conn.execute(
+            "SELECT name FROM keywords "
+            "WHERE parent_id IS NULL AND (is_species = 1 OR type = 'taxonomy')"
+        ).fetchall():
+            species_by_key.setdefault(keyword_match_key(row["name"]), []).append(
+                row["name"]
+            )
+        unique = {
+            key: names[0] for key, names in species_by_key.items()
+            if len(set(names)) == 1
+        }
+        return unique, set(species_by_key.keys())
+
+    def _canonical_curation_species(
+        self, name, unique_species_by_key, all_species_keys,
+    ):
+        """Canonical spelling for a curation species value.
+
+        Agrees with ``_collect_highlight_buckets`` / ``resolve_species_display_name``:
+
+        - Unambiguous keyword match → use the stored spelling.
+        - Ambiguous homonym → leave alone (returns the punctuation-
+          normalized input unchanged).
+        - No keyword row for the match_key → apply the same case
+          convention ``_collect_highlight_buckets`` uses when it
+          canonicalizes predicted species labels, so a highlight starred
+          from a prediction-only bucket (no keyword exists yet because
+          the photo hasn't been accepted) keys on the string the bucket
+          will emit after this migration.
+
+        Empty input returns unchanged.
+        """
+        clean = normalize_keyword_display(name or "")
+        if not clean:
+            return clean
+        key = keyword_match_key(clean)
+        stored = unique_species_by_key.get(key)
+        if stored:
+            return stored
+        if key in all_species_keys:
+            return clean
+        return self.resolve_species_display_name(clean)
 
     _DUPLICATE_PHOTO_SPECIES_REPAIR_KEY = "duplicate_photo_species_repaired_v1"
 
@@ -10645,125 +11193,11 @@ class Database:
                 )
 
         # Second curation pass: align case-only mismatches with the stored
-        # keyword spelling. normalize_keyword_display() preserves case, so
-        # the punctuation sweep above leaves a curation row keyed
-        # `Saffron Finch` untouched while the species keyword row is
-        # `Saffron finch` — and the eligible-highlight/life-list queries
-        # compare those strings EXACT against keywords.name, so the curated
-        # selection silently drops out.
-        #
-        # The match-key grouping earlier only merged within
-        # (match_key, parent_id, type), so intentionally-distinct
-        # same-key homonyms across types survive — for example a legacy
-        # `type='general', is_species=1` `Robin` alongside a taxonomy
-        # `robin`. A blind key→first-name map would then rewrite every
-        # curation row for the other spelling to the picked one,
-        # including for photos that carry the other keyword; the joined
-        # highlight/life-list queries then match a species keyword the
-        # photo doesn't have, so that photo's curation silently
-        # disappears. Restrict this pass to match_keys with a single
-        # surviving species keyword. Ambiguous case-variant homonyms are
-        # left as-is; the curation stays exactly where the pre-migration
-        # code had it, which is the same state that survived before the
-        # normalization work.
-        species_by_key = {}
-        for row in self.conn.execute(
-            "SELECT name FROM keywords "
-            "WHERE parent_id IS NULL AND (is_species = 1 OR type = 'taxonomy')"
-        ).fetchall():
-            species_by_key.setdefault(keyword_match_key(row["name"]), []).append(
-                row["name"]
-            )
-        unique_species_by_key = {
-            key: names[0] for key, names in species_by_key.items()
-            if len(set(names)) == 1
-        }
-        for table, rename in (
-            ("photo_preferences", self.rename_photo_preferences_species),
-            ("species_representatives",
-             self.rename_species_representatives_species),
-            ("species_highlights", self.rename_species_highlights_species),
-        ):
-            names = [
-                r["species"] for r in self.conn.execute(
-                    f"SELECT DISTINCT species FROM {table}"
-                ).fetchall()
-            ]
-            for old in names:
-                stored = unique_species_by_key.get(keyword_match_key(old or ""))
-                if not stored or stored == old:
-                    continue
-                curation_fixed += rename(old, stored, _commit=False) or 0
-                self.conn.execute(
-                    f"DELETE FROM {table} WHERE species = ?", (old,)
-                )
+        # keyword spelling (see _align_curation_species_case for the
+        # homonym-ambiguity rules).
+        curation_fixed += self._align_curation_species_case()
 
-        # Relabel undo/redo payloads carry snapshots of the same curation
-        # rows in edit_history_items.old_value. Normalizing only the live
-        # tables above leaves those JSON snapshots pointing at the legacy
-        # spelling; a later undo would then recreate orphaned curation rows
-        # that no longer compare equal to keywords.name. Apply the same
-        # punctuation normalization and unambiguous stored-species casing to
-        # every species value captured by hl_prev/pref_prev/rep_prev.
-        history_curation_fixed = 0
-
-        def _normalized_curation_species(value):
-            clean = normalize_keyword_display(value or "")
-            if not clean:
-                return clean
-            return unique_species_by_key.get(keyword_match_key(clean), clean)
-
-        history_rows = self.conn.execute(
-            "SELECT id, old_value FROM edit_history_items "
-            "WHERE old_value IS NOT NULL AND old_value LIKE ?",
-            ('{%curation%',),
-        ).fetchall()
-        for row in history_rows:
-            try:
-                payload = json.loads(row["old_value"])
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            curation = payload.get("curation")
-            if not isinstance(curation, dict):
-                continue
-            dirty = False
-            highlights = curation.get("hl_prev")
-            if isinstance(highlights, list):
-                for index, entry in enumerate(highlights):
-                    if isinstance(entry, str):
-                        normalized = _normalized_curation_species(entry)
-                        if normalized != entry:
-                            highlights[index] = normalized
-                            dirty = True
-                    elif isinstance(entry, dict):
-                        old = entry.get("species")
-                        if isinstance(old, str):
-                            normalized = _normalized_curation_species(old)
-                            if normalized != old:
-                                entry["species"] = normalized
-                                dirty = True
-            for key in ("pref_prev", "rep_prev"):
-                entries = curation.get(key)
-                if not isinstance(entries, list):
-                    continue
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    old = entry.get("species")
-                    if not isinstance(old, str):
-                        continue
-                    normalized = _normalized_curation_species(old)
-                    if normalized != old:
-                        entry["species"] = normalized
-                        dirty = True
-            if dirty:
-                self.conn.execute(
-                    "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
-                    (json.dumps(payload, sort_keys=True), row["id"]),
-                )
-                history_curation_fixed += 1
+        history_curation_fixed = self._align_curation_history_species()
 
         if (
             dropped_empty or merged or renamed or pending_fixed
@@ -11781,6 +12215,8 @@ class Database:
                       p.subject_y_median, p.noise_estimate,
                       p.eye_tenengrad,
                       k.name AS species,
+                      t.id AS taxon_id,
+                      t.rank AS taxon_rank,
                       t.name AS scientific_name,
                       t.common_name
                FROM photo_keywords pk
@@ -11908,6 +12344,44 @@ class Database:
                     seen[r["id"]] = dict(r)
         return sorted(seen.values(),
                       key=lambda r: r["common_name"] or r["name"])
+
+    def get_class_ancestors_for_taxa(self, taxon_ids):
+        """Map each taxon id to its class-rank ancestor.
+
+        Life List entries can be linked at any major rank, so preserve the
+        starting taxon id while walking toward the root.  The depth cap mirrors
+        :meth:`get_taxon_subtree` and also prevents malformed cyclic taxonomy
+        data from making the recursive query run forever.
+        """
+        ids = [taxon_id for taxon_id in taxon_ids if taxon_id is not None]
+        if not ids:
+            return {}
+        classes = {}
+        for chunk in _chunks(ids):
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"""WITH RECURSIVE up(
+                           origin_id, id, parent_id, rank, name, common_name, depth
+                       ) AS (
+                           SELECT id, id, parent_id, rank, name, common_name, 0
+                           FROM taxa WHERE id IN ({placeholders})
+                           UNION ALL
+                           SELECT u.origin_id, t.id, t.parent_id, t.rank,
+                                  t.name, t.common_name, u.depth + 1
+                           FROM up u JOIN taxa t ON t.id = u.parent_id
+                           WHERE u.depth < 12
+                       )
+                       SELECT origin_id, id, name, common_name
+                       FROM up WHERE rank = 'class'""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                classes.setdefault(row["origin_id"], {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "common_name": row["common_name"],
+                })
+        return classes
 
     def get_life_list_best_photo_by_taxon(self, taxon_ids):
         """Map taxon_id -> {id, filename} of a representative (highest quality_score,
@@ -12047,6 +12521,8 @@ class Database:
         by the single-species Life List paging endpoint so incremental
         loads don't scan every species' representatives.
         """
+        if species is not None:
+            species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         eligibility_filter = ""
         if eligible_only:
@@ -12138,7 +12614,17 @@ class Database:
         )
 
     def set_photo_preference(self, purpose, species, photo_id, _commit=True):
-        """Set the preferred photo for a species/purpose in this workspace."""
+        """Set the preferred photo for a species/purpose in this workspace.
+
+        ``species`` is canonicalized to the spelling ``add_keyword`` would
+        store (existing keyword row first, casing convention otherwise), so
+        curation keys written from prediction-cased bucket labels — e.g.
+        starring a photo in an unconfirmed ``Common Waxbill`` bucket — land
+        on the same key the keyword row will use once the species is
+        accepted. The eligible highlight/life-list queries compare these
+        strings exact against ``keywords.name``.
+        """
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         self.conn.execute(
             """INSERT INTO photo_preferences
@@ -12168,6 +12654,7 @@ class Database:
 
     def clear_photo_preference(self, purpose, species, _commit=True):
         """Clear the preferred photo for a species/purpose in this workspace."""
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         self.conn.execute(
             """DELETE FROM photo_preferences
@@ -12179,6 +12666,7 @@ class Database:
 
     def clear_species_representative(self, species, _commit=True):
         """Clear all representative photos for a species globally."""
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         self.conn.execute(
             "DELETE FROM species_representatives WHERE species = ?",
@@ -12209,6 +12697,8 @@ class Database:
 
         Result shape is ``{species: {photo_id: rank}}``.
         """
+        if species is not None:
+            species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         eligibility_joins = ""
         eligibility_filter = ""
@@ -12219,10 +12709,23 @@ class Database:
                     AND wf.workspace_id = sh.workspace_id
                    JOIN folders f ON f.id = p.folder_id
                     AND f.status IN ('ok', 'partial')"""
+            # Two-branch species eligibility. Accepted keyword compares
+            # exact: same-NOCASE homonyms preserved by the migration
+            # (legacy general ``Robin`` alongside taxonomy ``robin``) are
+            # genuinely different species — a stored highlight for
+            # ``Robin`` must not become eligible for a photo whose
+            # accepted keyword resolves to ``robin``. Prediction fallback
+            # compares NOCASE: the classifier emits an external
+            # vocabulary spelling (e.g. ``Common Waxbill``) while
+            # sh.species stores the canonical keyword spelling
+            # (``Common waxbill``), so an exact compare would drop every
+            # highlight starred from an unconfirmed bucket. Applying
+            # NOCASE only to the fallback keeps the ambiguous-homonym
+            # boundary intact.
             eligibility_filter = """
                  AND COALESCE(p.flag, 'none') != 'rejected'
-                 AND sh.species = COALESCE(
-                     (
+                 AND (
+                     sh.species = (
                          SELECT k.name
                          FROM photo_keywords pk
                          JOIN keywords k ON k.id = pk.keyword_id
@@ -12230,27 +12733,36 @@ class Database:
                          WHERE pk.photo_id = sh.photo_id
                          ORDER BY pk.rowid DESC
                          LIMIT 1
-                     ),
-                     (
-                         SELECT pr.species
-                         FROM detections d
-                         JOIN predictions pr ON pr.detection_id = d.id
-                         LEFT JOIN prediction_review pr_rev
-                          ON pr_rev.prediction_id = pr.id
-                         AND pr_rev.workspace_id = sh.workspace_id
-                         WHERE d.photo_id = sh.photo_id
-                           AND pr.species IS NOT NULL
-                           AND COALESCE(pr_rev.status, 'pending') != 'rejected'
-                           AND pr.labels_fingerprint = (
-                               SELECT pr2.labels_fingerprint
-                               FROM predictions pr2
-                               WHERE pr2.detection_id = pr.detection_id
-                                 AND pr2.classifier_model = pr.classifier_model
-                               ORDER BY pr2.created_at DESC, pr2.id DESC
-                               LIMIT 1
-                           )
-                         ORDER BY pr.confidence DESC, pr.id DESC
-                         LIMIT 1
+                     )
+                     OR (
+                         NOT EXISTS (
+                             SELECT 1
+                             FROM photo_keywords pk
+                             JOIN keywords k ON k.id = pk.keyword_id
+                              AND (k.is_species = 1 OR k.type = 'taxonomy')
+                             WHERE pk.photo_id = sh.photo_id
+                         )
+                         AND sh.species = (
+                             SELECT pr.species
+                             FROM detections d
+                             JOIN predictions pr ON pr.detection_id = d.id
+                             LEFT JOIN prediction_review pr_rev
+                              ON pr_rev.prediction_id = pr.id
+                             AND pr_rev.workspace_id = sh.workspace_id
+                             WHERE d.photo_id = sh.photo_id
+                               AND pr.species IS NOT NULL
+                               AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                               AND pr.labels_fingerprint = (
+                                   SELECT pr2.labels_fingerprint
+                                   FROM predictions pr2
+                                   WHERE pr2.detection_id = pr.detection_id
+                                     AND pr2.classifier_model = pr.classifier_model
+                                   ORDER BY pr2.created_at DESC, pr2.id DESC
+                                   LIMIT 1
+                               )
+                             ORDER BY pr.confidence DESC, pr.id DESC
+                             LIMIT 1
+                         ) COLLATE NOCASE
                      )
                  )"""
         if species:
@@ -12279,7 +12791,14 @@ class Database:
         return result
 
     def add_species_highlight(self, species, photo_id, _commit=True):
-        """Add a photo to a species' ordered highlights, appending if new."""
+        """Add a photo to a species' ordered highlights, appending if new.
+
+        ``species`` is canonicalized to the spelling ``add_keyword`` would
+        store (see :meth:`set_photo_preference`) so highlight rows written
+        from prediction-cased bucket labels key on the same string the
+        keyword row and eligibility queries use.
+        """
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         row = self.conn.execute(
             """SELECT rank FROM species_highlights
@@ -12315,6 +12834,7 @@ class Database:
 
     def promote_species_highlight(self, species, photo_id, _commit=True):
         """Add a photo to a species' ordered highlights at rank 1."""
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         rows = self.conn.execute(
             """SELECT photo_id
@@ -12348,6 +12868,7 @@ class Database:
 
     def remove_species_highlight(self, species, photo_id, _commit=True):
         """Remove a photo from a species' ordered highlights."""
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         cur = self.conn.execute(
             """DELETE FROM species_highlights
@@ -12360,6 +12881,7 @@ class Database:
 
     def move_species_highlight(self, species, photo_id, direction, _commit=True):
         """Move a highlighted photo one step up/down within its species."""
+        species = self.resolve_species_display_name(species)
         ws = self._ws_id()
         rows = self.conn.execute(
             """SELECT photo_id
@@ -12682,7 +13204,8 @@ class Database:
         already 'taxonomy' and the new name matches a different taxon,
         taxon_id is updated. Manually-set non-'general' types (e.g.
         'location', 'individual') are preserved. Explicit type/taxon_id
-        kwargs always win over auto-detection.
+        kwargs always win over auto-detection, and an explicit type change
+        reconciles the legacy ``is_species`` flag with the requested type.
         """
         if 'type' in kwargs:
             kt = kwargs['type']
@@ -12740,6 +13263,16 @@ class Database:
                 if 'type' not in updates and cur_type == 'general' and taxon_id:
                     effective_type = 'taxonomy'
                 type_changed = effective_type != cur_type
+                # The type dropdown sends only {type: ...}. Keep the legacy
+                # is_species flag coherent on an actual type transition:
+                # otherwise demoting a taxonomy homonym to a deliberate type
+                # such as 'location' leaves is_species=1, and downstream
+                # queries that accept ``type='taxonomy' OR is_species=1`` still
+                # treat it as a species. Do not touch no-op type submissions:
+                # legacy general rows can legitimately retain is_species=1
+                # until taxonomy marking normalizes them.
+                if 'type' in updates and type_changed:
+                    updates['is_species'] = int(effective_type == 'taxonomy')
                 if name_changed or type_changed:
                     # Merge into a same-slot same-type peer instead of
                     # writing a duplicate. Without this, top-level renames
@@ -13764,6 +14297,23 @@ class Database:
         limited_photo_ids = None
         if photo_ids is not None:
             limited_photo_ids = {int(pid) for pid in photo_ids}
+        # Load taxonomy once for the whole call so replace_species can protect
+        # keywords whose relationship to a neighbouring subject's prediction is
+        # broader/same/narrower — not just exact-text matches. Loaded here
+        # rather than inside _accept_for_photo so grouped accepts don't repeat
+        # the JSON parse per photo. None (missing/corrupt file, or unrelated
+        # import failure) cleanly degrades to exact-text protection.
+        _replace_taxonomy = None
+        _compare_pred_to_kws = None
+        if replace_species:
+            try:
+                from compare import compare_prediction_to_keywords as _cpk
+                from taxonomy import load_local_taxonomy as _llt
+                _replace_taxonomy = _llt()
+                _compare_pred_to_kws = _cpk
+            except Exception:
+                _replace_taxonomy = None
+                _compare_pred_to_kws = None
         pred = self.conn.execute(
             """SELECT pr.*,
                       pr.classifier_model AS model,
@@ -13848,29 +14398,128 @@ class Database:
                     [photo_id], kid
                 )
                 if replace_species:
-                    old_species = [
-                        row["name"] for row in self.conn.execute(
-                            """SELECT k.name
-                               FROM photo_keywords pk
-                               JOIN keywords k ON k.id = pk.keyword_id
-                               LEFT JOIN taxa t ON t.id = k.taxon_id
-                               WHERE pk.photo_id = ?
-                                 AND (k.is_species = 1 OR k.type = 'taxonomy')
-                                 AND (t.rank = 'species' OR t.rank IS NULL)""",
-                            (photo_id,),
+                    # Replace corrects *this subject's* identity, so it must
+                    # not strip a species that belongs to a different detection
+                    # (another subject) on the same photo. Any species named by
+                    # a live prediction on another box is protected; without
+                    # this, correcting the teal's ID wiped the American Wigeon
+                    # confirmed on the neighbouring box. On a single-detection
+                    # photo no box is protected, so every species keyword is
+                    # replaced exactly as before.
+                    this_det = self.conn.execute(
+                        "SELECT detection_id FROM predictions WHERE id = ?",
+                        (this_pred_id,),
+                    ).fetchone()
+                    this_det_id = this_det["detection_id"] if this_det else None
+                    # Mirror Compare's visibility filter when picking which
+                    # neighbouring predictions may protect a species keyword:
+                    #   * skip 'alternative' rows (Compare drops them at
+                    #     app.py's api_predictions_compare, alongside
+                    #     'rejected');
+                    #   * skip detections below the workspace's effective
+                    #     detector_confidence — Compare marks those "dormant"
+                    #     and excludes their subjects entirely.
+                    # Without this, a below-threshold neighbour or an
+                    # alternative row on a real neighbour would keep an
+                    # already-stale species keyword on the photo — replace
+                    # would leave it in place and never queue a
+                    # keyword_remove, so the sidecar would still list the
+                    # dead species.
+                    import config as _cfg
+                    _det_threshold = self.get_effective_config(
+                        _cfg.load()
+                    ).get("detector_confidence", 0.2)
+                    # Restrict to the latest labels_fingerprint per
+                    # (detection, classifier_model) — mirrors get_predictions
+                    # and the review/summary paths so stale rows from a prior
+                    # label set on a re-classified neighbouring detection do
+                    # not spuriously protect an obsolete species keyword.
+                    # Fold both sides through keyword_match_key so a raw
+                    # prediction species like `‘apapane` matches the stored
+                    # keyword `apapane` (add_keyword normalizes on write, so
+                    # a lower(trim(species)) SQL fold would otherwise miss
+                    # the still-live neighbour and queue its removal).
+                    neighbour_species = [
+                        row["species"] for row in self.conn.execute(
+                            """SELECT DISTINCT pr.species AS species
+                               FROM predictions pr
+                               JOIN detections d ON d.id = pr.detection_id
+                               LEFT JOIN prediction_review pr_rev
+                                 ON pr_rev.prediction_id = pr.id
+                                AND pr_rev.workspace_id = ?
+                               WHERE d.photo_id = ?
+                                 AND pr.detection_id IS NOT ?
+                                 AND COALESCE(pr_rev.status, 'pending')
+                                     NOT IN ('rejected', 'alternative')
+                                 AND d.detector_confidence >= ?
+                                 AND pr.labels_fingerprint = (
+                                     SELECT pr2.labels_fingerprint
+                                     FROM predictions pr2
+                                     WHERE pr2.detection_id = pr.detection_id
+                                       AND pr2.classifier_model
+                                           = pr.classifier_model
+                                     ORDER BY pr2.created_at DESC, pr2.id DESC
+                                     LIMIT 1
+                                 )""",
+                            (ws, photo_id, this_det_id, _det_threshold),
                         ).fetchall()
+                        if row["species"]
                     ]
-                    self.conn.execute(
-                        """DELETE FROM photo_keywords
-                           WHERE photo_id = ?
-                             AND keyword_id IN (
-                               SELECT k.id FROM keywords k
-                               LEFT JOIN taxa t ON t.id = k.taxon_id
-                               WHERE (k.is_species = 1 OR k.type = 'taxonomy')
-                                 AND (t.rank = 'species' OR t.rank IS NULL)
-                             )""",
+                    protected = {
+                        keyword_match_key(s) for s in neighbour_species
+                    }
+                    existing = self.conn.execute(
+                        """SELECT k.id, k.name
+                           FROM photo_keywords pk
+                           JOIN keywords k ON k.id = pk.keyword_id
+                           LEFT JOIN taxa t ON t.id = k.taxon_id
+                           WHERE pk.photo_id = ?
+                             AND (k.is_species = 1 OR k.type = 'taxonomy')
+                             AND (t.rank = 'species' OR t.rank IS NULL)""",
                         (photo_id,),
-                    )
+                    ).fetchall()
+                    # Compare treats a neighbouring subject's prediction as
+                    # supporting an existing keyword under the taxonomy —
+                    # match (same taxon), refinement (existing is broader
+                    # than the prediction), broader (existing is more
+                    # specific than the prediction). See compare.py's
+                    # compare_prediction_to_keywords and the "keyword
+                    # support" counters in templates/compare.html. Without
+                    # this, a photo tagged with a broader ancestor keyword
+                    # (e.g. Anatidae) that is only "held down" by a
+                    # neighbour's American Wigeon prediction is stripped
+                    # when a different box is replaced, and its curation
+                    # (highlights, representatives) gets migrated onto the
+                    # new species — the wrong subject. With no taxonomy
+                    # available the check quietly no-ops and we fall back
+                    # to exact-text protection, matching prior behaviour.
+                    def _supported_by_neighbour_taxonomy(kw_name):
+                        if not _replace_taxonomy or not neighbour_species:
+                            return False
+                        if _compare_pred_to_kws is None:
+                            return False
+                        for pred_species in neighbour_species:
+                            cmp_result = _compare_pred_to_kws(
+                                pred_species, [kw_name], _replace_taxonomy,
+                            )
+                            if cmp_result["category"] in (
+                                "match", "refinement", "broader",
+                            ):
+                                return True
+                        return False
+
+                    to_remove = [
+                        row for row in existing
+                        if keyword_match_key(row["name"]) not in protected
+                        and not _supported_by_neighbour_taxonomy(row["name"])
+                    ]
+                    old_species = [row["name"] for row in to_remove]
+                    for row in to_remove:
+                        self.conn.execute(
+                            """DELETE FROM photo_keywords
+                               WHERE photo_id = ? AND keyword_id = ?""",
+                            (photo_id, row["id"]),
+                        )
                     # The DB rows are gone, but sync_to_xmp only strips a
                     # keyword from the sidecar when a matching keyword_remove
                     # pending change exists. Queue one per removed species so a
@@ -13954,6 +14603,75 @@ class Database:
                 self.conn.rollback()
             raise
 
+    def accept_subject_species(self, prediction_id):
+        """Accept agreeing model predictions for one detected subject.
+
+        Compare uses this for an additional-species suggestion: the species
+        keyword is added once to the photo, the existing species keywords are
+        preserved, and every current-model prediction that names the same
+        species on the same detection is resolved together. Grouped
+        predictions are explicitly limited to this photo so accepting a
+        subject in Compare cannot silently tag the rest of a burst.
+        """
+        ws = self._ws_id()
+        target = self.conn.execute(
+            """SELECT pr.id, pr.detection_id, pr.species, d.photo_id
+               FROM predictions pr
+               JOIN detections d ON d.id = pr.detection_id
+               JOIN photos ph ON ph.id = d.photo_id
+               JOIN workspace_folders wf
+                 ON wf.folder_id = ph.folder_id AND wf.workspace_id = ?
+               WHERE pr.id = ?""",
+            (ws, prediction_id),
+        ).fetchone()
+        if target is None:
+            return None
+
+        agreeing = self.conn.execute(
+            """SELECT pr.id
+               FROM predictions pr
+               LEFT JOIN prediction_review pr_rev
+                 ON pr_rev.prediction_id = pr.id AND pr_rev.workspace_id = ?
+               WHERE pr.detection_id = ?
+                 AND lower(trim(pr.species)) = lower(trim(?))
+                 AND COALESCE(pr_rev.status, 'pending') != 'rejected'
+                 AND pr.labels_fingerprint = (
+                     SELECT pr2.labels_fingerprint FROM predictions pr2
+                     WHERE pr2.detection_id = pr.detection_id
+                       AND pr2.classifier_model = pr.classifier_model
+                     ORDER BY pr2.created_at DESC, pr2.id DESC
+                     LIMIT 1
+                 )
+               ORDER BY pr.confidence DESC, pr.id ASC""",
+            (ws, target["detection_id"], target["species"]),
+        ).fetchall()
+
+        accepted_ids = []
+        result = None
+        try:
+            for row in agreeing:
+                accepted = self.accept_prediction(
+                    row["id"],
+                    photo_ids=[target["photo_id"]],
+                    _commit=False,
+                )
+                if accepted is not None:
+                    result = accepted
+                    accepted_ids.append(row["id"])
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        if result is None:
+            return None
+        return {
+            "species": result["species"],
+            "keyword_id": result["keyword_id"],
+            "photo_id": target["photo_id"],
+            "prediction_ids": accepted_ids,
+        }
+
     # -- Detections --
 
     def record_detector_run(self, photo_id, detector_model, box_count):
@@ -14035,23 +14753,28 @@ class Database:
         return {(r["classifier_model"], r["labels_fingerprint"]) for r in rows}
 
     def count_classifier_runs(self, photo_ids, classifier_model, labels_fingerprint):
-        """Count distinct photos in `photo_ids` that have at least one
-        runtime-classifiable target with a classifier_runs row matching the
-        given (classifier_model, labels_fingerprint).
+        """Count distinct photos in `photo_ids` where EVERY runtime-classifiable
+        target has a classifier_runs row matching the given
+        (classifier_model, labels_fingerprint).
 
         Used by the streaming pipeline's classify stage to pre-flight how
         many photos will hit the cache vs. require fresh inference.
 
-        Mirrors the runtime gate's photo selection (see pipeline_job.py,
-        the ``primary_det = photo_dets[0]`` block in the classify loop):
-        above-threshold real detections count normally, and photos where
-        MegaDetector ran with ``box_count=0`` count through their synthetic
-        full-image anchor. Below-threshold real detections are ignored because
-        the pipeline still skips them instead of falling back. May still
-        overcount for photos with multiple above-threshold non-full-image
-        detections where a non-primary one happens to carry the matching
-        run key — exact mirroring would require a window function over
-        every photo's detection set.
+        Photo-scoped to match runtime accounting: the classify loop keeps its
+        ``cached`` bucket photo-scoped (see pipeline_job.py — a photo lands
+        there only if every processed detection is a cache hit; the moment
+        any detection runs fresh inference it is promoted to ``count``).
+        So the preflight only counts a photo as cached when NO qualifying
+        detection would need fresh inference — otherwise a multi-subject
+        photo with one cached and one uncached detection would inflate
+        ``cached_estimate`` up to ``total`` and the banner would misread as
+        "no work to classify" when there is real work remaining.
+
+        Above-threshold real detections must all have matching run keys,
+        and photos where MegaDetector ran with ``box_count=0`` still count
+        through their synthetic full-image anchor. Below-threshold real
+        detections are ignored because the pipeline still skips them
+        instead of falling back.
         """
         if not photo_ids:
             return 0
@@ -14066,16 +14789,46 @@ class Database:
         for i in range(0, len(photo_ids), CHUNK):
             chunk = photo_ids[i:i + CHUNK]
             placeholders = ",".join("?" * len(chunk))
+            # A photo counts as fully cached iff it has at least one
+            # above-threshold real detection AND every above-threshold real
+            # detection carries a matching (classifier_model,
+            # labels_fingerprint) run key. The outer NOT EXISTS is the
+            # "no uncached qualifying detection remains" clause; the outer
+            # WHERE also requires at least one qualifying detection so
+            # empty-detection photos don't fall through this branch (they
+            # are handled by the full-image anchor branch below).
+            # The category='animal' predicate on both the outer and inner
+            # detection scans mirrors the runtime classify loop's
+            # non-animal skip (MegaDetector can return person/vehicle
+            # boxes above the confidence threshold, and the classifier
+            # stage filters them out before inference). Without matching
+            # the runtime filter here, a photo with cached animal
+            # detections plus one uncached person/vehicle box would be
+            # excluded from ``cached_estimate`` even though that photo
+            # will actually be entirely cache-served at runtime, so the
+            # UI would understate cached work.
             rows = self.conn.execute(
                 f"SELECT DISTINCT d.photo_id "
                 f"FROM detections d "
-                f"JOIN classifier_runs cr ON cr.detection_id = d.id "
-                f"WHERE cr.classifier_model = ? "
-                f"  AND cr.labels_fingerprint = ? "
-                f"  AND d.detector_model != 'full-image' "
+                f"WHERE d.detector_model != 'full-image' "
+                f"  AND d.category = 'animal' "
                 f"  AND d.detector_confidence >= ? "
-                f"  AND d.photo_id IN ({placeholders})",
-                [classifier_model, labels_fingerprint, min_conf, *chunk],
+                f"  AND d.photo_id IN ({placeholders}) "
+                f"  AND NOT EXISTS ( "
+                f"    SELECT 1 FROM detections d2 "
+                f"    WHERE d2.photo_id = d.photo_id "
+                f"      AND d2.detector_model != 'full-image' "
+                f"      AND d2.category = 'animal' "
+                f"      AND d2.detector_confidence >= ? "
+                f"      AND NOT EXISTS ( "
+                f"        SELECT 1 FROM classifier_runs cr "
+                f"        WHERE cr.detection_id = d2.id "
+                f"          AND cr.classifier_model = ? "
+                f"          AND cr.labels_fingerprint = ? "
+                f"      ) "
+                f"  )",
+                [min_conf, *chunk, min_conf, classifier_model,
+                 labels_fingerprint],
             ).fetchall()
             for r in rows:
                 matched.add(r["photo_id"])
@@ -14355,10 +15108,10 @@ class Database:
                                   detector_model=None):
         """Return {photo_id: [det_dict, ...]} for a batch of photos.
 
-        Each det_dict has keys: x, y, w, h, confidence, category. Lists are
-        ordered by confidence DESC. The detections table is global — threshold
-        filtering happens at read time. Photos with no detections above
-        ``min_conf`` are omitted from the result.
+        Each det_dict has keys: id, x, y, w, h, confidence, category, and
+        detector_model. Lists are ordered by confidence DESC. The detections
+        table is global — threshold filtering happens at read time. Photos
+        with no detections above ``min_conf`` are omitted from the result.
 
         Args:
             photo_ids: iterable of photo ids
@@ -14380,8 +15133,8 @@ class Database:
         for chunk in _chunks(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
             q = (
-                f"SELECT photo_id, box_x, box_y, box_w, box_h, "
-                f"       detector_confidence, category "
+                f"SELECT id, photo_id, box_x, box_y, box_w, box_h, "
+                f"       detector_confidence, category, detector_model "
                 f"FROM detections "
                 f"WHERE photo_id IN ({placeholders}) "
                 f"  AND detector_confidence >= ?"
@@ -14394,12 +15147,14 @@ class Database:
             rows = self.conn.execute(q, params).fetchall()
             for r in rows:
                 result.setdefault(r["photo_id"], []).append({
+                    "id": r["id"],
                     "x": r["box_x"],
                     "y": r["box_y"],
                     "w": r["box_w"],
                     "h": r["box_h"],
                     "confidence": r["detector_confidence"],
                     "category": r["category"],
+                    "detector_model": r["detector_model"],
                 })
         return result
 
@@ -15727,10 +16482,12 @@ class Database:
             "file_paths": paths,
         }
 
-    def _build_collection_query(self, collection_id):
+    def _build_collection_query(self, collection_id, include_offline_folders=False):
         """Build SQL clauses from collection rules.
 
-        Returns (folder_join, join_clause, where, params) or None if collection not found.
+        Returns (folder_join, join_clause, where, params) or None if collection
+        not found. Pass ``include_offline_folders=True`` for metadata-only
+        callers (Dashboard scope) that keep offline photos in their totals.
         """
         row = self.conn.execute(
             "SELECT rules FROM collections WHERE id = ? AND workspace_id = ?",
@@ -15740,14 +16497,22 @@ class Database:
             return None
 
         rules = json.loads(row["rules"])
-        return self._build_query_from_rules(rules)
+        return self._build_query_from_rules(
+            rules, include_offline_folders=include_offline_folders,
+        )
 
-    def _build_query_from_rules(self, rules):
+    def _build_query_from_rules(self, rules, include_offline_folders=False):
         """Build SQL clauses from a smart-collection rule tree.
 
         Returns (folder_join, join_clause, where, params). Raises ValueError on
         malformed input — callers that accept rules from untrusted sources
         (e.g. the live-preview API) should catch and surface a 400.
+
+        By default the folder join filters to accessible folders
+        (``status IN ('ok', 'partial')``), matching what Browse and pipeline
+        callers need. Pass ``include_offline_folders=True`` for metadata-only
+        callers (e.g. Dashboard totals) that count photos even when their
+        storage is currently missing.
 
         Backward compatibility: the original collection format was a flat list
         of rule objects, implicitly combined with AND. Newer collections may use
@@ -16112,8 +16877,15 @@ class Database:
         _validate_node(root)
         condition, params = _build_node(root)
 
-        # Always join folders for folder-under rules, scoped to workspace
-        folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
+        # Always join folders for folder-under rules, scoped to workspace.
+        # For metadata-only callers (Dashboard scope) drop the accessible-
+        # folder filter so photos in an offline folder still count toward
+        # the collection's membership; every other caller keeps the Browse-
+        # oriented ``status IN ('ok', 'partial')`` filter that excludes them.
+        if include_offline_folders:
+            folder_join = " JOIN folders f ON f.id = p.folder_id"
+        else:
+            folder_join = " JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')"
         folder_join += " JOIN workspace_folders wf ON wf.folder_id = f.id AND wf.workspace_id = ?"
 
         # folder_join comes before join_clause in the query, so its param goes first
@@ -16242,9 +17014,15 @@ class Database:
     def mark_species_keywords(self, taxonomy):
         """Mark keywords that are recognized species in the taxonomy.
 
-        Retypes any keyword whose name matches a taxon lookup: sets
-        is_species=1, type='taxonomy', and (if the local taxa table is
-        populated) links taxon_id to the matching taxa row by inat_id.
+        Retypes untyped and ``type='general'`` keywords whose names match a
+        taxon lookup, and repairs incomplete ``type='taxonomy'`` rows. Explicit
+        non-taxonomy types such as ``location``, ``genre``, and ``individual``
+        are user intent and must be preserved even when their names are taxon
+        homonyms (for example, the location "California" is also a plant
+        genus).
+
+        Matching rows get ``is_species=1``, ``type='taxonomy'``, and (if the
+        local taxa table is populated) a ``taxon_id`` link by iNaturalist id.
 
         Uses the local taxonomy only (no network requests).
 
@@ -16254,11 +17032,14 @@ class Database:
         # Also include already-typed taxonomy keywords whose taxon_id is
         # still NULL — those were created before the local taxa table was
         # populated (e.g. via add_keyword(..., is_species=True) from the
-        # classifier), and still need their hierarchy link filled in.
+        # classifier), and still need their hierarchy link filled in. Deliberate
+        # non-taxonomy types are excluded before lookup so a taxon homonym can
+        # never silently retype them.
         keywords = self.conn.execute(
             "SELECT id, name, type, taxon_id, is_species FROM keywords "
-            "WHERE is_species = 0 OR type IS NULL OR type != 'taxonomy' "
-            "   OR taxon_id IS NULL"
+            "WHERE (type IS NULL OR type IN ('general', 'taxonomy')) "
+            "  AND (is_species = 0 OR type IS NULL OR type != 'taxonomy' "
+            "       OR taxon_id IS NULL)"
         ).fetchall()
         updated = 0
         for kw in keywords:
@@ -16505,6 +17286,48 @@ class Database:
                 continue
             pipeline["miss_det_confidence"] = new_det
             pipeline["miss_det_confidence_burst"] = new_burst
+            self.conn.execute(
+                "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
+                (json.dumps(overrides), row["id"]),
+            )
+            updated += 1
+        if updated:
+            self.conn.commit()
+        return updated
+
+    def rewrite_legacy_w_species_default_in_workspaces(self, legacy, new):
+        """Rewrite the exact legacy ``pipeline.w_species`` default in every
+        workspace's ``config_overrides``. Customized values are left alone.
+
+        Called from ``config.migrate_legacy_w_species_default``, which gates
+        the whole migration behind a one-time marker so this only runs once
+        per install — a user who later explicitly re-saves the legacy value
+        via the algorithm slider keeps that setting.
+
+        Fingerprint invalidation isn't needed: ``compute_group_fingerprint``
+        reads the effective ``w_species``, so any rewritten workspace's
+        ``last_group_fingerprint`` will already stop matching on the next
+        Process-page load.
+        """
+        rows = self.conn.execute(
+            "SELECT id, config_overrides FROM workspaces "
+            "WHERE config_overrides IS NOT NULL"
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            raw = row["config_overrides"]
+            try:
+                overrides = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(overrides, dict):
+                continue
+            pipeline = overrides.get("pipeline")
+            if not isinstance(pipeline, dict):
+                continue
+            if pipeline.get("w_species") != legacy:
+                continue
+            pipeline["w_species"] = new
             self.conn.execute(
                 "UPDATE workspaces SET config_overrides = ? WHERE id = ?",
                 (json.dumps(overrides), row["id"]),

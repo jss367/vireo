@@ -182,6 +182,182 @@ def test_move_folder_copies_tree(move_env):
     assert folder["path"] == str(env["dst"] / "src")
 
 
+def test_move_folder_can_rename_during_move(move_env):
+    """An explicit destination name moves and renames in one safe operation."""
+    from move import move_folder
+
+    env = move_env
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        destination_name="2026-07-12",
+    )
+
+    landing = env["dst"] / "2026-07-12"
+    assert result["errors"] == []
+    assert (landing / "bird1.jpg").exists()
+    assert not env["src"].exists()
+    folder = env["db"].conn.execute(
+        "SELECT path, name FROM folders WHERE id = ?", (env["fid_src"],)
+    ).fetchone()
+    assert folder["path"] == str(landing)
+    assert folder["name"] == "2026-07-12"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows strips trailing spaces from path components, so a ' shoot ' "
+    "directory can't exist on disk — the untrimmed-name invariant is a POSIX concern.",
+)
+def test_move_folder_no_op_rename_preserves_untrimmed_source_name(tmp_path):
+    """A no-op rename lands at the source's raw name — spaces and all.
+
+    When the user leaves the Folder name field unchanged, the UI sends
+    ``destination_name=""`` so the backend keeps the source folder name
+    verbatim. If move_folder trims that fallback, the copy lands at
+    ``/archive/shoot`` while preflight showed ``/archive/ shoot `` — the
+    catalog then points at a folder that doesn't match what the user
+    approved and could silently merge with a different existing folder.
+    """
+    from move import move_folder
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    src = tmp_path / " shoot "
+    src.mkdir()
+    (src / "bird.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 100)
+    dst = tmp_path / "archive"
+    dst.mkdir()
+
+    fid = db.add_folder(str(src), name=" shoot ")
+    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                 file_size=102, file_mtime=1.0)
+
+    result = move_folder(
+        db=db,
+        folder_id=fid,
+        destination=str(dst),
+        destination_name="",
+    )
+
+    landing = dst / " shoot "
+    assert result["errors"] == []
+    assert landing.is_dir()
+    assert (landing / "bird.jpg").exists()
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()
+    assert folder["path"] == str(landing)
+
+
+def test_move_folder_no_op_rename_uses_source_leaf_when_name_missing(tmp_path):
+    """A nameless folder row whose path ends in '/' must still land at its leaf.
+
+    Legacy/relocated rows can carry an empty ``name`` alongside a ``path``
+    stored with a trailing separator. ``os.path.basename("/photos/shoot/")``
+    is ``""``, so without stripping the separator the no-op rename fallback
+    collapses to ``""`` and the copy lands directly in the selected parent
+    (potentially merging with a different folder). Preflight and
+    ``resolve_folder_dest`` already ``rstrip("/\\")`` before basename();
+    ``move_folder`` must too.
+    """
+    from move import move_folder
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    src = tmp_path / "shoot"
+    src.mkdir()
+    (src / "bird.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 100)
+    dst = tmp_path / "archive"
+    dst.mkdir()
+
+    fid = db.add_folder(str(src), name="shoot")
+    # Simulate a legacy row: blank name, trailing separator on path.
+    db.conn.execute(
+        "UPDATE folders SET name = '', path = ? WHERE id = ?",
+        (str(src) + "/", fid),
+    )
+    db.conn.commit()
+
+    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                 file_size=102, file_mtime=1.0)
+
+    result = move_folder(
+        db=db,
+        folder_id=fid,
+        destination=str(dst),
+        destination_name="",
+    )
+
+    landing = dst / "shoot"
+    assert result["errors"] == []
+    assert landing.is_dir()
+    assert (landing / "bird.jpg").exists()
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()
+    assert folder["path"] == str(landing)
+
+
+def test_move_folder_rejects_destination_name_with_path_segments(move_env):
+    """The rename field cannot escape the separately selected parent."""
+    from move import move_folder
+
+    env = move_env
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        destination_name="../somewhere-else",
+    )
+
+    assert result["moved"] == 0
+    assert "without slashes" in result["errors"][0]
+    assert env["src"].exists()
+
+
+def test_move_folder_rejects_drive_qualified_destination_name(move_env):
+    """A Windows drive-qualified leaf like C:shoot must not escape the parent.
+
+    os.path.join(r"D:\\archive", "C:shoot") returns the drive-relative path
+    "C:shoot" on Windows, so accepting a colon-bearing leaf would drop the
+    copy — and repoint catalog_path — outside the selected destination.
+    """
+    from move import move_folder
+
+    env = move_env
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        destination_name="C:shoot",
+    )
+
+    assert result["moved"] == 0
+    assert "colons" in result["errors"][0]
+    assert env["src"].exists()
+
+
+def test_normalize_destination_name_rejects_colon():
+    """Drive-qualified and colon-containing leaves are rejected everywhere."""
+    import pytest
+    from move import normalize_destination_name
+
+    for bad in ("C:shoot", "D:\\archive", "foo:bar", ":", "bird:cage/nest"):
+        with pytest.raises(ValueError):
+            normalize_destination_name(bad)
+
+    # Valid single-component names still pass through.
+    assert normalize_destination_name("2026-07-12") == "2026-07-12"
+    assert normalize_destination_name("") == ""
+    assert normalize_destination_name(None) == ""
+
+
 def test_move_folder_reports_cleanup_error_after_commit(move_env, monkeypatch):
     """Catalog repoints first, so a post-commit rmtree failure is committed.
 
@@ -2132,6 +2308,10 @@ def test_resolve_folder_dest():
     # Falls back to basename when name is empty
     assert resolve_folder_dest("/a/birds/", "", "/nas/photos") == \
         os.path.join("/nas/photos", "birds")
+    # An explicit final name supports rename-while-moving.
+    assert resolve_folder_dest(
+        "/a/12", "12", "/nas/photos/2026", "2026-07-12"
+    ) == os.path.join("/nas/photos/2026", "2026-07-12")
 
 
 def test_move_folder_updates_counts(move_env):

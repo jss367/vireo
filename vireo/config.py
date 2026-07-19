@@ -140,12 +140,17 @@ DEFAULTS = {
         "w_time": 0.35,
         "w_subj": 0.35,
         "w_global": 0.15,
-        "w_species": 0.10,
+        # Kept in sync with encounters.DEFAULTS["w_species"]; raised from 0.10
+        # so a species mismatch resists merging distinct species into one
+        # encounter. See the note in encounters.py for the rationale.
+        "w_species": 0.40,
         "w_meta": 0.05,
         "tau_enc": 40.0,
         "hard_cut_time": 180.0,
         "hard_cut_score": 0.42,
         "soft_cut_score": 0.52,
+        "species_hard_cut_confidence": 0.80,
+        "species_hard_cut_margin": 0.60,
         "merge_score": 0.62,
         "merge_max_gap": 60.0,
         "merge_tau": 20.0,
@@ -176,6 +181,7 @@ DEFAULTS = {
             "shortcuts": "",
             "settings": "",
             "keywords": "",
+            "lightroom": "",
         },
         "review": {
             "accept": "a",
@@ -303,11 +309,15 @@ MIGRATION_TOGGLE_UI_H_CONFLICT = "toggle_ui_h_conflict_2026_07"
 MIGRATION_EYE_DETECT_DEFAULT_OFF = "eye_detect_default_off_2026_07"
 MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID = "default_strategy_to_process_id_2026_07"
 MIGRATION_BROWSE_LOCATION_STATUS = "browse_location_status_2026_07"
+MIGRATION_W_SPECIES_DEFAULT = "w_species_default_2026_07"
 
 _LEGACY_MISS_DET_CONFIDENCE = 0.25
 _LEGACY_MISS_DET_CONFIDENCE_BURST = 0.15
 _NEW_MISS_DET_CONFIDENCE = 0.20
 _NEW_MISS_DET_CONFIDENCE_BURST = 0.12
+
+_LEGACY_W_SPECIES = 0.10
+_NEW_W_SPECIES = 0.40
 
 
 def _read_raw():
@@ -574,6 +584,48 @@ def migrate_default_strategy_to_process_id(db):
         raw["_migrations_applied"] = applied
         save(raw)
         return True
+
+
+def migrate_legacy_w_species_default(db=None):
+    """One-time rewrite of the previous ``pipeline.w_species`` default (0.10)
+    to the new default (0.40) in both the global config file and every
+    workspace's ``config_overrides``.
+
+    Without this migration, an upgraded install that had the pipeline block
+    persisted verbatim keeps ``w_species: 0.10`` and its encounter grouping
+    stays on the old species weight — the intended split-mismatched-species
+    behavior only reaches fresh configs. Only the *exact* legacy value is
+    rewritten; a user who has explicitly tuned ``w_species`` (e.g. 0.15,
+    0.25) is left alone. Gated by a marker so it runs at most once per
+    install; a user who later re-saves 0.10 via the algorithm slider keeps
+    that setting on future loads.
+
+    The effective ``compute_group_fingerprint`` includes ``w_species``, so
+    any workspace whose value actually changes here will naturally show as
+    outdated on the Process page — no explicit fingerprint invalidation
+    needed.
+    """
+    with _lock:
+        raw = _read_raw()
+        applied = _migrations_applied(raw)
+        if MIGRATION_W_SPECIES_DEFAULT in applied:
+            return False
+        rewrote = False
+        pipeline = raw.get("pipeline")
+        if isinstance(pipeline, dict) and pipeline.get("w_species") == _LEGACY_W_SPECIES:
+            pipeline["w_species"] = _NEW_W_SPECIES
+            rewrote = True
+        if db is not None:
+            ws_rewrites = db.rewrite_legacy_w_species_default_in_workspaces(
+                _LEGACY_W_SPECIES,
+                _NEW_W_SPECIES,
+            )
+            if ws_rewrites:
+                rewrote = True
+        applied.append(MIGRATION_W_SPECIES_DEFAULT)
+        raw["_migrations_applied"] = applied
+        save(raw)
+        return rewrote
 
 
 def get_editors():

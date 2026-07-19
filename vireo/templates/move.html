@@ -8,31 +8,50 @@
 <link rel="stylesheet" href="/static/vireo-base.css">
 <title>Vireo - Move</title>
 <style>
-body { padding-bottom: 36px; }
-.content { max-width: 1100px; margin: 0 auto; padding: 20px; }
-.page-title { font-size: 20px; font-weight: 700; color: var(--text-primary); margin-bottom: 20px; }
+body { padding-bottom: 48px; }
+.content { max-width: 1120px; margin: 0 auto; padding: 32px 24px; }
+.page-header { margin-bottom: 24px; }
+.page-title {
+  font-size: 26px;
+  line-height: 1.2;
+  font-weight: 720;
+  letter-spacing: -0.025em;
+  color: var(--text-primary);
+  margin: 0 0 6px;
+}
+.page-subtitle {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
 
 /* Tabs */
 .move-tabs {
-  display: flex;
-  gap: 0;
-  border-bottom: 1px solid var(--border-primary);
-  margin-bottom: 20px;
+  display: inline-flex;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  margin-bottom: 22px;
 }
 .move-tab {
-  padding: 10px 20px;
+  padding: 8px 15px;
   font-size: 13px;
+  font-weight: 600;
   color: var(--text-muted);
   cursor: pointer;
-  border-bottom: 2px solid transparent;
-  transition: color 0.15s, border-color 0.15s;
-  background: none;
-  border-top: none;
-  border-left: none;
-  border-right: none;
+  border: 0;
+  border-radius: 7px;
+  transition: color 0.15s, background 0.15s, box-shadow 0.15s;
+  background: transparent;
 }
-.move-tab:hover { color: var(--text-primary); }
-.move-tab.active { color: var(--text-primary); border-bottom-color: var(--accent); }
+.move-tab:hover { color: var(--text-primary); background: var(--bg-secondary); }
+.move-tab.active {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--text-primary) 10%, transparent);
+}
 
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
@@ -41,8 +60,8 @@ body { padding-bottom: 36px; }
 .move-section {
   background: var(--bg-secondary);
   border: 1px solid var(--border-primary);
-  border-radius: 6px;
-  padding: 20px;
+  border-radius: 12px;
+  padding: 24px;
   margin-bottom: 16px;
 }
 .move-section h3 {
@@ -56,6 +75,141 @@ body { padding-bottom: 36px; }
   color: var(--text-muted);
   margin: 0 0 16px 0;
 }
+
+/* Guided whole-folder move */
+.quick-move-section { max-width: 980px; padding: 0; overflow: hidden; }
+.quick-move-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 19px 22px 17px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.quick-move-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 10px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-tertiary));
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-primary));
+}
+.quick-move-icon svg { width: 20px; height: 20px; }
+.quick-move-header h3 { margin: 0 0 4px; font-size: 16px; }
+.quick-move-header p { margin: 0; color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+.move-flow { padding: 20px 22px; }
+.move-step { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 14px; }
+.step-number {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 750;
+}
+.step-body { min-width: 0; }
+.step-title { display: block; margin: 3px 0 12px; font-size: 14px; font-weight: 650; color: var(--text-primary); }
+.step-connector { width: 1px; height: 22px; margin: 4px 0 4px 13px; background: var(--border-primary); }
+.field-group { margin-bottom: 14px; }
+.field-group:last-child { margin-bottom: 0; }
+.destination-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr);
+  align-items: start;
+  gap: 14px;
+}
+.destination-fields .field-group { margin-bottom: 0; }
+.field-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+.field-hint { margin-top: 6px; color: var(--text-dim); font-size: 11.5px; line-height: 1.45; }
+.move-control,
+.move-control-row input,
+.move-control-row select {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 7px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+}
+.move-control:focus,
+.move-control-row input:focus,
+.move-control-row select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.move-control-row { display: flex; align-items: stretch; gap: 8px; }
+.move-control-row input, .move-control-row select { flex: 1; min-width: 0; }
+.move-control-row .btn { flex: 0 0 auto; }
+.field-error { min-height: 16px; margin-top: 5px; color: var(--danger); font-size: 11.5px; }
+.folder-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 20px;
+  margin-top: 7px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.folder-info:not(:empty)::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.reset-name-btn { white-space: nowrap; }
+.move-preview-card {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border-primary));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-tertiary));
+}
+.move-preview-eyebrow {
+  margin-bottom: 11px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.move-route { display: grid; grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr); align-items: center; gap: 10px; }
+.move-route-label { margin-bottom: 4px; color: var(--text-dim); font-size: 10.5px; font-weight: 650; }
+.move-route-path { color: var(--text-primary); font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.45; word-break: break-word; }
+.move-route-arrow { color: var(--accent); font-size: 20px; text-align: center; }
+.move-preview-meta { margin-top: 9px; color: var(--text-muted); font-size: 11.5px; }
+.move-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 15px 22px;
+  border-top: 1px solid var(--border-primary);
+  background: color-mix(in srgb, var(--bg-tertiary) 55%, var(--bg-secondary));
+}
+.move-safety { display: flex; align-items: flex-start; gap: 8px; color: var(--text-dim); font-size: 11.5px; line-height: 1.45; }
+.move-safety svg { width: 15px; height: 15px; flex: 0 0 15px; margin-top: 1px; color: var(--accent); }
+.quick-submit { min-height: 40px; padding: 9px 18px; border-radius: 7px; white-space: nowrap; }
+.quick-submit .button-arrow { margin-left: 7px; font-size: 15px; }
 
 /* Form row */
 .form-row {
@@ -275,17 +429,11 @@ body { padding-bottom: 36px; }
 }
 
 /* Folder info row */
-.folder-info {
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-top: 4px;
-}
-
 /* Resolved-destination preview under the Move-folder destination input */
 .dest-preview {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-dim);
-  margin-top: 6px;
+  margin-top: 10px;
   word-break: break-all;
 }
 .dest-preview .dest-preview-path {
@@ -350,15 +498,7 @@ body { padding-bottom: 36px; }
   word-break: break-all;
 }
 .move-summary {
-  margin-top: 14px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-primary);
-  border-radius: 4px;
-  background: var(--bg-tertiary);
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.5;
-  word-break: break-word;
+  display: none;
 }
 .browser-folder-item {
   padding: 6px 10px;
@@ -386,6 +526,22 @@ body { padding-bottom: 36px; }
   color: var(--text-primary);
 }
 .new-folder-row input:focus { outline: none; border-color: var(--accent); }
+
+@media (max-width: 850px) {
+  .destination-fields { grid-template-columns: 1fr; }
+  .destination-fields .field-group { margin-bottom: 14px; }
+}
+
+@media (max-width: 700px) {
+  .content { padding: 22px 14px; }
+  .move-tabs { display: flex; }
+  .move-tab { flex: 1; padding-inline: 9px; }
+  .quick-move-header, .move-flow, .move-actions { padding-left: 17px; padding-right: 17px; }
+  .move-route { grid-template-columns: 1fr; }
+  .move-route-arrow { transform: rotate(90deg); text-align: left; padding-left: 4px; }
+  .move-actions { align-items: stretch; flex-direction: column; }
+  .quick-submit { width: 100%; }
+}
 </style>
 </head>
 <body>
@@ -393,7 +549,10 @@ body { padding-bottom: 36px; }
 {% include '_navbar.html' %}
 
 <div class="content">
-  <h2 class="page-title">Move Photos</h2>
+  <div class="page-header">
+    <h2 class="page-title">Move Photos</h2>
+    <p class="page-subtitle">Reorganize folders and photos without losing edits, metadata, or library links.</p>
+  </div>
 
   <div class="move-tabs">
     <button class="move-tab active" onclick="switchTab('quick')">Quick Move</button>
@@ -403,38 +562,91 @@ body { padding-bottom: 36px; }
 
   <!-- Quick Move Tab -->
   <div class="tab-panel active" id="tab-quick">
-    <div class="move-section">
-      <h3>Move Entire Folder</h3>
-      <p class="desc">Move all files in a folder (including subfolders) to a new location. Files are copied first, verified, then originals are removed.</p>
-
-      <div class="form-row">
-        <label>Source Folder</label>
-        <select id="quickFolderSelect" onchange="onQuickFolderChange()">
-          <option value="">-- Select a folder --</option>
-        </select>
-      </div>
-      <div class="folder-info" id="quickFolderInfo"></div>
-
-      <div class="form-row">
-        <label>Destination</label>
-        <div class="dest-row">
-          <select id="quickDestMode" onchange="onQuickDestModeChange()">
-            <option value="local">Local path</option>
-          </select>
+    <div class="move-section quick-move-section">
+      <div class="quick-move-header">
+        <div class="quick-move-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 7.5h6l2 2h10v8.75A1.75 1.75 0 0 1 19.25 20H4.75A1.75 1.75 0 0 1 3 18.25z"/>
+            <path d="M7.5 14h9M13.5 11l3 3-3 3"/>
+          </svg>
+        </div>
+        <div>
+          <h3>Move an entire folder</h3>
+          <p>Choose where it should live and rename it if you’d like. Subfolders and companion files move with it.</p>
         </div>
       </div>
-      <div class="dest-row" id="quickLocalRow" style="margin-bottom:8px;">
-        <input type="text" id="quickDestInput" placeholder="/path/to/destination" oninput="updateQuickMoveBtn()">
-        <button class="btn btn-secondary btn-small" onclick="openBrowser('quickDestInput')">Browse</button>
-      </div>
-      <div class="dest-row" id="quickRemoteRow" style="display:none; margin-bottom:8px;">
-        <input type="text" id="quickSubpathInput" placeholder="Optional subfolder under the target (e.g. USA/2026)" oninput="updateQuickMoveBtn()">
-      </div>
-      <div class="dest-preview" id="quickDestPreview"></div>
-      <div class="move-summary" id="quickMoveSummary" style="display:none;"></div>
 
-      <div style="margin-top:16px;">
-        <button class="btn btn-primary" id="quickMoveBtn" onclick="startQuickMove()" disabled>Move Folder</button>
+      <div class="move-flow">
+        <div class="move-step">
+          <div class="step-number">1</div>
+          <div class="step-body">
+            <label class="step-title" for="quickFolderSelect">Choose the folder to move</label>
+            <select class="move-control" id="quickFolderSelect" onchange="onQuickFolderChange()">
+              <option value="">Select a folder…</option>
+            </select>
+            <div class="folder-info" id="quickFolderInfo"></div>
+          </div>
+        </div>
+
+        <div class="step-connector" aria-hidden="true"></div>
+
+        <div class="move-step">
+          <div class="step-number">2</div>
+          <div class="step-body">
+            <span class="step-title">Choose its new location</span>
+
+            <div class="field-group">
+              <label class="field-label" for="quickDestMode">Destination type</label>
+              <select class="move-control" id="quickDestMode" onchange="onQuickDestModeChange()">
+                <option value="local">A folder on this Mac or a mounted drive</option>
+              </select>
+            </div>
+
+            <div class="destination-fields">
+              <div class="field-group" id="quickLocalRow">
+                <label class="field-label" for="quickDestInput">Destination parent folder</label>
+                <div class="move-control-row">
+                  <input type="text" id="quickDestInput" placeholder="Choose where it will live" oninput="updateQuickMoveBtn()">
+                  <button class="btn btn-secondary" type="button" onclick="openBrowser('quickDestInput')">
+                    Browse
+                  </button>
+                </div>
+                <div class="field-hint">The moved folder will be created inside this location.</div>
+              </div>
+
+              <div class="field-group" id="quickRemoteRow" style="display:none;">
+                <label class="field-label" for="quickSubpathInput">Folder inside remote target <span style="font-weight:400;color:var(--text-dim);">Optional</span></label>
+                <input class="move-control" type="text" id="quickSubpathInput" placeholder="For example: USA/2026" oninput="updateQuickMoveBtn()">
+                <div class="field-hint">Leave blank to use the remote target’s main folder.</div>
+              </div>
+
+              <div class="field-group">
+                <label class="field-label" for="quickFolderName">Folder name</label>
+                <div class="move-control-row">
+                  <input type="text" id="quickFolderName" placeholder="Select a source folder first" oninput="updateQuickMoveBtn()" disabled>
+                  <button class="btn btn-secondary reset-name-btn" id="quickResetNameBtn" type="button" onclick="resetQuickFolderName()" disabled>Use original</button>
+                </div>
+                <div class="field-hint">Edit this name to rename the folder as part of the move.</div>
+                <div class="field-error" id="quickFolderNameError" role="status"></div>
+              </div>
+            </div>
+
+            <div class="move-preview-card" id="quickMoveSummary" style="display:none;"></div>
+            <div class="dest-preview" id="quickDestPreview"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="move-actions">
+        <div class="move-safety">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3 4.5 6v5.5c0 4.6 3.2 7.7 7.5 9.5 4.3-1.8 7.5-4.9 7.5-9.5V6z"/><path d="m9 12 2 2 4-4"/>
+          </svg>
+          <span>Vireo copies and verifies every file before removing the originals.</span>
+        </div>
+        <button class="btn btn-primary quick-submit" id="quickMoveBtn" onclick="startQuickMove()" disabled>
+          Review move <span class="button-arrow" aria-hidden="true">→</span>
+        </button>
       </div>
     </div>
   </div>
@@ -536,6 +748,7 @@ var allFolders = [];
 var photoList = [];
 var selectedPhotos = new Set();
 var lastSelectedIdx = -1;
+var photoLoadSeq = 0;
 var browserTargetInput = null;
 var browserPath = '';
 var browserHomePath = '';
@@ -640,32 +853,118 @@ function populateFolderSelects() {
 function onQuickFolderChange() {
   var sel = document.getElementById('quickFolderSelect');
   var info = document.getElementById('quickFolderInfo');
+  var nameInput = document.getElementById('quickFolderName');
+  var resetBtn = document.getElementById('quickResetNameBtn');
   var fid = parseInt(sel.value);
   if (!fid) {
     info.textContent = '';
+    nameInput.value = '';
+    nameInput.disabled = true;
+    resetBtn.disabled = true;
     updateQuickMoveBtn();
     return;
   }
   var folder = allFolders.find(function(f) { return f.id === fid; });
   if (folder) {
     var count = folder.photo_count || 0;
-    info.textContent = 'Source: ' + folder.path + ' · ' +
+    info.textContent = folder.path + ' · ' +
       count.toLocaleString() + ' photo' + (count !== 1 ? 's' : '');
+    nameInput.value = sourceFolderName(folder);
+    nameInput.disabled = false;
+    resetBtn.disabled = false;
   }
   updateQuickMoveBtn();
+}
+
+function sourceFolderName(folder) {
+  var srcPath = (folder && folder.path) || '';
+  return (folder && folder.name) ||
+    srcPath.replace(/[\\\/]+$/, '').split(/[\\\/]/).pop() || '';
+}
+
+function resetQuickFolderName() {
+  var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  var folder = allFolders.find(function(f) { return f.id === fid; });
+  document.getElementById('quickFolderName').value = sourceFolderName(folder);
+  updateQuickMoveBtn();
+}
+
+function quickFolderNameResult() {
+  var raw = document.getElementById('quickFolderName').value;
+  // "Unchanged from the pre-populated default" is a distinct state from
+  // "the user typed something that happens to trim to the source name":
+  // if we .trim() a source folder whose real name has leading or trailing
+  // whitespace on a no-op submit, we'd rename it to the trimmed variant
+  // (landing at /archive/Shoot instead of preserving /archive/ Shoot ).
+  // Signal "keep original" with an empty value + rename:false so callers
+  // send no destination_name and the backend uses folder.name verbatim.
+  var fid = parseInt(document.getElementById('quickFolderSelect').value);
+  var folder = fid ? allFolders.find(function(f) { return f.id === fid; }) : null;
+  if (folder && raw === sourceFolderName(folder)) {
+    return {value: '', error: '', rename: false};
+  }
+  var name = raw.trim();
+  if (!name) return {value: '', error: 'Enter a name for the folder.', rename: false};
+  // Colon rejection matches the backend: on Windows, joining a parent with
+  // e.g. "C:shoot" collapses to the drive-relative "C:shoot" and escapes
+  // the selected parent, so the leaf name has to stay free of : as well.
+  if (name === '.' || name === '..' || /[\\\/:]/.test(name)) {
+    return {
+      value: '',
+      error: 'Use a single folder name without slashes or colons.',
+      rename: false,
+    };
+  }
+  return {value: name, error: '', rename: true};
 }
 
 function setQuickMoveSummary(folder, finalPath) {
   var summary = document.getElementById('quickMoveSummary');
   if (!folder || !finalPath) {
-    summary.textContent = '';
+    summary.replaceChildren();
     summary.style.display = 'none';
     return '';
   }
   var count = folder.photo_count || 0;
   var text = 'Confirm moving ' + count.toLocaleString() + ' photo' +
     (count !== 1 ? 's' : '') + ' from ' + folder.path + ' to ' + finalPath + '?';
-  summary.textContent = text;
+
+  summary.replaceChildren();
+  var eyebrow = document.createElement('div');
+  eyebrow.className = 'move-preview-eyebrow';
+  eyebrow.textContent = 'Final location';
+
+  var route = document.createElement('div');
+  route.className = 'move-route';
+  function routePoint(label, path) {
+    var point = document.createElement('div');
+    var routeLabel = document.createElement('div');
+    routeLabel.className = 'move-route-label';
+    routeLabel.textContent = label;
+    var routePath = document.createElement('div');
+    routePath.className = 'move-route-path';
+    routePath.textContent = path;
+    point.appendChild(routeLabel);
+    point.appendChild(routePath);
+    return point;
+  }
+  route.appendChild(routePoint('FROM', folder.path));
+  var arrow = document.createElement('div');
+  arrow.className = 'move-route-arrow';
+  arrow.setAttribute('aria-hidden', 'true');
+  arrow.textContent = '→';
+  route.appendChild(arrow);
+  route.appendChild(routePoint('TO', finalPath));
+
+  var meta = document.createElement('div');
+  meta.className = 'move-preview-meta';
+  var renamed = quickFolderNameResult().rename;
+  meta.textContent = count.toLocaleString() + ' photo' + (count !== 1 ? 's' : '') +
+    ' · Includes subfolders' + (renamed ? ' · Folder will be renamed' : '');
+
+  summary.appendChild(eyebrow);
+  summary.appendChild(route);
+  summary.appendChild(meta);
   summary.style.display = 'block';
   return text;
 }
@@ -674,16 +973,22 @@ function updateQuickMoveBtn() {
   var fid = document.getElementById('quickFolderSelect').value;
   var remoteId = quickRemoteTargetId();
   var btn = document.getElementById('quickMoveBtn');
+  var nameResult = quickFolderNameResult();
+  var nameError = document.getElementById('quickFolderNameError');
+  nameError.textContent = fid ? nameResult.error : '';
   var ready;
   if (remoteId) {
     // Remote needs a usable GNU rsync; no destination text is required (the
     // target carries it). An optional subpath refines where under it.
-    ready = !!fid && quickRsyncAvailable;
+    ready = !!fid && quickRsyncAvailable && !nameResult.error;
   } else {
-    ready = !!(fid && document.getElementById('quickDestInput').value.trim());
+    ready = !!(fid && document.getElementById('quickDestInput').value.trim()
+      && !nameResult.error);
   }
   btn.disabled = quickMoveBusy || !ready;
-  btn.textContent = quickMoveBusy ? 'Checking...' : 'Move Folder';
+  btn.innerHTML = quickMoveBusy
+    ? 'Checking destination…'
+    : 'Review move <span class="button-arrow" aria-hidden="true">→</span>';
   updateQuickMovePreview();
 }
 
@@ -693,20 +998,18 @@ function setQuickMoveBusy(isBusy) {
 }
 
 // Compute the final landing path, mirroring move.py move_folder():
-// the source folder is placed *inside* the destination, keeping its name.
+// the named folder is placed *inside* the destination. The editable name
+// allows a rename during the same safe move.
 // Detect Windows-style paths (containing '\') so the preview matches
 // os.path.join on a Windows backend, where 'C:\Archive\' + 'Birds' is
 // 'C:\Archive\Birds', not 'C:\Archive\/Birds'. Also lets the folder.name
 // fallback split a backslash-delimited source path.
-function resolvedMoveDest(folder, destination) {
+function resolvedMoveDest(folder, destination, destinationName) {
   var srcPath = (folder && folder.path) || '';
   var winStyle = destination.indexOf('\\') !== -1 || srcPath.indexOf('\\') !== -1;
   var sep = winStyle ? '\\' : '/';
   var trimRe = winStyle ? /[\\\/]+$/ : /\/+$/;
-  var splitRe = winStyle ? /[\\\/]/ : /\//;
-
-  var folderName = (folder && folder.name) ||
-    srcPath.replace(trimRe, '').split(splitRe).pop();
+  var folderName = destinationName || sourceFolderName(folder);
   return destination.replace(trimRe, '') + sep + folderName;
 }
 
@@ -720,6 +1023,13 @@ function updateQuickMovePreview() {
     return;
   }
   var folder = allFolders.find(function(f) { return f.id === fid; });
+  var nameResult = quickFolderNameResult();
+  if (nameResult.error) {
+    preview.textContent = '';
+    setQuickMoveSummary(null, '');
+    return;
+  }
+  var destinationName = nameResult.value;
 
   if (remoteId) {
     var t = quickRemoteTargets.find(function(x) { return x.id === remoteId; });
@@ -742,10 +1052,11 @@ function updateQuickMovePreview() {
       return;
     }
     var sub = subResult.value;
-    var folderName = (folder && folder.name) ||
-      ((folder && folder.path) || '').replace(/\/+$/, '').split('/').pop();
     var base = t.remote_path.replace(/\/+$/, '') + (sub ? '/' + sub : '');
-    var finalPath = base + '/' + folderName;
+    // Fall back to the source folder's actual name when the user hasn't
+    // renamed: destinationName is intentionally empty in that case so the
+    // backend uses the untrimmed folder.name, so the preview must match.
+    var finalPath = base + '/' + (destinationName || sourceFolderName(folder));
     var finalDestSpec = rsyncDestSpec(t.user, t.host, finalPath);
 
     preview.textContent = '';
@@ -777,7 +1088,7 @@ function updateQuickMovePreview() {
     rstatus.className = 'dest-status';
     preview.appendChild(rstatus);
     setQuickMoveSummary(folder, finalDestSpec);
-    scheduleQuickPreflight(fid, null, remoteId, sub);
+    scheduleQuickPreflight(fid, null, remoteId, sub, destinationName);
     return;
   }
 
@@ -787,18 +1098,9 @@ function updateQuickMovePreview() {
     setQuickMoveSummary(null, '');
     return;
   }
-  var finalPath = resolvedMoveDest(folder, dest);
+  var finalPath = resolvedMoveDest(folder, dest, destinationName);
 
-  // The resolved path is computable client-side, so show it instantly.
   preview.textContent = '';
-  var pathLine = document.createElement('div');
-  pathLine.textContent = 'Folder will be moved to: ';
-  var pathSpan = document.createElement('span');
-  pathSpan.className = 'dest-preview-path';
-  pathSpan.textContent = finalPath;
-  pathLine.appendChild(pathSpan);
-  preview.appendChild(pathLine);
-
   // Whether the destination already exists (and how much is in it) requires
   // hitting the filesystem, so fetch it from the preflight endpoint and fill
   // in this line asynchronously. Debounced so typing a path doesn't spam it.
@@ -807,7 +1109,7 @@ function updateQuickMovePreview() {
   status.className = 'dest-status';
   preview.appendChild(status);
   setQuickMoveSummary(folder, finalPath);
-  scheduleQuickPreflight(fid, dest, '', '');
+  scheduleQuickPreflight(fid, dest, '', '', destinationName);
 }
 
 function _destWarn(text) {
@@ -869,7 +1171,7 @@ function normalizeRemoteSubpath(raw) {
 var quickPreflightSeq = 0;
 var quickPreflightTimer = null;
 
-function scheduleQuickPreflight(fid, dest, remoteId, subpath) {
+function scheduleQuickPreflight(fid, dest, remoteId, subpath, destinationName) {
   if (quickPreflightTimer) clearTimeout(quickPreflightTimer);
   // Bump the sequence on *every* call, not just when a request starts. Any
   // change to the destination must immediately invalidate an in-flight
@@ -879,7 +1181,12 @@ function scheduleQuickPreflight(fid, dest, remoteId, subpath) {
   // exists/new-folder text for the wrong destination.
   var seq = ++quickPreflightSeq;
   if (remoteId) {
-    var body = {folder_id: fid, remote_target_id: remoteId, subpath: subpath || ''};
+    var body = {
+      folder_id: fid,
+      remote_target_id: remoteId,
+      subpath: subpath || '',
+      destination_name: destinationName,
+    };
     quickPreflightTimer = setTimeout(function() { runQuickPreflight(seq, body); }, 350);
     return;
   }
@@ -890,7 +1197,11 @@ function scheduleQuickPreflight(fid, dest, remoteId, subpath) {
   var isAbs = dest.charAt(0) === '/' || /^[A-Za-z]:[\\\/]/.test(dest) || /^\\\\/.test(dest);
   if (!isAbs) return;
   quickPreflightTimer = setTimeout(function() {
-    runQuickPreflight(seq, {folder_id: fid, destination: dest});
+    runQuickPreflight(seq, {
+      folder_id: fid,
+      destination: dest,
+      destination_name: destinationName,
+    });
   }, 350);
 }
 
@@ -929,7 +1240,8 @@ async function runQuickPreflight(seq, body) {
     // the user or holding up typing. Local-path only: the exact walk re-scans
     // a local dir, so for a remote target the capped "at least N" line stands.
     if (!data.remote && data.file_count_truncated) {
-      requestExactDestCount(body.folder_id, body.destination, seq);
+      requestExactDestCount(
+        body.folder_id, body.destination, body.destination_name, seq);
     }
   } else {
     status.textContent = '✓ New folder — nothing exists at this location yet.';
@@ -951,11 +1263,16 @@ function setDestExistsStatus(status, n, truncated) {
 // result landing after the user has changed the destination is discarded
 // instead of overwriting the line for the wrong path. Stays silent on failure:
 // the capped "at least N" line is already a valid answer.
-function requestExactDestCount(fid, dest, seq) {
+function requestExactDestCount(fid, dest, destinationName, seq) {
   fetch('/api/move-folder/preflight', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({folder_id: fid, destination: dest, mode: 'exact'}),
+    body: JSON.stringify({
+      folder_id: fid,
+      destination: dest,
+      destination_name: destinationName,
+      mode: 'exact',
+    }),
   }).then(function(resp) {
     return resp.ok ? resp.json() : null;
   }).then(function(data) {
@@ -976,6 +1293,11 @@ async function startQuickMove() {
   var fid = parseInt(document.getElementById('quickFolderSelect').value);
   if (!fid) return;
   var remoteId = quickRemoteTargetId();
+  var nameResult = quickFolderNameResult();
+  if (nameResult.error) {
+    showToast(nameResult.error, 'error');
+    return;
+  }
 
   // Build the destination half of the request body — a local path or a
   // remote target + optional subpath. The same shape is reused for both the
@@ -1001,11 +1323,12 @@ async function startQuickMove() {
     destBody = {
       remote_target_id: remoteId,
       subpath: subResult.value,
+      destination_name: nameResult.value,
     };
   } else {
     var dest = document.getElementById('quickDestInput').value.trim();
     if (!dest) return;
-    destBody = {destination: dest};
+    destBody = {destination: dest, destination_name: nameResult.value};
   }
 
   var folder = allFolders.find(function(f) { return f.id === fid; });
@@ -1125,6 +1448,8 @@ async function loadPhotosForFolder() {
   var sel = document.getElementById('photoFolderSelect');
   var fid = parseInt(sel.value);
   var container = document.getElementById('photoGridContainer');
+  var seq = ++photoLoadSeq;
+  photoList = [];
   selectedPhotos.clear();
   lastSelectedIdx = -1;
   updatePhotoSelectionUI();
@@ -1137,14 +1462,35 @@ async function loadPhotosForFolder() {
   container.innerHTML = '<div class="loading">Loading photos...</div>';
 
   try {
-    var data = await safeFetch('/api/photos?folder_id=' + fid + '&per_page=500');
-    photoList = data.photos || [];
+    var page = 1;
+    var total = null;
+    var loadedPhotos = [];
+    while (total === null || loadedPhotos.length < total) {
+      var data = await safeFetch(
+        '/api/photos?folder_id=' + encodeURIComponent(fid) +
+        '&per_page=500&page=' + page
+      );
+      if (seq !== photoLoadSeq) return;
+
+      var pagePhotos = data.photos || [];
+      loadedPhotos = loadedPhotos.concat(pagePhotos);
+      if (typeof data.total === 'number') total = data.total;
+
+      if (pagePhotos.length < 500 || (total !== null && loadedPhotos.length >= total)) break;
+      page += 1;
+      var totalText = total !== null ? ' of ' + total.toLocaleString() : '';
+      container.innerHTML = '<div class="loading">Loading photos... ' +
+        loadedPhotos.length.toLocaleString() + totalText + '</div>';
+    }
+
+    photoList = loadedPhotos;
     if (photoList.length === 0) {
       container.innerHTML = '<div class="empty-state">No photos in this folder</div>';
       return;
     }
     renderPhotoGrid();
   } catch (e) {
+    if (seq !== photoLoadSeq) return;
     container.innerHTML = '<div class="empty-state">Failed to load photos</div>';
   }
 }

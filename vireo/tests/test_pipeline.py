@@ -1602,6 +1602,66 @@ def test_load_photo_features_includes_model_in_species(tmp_path):
             assert isinstance(entry[2], str), f"Model should be a string, got {type(entry[2])}"
 
 
+def test_load_photo_features_preserves_subject_boxes_and_predictions(tmp_path):
+    """Each qualifying detection remains a distinct review subject.
+
+    A detected second bird must still surface when it has no prediction, and
+    later predictions must attach to that bird rather than being flattened
+    without spatial provenance.
+    """
+    from db import Database
+    from pipeline import load_photo_features
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path), name="photos")
+    photo_id = db.add_photo(
+        folder_id, "two-birds.jpg", ".jpg", 1000, 1.0,
+        width=4000, height=3000,
+    )
+    detection_ids = db.save_detections(
+        photo_id,
+        [
+            {
+                "box": {"x": 0.05, "y": 0.4, "w": 0.2, "h": 0.3},
+                "confidence": 0.9,
+                "category": "animal",
+            },
+            {
+                "box": {"x": 0.55, "y": 0.35, "w": 0.2, "h": 0.3},
+                "confidence": 0.4,
+                "category": "animal",
+            },
+        ],
+        detector_model="megadetector-v6",
+    )
+    db.add_prediction(
+        detection_ids[0], "American Wigeon", 0.98, "bioclip",
+        category="match",
+    )
+
+    photo = load_photo_features(db)[0]
+    assert [s["detection_id"] for s in photo["subjects"]] == detection_ids
+    assert photo["subjects"][0]["box"] == {
+        "x": 0.05, "y": 0.4, "w": 0.2, "h": 0.3,
+    }
+    assert photo["subjects"][0]["predictions"] == [
+        ("American Wigeon", 0.98, "bioclip"),
+    ]
+    assert photo["subjects"][1]["predictions"] == []
+
+    db.add_prediction(
+        detection_ids[1], "Blue-winged Teal", 0.91, "bioclip",
+        category="match",
+    )
+    photo = load_photo_features(db)[0]
+    assert photo["subjects"][1]["predictions"] == [
+        ("Blue-winged Teal", 0.91, "bioclip"),
+    ]
+    assert {row[0] for row in photo["species_top5"]} == {
+        "American Wigeon", "Blue-winged Teal",
+    }
+
+
 def test_load_photo_features_filters_to_latest_fingerprint(tmp_path):
     """With multiple fingerprints cached for a (detection, model), only the
     latest one surfaces — otherwise stale species from an old label set

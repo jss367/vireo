@@ -187,6 +187,58 @@ def test_extract_metadata_does_not_retry_permanent_failures(monkeypatch):
     assert calls == [paths]
 
 
+def test_extract_metadata_checkpoints_between_batches(monkeypatch):
+    """Pause/cancel callbacks run around each bounded ExifTool batch."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(5)]
+    batches = []
+    checkpoints = []
+
+    def fake_run(file_paths, extra_args=None):
+        batches.append(list(file_paths))
+        return [{"SourceFile": path} for path in file_paths]
+
+    monkeypatch.setattr(metadata, "_BATCH_SIZE", 2)
+    monkeypatch.setattr(metadata, "_run_exiftool_with_retries", fake_run)
+
+    results = metadata.extract_metadata(
+        paths,
+        checkpoint=lambda: checkpoints.append(len(batches)),
+    )
+
+    assert batches == [paths[:2], paths[2:4], paths[4:]]
+    assert checkpoints == [0, 1, 1, 2, 2, 3]
+    assert set(results) == set(paths)
+
+
+def test_extract_metadata_cancel_checkpoint_stops_before_next_batch(monkeypatch):
+    """Cancellation after a batch prevents another ExifTool subprocess."""
+    import metadata
+
+    paths = [f"/photos/img{i}.jpg" for i in range(5)]
+    batches = []
+
+    class Cancelled(RuntimeError):
+        pass
+
+    def fake_run(file_paths, extra_args=None):
+        batches.append(list(file_paths))
+        return [{"SourceFile": path} for path in file_paths]
+
+    def checkpoint():
+        if len(batches) == 1:
+            raise Cancelled("cancelled between batches")
+
+    monkeypatch.setattr(metadata, "_BATCH_SIZE", 2)
+    monkeypatch.setattr(metadata, "_run_exiftool_with_retries", fake_run)
+
+    with pytest.raises(Cancelled, match="between batches"):
+        metadata.extract_metadata(paths, checkpoint=checkpoint)
+
+    assert batches == [paths[:2]]
+
+
 def test_extract_metadata_timeout_retries_isolate_slow_file(monkeypatch):
     """Timed-out ExifTool batches split until a slow file is isolated."""
     import metadata

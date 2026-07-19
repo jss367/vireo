@@ -9,9 +9,19 @@
 <title>Vireo - Review Photo Locations</title>
 <style>
 html, body { height: 100%; overflow: hidden; }
-body { margin: 0; }
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: var(--bottom-offset, 28px);
+}
+.navbar,
+.runtime-warning-banner,
+.missing-folders-banner,
+.new-images-banner,
+.dup-cleanup-banner { flex-shrink: 0; }
 .location-review-page {
-  height: calc(100vh - 76px);
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -44,6 +54,32 @@ body { margin: 0; }
 .location-review-title { min-width: 0; }
 .location-review-title h1 { margin: 0; font-size: 17px; font-weight: 650; }
 .location-review-title p { margin: 2px 0 0; color: var(--text-dim); font-size: 11px; }
+.location-review-source {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 220px;
+  max-width: 320px;
+  margin-left: auto;
+}
+.location-review-source label {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.location-review-source select {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border-secondary);
+  border-radius: 5px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 12px;
+}
 .location-review-progress { margin-left: auto; min-width: 180px; }
 .location-review-progress-line {
   display: flex;
@@ -237,6 +273,7 @@ body { margin: 0; }
 }
 .location-review-assign:disabled { opacity: .45; cursor: default; }
 .location-review-empty {
+  flex: 1;
   grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
@@ -265,8 +302,11 @@ body { margin: 0; }
   border-color: var(--border-secondary) !important;
 }
 @media (max-width: 860px) {
-  html, body { overflow: auto; }
-  .location-review-page { height: auto; min-height: calc(100vh - 76px); }
+  html, body { height: auto; overflow: auto; }
+  body { display: block; padding-bottom: var(--bottom-offset, 28px); }
+  .location-review-page { height: auto; min-height: calc(100vh - 48px - var(--bottom-offset, 28px)); }
+  .location-review-header { flex-wrap: wrap; }
+  .location-review-source { order: 3; width: 100%; max-width: none; margin-left: 0; }
   .location-review-main { grid-template-columns: 1fr; grid-template-rows: 58vh auto; }
   .location-review-map-column { border-right: 0; border-bottom: 1px solid var(--border-primary); }
   .location-review-panel { min-height: 560px; }
@@ -283,6 +323,12 @@ body { margin: 0; }
     <div class="location-review-title">
       <h1>Review Photo Locations</h1>
       <p id="locationReviewScope">Preparing coordinate groups…</p>
+    </div>
+    <div class="location-review-source">
+      <label for="locationReviewCollection">Collection</label>
+      <select id="locationReviewCollection" aria-label="Photo collection to review">
+        <option value="">Choose a collection…</option>
+      </select>
     </div>
     <div class="location-review-progress">
       <div class="location-review-progress-line">
@@ -370,6 +416,7 @@ body { margin: 0; }
   var state = {
     source: null,
     returnUrl: sessionStorage.getItem('vireoLocationReviewReturn') || '/browse',
+    collections: [],
     groups: [],
     currentIndex: 0,
     initialGroupCount: 0,
@@ -405,6 +452,7 @@ body { margin: 0; }
     var params = new URLSearchParams(window.location.search);
     var collectionId = parseInt(params.get('collection_id') || '', 10);
     if (!isNaN(collectionId)) return { collection_id: collectionId };
+    if (params.get('source') !== 'selection') return null;
     try {
       var stored = JSON.parse(sessionStorage.getItem('vireoLocationReviewSource') || 'null');
       if (stored && Array.isArray(stored.photo_ids) && stored.photo_ids.length) {
@@ -413,6 +461,49 @@ body { margin: 0; }
     } catch (e) {}
     return null;
   }
+
+  function collectionOptionLabel(collection) {
+    var count = collection.photo_count;
+    if (count == null) return collection.name;
+    return collection.name + ' (' + formatNumber(count) + ')';
+  }
+
+  async function loadCollectionChoices() {
+    var select = document.getElementById('locationReviewCollection');
+    try {
+      state.collections = await safeFetch('/api/collections', {}, {toast: false});
+    } catch (e) {
+      select.options[0].textContent = 'Collections unavailable';
+      throw e;
+    }
+
+    state.collections.forEach(function(collection) {
+      var option = document.createElement('option');
+      option.value = String(collection.id);
+      option.textContent = collectionOptionLabel(collection);
+      if (collection.count_error) {
+        option.disabled = true;
+        option.textContent = collection.name + ' (unavailable — edit rules to fix)';
+      }
+      select.appendChild(option);
+    });
+
+    if (state.source && state.source.photo_ids) {
+      var selectionOption = document.createElement('option');
+      selectionOption.value = '__selection__';
+      selectionOption.textContent = 'Selected photos (' + formatNumber(state.source.photo_ids.length) + ')';
+      select.insertBefore(selectionOption, select.options[1] || null);
+      select.value = '__selection__';
+    } else if (state.source && state.source.collection_id != null) {
+      select.value = String(state.source.collection_id);
+    }
+  }
+
+  document.getElementById('locationReviewCollection').addEventListener('change', function(event) {
+    var collectionId = parseInt(event.target.value || '', 10);
+    if (isNaN(collectionId)) return;
+    window.location.href = '/locations/review?collection_id=' + encodeURIComponent(collectionId);
+  });
 
   function formatNumber(value) { return Number(value || 0).toLocaleString(); }
 
@@ -1005,8 +1096,29 @@ body { margin: 0; }
 
   async function initialize() {
     state.source = parseSource();
+    var collectionsLoaded = false;
+    try {
+      await loadCollectionChoices();
+      collectionsLoaded = true;
+    } catch (e) {
+      if (!state.source) {
+        document.getElementById('locationReviewScope').textContent = 'Collections could not be loaded';
+        document.getElementById('locationReviewProgressText').textContent = 'Unavailable';
+        showEmpty('Could not load collections', e.message || 'The collection list is temporarily unavailable.', true);
+        return;
+      }
+    }
     if (!state.source) {
-      showEmpty('No photos selected', 'Return to Browse and choose a collection or photo selection to review.', true);
+      document.getElementById('locationReviewScope').textContent = 'Choose a collection to begin';
+      document.getElementById('locationReviewProgressText').textContent = 'Ready';
+      document.getElementById('locationReviewRemaining').textContent = '';
+      document.getElementById('locationReviewProgressFill').style.width = '0';
+      showEmpty(
+        collectionsLoaded && state.collections.length ? 'Choose a collection' : 'No collections yet',
+        collectionsLoaded && state.collections.length
+          ? 'Select any collection above to review its unassigned photo locations.'
+          : 'Create a collection in Browse, then return here to review its photo locations.'
+      );
       return;
     }
     try {

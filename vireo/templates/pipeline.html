@@ -1021,6 +1021,7 @@ body { padding-bottom: 36px; }
 // with the checkbox while this is still true risks having that
 // assignment silently overwrite the interaction.
 window._pageInitPending = true;
+var _dashboardActionScopeError = '';
 function initPipelinePage() {
   fetch('/api/pipeline/page-init')
     .then(function(r) { return r.json(); })
@@ -1077,14 +1078,15 @@ function initPipelinePage() {
 
   // Load collections, models, and labels in parallel
   loadFolderScopeList();
-  loadCollections();
+  var collectionsReady = loadCollections();
   // Models and labels populate the pickers the plan endpoint reads from,
   // so chain the first plan refresh once both are in the DOM. Without
   // this, the initial plan would key off zero models / zero labels and
   // mislabel Classify as "No models selected" until the user clicks
   // something.
-  Promise.all([loadModels(), loadLabels()]).then(function() {
+  Promise.all([loadModels(), loadLabels(), collectionsReady]).then(function() {
     applyClassifyQueryParams();
+    applyDashboardActionQueryParams();
     refreshPipelinePlan();
   });
 
@@ -1131,6 +1133,48 @@ function applyClassifyQueryParams() {
     });
   }
   if (typeof updateLabelsPickerState === 'function') updateLabelsPickerState();
+}
+
+// Dashboard attention cards deep-link to a deliberately narrow Process
+// setup.  The user still reviews the plan and clicks Run; this only selects
+// the intended scope and optional stages.
+function applyDashboardActionQueryParams() {
+  var qs = new URLSearchParams(window.location.search);
+  var stage = qs.get('dashboard_stage');
+  if (stage !== 'classify' && stage !== 'previews') return;
+
+  var classify = document.getElementById('enableClassify');
+  var extract = document.getElementById('enableExtract');
+  var eyes = document.getElementById('enableEyeKeypoints');
+  var group = document.getElementById('enableGroup');
+  var misses = document.getElementById('enableMisses');
+  var speciesReview = document.getElementById('enableSpeciesReview');
+  if (classify) classify.checked = stage === 'classify';
+  if (extract) extract.checked = false;
+  if (eyes) eyes.checked = false;
+  if (group) group.checked = false;
+  if (misses) misses.checked = false;
+  if (speciesReview) speciesReview.checked = false;
+
+  var collectionId = qs.get('collection_id');
+  var picker = document.getElementById('collectionPicker');
+  if (collectionId) {
+    var option = picker && picker.querySelector(
+      'option[value="' + CSS.escape(collectionId) + '"]');
+    if (!option || option.disabled) {
+      _dashboardActionScopeError =
+        'The Dashboard collection is unavailable. Return to Dashboard and choose another scope.';
+    } else {
+      picker.value = collectionId;
+      selectSourceMode('collection');
+      onCollectionChange();
+    }
+  }
+
+  var card = document.getElementById(stage === 'classify' ? 'card-classify' : 'card-previews');
+  if (card) card.classList.add('expanded');
+  updateCardStates();
+  updateStartButton();
 }
 
 document.addEventListener('DOMContentLoaded', initPipelinePage);
@@ -1492,15 +1536,10 @@ function applyProcessToToggles(proc) {
     document.getElementById('enableMisses').checked = !!proc.miss_enabled;
     document.getElementById('enableSpeciesReview').checked =
       (proc.review_mode === 'species');
-    // Re-run the cascade so downstream enable/disable state is consistent,
-    // then force back on any stage the process says should run (the cascade
-    // would otherwise disable e.g. Group when Extract is off).
+    // Re-run the dependency handling so enabled/disabled state is consistent.
     ['classify', 'extract', 'eyekeypoints', 'group'].forEach(function(st) {
       try { onStageToggle(st); } catch (e) {}
     });
-    if (!proc.skip_regroup) {
-      var g = document.getElementById('enableGroup'); g.checked = true; g.disabled = false;
-    }
     if (!proc.skip_eye_keypoints) {
       var ek = document.getElementById('enableEyeKeypoints'); ek.checked = true; ek.disabled = false;
     }
@@ -2113,6 +2152,15 @@ function updateStartButton() {
     actionStatus.className = 'status-msg';
   }
 
+  if (_dashboardActionScopeError) {
+    btn.disabled = true;
+    if (actionStatus) {
+      actionStatus.textContent = _dashboardActionScopeError;
+      actionStatus.className = 'status-msg error';
+    }
+    return;
+  }
+
   if (_sourceMode === 'folders') {
     btn.disabled = selectedFolderIds().length === 0;
   } else if (_sourceMode === 'new_images') {
@@ -2172,11 +2220,11 @@ function updateStartButton() {
   }
 }
 
-// -- Stage enable/disable dependency chain --
-// Eye keypoints sits off the linear chain: it depends on extract (needs masks)
-// but is not a prerequisite for group, so toggling it alone affects only itself.
+// -- Stage enable/disable dependencies --
+// Extract depends on Classify, and Eye Keypoints depends on Extract (needs
+// masks). Group is independent because it can regroup from cached features.
 function onStageToggle(stage) {
-  var chain = ['classify', 'extract', 'group'];
+  var chain = ['classify', 'extract'];
   var idx = chain.indexOf(stage);
 
   if (idx >= 0) {
@@ -2199,7 +2247,7 @@ function onStageToggle(stage) {
 
   // Sync eye keypoints to extract: if extract is off, eye keypoints can't
   // run (no masks); when extract comes back on, leave eye keypoints
-  // unchecked so user must opt in again, matching how group behaves.
+  // unchecked so the user must opt in again.
   var extCb = document.getElementById('enableExtract');
   var ekCb = document.getElementById('enableEyeKeypoints');
   if (extCb && ekCb && stage !== 'eyekeypoints') {
@@ -2296,6 +2344,10 @@ var _currentPipelineJobId = null;
 
 async function startPipeline() {
   if (_pipelineRunning) return;
+  if (_dashboardActionScopeError) {
+    updateStartButton();
+    return;
+  }
 
   // Belt-and-suspenders: updateStartButton() should already have disabled
   // this button when Classify is enabled and the plan is mid-refresh, but

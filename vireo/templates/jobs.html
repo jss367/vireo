@@ -65,6 +65,8 @@
   width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
 }
 .job-list-item-dot.running { background: var(--accent); animation: pulse-dot 1.5s ease-in-out infinite; }
+.job-list-item-dot.pausing { background: var(--warning, #d99a24); animation: pulse-dot 1.5s ease-in-out infinite; }
+.job-list-item-dot.paused { background: var(--warning, #d99a24); }
 .job-list-item-dot.queued { background: var(--text-muted, #888); border: 1px solid var(--accent); }
 .job-list-item-dot.completed { background: var(--success, #4caf50); }
 .job-list-item-dot.failed { background: var(--danger); }
@@ -111,6 +113,8 @@
   font-size: 12px; padding: 3px 10px; border-radius: 4px; font-weight: 500;
 }
 .job-detail-status.running { background: var(--accent); color: var(--accent-text); }
+.job-detail-status.pausing,
+.job-detail-status.paused { background: color-mix(in srgb, var(--warning, #d99a24) 20%, transparent); color: var(--warning, #d99a24); }
 .job-detail-status.queued { background: var(--bg-tertiary); color: var(--text-muted, #888); border: 1px solid var(--border-secondary); }
 .job-detail-status.completed { background: color-mix(in srgb, var(--success, #4caf50) 20%, transparent); color: var(--success, #4caf50); }
 .job-detail-status.failed { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
@@ -127,6 +131,14 @@
 .btn-cancel:disabled {
   background: var(--text-muted); cursor: progress; opacity: 0.7;
 }
+.btn-pause {
+  font-size: 12px; padding: 4px 12px; border-radius: 4px; cursor: pointer;
+  background: var(--warning, #d99a24); color: #1f1b12;
+  border: 1px solid color-mix(in srgb, var(--warning, #d99a24) 75%, #000);
+  font-weight: 600;
+}
+.btn-pause:hover { filter: brightness(1.06); }
+.btn-pause:disabled { cursor: progress; opacity: 0.65; }
 .btn-retry {
   font-size: 11px; padding: 2px 8px; border-radius: 3px; cursor: pointer;
   background: var(--accent); color: var(--accent-text); border: none;
@@ -215,6 +227,8 @@
 .job-card-header {
   padding: 16px 24px; border-bottom: 1px solid var(--border-primary);
   display: flex; align-items: center; gap: 12px; background: var(--bg-secondary);
+  position: sticky; top: 0; z-index: 5;
+  box-shadow: 0 2px 6px color-mix(in srgb, #000 12%, transparent);
 }
 .job-card-workspace {
   font-size: 12px; padding: 2px 8px; border-radius: 4px;
@@ -329,6 +343,11 @@
     }
   }
 
+  function isLiveStatus(status) {
+    return status === 'running' || status === 'queued' ||
+      status === 'pausing' || status === 'paused';
+  }
+
   function activeProgress(progress) {
     if (!progress) return null;
     if (typeof progress.phase_current === 'number' && progress.phase_total > 0) {
@@ -375,7 +394,7 @@
     // the queued case), and dropping them out of the active section
     // strands them — the user has no way to find or cancel a queued
     // pipeline until the slot opens.
-    var isLive = job.status === 'running' || job.status === 'queued';
+    var isLive = isLiveStatus(job.status);
     var elapsed = '';
     if (isLive && job.started_at) {
       elapsed = formatElapsed((Date.now() - new Date(job.started_at).getTime()) / 1000);
@@ -395,6 +414,13 @@
     }
     html += '<span class="job-detail-status ' + job.status + '">' + job.status + '</span>';
     if (isLive) {
+      if (job.pausable && job.status === 'running') {
+        html += '<button class="btn-pause" data-pause-job="' + escapeAttr(job.id) + '">Pause</button>';
+      } else if (job.pausable && job.status === 'pausing') {
+        html += '<button class="btn-pause" disabled>Pausing…</button>';
+      } else if (job.pausable && job.status === 'paused') {
+        html += '<button class="btn-pause" data-resume-job="' + escapeAttr(job.id) + '">Resume</button>';
+      }
       if (cancellingJobIds[job.id]) {
         html += '<button class="btn-cancel cancelling" disabled>Cancelling…</button>';
       } else {
@@ -697,7 +723,7 @@
     // slot are findable + cancellable here; without this, opening /jobs
     // after queuing from another tab would show the queued run nowhere.
     var running = activeJobs.filter(function(j) {
-      return j.status === 'running' || j.status === 'queued';
+      return isLiveStatus(j.status);
     });
     html += '<div class="jobs-list-divider clickable' + (currentView === 'active' ? ' selected' : '') + '" data-view="active">Active' +
       (running.length > 0 ? ' (' + running.length + ')' : '') + '</div>';
@@ -719,7 +745,7 @@
     var selected = j.id === selectedJobId ? ' selected' : '';
     var dot = j.status || 'completed';
     var time = '';
-    if (j.status === 'running' && j.started_at) {
+    if (isLiveStatus(j.status) && j.started_at) {
       time = formatElapsed((Date.now() - new Date(j.started_at).getTime()) / 1000);
     } else if (j.started_at) {
       time = timeAgo(j.started_at);
@@ -727,7 +753,7 @@
     var detail = '';
     var visibleProgress = activeProgress(j.progress);
     var collectionText = jobCollectionText(j);
-    if (j.status === 'running' && j.progress && j.progress.phase) {
+    if (isLiveStatus(j.status) && j.progress && j.progress.phase) {
       detail = esc(j.progress.phase);
       if (visibleProgress && visibleProgress.phase) {
         detail += ' ' + visibleProgress.current.toLocaleString() + '/' + visibleProgress.total.toLocaleString();
@@ -753,7 +779,7 @@
     html += '<span class="job-list-item-time">' + time + '</span>';
     html += '</div>';
     if (detail) html += '<div class="job-list-item-detail">' + detail + '</div>';
-    if (j.status === 'running' && pct > 0) {
+    if (isLiveStatus(j.status) && pct > 0) {
       html += '<div class="job-list-item-progress"><div class="job-list-item-progress-fill" style="width:' + pct + '%"></div></div>';
     }
     html += '</div>';
@@ -762,7 +788,7 @@
 
   function updateRunningBadge() {
     var running = activeJobs.filter(function(j) {
-      return j.status === 'running' || j.status === 'queued';
+      return isLiveStatus(j.status);
     });
     var badge = document.getElementById('runningBadge');
     if (running.length > 0) { badge.textContent = running.length; badge.style.display = ''; }
@@ -794,7 +820,7 @@
     if (sseSource) { sseSource.close(); sseSource = null; }
     if (source === 'active') {
       var job = activeJobs.find(function(j) { return j.id === jobId; });
-      if (job) { renderDetail(job); if (job.status === 'running' || job.status === 'queued') connectSSE(jobId); }
+      if (job) { renderDetail(job); if (isLiveStatus(job.status)) connectSSE(jobId); }
     } else {
       var job = historyJobs.find(function(j) { return j.id === jobId; });
       if (job) renderHistoryDetail(job);
@@ -813,6 +839,16 @@
         if (data.steps) job.steps = data.steps;
         if (selectedJobId === jobId) renderDetail(job);
         updateList();
+      }
+    });
+    sseSource.addEventListener('status', function(e) {
+      var data = JSON.parse(e.data);
+      var job = activeJobs.find(function(j) { return j.id === jobId; });
+      if (job && data.status) {
+        job.status = data.status;
+        if (selectedJobId === jobId) renderDetail(job);
+        updateList();
+        updateRunningBadge();
       }
     });
     sseSource.addEventListener('complete', function(e) {
@@ -853,11 +889,43 @@
     }
   }
 
-  // Event delegation for detail pane clicks (step toggle, cancel)
+  // Event delegation for detail pane clicks (step toggle, pause/resume, cancel)
   document.getElementById('jobDetailPane').addEventListener('click', function(e) {
     var stepHeader = e.target.closest('[data-toggle-step]');
     if (stepHeader) {
       toggleStep(stepHeader.getAttribute('data-toggle-step'));
+      return;
+    }
+    var pauseBtn = e.target.closest('[data-pause-job]');
+    var resumeBtn = e.target.closest('[data-resume-job]');
+    if (pauseBtn || resumeBtn) {
+      var controlBtn = pauseBtn || resumeBtn;
+      var action = pauseBtn ? 'pause' : 'resume';
+      var jobId = controlBtn.getAttribute(
+        pauseBtn ? 'data-pause-job' : 'data-resume-job'
+      );
+      controlBtn.disabled = true;
+      controlBtn.textContent = pauseBtn ? 'Pausing…' : 'Resuming…';
+      fetch('/api/jobs/' + encodeURIComponent(jobId) + '/' + action, {
+        method: 'POST'
+      }).then(function(r) {
+        if (!r.ok) {
+          return r.json().then(function(data) {
+            throw new Error((data && data.error) || 'Unable to ' + action + ' job');
+          });
+        }
+        return r.json();
+      }).then(function(data) {
+        var job = activeJobs.find(function(j) { return j.id === jobId; });
+        if (job && data.status) job.status = data.status;
+        if (typeof showToast === 'function') {
+          showToast(action === 'pause' ? 'Pausing after the current batch…' : 'Job resumed', 'info');
+        }
+        fetchJobs();
+      }).catch(function(err) {
+        if (typeof showToast === 'function') showToast(err.message, 'error');
+        fetchJobs();
+      });
       return;
     }
     var cancelBtn = e.target.closest('[data-cancel-job]');
@@ -915,7 +983,7 @@
   function renderActiveOverview() {
     var pane = document.getElementById('jobDetailPane');
     var running = activeJobs.filter(function(j) {
-      return j.status === 'running' || j.status === 'queued';
+      return isLiveStatus(j.status);
     });
 
     if (running.length === 0) {

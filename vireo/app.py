@@ -141,6 +141,8 @@ ALL_PAGES = [
     {"id": "browse",          "label": "Browse",          "href": "/browse"},
     {"id": "edit",            "label": "Edit",            "href": "/edit"},
     {"id": "map",             "label": "Map",             "href": "/map"},
+    {"id": "location_review", "label": "Review Photo Locations", "href": "/locations/review",
+     "keywords": "location review map coordinates collections gps places"},
     {"id": "variants",        "label": "Variants",        "href": "/variants"},
     {"id": "dashboard",       "label": "Dashboard",       "href": "/dashboard"},
     {"id": "storage",         "label": "Storage",         "href": "/storage"},
@@ -149,6 +151,7 @@ ALL_PAGES = [
     {"id": "compare",         "label": "Compare",         "href": "/compare"},
     {"id": "settings",        "label": "Settings",        "href": "/settings"},
     {"id": "workspace",       "label": "Workspace",       "href": "/workspace"},
+    {"id": "lightroom",       "label": "Lightroom",       "href": "/lightroom"},
     {"id": "shortcuts",       "label": "Shortcuts",       "href": "/shortcuts"},
     {"id": "keywords",        "label": "Keywords",        "href": "/keywords"},
     {"id": "duplicates",      "label": "Duplicates",      "href": "/duplicates"},
@@ -542,7 +545,8 @@ def _photo_highlight_entries(db, photo_id):
         None, min_quality=0.0, photo_id=photo_id
     )
     buckets, _unidentified = _collect_highlight_buckets(
-        candidates, confidence_threshold=0.0
+        candidates, confidence_threshold=0.0,
+        canonicalize_species=_species_canonicalizer(db),
     )
     entries = []
     for bucket in buckets:
@@ -588,10 +592,27 @@ def _normalize_highlight_presence_filter(value):
     return value
 
 
+def _species_canonicalizer(db):
+    """Memoized wrapper around db.resolve_species_display_name.
+
+    Bucket collection resolves the same handful of species strings for
+    thousands of candidate rows; caching avoids a keyword lookup per row.
+    """
+    cache = {}
+
+    def canonicalize(name):
+        if name not in cache:
+            cache[name] = db.resolve_species_display_name(name)
+        return cache[name]
+
+    return canonicalize
+
+
 def _collect_highlight_buckets(
     candidates,
     confidence_threshold,
     confirmation_filter="all",
+    canonicalize_species=None,
 ):
     confirmation_filter = _normalize_highlight_confirmation_filter(
         confirmation_filter
@@ -615,7 +636,15 @@ def _collect_highlight_buckets(
             and predicted_conf is not None
             and predicted_conf >= confidence_threshold
         ):
+            # Prediction labels are external vocabulary (classifier label
+            # files) with their own casing. Bucket by the spelling
+            # add_keyword would store so a predicted `Common Waxbill` and
+            # photos already accepted as `Common waxbill` land in ONE
+            # bucket, and so curation written from this bucket's label keys
+            # on the string the keyword row and eligibility queries use.
             species = r["predicted_species"]
+            if canonicalize_species is not None:
+                species = canonicalize_species(species) or species
             is_accepted = False
         else:
             species = None
@@ -3042,6 +3071,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # verbatim. Add the new coordinate-source field only for that exact legacy
     # list; customized card layouts remain unchanged.
     cfg.migrate_browse_location_status_field()
+    # One-time rewrite of the previous encounter-grouping species weight
+    # (0.10) to the new default (0.40) in both ~/.vireo/config.json and
+    # workspace overrides. Without this, upgraded installs that had the
+    # pipeline block persisted verbatim keep grouping distinct species into
+    # one encounter — the intended split behavior only reaches fresh
+    # configs. Only the exact legacy value is rewritten; re-saved values
+    # are preserved on subsequent boots.
+    cfg.migrate_legacy_w_species_default(init_db)
     # One-time rewrite of the global pipeline.default_strategy (legacy
     # hardcoded strategy name) to pipeline.default_process_id (saved_processes
     # id). The workspace-side rewrite happens inside Database(); this covers
@@ -3619,6 +3656,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         return value
 
+    def _collection_rules_state(db, rules_json):
+        """Return parsed collection rules and whether they are degraded."""
+        try:
+            parsed_rules = json.loads(rules_json)
+        except (TypeError, ValueError):
+            return None, True
+        return parsed_rules, not db.rules_resolvable(parsed_rules)
+
     @app.route("/api/browse/init")
     def api_browse_init():
         """Combined endpoint for browse page initial load — one request instead of five."""
@@ -3629,6 +3674,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
+        collection_id = request.args.get("collection_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
@@ -3642,26 +3688,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError as e:
             return json_error(str(e), 400)
 
-        photos = db.get_photos(
-            folder_id=folder_id,
-            page=page,
-            per_page=per_page,
-            sort=sort,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            color_label=color_label,
-            flag=flag,
-            location_status=location_status,
-        )
-        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
-            total = db.count_photos()
-        else:
-            total = db.count_filtered_photos(
+        try:
+            photos = db.get_photos(
                 folder_id=folder_id,
+                collection_id=collection_id,
+                page=page,
+                per_page=per_page,
+                sort=sort,
                 rating_min=rating_min,
                 date_from=date_from,
                 date_to=date_to,
@@ -3672,6 +3705,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 flag=flag,
                 location_status=location_status,
             )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        if not any([folder_id, collection_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
+            total = db.count_photos()
+        else:
+            try:
+                total = db.count_filtered_photos(
+                    folder_id=folder_id,
+                    collection_id=collection_id,
+                    rating_min=rating_min,
+                    date_from=date_from,
+                    date_to=date_to,
+                    keyword=keyword,
+                    keyword_match_case=keyword_match_case,
+                    keyword_whole_word=keyword_whole_word,
+                    color_label=color_label,
+                    flag=flag,
+                    location_status=location_status,
+                )
+            except ValueError as exc:
+                return json_error(str(exc), 400)
         folders = db.get_folder_tree()
         keywords = db.get_keyword_tree()
         collections = db.get_collections()
@@ -3695,24 +3749,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # on every smart-collection query. Malformed JSON is treated
             # as degraded too — those rules would 400 downstream just
             # like an unresolvable rule.
-            try:
-                parsed_rules = json.loads(c["rules"])
-            except (TypeError, ValueError):
+            parsed_rules, degraded = _collection_rules_state(db, c["rules"])
+            if degraded:
                 d["can_add_photos"] = False
                 d["count_error"] = True
                 collection_dicts.append(d)
-                continue
-            if not db.rules_resolvable(parsed_rules):
                 app.logger.warning(
                     "Collection %s (%s) has unresolvable rules; marking degraded",
                     c["id"],
                     c["name"],
                 )
-                d["count_error"] = True
-                # Same reasoning as /api/collections: an unresolvable rule
-                # cannot be safely merged into via add-photos, so keep it
-                # out of the add-to-collection modal.
-                d["can_add_photos"] = False
+                continue
             else:
                 d["can_add_photos"] = _collection_accepts_manual_photos(parsed_rules)
             collection_dicts.append(d)
@@ -3748,7 +3795,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if j.get("type") != "pipeline":
                 continue
             status = j.get("status")
-            if status == "running":
+            if status in {"running", "pausing", "paused"}:
                 active += 1
             elif status == "queued":
                 queued += 1
@@ -4352,7 +4399,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _missing_originals_heavy_job_active():
         for job in app._job_runner.list_jobs():
-            if job.get("status") not in ("running", "queued"):
+            if job.get("status") not in (
+                "running", "pausing", "paused", "queued",
+            ):
                 continue
             if job.get("type") in _MISSING_ORIGINALS_HEAVY_JOB_TYPES:
                 return True
@@ -4371,7 +4420,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if workspace_id is None:
             return None
         for job in app._job_runner.list_jobs():
-            if job.get("status") not in ("queued", "running"):
+            if job.get("status") not in (
+                "queued", "running", "pausing", "paused",
+            ):
                 continue
             job_type = job.get("type")
             if job_type in LOCAL_WORKSPACE_JOB_TYPES and job.get("workspace_id") == workspace_id:
@@ -5065,6 +5116,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
+        collection_id = request.args.get("collection_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
@@ -5078,28 +5130,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError as e:
             return json_error(str(e), 400)
 
-        photos = db.get_photos(
-            folder_id=folder_id,
-            page=page,
-            per_page=per_page,
-            sort=sort,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            color_label=color_label,
-            flag=flag,
-            location_status=location_status,
-        )
-
-        # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
-        if not any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
-            total = db.count_photos()
-        else:
-            total = db.count_filtered_photos(
+        try:
+            photos = db.get_photos(
                 folder_id=folder_id,
+                collection_id=collection_id,
+                page=page,
+                per_page=per_page,
+                sort=sort,
                 rating_min=rating_min,
                 date_from=date_from,
                 date_to=date_to,
@@ -5110,6 +5147,29 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 flag=flag,
                 location_status=location_status,
             )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+
+        # Total count — use count_photos for unfiltered, otherwise use efficient COUNT query
+        if not any([folder_id, collection_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
+            total = db.count_photos()
+        else:
+            try:
+                total = db.count_filtered_photos(
+                    folder_id=folder_id,
+                    collection_id=collection_id,
+                    rating_min=rating_min,
+                    date_from=date_from,
+                    date_to=date_to,
+                    keyword=keyword,
+                    keyword_match_case=keyword_match_case,
+                    keyword_whole_word=keyword_whole_word,
+                    color_label=color_label,
+                    flag=flag,
+                    location_status=location_status,
+                )
+            except ValueError as exc:
+                return json_error(str(exc), 400)
 
         photo_dicts = [dict(p) for p in photos]
         _attach_location_statuses(db, photo_dicts)
@@ -5133,6 +5193,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
+        collection_id = request.args.get("collection_id", None, type=int)
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
@@ -5146,19 +5207,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         except ValueError as e:
             return json_error(str(e), 400)
 
-        photo_ids = db.get_photo_ids(
-            folder_id=folder_id,
-            sort=sort,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            color_label=color_label,
-            flag=flag,
-            location_status=location_status,
-        )
+        try:
+            photo_ids = db.get_photo_ids(
+                folder_id=folder_id,
+                collection_id=collection_id,
+                sort=sort,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
+                color_label=color_label,
+                flag=flag,
+                location_status=location_status,
+            )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
         return jsonify({"photo_ids": photo_ids, "total": len(photo_ids)})
 
     @app.route("/api/photos/calendar")
@@ -6281,10 +6346,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
         result["tagging"] = summary
 
-        def cancel_requested():
+        def cancel_requested(*, pause_safe=True):
+            runner_check = None
+            if job is not None and runner is not None:
+                runner_check = (
+                    runner.is_cancelled
+                    if pause_safe
+                    else runner.cancellation_requested
+                )
             cancelled = result.get("cancelled") or (
-                job is not None and runner is not None
-                and runner.is_cancelled(job["id"])
+                runner_check is not None and runner_check(job["id"])
             )
             if cancelled:
                 # The cancellation may arrive after the importer itself has
@@ -6337,7 +6408,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 items = []
                 for photo_id in photo_ids:
-                    if cancel_requested():
+                    if cancel_requested(pause_safe=False):
                         break
                     exists = thread_db.conn.execute(
                         "SELECT 1 FROM photo_keywords "
@@ -6355,7 +6426,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         "old_value": "",
                         "new_value": str(keyword_id),
                     })
-                if cancel_requested():
+                if cancel_requested(pause_safe=False):
                     thread_db.conn.rollback()
                     summary["skipped"] = "import cancelled"
                     break
@@ -6375,8 +6446,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     f'Could not add tag "{requested_name}": {exc}'
                 )
         summary["tagged_photos"] = len(tagged_photo_ids)
+        tagging_cancelled = cancel_requested()
 
-        if location_from_gps and not cancel_requested():
+        if location_from_gps and not tagging_cancelled:
             unresolved = 0
             skipped = 0
             added = 0
@@ -6404,7 +6476,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     unresolved += len(payload["unresolved"])
                     skipped += len(payload["skipped"])
                     for group in payload["groups"]:
-                        if cancel_requested():
+                        if cancel_requested(pause_safe=False):
                             cancelled_during_gps = True
                             break
                         details = details_by_place_id.get(group["place_id"])
@@ -6427,7 +6499,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             continue
                         location_items = []
                         for photo_id in group["photo_ids"]:
-                            if cancel_requested():
+                            if cancel_requested(pause_safe=False):
                                 cancelled_during_gps = True
                                 break
                             thread_db.set_photo_location(photo_id, leaf_id)
@@ -6449,6 +6521,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 is_batch=True, _commit=False,
                             )
                     thread_db.conn.commit()
+                    if cancel_requested():
+                        cancelled_during_gps = True
                     if cancelled_during_gps:
                         break
                 except Exception as exc:
@@ -8712,18 +8786,48 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Statistics --
 
+    def _dashboard_scope_args():
+        return {
+            "folder_id": request.args.get("folder_id", None, type=int),
+            "collection_id": request.args.get("collection_id", None, type=int),
+            "date_from": request.args.get("date_from", None),
+            "date_to": request.args.get("date_to", None),
+        }
+
+    @app.route("/api/dashboard/options")
+    def api_dashboard_options():
+        """Return lightweight scope choices without running collection counts.
+
+        Collections whose rules can't be compiled (malformed JSON or
+        unresolvable fields) are marked ``degraded`` so the Dashboard scope
+        picker can disable them. Selecting one would 400 both /api/stats and
+        /api/coverage via ``_build_collection_query`` and leave the Dashboard
+        panels wedged until the scope is reset.
+        """
+        db = _get_db()
+        folders = [dict(row) for row in db.get_folder_tree()]
+        collection_rows = db.conn.execute(
+            "SELECT id, name, rules FROM collections "
+            "WHERE workspace_id = ? ORDER BY name COLLATE NOCASE, id",
+            (db._ws_id(),),
+        ).fetchall()
+        collections = []
+        for row in collection_rows:
+            _, degraded = _collection_rules_state(db, row["rules"])
+            collections.append({
+                "id": row["id"],
+                "name": row["name"],
+                "degraded": degraded,
+            })
+        return jsonify({"folders": folders, "collections": collections})
+
     @app.route("/api/stats")
     def api_stats():
         db = _get_db()
-        stats = db.get_dashboard_stats()
-        # ``total_photos`` is the workspace's full inventory (includes photos
-        # whose folders are currently flagged 'missing'), so the dashboard's
-        # headline number stays honest when a drive is unmounted.
-        # ``accessible_photos`` is the subset that's actually reachable right
-        # now — when this is lower, the UI surfaces the gap with a banner.
-        stats["total_photos"] = db.count_photos_in_workspace()
-        stats["accessible_photos"] = db.count_photos()
-        stats["missing_folder_count"] = len(db.get_missing_folders())
+        try:
+            stats = db.get_dashboard_stats(**_dashboard_scope_args())
+        except ValueError as exc:
+            return json_error(str(exc), 400)
         return jsonify(stats)
 
     @app.route("/api/coverage")
@@ -8735,10 +8839,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         linked to the workspace). Both share the same coverage keys.
         """
         db = _get_db()
-        return jsonify({
-            "overall": db.get_coverage_stats(),
-            "folders": db.get_folder_coverage_stats(),
-        })
+        scope = _dashboard_scope_args()
+        try:
+            return jsonify({
+                "overall": db.get_coverage_stats(**scope),
+                "folders": db.get_folder_coverage_stats(**scope),
+            })
+        except ValueError as exc:
+            return json_error(str(exc), 400)
 
     @app.route("/api/workspace/classification-inventory")
     def api_workspace_classification_inventory():
@@ -9411,6 +9519,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         if not species:
             return None, "species required"
+        # Canonicalize to the spelling add_keyword would store (see
+        # _parse_species_highlight_body) so the eligibility prechecks and
+        # the DB setters all key on one string.
+        species = _get_db().resolve_species_display_name(species)
+        if not species:
+            return None, "species required"
 
         photo_id = body.get("photo_id")
         # Ordered highlights are per-photo (multiple photos per species),
@@ -9456,7 +9570,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _photo_can_be_highlights_preference(db, species, photo_id):
         candidates = db.get_highlights_candidates(None, min_quality=0.0)
         buckets, _unidentified = _collect_highlight_buckets(
-            candidates, confidence_threshold=0.0
+            candidates, confidence_threshold=0.0,
+            canonicalize_species=_species_canonicalizer(db),
         )
         for bucket in buckets:
             if bucket["species"] != species:
@@ -9546,6 +9661,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _parse_species_highlight_body(body, require_direction=False):
         species = body.get("species", "")
         species = species.strip() if isinstance(species, str) else ""
+        if not species:
+            return None, "species required"
+        # Canonicalize to the spelling add_keyword would store: the client
+        # sends bucket labels, which for unconfirmed buckets derive from
+        # prediction casing. The eligibility precheck compares against
+        # canonical bucket keys and the DB setters canonicalize on write,
+        # so parse-time canonicalization keeps all three in agreement.
+        species = _get_db().resolve_species_display_name(species)
         if not species:
             return None, "species required"
         photo_id = body.get("photo_id")
@@ -9645,7 +9768,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         total_in_scope = db.count_filtered_photos(folder_id=folder_id)
 
         buckets, unidentified_photos = _collect_highlight_buckets(
-            candidates, confidence_threshold, confirmation_filter
+            candidates, confidence_threshold, confirmation_filter,
+            canonicalize_species=_species_canonicalizer(db),
         )
         eligible_count = sum(b["photo_count"] for b in buckets) + len(
             unidentified_photos
@@ -9761,6 +9885,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     ):
         rows = db.get_life_list_candidates(species=species_filter)
         locations_by_species = db.get_life_list_locations(species=species_filter)
+        class_by_taxon = db.get_class_ancestors_for_taxa({
+            row["taxon_id"] for row in rows if row["taxon_id"] is not None
+        })
         photo_offset = max(0, int(photo_offset))
         if photos_per_species is None:
             photo_limit = None
@@ -9775,6 +9902,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             entry = buckets.setdefault(r["species"], {
                 "scientific_name": None,
                 "common_name": None,
+                "taxon_id": None,
+                "taxon_rank": None,
+                "taxonomic_class": None,
                 "photos": [],
                 "seen_ids": set(),
             })
@@ -9784,6 +9914,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 entry["scientific_name"] = r.get("scientific_name")
             if entry["common_name"] is None:
                 entry["common_name"] = r.get("common_name")
+            if entry["taxon_id"] is None and r.get("taxon_id") is not None:
+                entry["taxon_id"] = r["taxon_id"]
+                entry["taxon_rank"] = r.get("taxon_rank")
+                entry["taxonomic_class"] = class_by_taxon.get(r["taxon_id"])
             # A photo tagged with two same-name species keywords would
             # otherwise be appended once per row, inflating photo_count
             # and duplicating cards in the lightbox.
@@ -9879,6 +10013,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "species": species,
                 "scientific_name": entry["scientific_name"],
                 "common_name": entry["common_name"],
+                "taxon_id": entry["taxon_id"],
+                "taxon_rank": entry["taxon_rank"],
+                "taxonomic_class": entry["taxonomic_class"],
                 "photo_count": len(photos),
                 "first_seen": min(timestamps) if timestamps else None,
                 "last_seen": max(timestamps) if timestamps else None,
@@ -9993,6 +10130,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         best = entry.get("best")
         return [best] if best else []
 
+    _LIFE_LIST_SPECIES_CSV_COLUMNS = (
+        "number",
+        "species",
+        "scientific_name",
+        "common_name",
+        "photo_count",
+        "first_seen",
+        "last_seen",
+        "locations",
+        "best_photo_id",
+        "best_filename",
+    )
+    _LIFE_LIST_PHOTO_CSV_COLUMNS = (
+        "number",
+        "species",
+        "scientific_name",
+        "common_name",
+        "photo_id",
+        "filename",
+        "timestamp",
+        "is_life_list_photo",
+        "quality_score",
+        "locations",
+    )
+
     def _life_list_export_response(body, mimetype, extension):
         today = datetime.now(UTC).date().isoformat()
         resp = make_response(body)
@@ -10011,21 +10173,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return "'" + text
         return text
 
-    def _life_list_species_csv(payload):
+    def _life_list_species_csv(payload, fieldnames=None):
         out = io.StringIO()
-        fieldnames = [
-            "number",
-            "species",
-            "scientific_name",
-            "common_name",
-            "photo_count",
-            "first_seen",
-            "last_seen",
-            "locations",
-            "best_photo_id",
-            "best_filename",
-        ]
-        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        fieldnames = fieldnames or _LIFE_LIST_SPECIES_CSV_COLUMNS
+        writer = csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for entry in payload.get("species", []):
             best = entry.get("best") or {}
@@ -10045,21 +10196,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             })
         return out.getvalue()
 
-    def _life_list_photos_csv(payload, photo_mode):
+    def _life_list_photos_csv(payload, photo_mode, fieldnames=None):
         out = io.StringIO()
-        fieldnames = [
-            "number",
-            "species",
-            "scientific_name",
-            "common_name",
-            "photo_id",
-            "filename",
-            "timestamp",
-            "is_life_list_photo",
-            "quality_score",
-            "locations",
-        ]
-        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        fieldnames = fieldnames or _LIFE_LIST_PHOTO_CSV_COLUMNS
+        writer = csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for entry in payload.get("species", []):
             for photo in _life_list_export_photos(entry, photo_mode):
@@ -10131,6 +10271,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if photo_mode not in {"best", "all"}:
             return json_error("photos must be best or all")
 
+        csv_columns = None
+        if "columns" in request.args:
+            if fmt != "csv":
+                return json_error("columns is only supported for csv exports")
+            available_columns = (
+                _LIFE_LIST_PHOTO_CSV_COLUMNS
+                if detail == "photos"
+                else _LIFE_LIST_SPECIES_CSV_COLUMNS
+            )
+            requested_columns = {
+                column.strip()
+                for column in request.args.get("columns", "").split(",")
+                if column.strip()
+            }
+            if not requested_columns:
+                return json_error("select at least one csv column")
+            unknown_columns = requested_columns.difference(available_columns)
+            if unknown_columns:
+                return json_error(
+                    "unknown csv columns: " + ", ".join(sorted(unknown_columns))
+                )
+            csv_columns = [
+                column for column in available_columns
+                if column in requested_columns
+            ]
+
         db = _get_db()
         uses_photo_scope = fmt == "files" or (fmt == "csv" and detail == "photos")
         payload_photos_per_species = (
@@ -10149,9 +10315,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return _life_list_export_response(body, "application/json", "json")
         if fmt == "csv":
             body = (
-                _life_list_photos_csv(payload, photo_mode)
+                _life_list_photos_csv(payload, photo_mode, csv_columns)
                 if detail == "photos"
-                else _life_list_species_csv(payload)
+                else _life_list_species_csv(payload, csv_columns)
             )
             return _life_list_export_response(body, "text/csv; charset=utf-8", "csv")
         if fmt == "files":
@@ -10294,6 +10460,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # dst_existed=false; undo would then delete the user's
         # pre-existing highlight/preference/rep.
         species = db.resolve_species_display_name(species)
+        # Multi-homonym reconciliation. resolve_species_display_name
+        # preserves the caller's spelling when two intentionally-distinct
+        # root species keywords share a NOCASE key (legacy general
+        # ``Robin`` alongside taxonomy ``robin``) so bucket / parse /
+        # setter paths stay in agreement on one string. add_keyword's
+        # typed lookup below still prefers the taxonomy row, however, so
+        # a request submitted as ``Robin`` would snapshot dst_existed
+        # against ``Robin`` and then rename onto ``robin`` — leaving undo
+        # able to delete pre-existing ``robin`` curation rows it never
+        # created. Mirror add_keyword's ORDER BY here so snapshots and
+        # renames key on the exact spelling add_keyword will store. Rows
+        # with type NOT IN ('taxonomy', 'general') are excluded (matching
+        # add_keyword) so a deliberate individual/location/genre homonym
+        # doesn't misroute the target.
+        target_row = db.conn.execute(
+            "SELECT name FROM keywords WHERE name = ? COLLATE NOCASE "
+            "AND parent_id IS NULL AND type IN ('taxonomy', 'general') "
+            "ORDER BY (type = 'taxonomy') DESC, id ASC LIMIT 1",
+            (species,),
+        ).fetchone()
+        if target_row and target_row["name"]:
+            species = target_row["name"]
         error, status = _validate_highlight_photo_ids(db, photo_ids)
         if error:
             return json_error(error, status)
@@ -10709,7 +10897,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         candidates = db.get_highlights_candidates(folder_id, min_quality=min_quality)
         buckets, unidentified_photos = _collect_highlight_buckets(
-            candidates, confidence_threshold, confirmation_filter
+            candidates, confidence_threshold, confirmation_filter,
+            canonicalize_species=_species_canonicalizer(db),
         )
         buckets, unidentified_photos = _filter_highlight_sections(
             buckets,
@@ -11831,6 +12020,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             })
 
         preds = db.get_predictions(photo_ids=photo_ids)
+        detections_by_photo = db.get_detections_for_photos(photo_ids)
         keywords_by_photo = db.get_keywords_for_photos(photo_ids)
         species_by_photo = db.get_species_keywords_for_photos(photo_ids)
         edit_recipes_by_photo = db.get_photo_edit_recipes(photo_ids)
@@ -11857,6 +12047,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "keywords": keywords_by_photo.get(row["id"], []),
                 "species_keywords": species_by_photo.get(row["id"], []),
                 "predictions": {},
+                "subjects": [],
                 "row_category": "missing_prediction",
                 "row_label": "Missing prediction",
             }
@@ -11865,15 +12056,59 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # With multi-detection, each photo may have multiple predictions per model
         models = set()
         by_photo = {p["id"]: summarize_photo(p) for p in photos}
+        subjects_by_detection = {}
+        for pid, detections in detections_by_photo.items():
+            photo = by_photo.get(pid)
+            if photo is None:
+                continue
+            for det in detections:
+                if (
+                    det.get("category") != "animal"
+                    or det.get("detector_model") == "full-image"
+                ):
+                    continue
+                subject = {
+                    "detection_id": det["id"],
+                    "kind": "detected",
+                    "box": {
+                        "x": det["x"],
+                        "y": det["y"],
+                        "w": det["w"],
+                        "h": det["h"],
+                    },
+                    "detector_confidence": det["confidence"],
+                    "predictions": {},
+                }
+                photo["subjects"].append(subject)
+                subjects_by_detection[det["id"]] = subject
+
         for pr in preds:
             d = dict(pr)
             if d.get("status") == "alternative":
                 continue
             pid = d["photo_id"]
             model = d["model"]
-            models.add(model)
             if pid not in by_photo:
                 continue
+            subject = subjects_by_detection.get(d.get("detection_id"))
+            if subject is None:
+                if d.get("detector_model") != "full-image":
+                    # Predictions backed by a detection below the current
+                    # workspace threshold are intentionally dormant until the
+                    # user lowers that threshold. Do not let them create
+                    # invisible Compare conflicts.
+                    continue
+                subject = {
+                    "detection_id": d["detection_id"],
+                    "kind": "full_image",
+                    "box": {"x": 0, "y": 0, "w": 1, "h": 1},
+                    "detector_confidence": 0,
+                    "predictions": {},
+                }
+                by_photo[pid]["subjects"].append(subject)
+                subjects_by_detection[d["detection_id"]] = subject
+
+            models.add(model)
             if model not in by_photo[pid]["predictions"]:
                 by_photo[pid]["predictions"][model] = []
             comparison = compare_prediction_to_keywords(
@@ -11881,8 +12116,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 species_by_photo.get(pid, []),
                 taxonomy,
             )
-            by_photo[pid]["predictions"][model].append({
+            prediction = {
                 "id": d["id"],
+                "detection_id": d["detection_id"],
                 "species": d["species"],
                 "confidence": d["confidence"],
                 "status": d["status"],
@@ -11895,7 +12131,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "box_y": d.get("box_y"),
                 "box_w": d.get("box_w"),
                 "box_h": d.get("box_h"),
-            })
+            }
+            by_photo[pid]["predictions"][model].append(prediction)
+            subject["predictions"].setdefault(model, []).append(prediction)
 
         priority = {
             "conflict": 6,
@@ -12056,6 +12294,30 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             db.record_edit('prediction_accept', desc, str(result['keyword_id']),
                            items, is_batch=is_batch)
         return jsonify({"ok": True})
+
+    @app.route("/api/predictions/<int:pred_id>/accept-subject", methods=["POST"])
+    def api_accept_subject_species(pred_id):
+        db = _get_db()
+        result = db.accept_subject_species(pred_id)
+        if result is None:
+            return json_error("prediction not found", 404)
+        db.record_edit(
+            "prediction_accept",
+            f'Accepted additional subject species: added "{result["species"]}"',
+            str(result["keyword_id"]),
+            [{
+                "photo_id": result["photo_id"],
+                "old_value": ",".join(
+                    str(pred_id) for pred_id in result["prediction_ids"]
+                ),
+                "new_value": str(result["keyword_id"]),
+            }],
+        )
+        return jsonify({
+            "ok": True,
+            "species": result["species"],
+            "prediction_ids": result["prediction_ids"],
+        })
 
     @app.route("/api/predictions/<int:pred_id>/reject", methods=["POST"])
     def api_reject_prediction(pred_id):
@@ -17376,6 +17638,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         job_id = runner.start(
             "scan", work, config=job_config, workspace_id=active_ws,
+            pausable=True,
         )
         return jsonify({"job_id": job_id})
 
@@ -17427,6 +17690,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "folder_id": folder_id,
             },
             workspace_id=active_ws,
+            pausable=True,
         )
         return jsonify({"job_id": job_id})
 
@@ -17461,6 +17725,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             job_config["root"] = existing[0]
         job_id = runner.start(
             "scan", work, config=job_config, workspace_id=active_ws,
+            pausable=True,
         )
         return jsonify({"job_id": job_id, "roots": existing, "skipped": skipped})
 
@@ -18933,6 +19198,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("JSON body must be an object")
         folder_id = body.get("folder_id")
         destination = body.get("destination", "")
+        destination_name_raw = body.get("destination_name", "")
         remote_target_id = (body.get("remote_target_id") or "").strip()
         subpath = body.get("subpath", "")
         merge_raw = body.get("merge", False)
@@ -19010,6 +19276,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         import config as cfg
         import move as move_mod
+        try:
+            destination_name = move_mod.normalize_destination_name(
+                destination_name_raw)
+        except ValueError as exc:
+            return json_error(str(exc))
         effective_cfg = _get_db().get_effective_config(cfg.load())
         developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
@@ -19122,6 +19393,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 developed_dir=developed_dir,
                 merge=merge,
                 remote=remote,
+                destination_name=destination_name,
             )
 
             # Tell the JobRunner whether the move actually succeeded. Without
@@ -19161,6 +19433,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         job_config = {
             "folder_id": folder_id, "destination": display_dest, "merge": merge,
         }
+        if destination_name:
+            job_config["destination_name"] = destination_name
         if remote:
             # Surface that this is an SSH transfer (and to where) so the job
             # panel can show it, per the UI-transparency rule.
@@ -19217,6 +19491,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("JSON body must be an object")
         folder_id = body.get("folder_id")
         destination = body.get("destination", "")
+        destination_name_raw = body.get("destination_name", "")
         mode = body.get("mode", "quick")
         if mode not in ("quick", "exact", "preview"):
             mode = "quick"
@@ -19225,6 +19500,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not folder_id:
             return json_error("folder_id required")
+        try:
+            destination_name = move_mod.normalize_destination_name(
+                destination_name_raw)
+        except ValueError as exc:
+            return json_error(str(exc))
 
         folder = _get_db().conn.execute(
             "SELECT path, name FROM folders WHERE id = ?", (folder_id,)
@@ -19260,9 +19540,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # different remote path than the actual transfer (move_folder
             # uses posixpath.join), so an existing destination would be
             # reported as new and the first non-merge move would fail.
-            folder_name = (folder["name"]
-                           or os.path.basename(folder["path"].rstrip("/\\")))
-            resolved = posixpath.join(spec["ssh_dest_base"], folder_name)
+            landing_name = destination_name or folder["name"] \
+                or os.path.basename(folder["path"].rstrip("/\\"))
+            resolved = posixpath.join(spec["ssh_dest_base"], landing_name)
             exists, fcount, truncated, reachable, err = \
                 move_mod.remote_preflight(target, resolved)
             return jsonify({
@@ -19283,7 +19563,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not os.path.isabs(destination):
             return json_error("destination must be an absolute path")
 
-        resolved = resolve_folder_dest(folder["path"], folder["name"], destination)
+        resolved = resolve_folder_dest(
+            folder["path"], folder["name"], destination, destination_name)
         exists = os.path.isdir(resolved)
         file_count = 0
         file_count_truncated = False
@@ -20150,6 +20431,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         }
         job_id = runner.start(
             "import-in-place", work, config=job_config, workspace_id=active_ws,
+            pausable=True,
         )
         response = {"job_id": job_id}
         if created_workspace is not None:
@@ -20548,6 +20830,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         job_id = runner.start(
             "import", work, config=job_config, workspace_id=active_ws,
+            pausable=True,
         )
         response = {"job_id": job_id}
         if created_workspace is not None:
@@ -20934,10 +21217,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/jobs/<job_id>/cancel", methods=["POST"])
     def api_job_cancel(job_id):
-        """Request cancellation of a running job.
+        """Request cancellation of a running, pausing, paused, or queued job.
 
-        Returns 200 if the job was found running and marked for cancellation,
-        404 if the job does not exist or is no longer running.
+        Returns 200 if the live job accepted cancellation, or 404 if the job
+        does not exist or has already reached a terminal state.
         """
         runner = app._job_runner
         if runner.cancel_job(job_id):
@@ -20946,6 +21229,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if job is None:
             return json_error("job not found", 404)
         return json_error(f"job is not running (status={job['status']})", 404)
+
+    @app.route("/api/jobs/<job_id>/pause", methods=["POST"])
+    def api_job_pause(job_id):
+        """Pause supported work at its next safe checkpoint."""
+        runner = app._job_runner
+        if runner.pause_job(job_id):
+            return jsonify({
+                "pause_requested": True,
+                "job_id": job_id,
+                "status": "pausing",
+            })
+        job = runner.get(job_id)
+        if job is None:
+            return json_error("job not found", 404)
+        if not job.get("pausable"):
+            return json_error("job does not support pausing", 409)
+        return json_error(
+            f"job cannot be paused (status={job['status']})", 409,
+        )
+
+    @app.route("/api/jobs/<job_id>/resume", methods=["POST"])
+    def api_job_resume(job_id):
+        """Resume a pausing or paused job."""
+        runner = app._job_runner
+        if runner.resume_job(job_id):
+            return jsonify({
+                "resumed": True,
+                "job_id": job_id,
+                "status": "running",
+            })
+        job = runner.get(job_id)
+        if job is None:
+            return json_error("job not found", 404)
+        return json_error(
+            f"job cannot be resumed (status={job['status']})", 409,
+        )
 
     @app.route("/api/jobs/cancel-queued", methods=["POST"])
     def api_jobs_cancel_queued():
@@ -24066,6 +24385,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "hard_cut_time": ("seconds", 0.0, 86400.0),
             "hard_cut_score": ("score", 0.0, 1.0),
             "soft_cut_score": ("score", 0.0, 1.0),
+            "species_hard_cut_confidence": ("score", 0.0, 1.0),
+            "species_hard_cut_margin": ("score", 0.0, 1.0),
             "merge_score": ("score", 0.0, 1.0),
             "merge_max_gap": ("seconds", 0.0, 86400.0),
             "merge_tau": ("seconds", 1.0, 86400.0),

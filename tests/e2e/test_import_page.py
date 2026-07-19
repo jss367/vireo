@@ -668,8 +668,17 @@ def test_import_duplicate_stream_result_ignored_after_controls_change(
     page.wait_for_function("window.__resolveDuplicates !== null")
     page.locator("#fileTypePreset").select_option("custom")
     page.locator("#chkVerifyByHash").check()
-    page.evaluate("() => window.__resolveDuplicates()")
-    page.wait_for_timeout(100)
+    # The control changes schedule a legitimate automatic refresh after the
+    # debounce interval. Cancel that future run so this assertion stays scoped
+    # to the stale duplicate stream we are releasing, then synchronize on the
+    # stale preview's own finally block instead of an arbitrary timeout.
+    page.evaluate(
+        """() => {
+          clearScheduledImportPreview();
+          window.__resolveDuplicates();
+        }"""
+    )
+    expect(page.locator("#btnPreview")).to_be_enabled()
 
     assert page.evaluate("window.__destinationPreviewCalled") is False
     expect(page.locator("#destStructure")).to_be_hidden()

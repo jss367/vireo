@@ -1708,7 +1708,7 @@ body.sidebar-resizing {
         <div style="margin-bottom:16px;font-size:18px;color:var(--text-primary);font-weight:600;">Welcome to Vireo</div>
         <p style="max-width:460px;margin:0 auto 20px;line-height:1.6;color:var(--text-muted);">
           To get started, import your photos. You can scan a folder of images
-          (with or without existing XMP sidecars).
+          (with or without existing XMP sidecars), or import keywords from a Lightroom catalog.
         </p>
         <a href="/import" style="display:inline-block;background:var(--accent);color:var(--accent-text);padding:10px 28px;border-radius:4px;font-size:14px;font-weight:600;text-decoration:none;">Import Photos</a>
       </div>
@@ -1755,7 +1755,7 @@ body.sidebar-resizing {
         <div class="selection-action-hint" id="pasteEditHint"></div>
       </div>
       <div class="detail-section">
-        <div class="detail-section-title">Fill Missing Keywords</div>
+        <div class="detail-section-title">Keywords</div>
         <div class="selection-keyword-list" id="selectionKeywordSuggestions"></div>
       </div>
     </div>
@@ -2028,6 +2028,9 @@ var flagFilter = '';
 var activeFolderId = null;
 var activeKeyword = null;
 var activeCollectionId = null;
+// A Dashboard deep link can combine a collection with date/keyword filters.
+// Normal collection clicks keep the historical collection-only behavior.
+var dashboardCollectionScope = false;
 var keywordSearchMatchCase = false;
 var keywordSearchWholeWord = false;
 var timelineMode = false;
@@ -2512,6 +2515,20 @@ function formatFileSize(bytes) {
   return (bytes / 1073741824).toFixed(1) + ' GB';
 }
 
+function renderSpeciesBadges(species, inline) {
+  if (!Array.isArray(species) || species.length === 0) return '';
+  var maxShow = 3;
+  var style = inline ? ' style="position:static;padding:0;"' : '';
+  var html = '<div class="species-badges"' + style + '>';
+  species.slice(0, maxShow).forEach(function(name) {
+    html += '<span class="species-badge">' + escapeHtml(name) + '</span>';
+  });
+  if (species.length > maxShow) {
+    html += '<span class="species-badge-overflow">+' + (species.length - maxShow) + ' more</span>';
+  }
+  return html + '</div>';
+}
+
 function renderCardField(field, p) {
   switch (field) {
     case 'filename':
@@ -2541,19 +2558,7 @@ function renderCardField(field, p) {
       if (p.sharpness != null) return '<span style="font-size:10px;color:var(--text-ghost);" title="Sharpness score">' + Math.round(p.sharpness) + '</span>';
       return '';
     case 'species':
-      if (p.species && p.species.length > 0) {
-        var maxShow = 3;
-        var html = '<div class="species-badges" style="position:static;padding:0;">';
-        p.species.slice(0, maxShow).forEach(function(s) {
-          html += '<span class="species-badge">' + escapeHtml(s) + '</span>';
-        });
-        if (p.species.length > maxShow) {
-          html += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
-        }
-        html += '</div>';
-        return html;
-      }
-      return '';
+      return renderSpeciesBadges(p.species, true);
     case 'dimensions':
       if (p.width && p.height) return '<span style="font-size:10px;color:var(--text-ghost);">' + p.width + ' \u00d7 ' + p.height + '</span>';
       return '';
@@ -2642,17 +2647,8 @@ function renderPhotoCard(p, idx) {
 
   // Species badges on image overlay (only when NOT in cardFields — if in cardFields, rendered below)
   var speciesBadgeHtml = '';
-  if (cardFields.indexOf('species') === -1 && p.species && p.species.length > 0) {
-    var maxShow = 3;
-    var shown = p.species.slice(0, maxShow);
-    speciesBadgeHtml = '<div class="species-badges">';
-    shown.forEach(function(s) {
-      speciesBadgeHtml += '<span class="species-badge">' + escapeHtml(s) + '</span>';
-    });
-    if (p.species.length > maxShow) {
-      speciesBadgeHtml += '<span class="species-badge-overflow">+' + (p.species.length - maxShow) + ' more</span>';
-    }
-    speciesBadgeHtml += '</div>';
+  if (cardFields.indexOf('species') === -1) {
+    speciesBadgeHtml = renderSpeciesBadges(p.species, false);
   }
 
   var thumbUrl = window.vireoThumbnailUrl ? window.vireoThumbnailUrl(p) : '/thumbnails/' + p.id + '.jpg';
@@ -2758,6 +2754,17 @@ function refreshGridCards(photoIds) {
     // when async metadata arrives after the card was appended.
     var wrap = card.querySelector('.grid-card-img-wrap');
     if (wrap) {
+      var speciesBadges = wrap.querySelector('.species-badges');
+      var speciesBadgeHtml = cardFields.indexOf('species') === -1
+        ? renderSpeciesBadges(p.species, false)
+        : '';
+      if (speciesBadges && speciesBadgeHtml) {
+        speciesBadges.outerHTML = speciesBadgeHtml;
+      } else if (speciesBadges) {
+        speciesBadges.remove();
+      } else if (speciesBadgeHtml) {
+        wrap.insertAdjacentHTML('beforeend', speciesBadgeHtml);
+      }
       var existing = wrap.querySelector('.inat-badge');
       var shouldShow = !!inatSubmitted[String(id)];
       if (shouldShow && !existing) {
@@ -2881,6 +2888,32 @@ async function bootstrapBrowse() {
   try {
     applyBrowseConfig(await _cfgPromise);
     var pageParams = new URLSearchParams(window.location.search);
+    var initialFolderId = parseInt(pageParams.get('folder_id'), 10);
+    if (!isNaN(initialFolderId)) activeFolderId = initialFolderId;
+    var initialCollectionId = parseInt(pageParams.get('collection_id'), 10);
+    if (!isNaN(initialCollectionId)) {
+      activeCollectionId = initialCollectionId;
+      dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
+    }
+    document.getElementById('dateFrom').value = pageParams.get('date_from') || '';
+    document.getElementById('dateTo').value = pageParams.get('date_to') || '';
+    var initialKeyword = pageParams.get('keyword') || '';
+    if (initialKeyword) {
+      document.getElementById('searchInput').value = initialKeyword;
+      appliedKeywordSearch = initialKeyword;
+    }
+    var initialRating = parseInt(pageParams.get('rating_min'), 10);
+    if (!isNaN(initialRating) && initialRating >= 1 && initialRating <= 5) {
+      filterRating = initialRating;
+      document.querySelectorAll('.rating-filter .rating-star').forEach(function(el) {
+        el.classList.toggle('active', parseInt(el.dataset.val, 10) <= filterRating);
+      });
+    }
+    var initialFlag = pageParams.get('flag') || '';
+    if (['none', 'flagged', 'rejected'].indexOf(initialFlag) !== -1) {
+      flagFilter = initialFlag;
+      updateFlagFilterButtons();
+    }
     var initialLocationStatus = pageParams.get('location_status') || '';
     if (!initialLocationStatus && pageParams.get('missing_gps') === '1') {
       initialLocationStatus = 'none';
@@ -2889,6 +2922,11 @@ async function bootstrapBrowse() {
       document.getElementById('locationStatusFilter').value = initialLocationStatus;
     }
     var initParams = buildCurrentBrowseParams();
+    // Collection-only deep links keep their historical endpoint behavior,
+    // while Dashboard links opt into composable filters via dashboard_scope.
+    // The combined init endpoint still needs the collection id for first paint
+    // in either case.
+    if (activeCollectionId) initParams.set('collection_id', activeCollectionId);
     initParams.set('per_page', perPage);
     var data = await safeFetch('/api/browse/init?' + initParams.toString());
 
@@ -3255,6 +3293,7 @@ async function filterByCollection(id, options) {
   activeFolderId = null;
   activeKeyword = null;
   activeCollectionId = id;
+  dashboardCollectionScope = false;
   if (clipSearchActive && getClipSearchQuery()) {
     selectedPhotos.clear();
     selectedPhotoId = null;
@@ -3952,6 +3991,9 @@ function buildCurrentBrowseParams() {
   params.set('sort', document.getElementById('sortSelect').value);
 
   if (activeFolderId) params.set('folder_id', activeFolderId);
+  if (activeCollectionId && dashboardCollectionScope) {
+    params.set('collection_id', activeCollectionId);
+  }
   if (filterRating > 0) params.set('rating_min', filterRating);
   if (flagFilter) params.set('flag', flagFilter);
 
@@ -4029,7 +4071,7 @@ async function loadPhotos(options) {
   var reqPerPage = perPage * chunk;
 
   var url;
-  if (activeCollectionId) {
+  if (activeCollectionId && !dashboardCollectionScope) {
     var cparams = new URLSearchParams();
     cparams.set('page', reqPage);
     cparams.set('per_page', reqPerPage);
@@ -4800,7 +4842,7 @@ async function selectAllMatchingPhotos() {
   }
 
   var url;
-  if (activeCollectionId) {
+  if (activeCollectionId && !dashboardCollectionScope) {
     url = '/api/collections/' + activeCollectionId + '/photo-ids';
   } else {
     url = '/api/photos/ids?' + buildCurrentBrowseParams().toString();
@@ -5466,7 +5508,7 @@ async function loadSelectionKeywordSuggestions(ids) {
       body: JSON.stringify({photo_ids: ids}),
     }, { toast: false });
     if (seq !== selectionKeywordRequestSeq) return;
-    renderSelectionKeywordSuggestions(data.suggestions || [], data.selected_count || ids.length);
+    renderSelectionKeywordSuggestions(data.keywords || [], data.selected_count || ids.length);
   } catch(e) {
     if (seq === selectionKeywordRequestSeq && list) {
       list.innerHTML = '<div class="selection-empty">Could not load keyword suggestions.</div>';
@@ -5523,6 +5565,7 @@ async function applySelectionKeyword(keywordId) {
       body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
     });
   } catch(e) { return; }
+  await _refreshBrowseKeywordState(ids);
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(getActiveSelection());
   loadKeywords();
@@ -5543,6 +5586,7 @@ async function removeSelectionKeyword(keywordId) {
       body: JSON.stringify({photo_ids: ids, keyword_id: keywordId}),
     });
   } catch(e) { return; }
+  await _refreshBrowseKeywordState(ids);
   _clearRepresentativeStateAfterKeywordRemoval(ids, removedName);
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(getActiveSelection());
@@ -5635,6 +5679,45 @@ function _keywordNameFromCache(keywordId) {
     if (k && k.id === keywordId) return k.name;
   }
   return null;
+}
+
+// Keyword edits update the detail panel from /api/photos/:id, but Browse card
+// badges render from the separate `photos` cache populated by /api/photos.
+// Refresh the loaded rows from the authoritative batch endpoint after every
+// keyword mutation so taxonomy badges and representative state cannot drift.
+async function _refreshBrowseKeywordState(photoIds) {
+  if (!Array.isArray(photoIds) || !photoIds.length) return;
+  var loadedIds = new Set(photos.map(function(photo) { return photo.id; }));
+  var ids = Array.from(new Set(photoIds)).filter(function(id) {
+    return loadedIds.has(id);
+  });
+  if (!ids.length) return;
+
+  var refreshed = [];
+  try {
+    for (var offset = 0; offset < ids.length; offset += 500) {
+      var data = await safeFetch('/api/photos/by-ids', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: ids.slice(offset, offset + 500)}),
+      }, {toast: false});
+      (data.photos || []).forEach(function(updated) {
+        var local = photos.find(function(photo) { return photo.id === updated.id; });
+        if (!local) return;
+        local.species = Array.isArray(updated.species) ? updated.species : [];
+        local.life_list = Array.isArray(updated.life_list) ? updated.life_list : [];
+        local.species_representatives = Array.isArray(updated.species_representatives)
+          ? updated.species_representatives
+          : local.life_list;
+        local.is_species_representative = !!updated.is_species_representative;
+        refreshed.push(updated.id);
+      });
+    }
+  } catch (e) {
+    // The keyword save already succeeded; a later page reload remains a safe
+    // fallback if this non-critical card refresh is interrupted.
+  }
+  if (refreshed.length) refreshGridCards(refreshed);
 }
 
 // Server-side eligibility requires the photo to still carry the species
@@ -5747,6 +5830,7 @@ async function confirmBatchKeyword() {
       body: JSON.stringify(payload),
     });
   } catch(e) { return; }
+  await _refreshBrowseKeywordState(ids);
   if (!selectedKeyword) invalidateKeywordAutocompleteCache();
   selectionKeywordKey = '';
   loadSelectionKeywordSuggestions(ids);
@@ -6888,6 +6972,7 @@ async function addKeyword(keyword) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    await _refreshBrowseKeywordState(ids);
     input.value = '';
     state.selectedKeyword = null;
     hideKeywordSuggestions('addKeywordInput');
@@ -6919,6 +7004,7 @@ async function removeKeyword(photoId, keywordId) {
     await safeFetch('/api/photos/' + photoId + '/keywords/' + keywordId, {
       method: 'DELETE',
     });
+    await _refreshBrowseKeywordState([photoId]);
     _clearRepresentativeStateAfterKeywordRemoval(
       [photoId],
       _keywordNameFromCache(keywordId),
@@ -7615,6 +7701,7 @@ async function setKeywordType(kwId, newType, el) {
     var dropdown = el.closest('.keyword-type-dropdown');
     if (dropdown) dropdown.classList.remove('open');
     // Refresh detail panel and keyword tree
+    await _refreshBrowseKeywordState(photos.map(function(photo) { return photo.id; }));
     if (selectedPhotoId) loadDetail(selectedPhotoId);
     loadKeywords();
   } catch(e) {}

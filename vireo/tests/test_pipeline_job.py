@@ -3264,11 +3264,12 @@ def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
     assert 42 in processed
 
 
-def test_pipeline_classify_passes_primary_detection_to_prepare_image(
+def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
     tmp_path, monkeypatch
 ):
-    """classify_stage must pass the primary detection dict (with box_x/y/w/h
-    keys) to _prepare_image, not the raw {photo_id: [dets]} det_map.
+    """classify_stage must pass every qualifying detection dict (with
+    box_x/y/w/h keys) to _prepare_image, not the raw {photo_id: [dets]}
+    det_map. Raw detections below the workspace threshold stay excluded.
 
     Regression: classify_stage called
         _prepare_image(photo, folders, det_map)
@@ -3276,8 +3277,8 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
     once any photo in a batch has a detection, _prepare_image entered its
     crop branch and evaluated det_map["box_w"] -> KeyError: 'box_w', aborting
     classify the moment the first detection came back.  The fix is to look
-    up the highest-confidence detection for this specific photo and pass
-    that (or None) to _prepare_image.
+    up the detections for this specific photo and pass each one (or None for
+    the full-image fallback) to _prepare_image.
     """
     import classifier as classifier_mod
     import classify_job
@@ -3308,11 +3309,24 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
         "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
         "confidence": 0.95, "category": "animal",
     }
+    secondary_det = {
+        "id": 78,
+        "box_x": 0.6, "box_y": 0.2, "box_w": 0.25, "box_h": 0.3,
+        "confidence": 0.45, "category": "animal",
+    }
+    below_threshold_det = {
+        "id": 79,
+        "box_x": 0.8, "box_y": 0.8, "box_w": 0.05, "box_h": 0.05,
+        "confidence": 0.1, "category": "animal",
+    }
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None):
-        det_map = {p["id"]: [primary_det] for p in batch}
+        det_map = {
+            p["id"]: [primary_det, secondary_det, below_threshold_det]
+            for p in batch
+        }
         return det_map, len(batch), {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -3379,12 +3393,10 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
             f"_prepare_image received {det!r}; expected a detection dict "
             "with 'box_w' (or None), not the {photo_id: [dets]} map."
         )
-    # The fix should pass this photo's primary detection through.
-    assert any(
-        isinstance(d, dict) and d.get("box_w") == 0.5 for d in captured
-    ), (
-        f"Expected _prepare_image to receive the primary detection for "
-        f"photo {photo_id}, got {captured!r}."
+    captured_ids = [d.get("id") for d in captured if isinstance(d, dict)]
+    assert captured_ids == [77, 78], (
+        f"Expected both detections above the 0.2 workspace threshold, "
+        f"and no raw low-confidence detection; got {captured!r}."
     )
     # And the KeyError must not have leaked into job errors.
     assert not any("'box_w'" in e for e in job["errors"]), (
@@ -7275,6 +7287,11 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
     ws_id = db._active_workspace_id
 
     events = []
+    pause_state = {
+        "requested": False,
+        "lock_held": False,
+        "wait_lock_states": [],
+    }
 
     real_acquire = pipeline_locks.acquire_workspace_regroup
 
@@ -7286,11 +7303,15 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
         def __enter__(self):
             events.append(("acquire", self._ws))
             self._inner.__enter__()
+            pause_state["lock_held"] = True
             return self
 
         def __exit__(self, *args):
             events.append(("release", self._ws))
-            return self._inner.__exit__(*args)
+            try:
+                return self._inner.__exit__(*args)
+            finally:
+                pause_state["lock_held"] = False
 
     monkeypatch.setattr(
         pj, "acquire_workspace_regroup",
@@ -7299,6 +7320,9 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
 
     def _ok_run(photos, config=None, emit_trace=False):
         events.append(("regroup_work", ws_id))
+        # Simulate Pause arriving during regroup work. The pipeline must defer
+        # its blocking wait until after the shared regroup/misses lock releases.
+        pause_state["requested"] = True
         return {"summary": {"groups": 1}, "photos": photos}
 
     monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _ok_run)
@@ -7309,6 +7333,22 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
     )
 
     class TrackingRunner(FakeRunner):
+        def pause_requested(self, job_id):
+            return pause_state["requested"]
+
+        def cancellation_requested(self, job_id):
+            return False
+
+        def mark_paused(self, job_id):
+            return True
+
+        def wait_if_paused(self, job_id, *, publish_paused=False):
+            pause_state["wait_lock_states"].append(
+                pause_state["lock_held"],
+            )
+            pause_state["requested"] = False
+            return False
+
         def update_step(self, job_id, step_id, **kwargs):
             if step_id == "misses":
                 events.append(("miss_step", kwargs.get("status")))
@@ -7364,6 +7404,10 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
         "miss step must run inside the same lock as regroup — otherwise "
         "a second same-workspace pipeline could sneak in and rewrite "
         f"grouping state between them. events: {interesting}"
+    )
+    assert pause_state["wait_lock_states"] == [False], (
+        "Pause must block only after the regroup/misses lock is released; "
+        f"wait states: {pause_state['wait_lock_states']}"
     )
 
 
@@ -8226,6 +8270,7 @@ def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
 
 def _run_extract_masks_for_test(
     tmp_path, monkeypatch, sam2_variant, photo_specs,
+    *, runner=None, on_generate_mask=None,
 ):
     """Drive a single pipeline run with extract_masks enabled and the heavy
     SAM2/DINOv2 calls stubbed.  Returns (db, runner, generate_mask_calls)
@@ -8286,6 +8331,8 @@ def _run_extract_masks_for_test(
         # Track every (variant, det_box) we get asked about — the cache
         # short-circuit must skip past this entirely on a hit.
         generate_mask_calls.append((variant, tuple(sorted(det_box.items()))))
+        if on_generate_mask is not None:
+            on_generate_mask()
         return np.ones((4, 4), dtype=bool)
 
     monkeypatch.setattr(masking, "render_proxy", fake_render_proxy)
@@ -8323,11 +8370,83 @@ def _run_extract_masks_for_test(
         skip_extract_masks=False,
         skip_regroup=True,
     )
-    runner = FakeRunner()
+    runner = runner or FakeRunner()
     job = _make_job()
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
     return db, runner, generate_mask_calls, photo_ids
+
+
+def test_extract_masks_pause_waits_outside_photo_lock(tmp_path, monkeypatch):
+    """Pause may be requested under a photo lock but must wait after release."""
+    import pipeline_job as pj
+    import pipeline_locks
+
+    pause_state = {
+        "requested": False,
+        "lock_held": False,
+        "wait_lock_states": [],
+    }
+    real_acquire = pipeline_locks.acquire_photo_mask
+
+    class TrackingLock:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            self._inner.__enter__()
+            pause_state["lock_held"] = True
+            return self
+
+        def __exit__(self, *args):
+            try:
+                return self._inner.__exit__(*args)
+            finally:
+                pause_state["lock_held"] = False
+
+    monkeypatch.setattr(
+        pj, "acquire_photo_mask",
+        lambda photo_id: TrackingLock(real_acquire(photo_id)),
+    )
+
+    class PauseTrackingRunner(FakeRunner):
+        def pause_requested(self, job_id):
+            return pause_state["requested"]
+
+        def cancellation_requested(self, job_id):
+            return False
+
+        def mark_paused(self, job_id):
+            return True
+
+        def wait_if_paused(self, job_id, *, publish_paused=False):
+            pause_state["wait_lock_states"].append(
+                pause_state["lock_held"],
+            )
+            pause_state["requested"] = False
+            return False
+
+    def request_pause():
+        assert pause_state["lock_held"] is True
+        pause_state["requested"] = True
+
+    _run_extract_masks_for_test(
+        tmp_path,
+        monkeypatch,
+        "sam2-small",
+        [{
+            "filename": "a.jpg",
+            "box": (10, 20, 100, 200),
+            "model": "MegaDetector",
+        }],
+        runner=PauseTrackingRunner(),
+        on_generate_mask=request_pause,
+    )
+
+    assert pause_state["wait_lock_states"] == [False], (
+        "Pause must block only after the per-photo mask lock is released; "
+        f"wait states: {pause_state['wait_lock_states']}"
+    )
 
 
 def _apply_extract_masks_stubs(monkeypatch, generate_mask_calls):

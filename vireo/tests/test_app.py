@@ -809,10 +809,9 @@ def test_encounter_species_confirm_reuses_hierarchical_taxon(app_and_db):
     assert nested in nested_ids
     assert root not in nested_ids
     assert root in untagged_ids
-    assert db.get_species_keywords_for_photos(photo_ids) == {
-        nested_photo: ["Verdin"],
-        untagged_photo: ["Verdin"],
-    }
+    species_by_photo = db.get_species_keywords_for_photos(photo_ids)
+    assert species_by_photo[nested_photo].count("Verdin") == 1
+    assert species_by_photo[untagged_photo].count("Verdin") == 1
     additions = [
         row for row in db.get_pending_changes()
         if row["change_type"] == "keyword_add" and row["value"] == "Verdin"
@@ -1766,7 +1765,7 @@ def test_pages_link_base_css(app_and_db):
     """Every page includes a <link> to vireo-base.css."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/pipeline/review', '/map', '/shortcuts']
     for page in pages:
@@ -1829,17 +1828,60 @@ def test_compare_predictions_api(app_and_db):
     assert len(data["photos"]) >= 2
 
     # Check structure of a photo entry
-    photo = data["photos"][0]
+    photo = next(
+        item for item in data["photos"]
+        if item["photo_id"] == photo_ids[0]
+    )
     assert "photo_id" in photo
     assert "filename" in photo
     assert "predictions" in photo
     assert isinstance(photo["predictions"], dict)  # keyed by model name
+    assert "subjects" in photo
+    subject = next(
+        item for item in photo["subjects"]
+        if item["detection_id"] == det_ids_0[0]
+    )
+    assert subject["box"] == {
+        "x": 0.1, "y": 0.1, "w": 0.3, "h": 0.3,
+    }
+    assert set(subject["predictions"]) == {"model-a", "model-b"}
     # Each model maps to a list of predictions (multi-detection support)
     for model_preds in photo["predictions"].values():
         assert isinstance(model_preds, list)
         assert len(model_preds) >= 1
         assert "species" in model_preds[0]
         assert "confidence" in model_preds[0]
+        assert "detection_id" in model_preds[0]
+
+
+def test_compare_predictions_api_preserves_unclassified_subject(app_and_db):
+    """A qualifying box remains visible when no classifier prediction exists."""
+    app, db = app_and_db
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    det_id = db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.55, "y": 0.4, "w": 0.2, "h": 0.2},
+            "confidence": 0.45,
+            "category": "animal",
+        }],
+        detector_model="MDV6",
+    )[0]
+    cid = db.add_collection(
+        "Unclassified Subject",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    response = app.test_client().get(
+        f"/api/predictions/compare?collection_id={cid}"
+    )
+
+    assert response.status_code == 200
+    subjects = response.get_json()["photos"][0]["subjects"]
+    subject = next(item for item in subjects if item["detection_id"] == det_id)
+    assert subject["predictions"] == {}
 
 
 def test_compare_predictions_api_exposes_miss_flags(app_and_db):
@@ -2475,7 +2517,7 @@ def test_pages_include_vireo_utils(app_and_db):
     """Every page includes vireo-utils.js via _navbar.html."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:
@@ -2497,7 +2539,7 @@ def test_pages_no_inline_escapeHtml(app_and_db):
     """No page template should still define escapeHtml inline."""
     app, _ = app_and_db
     client = app.test_client()
-    pages = ['/browse', '/audit', '/logs',
+    pages = ['/browse', '/lightroom', '/audit', '/logs',
              '/settings', '/storage', '/workspace', '/pipeline', '/dashboard',
              '/review', '/cull', '/variants', '/compare', '/map']
     for page in pages:
@@ -5622,8 +5664,8 @@ def test_batch_keyword_route_queues_stored_name_after_normalization(app_and_db):
     assert remaining == []
 
 
-def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
-    """Multi-select suggestions should offer keywords present on only some photos."""
+def test_selection_keyword_suggestions_return_partial_and_shared_keywords(app_and_db):
+    """Multi-select keyword data includes both partial and shared keywords."""
     app, db = app_and_db
     ids = [
         row["id"]
@@ -5648,10 +5690,29 @@ def test_selection_keyword_suggestions_return_partial_keywords(app_and_db):
     assert by_name["Sparrow"]["count"] == 1
     assert by_name["Sparrow"]["missing_count"] == 2
 
+    shared_id = db.add_keyword("Shared selection keyword")
+    for photo_id in ids:
+        db.tag_photo(photo_id, shared_id)
+    resp = client.post(
+        "/api/selection/keyword-suggestions",
+        json={"photo_ids": ids},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
     keywords_by_name = {item["name"]: item for item in data["keywords"]}
     assert keywords_by_name["Cardinal"]["present_photo_ids"] == [ids[0]]
     assert sorted(keywords_by_name["Cardinal"]["missing_photo_ids"]) == sorted(ids[1:])
     assert keywords_by_name["Sparrow"]["present_photo_ids"] == [ids[1]]
+    assert keywords_by_name["Shared selection keyword"] == {
+        "id": shared_id,
+        "name": "Shared selection keyword",
+        "type": "general",
+        "count": len(ids),
+        "missing_count": 0,
+        "present_photo_ids": ids,
+        "missing_photo_ids": [],
+    }
 
 
 def test_selection_keyword_suggestions_chunks_large_selection(app_and_db):
@@ -10153,6 +10214,400 @@ def test_highlights_accepted_species_wins_over_higher_confidence_prediction(app_
     assert data["buckets"][0]["is_accepted"] is True
 
 
+def _seed_waxbill_casing_scenario(db):
+    """One accepted `Common waxbill` photo plus one photo whose only signal
+    is a raw title-cased prediction `Common Waxbill` (label-file casing —
+    prediction rows are external vocabulary and stay verbatim)."""
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/wax', 'wax', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    waxbill_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    ).lastrowid
+    accepted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'accepted.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (accepted_pid, waxbill_kw),
+    )
+    predicted_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'predicted.jpg', 0.8, 'none')",
+        (fid,),
+    ).lastrowid
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (predicted_pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions "
+        "(detection_id, classifier_model, species, confidence) "
+        "VALUES (?, 'm', 'Common Waxbill', 0.95)",
+        (did,),
+    )
+    db.conn.commit()
+    return fid, accepted_pid, predicted_pid
+
+
+def test_highlights_merges_prediction_casing_with_accepted_keyword(app_and_db):
+    """A title-cased classifier label and a sentence-cased accepted keyword
+    are the same species: one Highlights bucket, keyed by the keyword
+    spelling. Prediction rows keep label-file casing (external vocabulary),
+    so the merge must happen at bucket-collection time."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid, accepted_pid, predicted_pid = _seed_waxbill_casing_scenario(db)
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    waxbill_buckets = [
+        b for b in data["buckets"] if b["species"].lower() == "common waxbill"
+    ]
+    assert len(waxbill_buckets) == 1
+    bucket = waxbill_buckets[0]
+    assert bucket["species"] == "Common waxbill"
+    assert {p["id"] for p in bucket["photos"]} == {accepted_pid, predicted_pid}
+
+
+def test_species_highlights_add_canonicalizes_prediction_cased_label(app_and_db):
+    """Starring a photo in a prediction-cased bucket must store and surface
+    the highlight under the keyword spelling.
+
+    Regression for the silently-dropped star: the client sends the bucket
+    label (`Common Waxbill` from the classifier), but the eligibility
+    queries compare species strings exact against `keywords.name`
+    (`Common waxbill`). Without canonicalization at the route/setter, the
+    star writes a `Common Waxbill` row that no query ever matches again."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid, _accepted_pid, predicted_pid = _seed_waxbill_casing_scenario(db)
+
+    resp = client.post(
+        "/api/species-highlights",
+        json={"species": "Common Waxbill", "photo_id": predicted_pid},
+    )
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE photo_id = ?",
+        (predicted_pid,),
+    ).fetchall()
+    assert [r["species"] for r in rows] == ["Common waxbill"]
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.7")
+    bucket = next(
+        b for b in resp.get_json()["buckets"]
+        if b["species"] == "Common waxbill"
+    )
+    assert bucket["has_highlight_selection"] is True
+    starred = next(p for p in bucket["photos"] if p["id"] == predicted_pid)
+    assert starred["is_highlighted"] is True
+
+    # Un-starring with yet another casing of the same label must find and
+    # remove the canonical row rather than silently deleting nothing.
+    resp = client.delete(
+        "/api/species-highlights",
+        json={"species": "COMMON WAXBILL", "photo_id": predicted_pid},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["removed"] == 1
+
+
+def test_species_highlights_add_preserves_ambiguous_homonym_species(app_and_db):
+    """When two intentionally-distinct root species keywords share a
+    NOCASE key (legacy general ``Robin`` alongside taxonomy ``robin``),
+    curation requests from a specific bucket must land on that bucket's
+    exact spelling. Silently collapsing to one canonical spelling would
+    make the eligibility precheck (which compares ``bucket["species"]``
+    exact) reject the request coming from the other homonym's bucket."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/robin', 'robin', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    legacy_kw = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'taxonomy', 1)"
+    )
+    legacy_pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'legacy.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (legacy_pid, legacy_kw),
+    )
+    db.conn.commit()
+
+    resp = client.get(f"/api/highlights?folder_id={fid}&confidence_threshold=0.5")
+    assert resp.status_code == 200
+    buckets = resp.get_json()["buckets"]
+    legacy_bucket = next(b for b in buckets if b["species"] == "Robin")
+    assert legacy_pid in {p["id"] for p in legacy_bucket["photos"]}
+
+    resp = client.post(
+        "/api/species-highlights",
+        json={"species": "Robin", "photo_id": legacy_pid},
+    )
+    assert resp.status_code == 200
+
+    rows = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE photo_id = ?",
+        (legacy_pid,),
+    ).fetchall()
+    assert [r["species"] for r in rows] == ["Robin"]
+
+
+def test_highlights_relabel_snapshots_match_add_keyword_pick_for_homonyms(
+    app_and_db,
+):
+    """When two intentionally-distinct species keywords share a NOCASE key
+    (legacy general ``Robin`` alongside taxonomy ``robin``), the relabel
+    snapshots must key on the SAME spelling ``add_keyword`` will store.
+    ``resolve_species_display_name`` preserves the caller spelling
+    (``Robin``) for bucket/parse/setter symmetry, but ``add_keyword``'s
+    typed lookup picks the taxonomy row (``robin``); before the fix the
+    snapshot compared destination curation against ``Robin`` while the
+    rename actually landed on ``robin``, so undo would delete a pre-existing
+    ``robin`` highlight it never created."""
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/hrhom', 'hrhom', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    old_kid = db.add_keyword("Legacy Species", is_species=True)
+    # Legacy general row with is_species=1 (a pre-migration state that
+    # the v2 sweep intentionally preserves for ambiguous homonyms), plus
+    # the taxonomy row add_keyword's typed lookup will pick.
+    legacy_robin = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    taxonomy_robin = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'taxonomy', 1)"
+    ).lastrowid
+    # The photo being relabelled currently carries the "Legacy Species"
+    # tag; the relabel will move it to whichever Robin row add_keyword
+    # picks (the taxonomy row).
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'moving.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, old_kid)
+    db.add_species_highlight("Legacy Species", pid)
+    # Pre-existing destination highlight, keyed on the taxonomy spelling
+    # (which is what add_keyword would store for a "Robin" request).
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'robin', ?, 0)",
+        (db._ws_id(), pid),
+    )
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Robin"},
+    )
+    assert resp.status_code == 200
+    # add_keyword's typed lookup returns the taxonomy row, so the tag
+    # lands on `robin`. The pre-existing `robin` highlight survives.
+    tagged = db.conn.execute(
+        "SELECT k.name FROM photo_keywords pk "
+        "JOIN keywords k ON k.id = pk.keyword_id "
+        "WHERE pk.photo_id = ? AND (k.is_species = 1 OR k.type = 'taxonomy')",
+        (pid,),
+    ).fetchall()
+    assert [r["name"] for r in tagged] == ["robin"]
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("robin") or {})
+
+    undone = db.undo_last_edit()
+    assert undone is not None
+    hl_after_undo = db.get_species_highlights()
+    # The pre-existing `robin` highlight must survive the undo — before
+    # the fix the snapshot recorded dst_existed=False (compared against
+    # "Robin") and undo deleted the user's pre-existing row.
+    assert pid in (hl_after_undo.get("robin") or {}), (
+        "Undo deleted pre-existing robin highlight because snapshots keyed "
+        "on the wrong spelling"
+    )
+    # And the original bucket is restored.
+    assert pid in (hl_after_undo.get("Legacy Species") or {})
+    # Silence the unused-variable warnings on the setup rows: keeping
+    # them named documents the two homonym roles.
+    assert legacy_robin != taxonomy_robin
+
+
+def test_species_highlight_eligibility_accepted_species_exact_match(app_and_db):
+    """When a photo's accepted keyword resolves to one specific spelling of
+    an ambiguous homonym, a stored highlight for the OTHER homonym must
+    stay ineligible. Applying COLLATE NOCASE across the whole eligibility
+    COALESCE relaxed the accepted-keyword branch too: a stored highlight
+    keyed ``Robin`` would then match a photo whose accepted keyword
+    subquery returned ``robin``, silently making the wrong species bucket
+    appear to have a highlight."""
+    app, db = app_and_db
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) VALUES ('/elig', 'elig', 'ok')"
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (db._ws_id(), fid),
+    )
+    # Two intentionally-distinct root species keywords sharing a NOCASE
+    # key — the migration explicitly preserves this shape.
+    legacy_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    ).lastrowid
+    taxonomy_kid = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('robin', 'taxonomy', 1)"
+    ).lastrowid
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'elig.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    # The photo's accepted keyword is the TAXONOMY row (lowercase
+    # ``robin``); the accepted-branch of the eligibility COALESCE
+    # returns exactly ``robin``.
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, taxonomy_kid),
+    )
+    # Stored highlight keyed on the OTHER homonym's spelling
+    # (uppercase ``Robin``, the general row) — a plausible remnant when
+    # ambiguous-homonym curation is left alone by the v2 sweep.
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Robin', ?, 0)",
+        (db._ws_id(), pid),
+    )
+    db.conn.commit()
+
+    eligible = db.get_species_highlights("Robin", eligible_only=True)
+    # Before the fix the whole-COALESCE NOCASE would match ``Robin`` to
+    # the accepted ``robin`` and mark the highlight eligible. With the
+    # branch-specific NOCASE, the accepted keyword compares EXACT.
+    assert eligible == {}, (
+        "Cross-homonym match: stored 'Robin' highlight should NOT be "
+        "eligible for a photo whose accepted keyword is 'robin'"
+    )
+    # The same-spelling case still passes (sanity check the accepted
+    # branch still resolves an exact match).
+    db.conn.execute(
+        "DELETE FROM photo_keywords WHERE photo_id = ?", (pid,)
+    )
+    db.conn.execute(
+        "INSERT INTO photo_keywords (photo_id, keyword_id) VALUES (?, ?)",
+        (pid, legacy_kid),
+    )
+    db.conn.commit()
+    same_spelling = db.get_species_highlights("Robin", eligible_only=True)
+    assert pid in (same_spelling.get("Robin") or {})
+
+
+def test_resolve_species_display_name_prefers_taxonomy_over_general_homonym(
+    app_and_db,
+):
+    """When a taxonomy species row and a non-species general row share a
+    NOCASE key (e.g. taxonomy ``Common waxbill`` alongside a hand-tagged
+    ``Common Waxbill`` general), ``add_keyword(is_species=True)`` picks
+    the taxonomy row. ``resolve_species_display_name`` must mirror that
+    pick — otherwise the bucket collection keys prediction-only photos
+    under ``Common Waxbill``, curation setters store rows under the
+    non-taxonomy spelling, and once the prediction is accepted the
+    stored highlight no longer matches the accepted keyword spelling
+    (``Common waxbill``) and silently disappears from the bucket."""
+    _, db = app_and_db
+    # Taxonomy species row (the one add_keyword prefers).
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common waxbill', 'taxonomy', 1)"
+    )
+    # Separate non-species general row with classifier casing —
+    # someone hand-tagged the same spelling as a plain keyword.
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common Waxbill', 'general', 0)"
+    )
+    db.conn.commit()
+
+    # Every caller spelling must land on the taxonomy row's stored
+    # spelling: that's what add_keyword(is_species=True) will pick, and
+    # bucket / parse / setter paths all agree on the same string.
+    assert db.resolve_species_display_name("Common Waxbill") == "Common waxbill"
+    assert db.resolve_species_display_name("common waxbill") == "Common waxbill"
+    assert db.resolve_species_display_name("COMMON WAXBILL") == "Common waxbill"
+
+    # Cross-check the invariant: add_keyword(is_species=True) actually
+    # returns the taxonomy row — otherwise the resolve fix would be
+    # tracking a different behavior than reality.
+    picked_id = db.add_keyword("Common Waxbill", is_species=True)
+    picked_name = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (picked_id,)
+    ).fetchone()["name"]
+    assert picked_name == "Common waxbill"
+
+
+def test_resolve_species_display_name_promotes_non_species_general_alone(
+    app_and_db,
+):
+    """When only a non-species general row shares the NOCASE key,
+    ``add_keyword(is_species=True)`` finds and promotes it in place —
+    is_species/type flip but the stored name is untouched. Resolve must
+    return that stored name so curation keys on the string the promoted
+    row will carry, not on a case-convention-derived spelling that
+    doesn't exist."""
+    _, db = app_and_db
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Common Waxbill', 'general', 0)"
+    )
+    db.conn.commit()
+
+    # No taxonomy candidate for this NOCASE key, so add_keyword will
+    # promote the general row rather than insert a fresh taxonomy row.
+    # Resolve returns the general's stored spelling — the string
+    # curation setters must key on.
+    assert db.resolve_species_display_name("common waxbill") == "Common Waxbill"
+
+    # add_keyword promotes in place; the row's name doesn't change.
+    picked_id = db.add_keyword("common waxbill", is_species=True)
+    row = db.conn.execute(
+        "SELECT name, type, is_species FROM keywords WHERE id = ?",
+        (picked_id,),
+    ).fetchone()
+    assert row["name"] == "Common Waxbill"
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+
+
 def test_highlights_save(app_and_db):
     """POST /api/highlights/save creates a static collection."""
     app, db = app_and_db
@@ -11137,7 +11592,13 @@ def test_save_grouping_defaults_persists_to_config(tmp_path, monkeypatch):
     app = create_app(db_path=db_path, thumb_cache_dir=thumb_dir, api_token="t")
     client = app.test_client()
 
-    payload = {"pipeline": {"w_species": 0.40, "hard_cut_score": 0.55, "tau_enc": 30.0}}
+    payload = {"pipeline": {
+        "w_species": 0.40,
+        "hard_cut_score": 0.55,
+        "species_hard_cut_confidence": 0.85,
+        "species_hard_cut_margin": 0.65,
+        "tau_enc": 30.0,
+    }}
     resp = client.post("/api/pipeline/save-grouping-defaults", json=payload)
     assert resp.status_code == 200, resp.get_json()
     body = resp.get_json()
@@ -11146,6 +11607,8 @@ def test_save_grouping_defaults_persists_to_config(tmp_path, monkeypatch):
     saved = cfg.load()
     assert saved["pipeline"]["w_species"] == 0.40
     assert saved["pipeline"]["hard_cut_score"] == 0.55
+    assert saved["pipeline"]["species_hard_cut_confidence"] == 0.85
+    assert saved["pipeline"]["species_hard_cut_margin"] == 0.65
     assert saved["pipeline"]["tau_enc"] == 30.0
 
 
@@ -12040,7 +12503,14 @@ def test_native_import_commands_route_to_import_page():
         menu = f.read()
 
     assert "ids::NAV_IMPORT => Some(\"/import\")" in menu
+    assert "ids::NAV_LIGHTROOM => Some(\"/lightroom\")" in menu
+    # File → Import Lightroom Catalog must be a route (not a command) so it
+    # still works after Open in Browser — command dispatch is a no-op in
+    # browser mode, but route_for_id opens the URL in the user's browser.
+    assert "ids::FILE_IMPORT_LIGHTROOM => Some(\"/lightroom\")" in menu
+    assert "FILE_IMPORT_LIGHTROOM => Some(\"import_lightroom\")" not in menu
     assert "case 'import_photos':\n        nativeMenuRoute('/import');" in navbar
+    assert '"Import Lightroom Catalog..."' in menu
     # Import Folder... must stay a distinct action from Import Photos...:
     # it deep-links into Copy-to-archive with the source picker open.
     assert (
@@ -12068,6 +12538,8 @@ def test_native_shell_owns_external_navigation_policy():
     assert "navigation::handle_navigation(&navigation_app, url)" in lib
     assert ".on_new_window(" in lib
     assert "NewWindowResponse::Deny" in lib
+    assert ".on_download(" in lib
+    assert "handle_download(&download_app, event)" in lib
 
 
 def test_pipeline_plan_accepts_folder_scope(app_and_db):

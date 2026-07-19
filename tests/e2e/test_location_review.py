@@ -1,3 +1,5 @@
+import json
+
 from playwright.sync_api import expect
 
 LEAFLET_STUB = """
@@ -36,6 +38,41 @@ def _stub_leaflet(route):
             content_type="application/javascript",
             body=LEAFLET_STUB,
         )
+
+
+def test_location_review_is_a_navigable_collection_page(live_server, page):
+    """The standalone page lets the user choose a collection and start its queue."""
+    photo_id = live_server["data"]["photos"][0]
+    with live_server["db"].conn:
+        live_server["db"].conn.execute(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            (33.2550, -116.4050, photo_id),
+        )
+    collection_id = live_server["db"].add_collection(
+        "San Diego Field Notes",
+        json.dumps([{"field": "photo_ids", "value": [photo_id]}]),
+    )
+
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.goto(f"{live_server['url']}/locations/review")
+
+    expect(page.locator("#locationReviewEmptyTitle")).to_have_text(
+        "Choose a collection"
+    )
+    expect(page.locator("#locationReviewCollection")).to_contain_text(
+        "San Diego Field Notes (1)"
+    )
+    expect(
+        page.locator('.nav-tab[data-nav-id="location_review"]')
+    ).to_have_class("nav-tab is-ephemeral active")
+
+    page.locator("#locationReviewCollection").select_option(str(collection_id))
+    page.wait_for_url(f"**/locations/review?collection_id={collection_id}")
+
+    expect(page.locator("#locationReviewCollection")).to_have_value(
+        str(collection_id)
+    )
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
 
 
 def test_location_review_assigns_a_custom_name_to_coordinate_group(
@@ -127,3 +164,83 @@ def test_browse_review_on_map_opens_the_selected_photos(live_server, page):
     expect(page.locator("#locationReviewEmptyMessage")).to_contain_text(
         "skipped without changes"
     )
+
+
+def test_location_review_actions_stay_above_open_bottom_panel(live_server, page):
+    """Opening the shared jobs panel must not cover the review controls."""
+    photo_id = live_server["data"]["photos"][0]
+    with live_server["db"].conn:
+        live_server["db"].conn.execute(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            (33.2550, -116.4050, photo_id),
+        )
+
+    page.set_viewport_size({"width": 890, "height": 600})
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate(
+        "photoId => sessionStorage.setItem('vireoLocationReviewSource', "
+        "JSON.stringify({photo_ids: [photoId]}))",
+        photo_id,
+    )
+    page.goto(f"{live_server['url']}/locations/review?source=selection")
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
+
+    page.locator("#bpArrow").click()
+    page.wait_for_function(
+        "() => document.body.style.getPropertyValue('--bottom-offset') === '268px'"
+    )
+
+    positions = page.evaluate(
+        """() => ({
+          actionsBottom: document.querySelector('.location-review-actions')
+            .getBoundingClientRect().bottom,
+          panelTop: document.getElementById('bottomPanel').getBoundingClientRect().top
+        })"""
+    )
+    assert positions["actionsBottom"] <= positions["panelTop"]
+    expect(page.locator("#locationReviewAssign")).to_be_in_viewport()
+
+
+def test_location_review_actions_stay_visible_below_top_banner(live_server, page):
+    """Shared notification banners must resize rather than clip the review page."""
+    photo_id = live_server["data"]["photos"][0]
+    with live_server["db"].conn:
+        live_server["db"].conn.execute(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            (33.2550, -116.4050, photo_id),
+        )
+
+    page.set_viewport_size({"width": 890, "height": 600})
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate(
+        "photoId => sessionStorage.setItem('vireoLocationReviewSource', "
+        "JSON.stringify({photo_ids: [photoId]}))",
+        photo_id,
+    )
+    page.goto(f"{live_server['url']}/locations/review?source=selection")
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
+
+    page.evaluate(
+        """() => {
+          document.getElementById('newImagesMsg').textContent = '7 new images';
+          document.getElementById('newImagesBanner').style.display = 'flex';
+        }"""
+    )
+
+    positions = page.evaluate(
+        """() => ({
+          bannerBottom: document.getElementById('newImagesBanner')
+            .getBoundingClientRect().bottom,
+          reviewTop: document.querySelector('.location-review-page')
+            .getBoundingClientRect().top,
+          actionsBottom: document.querySelector('.location-review-actions')
+            .getBoundingClientRect().bottom,
+          bottomBarTop: document.getElementById('bottomToggle')
+            .getBoundingClientRect().top
+        })"""
+    )
+    assert positions["reviewTop"] >= positions["bannerBottom"]
+    assert positions["actionsBottom"] <= positions["bottomBarTop"]
+    expect(page.locator("#locationReviewAssign")).to_be_in_viewport()

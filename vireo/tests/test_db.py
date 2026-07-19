@@ -1447,6 +1447,59 @@ def test_mark_species_keywords_sets_type_taxonomy(tmp_path):
     assert row['type'] == 'taxonomy'
 
 
+def test_mark_species_keywords_preserves_explicit_location_homonym(tmp_path):
+    """A location name that is also a taxon must remain a location.
+
+    ``California`` is both a geographic name and a plant genus. Retyping a
+    location hierarchy node as taxonomy makes subsequent Google Place chain
+    upserts fail with ``name_conflict``.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    location_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="location",
+    )
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            if name == "California":
+                return {"taxon_id": 123, "scientific_name": "California"}
+            return None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+
+    assert updated == 0
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (location_id,),
+    ).fetchone()
+    assert dict(row) == {
+        "type": "location",
+        "is_species": 0,
+        "taxon_id": None,
+    }
+
+    leaf_id = db.upsert_place_chain({
+        "place_id": "test-california-park",
+        "name": "Test California Park",
+        "types": ["park"],
+        "lat": 32.9,
+        "lng": -117.2,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+            {
+                "name": "California",
+                "types": ["administrative_area_level_1"],
+            },
+        ],
+    })
+    leaf = db.conn.execute(
+        "SELECT type, parent_id FROM keywords WHERE id = ?", (leaf_id,),
+    ).fetchone()
+    assert dict(leaf) == {"type": "location", "parent_id": location_id}
+
+
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
     """mark_species_keywords links keywords.taxon_id when taxa table has a match."""
     from db import Database
@@ -2080,6 +2133,153 @@ def test_get_dashboard_stats_with_data(tmp_path):
     assert hours[8] == 1
 
 
+def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
+    """Dashboard, coverage, and Browse use the same intersected scope."""
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    park = db.add_folder("/photos/park", name="park")
+    yard = db.add_folder("/photos/yard", name="yard")
+    db.add_workspace_folder(ws_id, park)
+    db.add_workspace_folder(ws_id, yard)
+
+    march = db.add_photo(
+        folder_id=park, filename="march.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-03-10T08:00:00",
+    )
+    june_park = db.add_photo(
+        folder_id=park, filename="june-park.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
+    )
+    june_yard = db.add_photo(
+        folder_id=yard, filename="june-yard.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
+    )
+    collection_id = db.add_collection(
+        "June picks",
+        json.dumps([{"field": "photo_ids", "value": [march, june_park, june_yard]}]),
+    )
+
+    scope = {
+        "collection_id": collection_id,
+        "date_from": "2024-06-01",
+        "date_to": "2024-06-30",
+    }
+    stats = db.get_dashboard_stats(**scope)
+    assert stats["total_photos"] == 2
+    assert stats["folder_count"] == 2
+    assert stats["photos_by_month"] == [{"month": "2024-06", "count": 2}]
+    assert db.get_coverage_stats(**scope)["total"] == 2
+    assert {row["path"] for row in db.get_folder_coverage_stats(**scope)} == {
+        "/photos/park", "/photos/yard",
+    }
+
+    browse = db.get_photos(folder_id=yard, **scope)
+    assert [photo["id"] for photo in browse] == [june_yard]
+    assert db.get_photo_ids(folder_id=yard, **scope) == [june_yard]
+    assert db.count_filtered_photos(folder_id=yard, **scope) == 1
+
+
+def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
+    """Dashboard totals for a collection scope keep photos in offline folders.
+
+    The unscoped Dashboard intentionally counts photos in missing folders
+    (metadata-only aggregates like total_photos, photos_by_month, etc.).
+    Scoping by a collection whose rules match those photos must not
+    silently drop them via the collection subquery's folder-status filter.
+    """
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    ok_folder = db.add_folder("/photos/ok", name="ok")
+    gone_folder = db.add_folder("/photos/gone", name="gone")
+    db.add_workspace_folder(ws_id, ok_folder)
+    db.add_workspace_folder(ws_id, gone_folder)
+
+    visible = db.add_photo(
+        folder_id=ok_folder, filename="here.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
+    )
+    offline = db.add_photo(
+        folder_id=gone_folder, filename="offline.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
+    )
+    collection_id = db.add_collection(
+        "All photos",
+        json.dumps([{"field": "photo_ids", "value": [visible, offline]}]),
+    )
+
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (gone_folder,),
+    )
+    db.conn.commit()
+
+    stats = db.get_dashboard_stats(collection_id=collection_id)
+    assert stats["total_photos"] == 2, (
+        "Dashboard totals must count the offline photo when scoped by "
+        f"a collection that matches it; got {stats['total_photos']}"
+    )
+    assert stats["accessible_photos"] == 1
+    assert stats["missing_folder_count"] == 1
+    assert stats["attention"]["unclassified"] == 1
+    assert stats["attention"]["missing_location"] == 1
+    months = {row["month"]: row["count"] for row in stats["photos_by_month"]}
+    assert months.get("2024-06") == 2
+
+    # Coverage still restricts to accessible folders in its outer join, so
+    # the collection scope must not further shrink that count either.
+    assert db.get_coverage_stats(collection_id=collection_id)["total"] == 1
+
+    # Regression guard: Browse and pipeline callers must still filter out
+    # photos in offline folders even when the collection rules match them.
+    assert db.count_collection_photos(collection_id) == 1
+    assert [p["id"] for p in db.get_collection_photos(collection_id)] == [visible]
+
+
+def test_dashboard_attention_counts_actionable_gaps_in_scope(tmp_path):
+    """Needs Attention cards report preview, sync, location, and duplicate work."""
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {"timestamp": "2024-06-01T08:00:00", "file_hash": "same"},
+        {"timestamp": "2024-06-02T08:00:00", "file_hash": "same"},
+        {"timestamp": "2024-07-01T08:00:00", "file_hash": "other"},
+    ])
+    det_ids = db.save_detections(pids[0], [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+        "confidence": 0.9,
+        "category": "animal",
+    }], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "test")
+    db.preview_cache_insert(pids[0], 1920, 100)
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'rating', '4', 'token', ?)",
+        (pids[1], db._ws_id()),
+    )
+    db.conn.commit()
+
+    attention = db.get_dashboard_stats(
+        date_from="2024-06-01", date_to="2024-06-30",
+    )["attention"]
+    assert attention == {
+        "unclassified": 1,
+        "missing_location": 2,
+        "missing_previews": 1,
+        "preview_size": 1920,
+        "preview_enabled": True,
+        "pending_sync": 1,
+        "duplicate_groups": 1,
+    }
+
+
 # --- Cluster 2b: Coverage Stats ---
 
 def test_get_coverage_stats_empty_workspace(tmp_path):
@@ -2191,6 +2391,40 @@ def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
     assert by_path['/B']['total'] == 2
     assert by_path['/B']['thumbnail'] == 0
     assert by_path['/B']['phash'] == 0
+
+
+def test_folder_coverage_keeps_zero_match_folders_with_scopes(tmp_path):
+    """Photo filters keep in-scope folders visible while folder scope narrows rows."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    folder_a = db.add_folder("/A", name="A")
+    folder_b = db.add_folder("/B", name="B")
+    db.add_workspace_folder(ws_id, folder_a)
+    db.add_workspace_folder(ws_id, folder_b)
+    db.add_photo(
+        folder_id=folder_a, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-01-01T00:00:00",
+    )
+    db.add_photo(
+        folder_id=folder_b, filename="b.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-01-02T00:00:00",
+    )
+
+    no_matches = db.get_folder_coverage_stats(date_from="2024-02-01")
+    assert {row["path"]: row["total"] for row in no_matches} == {
+        "/A": 0,
+        "/B": 0,
+    }
+
+    folder_scoped = db.get_folder_coverage_stats(
+        folder_id=folder_a, date_from="2024-02-01",
+    )
+    assert [(row["path"], row["total"]) for row in folder_scoped] == [
+        ("/A", 0),
+    ]
 
 
 # --- Cluster 3: Prediction Management ---
@@ -5156,6 +5390,600 @@ def test_accept_prediction_tags_photo(tmp_path):
     assert result["species"] == "Elk"
     kws = db.get_photo_keywords(pid)
     assert any(k["name"] == "Elk" for k in kws)
+
+
+def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_path):
+    """An additional subject species is added without replacing the original.
+
+    Agreeing predictions from different models on the same detection are
+    resolved together.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    wigeon_id = db.add_keyword("American Wigeon", is_species=True)
+    db.tag_photo(photo_id, wigeon_id)
+    detection_id = db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.5, "y": 0.4, "w": 0.2, "h": 0.2},
+            "confidence": 0.6,
+            "category": "animal",
+        }],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(
+        detection_id, "Blue-winged Teal", 0.91, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        detection_id, "Blue-winged Teal", 0.87, "inat",
+        labels_fingerprint="fp",
+    )
+    target = next(
+        row for row in db.get_predictions()
+        if row["classifier_model"] == "bioclip"
+    )
+
+    result = db.accept_subject_species(target["id"])
+
+    assert result["species"] == "Blue-winged Teal"
+    assert len(result["prediction_ids"]) == 2
+    assert {row["name"] for row in db.get_photo_keywords(photo_id)} >= {
+        "American Wigeon", "Blue-winged Teal",
+    }
+    statuses = {
+        row["classifier_model"]: row["status"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+    }
+    assert statuses == {"bioclip": "accepted", "inat": "accepted"}
+
+
+def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_path):
+    """Replacing one subject's species must not strip a species that belongs
+    to a different detection (subject) on the same photo.
+
+    Regression: accept_prediction(replace_species=True) deleted every species
+    keyword on the photo, so correcting the teal box's ID wiped the American
+    Wigeon confirmed on the other box.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    wigeon = db.add_keyword("American Wigeon", is_species=True)
+    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, wigeon)
+    db.tag_photo(pid, stale_teal)
+
+    d_wigeon, d_teal = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # The wigeon box keeps a live prediction naming the wigeon; the teal box's
+    # real identity is Blue-winged Teal.
+    db.add_prediction(
+        d_wigeon, "American Wigeon", 0.99, "bioclip", labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_teal, "Blue-winged Teal", 0.95, "bioclip", labels_fingerprint="fp",
+    )
+    teal_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_teal
+    )
+
+    result = db.accept_prediction(teal_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names        # this subject's corrected ID
+    assert "American Wigeon" in names          # other subject preserved
+    assert "Green-winged Teal" not in names    # this subject's stale ID gone
+    # The stripped species is reported (and only it), so the sidecar remove is
+    # queued for the stale teal but not the still-tagged wigeon.
+    assert result["affected"][0]["old_species"] == ["Green-winged Teal"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+    assert (pid, "American Wigeon") not in removed
+
+
+def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_path):
+    """The protected-species query must only consider the neighbouring
+    detection's *current* labels_fingerprint. A re-classified detection can
+    still carry pending predictions from an older label set naming a species
+    that the current run no longer produces; those stale rows must not
+    shield an obsolete species keyword from replace_species.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # The photo carries a stale species tag left over from when the neighbour
+    # was previously classified as Green-winged Teal.
+    fresh_wigeon = db.add_keyword("American Wigeon", is_species=True)
+    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, fresh_wigeon)
+    db.tag_photo(pid, stale_teal)
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # Neighbour's *old* fingerprint still has a pending row naming the stale
+    # species — the kind of row get_predictions() filters out.
+    db.add_prediction(
+        d_neighbour, "Green-winged Teal", 0.90, "bioclip",
+        labels_fingerprint="fp_old",
+    )
+    # Neighbour's *current* fingerprint names the wigeon; the target box was
+    # classified as the wrong teal and needs correction to Blue-winged Teal.
+    db.add_prediction(
+        d_neighbour, "American Wigeon", 0.95, "bioclip",
+        labels_fingerprint="fp_new",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp_new",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "American Wigeon" in names          # protected by current fp
+    assert "Green-winged Teal" not in names    # stale fp must not protect it
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+
+
+def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
+    """The neighbour's *live* prediction species must be folded through the
+    same keyword-normalization as the photo's stored keyword before deciding
+    what to protect.
+
+    Regression: predictions.species stores the raw model output (e.g.
+    `‘apapane` with a leading edge quote), while add_keyword normalizes on
+    write so the photo actually carries the clean keyword `apapane`. A
+    naive `lower(trim(species))` fold on the SQL side would leave the raw
+    edge quote in place, `keyword.name.strip().lower() not in protected`
+    would be True, and replace_species would queue a keyword_remove for
+    the still-live neighbouring subject.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries the neighbour's species under the normalized (clean)
+    # spelling — the shape add_keyword actually writes.
+    apapane = db.add_keyword("apapane", is_species=True)
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, apapane)
+    db.tag_photo(pid, stale)
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # Neighbour's live prediction still carries the raw edge-quote form
+    # that predictions.species records verbatim.
+    db.add_prediction(
+        d_neighbour, "‘apapane", 0.95, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "apapane" in names                  # protected across normalization
+    assert "Green-winged Teal" not in names    # this subject's stale ID gone
+    assert result["affected"][0]["old_species"] == ["Green-winged Teal"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+    assert (pid, "apapane") not in removed
+
+
+def test_replace_species_ignores_alternative_prediction_on_neighbour(tmp_path):
+    """The protected set must exclude neighbour predictions whose review
+    status is ``'alternative'`` — Compare drops those rows explicitly, so a
+    stale species keyword that only survives via an alternative row is not
+    "still tagged by another subject", it's just an out-of-band species
+    tag that replace should strip.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries a stale species tag whose only backing on the neighbour
+    # is an 'alternative' prediction row.
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, stale)
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # Neighbour: primary picks a wigeon, alternative names the stale teal.
+    db.add_prediction(
+        d_neighbour, "American Wigeon", 0.95, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_neighbour, "Green-winged Teal", 0.40, "bioclip",
+        status="alternative", labels_fingerprint="fp",
+    )
+    # Target box: wrong teal, needs correction to Blue-winged Teal.
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target and r["status"] != "alternative"
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "Green-winged Teal" not in names    # alternative must not protect it
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+
+
+def test_replace_species_ignores_below_threshold_neighbour(tmp_path):
+    """The protected set must exclude neighbour predictions whose detection
+    sits below the workspace's ``detector_confidence`` threshold — Compare
+    treats those as dormant and hides them, so a stale species keyword that
+    only survives via a below-threshold neighbour is not "another visible
+    subject" and replace must strip it.
+    """
+    import config as cfg
+    from db import Database
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"detector_confidence": 0.5})
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries a stale species tag whose only backing on the neighbour
+    # is a below-threshold detection.
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, stale)
+
+    d_target, d_dormant = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        # Below the 0.5 workspace threshold — Compare treats as dormant.
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.2, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(
+        d_dormant, "Green-winged Teal", 0.95, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    # Dormant (below-threshold) neighbour must not protect the stale tag.
+    assert "Green-winged Teal" not in names
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+
+
+def test_replace_species_preserves_neighbour_above_threshold(tmp_path):
+    """Companion to the below-threshold test: an above-threshold neighbour
+    with a non-alternative prediction MUST still protect its species even
+    when the workspace's detector_confidence is set high enough that the
+    default 0.2 would have hidden neighbours in the earlier test. This
+    guards against the visibility filter accidentally protecting nothing.
+    """
+    import config as cfg
+    from db import Database
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"detector_confidence": 0.5})
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    wigeon = db.add_keyword("American Wigeon", is_species=True)
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, wigeon)
+    db.tag_photo(pid, stale)
+
+    d_target, d_wigeon = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        # Comfortably above the 0.5 workspace threshold.
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(
+        d_wigeon, "American Wigeon", 0.99, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "American Wigeon" in names          # visible neighbour still protects
+    assert "Green-winged Teal" not in names
+
+
+def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
+    tmp_path, monkeypatch,
+):
+    """A broader taxonomy keyword (e.g. Anatidae) supported by a neighbouring
+    subject's prediction under the taxonomy — not just by exact text — must
+    survive replace_species and its curation must not be migrated onto the
+    new species.
+
+    Regression: the protected set only contained ``keyword_match_key(pr.species)``
+    so a multi-detection photo carrying a family-level keyword like Anatidae
+    alongside the neighbour's American Wigeon still had Anatidae deleted when
+    a different box was replaced, and the ``rename_*_species`` migration then
+    rebound Anatidae's curation onto the corrected species — the wrong
+    subject.
+    """
+    import json as _json
+
+    import taxonomy as taxonomy_mod
+    from db import Database
+    from taxonomy import Taxonomy
+
+    # Minimal taxonomy: Anatidae family + three species inside it. Enough for
+    # Compare's relationship rules to fire:
+    #   * Anatidae vs American Wigeon -> ancestor / refinement (must protect)
+    #   * Green-winged Teal vs American Wigeon -> sibling / conflict (must not)
+    tax_path = tmp_path / "taxonomy.json"
+    with open(tax_path, "w") as f:
+        _json.dump({
+            "last_updated": "2026-07-18",
+            "source": "test",
+            "taxa_by_common": {
+                "american wigeon": {
+                    "taxon_id": 1,
+                    "scientific_name": "Mareca americana",
+                    "common_name": "American Wigeon",
+                    "rank": "species",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae", "Mareca", "Mareca americana",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order",
+                        "family", "genus", "species",
+                    ],
+                },
+                "green-winged teal": {
+                    "taxon_id": 2,
+                    "scientific_name": "Anas crecca",
+                    "common_name": "Green-winged Teal",
+                    "rank": "species",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae", "Anas", "Anas crecca",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order",
+                        "family", "genus", "species",
+                    ],
+                },
+                "wood duck": {
+                    "taxon_id": 3,
+                    "scientific_name": "Aix sponsa",
+                    "common_name": "Wood Duck",
+                    "rank": "species",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae", "Aix", "Aix sponsa",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order",
+                        "family", "genus", "species",
+                    ],
+                },
+                "anatidae": {
+                    "taxon_id": 4,
+                    "scientific_name": "Anatidae",
+                    "common_name": "Anatidae",
+                    "rank": "family",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order", "family",
+                    ],
+                },
+            },
+            "taxa_by_scientific": {
+                "anatidae": {
+                    "taxon_id": 4,
+                    "scientific_name": "Anatidae",
+                    "common_name": "Anatidae",
+                    "rank": "family",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order", "family",
+                    ],
+                },
+            },
+        }, f)
+    fake_tax = Taxonomy(str(tax_path))
+    monkeypatch.setattr(
+        taxonomy_mod, "load_local_taxonomy", lambda: fake_tax,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries the neighbour's species AND a broader family taxonomy
+    # keyword — the shape a photo picks up from a prior curation pass. It
+    # also carries an unrelated stale species that only the target box's
+    # (soon-to-be-replaced) old identity supported.
+    wigeon = db.add_keyword("American Wigeon", is_species=True)
+    anatidae = db.add_keyword("Anatidae", kw_type="taxonomy")
+    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, wigeon)
+    db.tag_photo(pid, anatidae)
+    db.tag_photo(pid, stale_teal)
+
+    # Seed curation state on the family keyword so we can verify it is NOT
+    # migrated onto the new species when Anatidae survives replace.
+    ws_id = db._ws_id()
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+             (workspace_id, purpose, species, photo_id)
+           VALUES (?, ?, ?, ?)""",
+        (ws_id, "highlights", "Anatidae", pid),
+    )
+    db.conn.commit()
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(
+        d_neighbour, "American Wigeon", 0.99, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Wood Duck", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Wood Duck" in names                # target's corrected identity
+    assert "American Wigeon" in names           # exact-text neighbour survives
+    assert "Anatidae" in names                  # taxonomy ancestor survives
+    assert "Green-winged Teal" not in names     # target's stale ID gone
+    # Anatidae must not appear in old_species: it wasn't stripped, so no
+    # keyword_remove was queued and the curation migration was skipped.
+    assert "Anatidae" not in result["affected"][0]["old_species"]
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+    assert (pid, "Anatidae") not in removed
+    assert (pid, "American Wigeon") not in removed
+    # Anatidae's curation stayed on Anatidae — not silently rebound to the
+    # newly-added Wood Duck.
+    prefs = db.conn.execute(
+        "SELECT species FROM photo_preferences WHERE photo_id = ?",
+        (pid,),
+    ).fetchall()
+    pref_species = {row["species"] for row in prefs}
+    assert "Anatidae" in pref_species
+    assert "Wood Duck" not in pref_species
 
 
 def test_accept_prediction_queues_normalized_species(tmp_path):
@@ -13319,6 +14147,50 @@ def test_update_keyword_no_name_change_does_not_touch_type(tmp_path):
     assert row["taxon_id"] is None
 
 
+def test_update_keyword_explicit_location_type_clears_species_flag(tmp_path):
+    """Demoting a taxonomy homonym without a merge peer clears is_species.
+
+    The Keywords UI sends only ``type`` for this edit. Leaving the legacy flag
+    set would make species queries continue to treat the location as taxonomy
+    even though taxonomy marking now preserves explicit non-taxonomy types.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("California", kw_type="taxonomy")
+    before = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,),
+    ).fetchone()
+    assert dict(before) == {"type": "taxonomy", "is_species": 1}
+
+    effective_id = db.update_keyword(kid, type="location")
+
+    assert effective_id == kid
+    after = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,),
+    ).fetchone()
+    assert dict(after) == {"type": "location", "is_species": 0}
+
+
+def test_update_keyword_noop_general_type_preserves_legacy_species_flag(tmp_path):
+    """Re-selecting General must not erase a legacy species marker."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    effective_id = db.update_keyword(kid, type="general")
+
+    assert effective_id == kid
+    row = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,),
+    ).fetchone()
+    assert dict(row) == {"type": "general", "is_species": 1}
+
+
 def test_update_keyword_explicit_type_and_taxon_id_kwargs_win(tmp_path):
     """Caller-supplied type and taxon_id win over auto-detection. Used by
     the bulk-type-apply UI path."""
@@ -14265,8 +15137,10 @@ def _add_one_detection(db, photo_id, detector_model="test-det", conf=0.9):
 
 def test_count_classifier_runs_filters_by_model_and_fingerprint(tmp_path):
     """count_classifier_runs returns the number of distinct photos in the
-    given id list that have at least one detection with a classifier_runs
-    row matching the given (model, fingerprint)."""
+    given id list where every qualifying detection has a classifier_runs
+    row matching the given (model, fingerprint). Photo-scoped to match
+    the classify loop's ``cached`` bucket: a photo is only "cached" when
+    no detection would need fresh inference."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
@@ -14296,9 +15170,18 @@ def test_count_classifier_runs_filters_by_model_and_fingerprint(tmp_path):
     # Empty input returns 0.
     assert db.count_classifier_runs([], "BioCLIP-2.5", "fp-a") == 0
 
-    # Photo with multiple detections, only one cached, still counts as 1.
+    # Photo with multiple detections, only one cached, does NOT count:
+    # the runtime would still need to infer the uncached detection, and the
+    # photo would end up in ``count`` (inferred), not ``cached``.
     d2b = _add_one_detection(db, p2)
     db.record_classifier_run(d2b, "BioCLIP-2.5", "fp-a", prediction_count=1)
+    assert db.count_classifier_runs(
+        [p1, p2, p3], "BioCLIP-2.5", "fp-a"
+    ) == 1  # only p1 — p2 still has d2 (fp-b) with no matching run key
+
+    # Once every qualifying detection on p2 has a matching run key, p2
+    # counts too.
+    db.record_classifier_run(d2, "BioCLIP-2.5", "fp-a", prediction_count=1)
     assert db.count_classifier_runs(
         [p1, p2, p3], "BioCLIP-2.5", "fp-a"
     ) == 2  # p1 and p2
@@ -14366,14 +15249,63 @@ def test_count_classifier_runs_excludes_full_image_and_below_threshold(tmp_path)
     ) == 1
 
 
+def test_count_classifier_runs_ignores_non_animal_detections(tmp_path):
+    """Non-animal detector boxes (person, vehicle) are skipped by the
+    classify loop before inference — so an uncached non-animal box on an
+    otherwise cache-served photo must not force that photo out of the
+    ``cached`` bucket. Mirrors pipeline_job.py's ``category == 'animal'``
+    filter on both the cache- and DB-read detection paths.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+
+    # p1: one animal detection (cached) + one uncached person detection.
+    # The person box gets skipped at runtime so p1 IS fully cache-served.
+    d1_animal = _add_one_detection(db, p1, conf=0.9)
+    db.record_classifier_run(d1_animal, "BioCLIP-2.5", "fp-a", prediction_count=1)
+    db.conn.execute(
+        """INSERT INTO detections
+             (photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category)
+           VALUES (?, 'test-det', 0.0, 0.0, 1.0, 1.0, 0.9, 'person')""",
+        (p1,),
+    )
+    db.conn.commit()
+
+    # p2: only a person detection has a matching run key. Person boxes
+    # aren't classifier targets, so p2 has zero classifiable detections —
+    # it falls through to the empty-detections/full-image branch and is
+    # not counted here.
+    cur = db.conn.execute(
+        """INSERT INTO detections
+             (photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category)
+           VALUES (?, 'test-det', 0.0, 0.0, 1.0, 1.0, 0.9, 'vehicle')""",
+        (p2,),
+    )
+    db.conn.commit()
+    db.record_classifier_run(cur.lastrowid, "BioCLIP-2.5", "fp-a", prediction_count=1)
+
+    assert db.count_classifier_runs(
+        [p1, p2], "BioCLIP-2.5", "fp-a",
+    ) == 1
+
+
 def test_all_nav_ids_covers_every_page():
     from db import ALL_NAV_IDS
     expected = {
         "import",
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-        "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
+        "misses", "highlights", "life_list", "browse", "edit", "map", "location_review", "variants",
         "dashboard", "storage", "audit", "move", "compare",
-        "settings", "workspace", "shortcuts",
+        "settings", "workspace", "lightroom", "shortcuts",
         "keywords", "duplicates", "logs",
     }
     assert expected == ALL_NAV_IDS
@@ -16214,3 +17146,61 @@ def test_best_photo_by_taxon(db):
     db.conn.commit()
     best = db.get_life_list_best_photo_by_taxon([ids['Melospiza melodia']])
     assert best[ids['Melospiza melodia']]['filename'] == 'high.jpg'
+
+
+def test_apply_case_convention_preserves_mixed_case_eponym(tmp_path):
+    """The 'lower' convention must not mangle mixed-case first words:
+    `McKay's bunting` keeps its internal capital, ALL-CAPS label-file
+    spellings sentence-case, plain words capitalize as before."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        conv = db._apply_case_convention
+        assert conv("McKay's bunting", "lower") == "McKay's bunting"
+        assert conv("MALLARD DUCK", "lower") == "Mallard duck"
+        assert conv("black phoebe", "lower") == "Black phoebe"
+        assert conv("mallard", "lower") == "Mallard"
+    finally:
+        db.close()
+
+
+def test_curation_setters_canonicalize_species_casing(tmp_path):
+    """Curation writes with a prediction-cased label key on the stored
+    keyword spelling, and removal finds the row under any casing."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws_id = db.ensure_default_workspace()
+        db.set_active_workspace(ws_id)
+        fid = db.add_folder('/photos', name='photos')
+        pid = db.add_photo(
+            folder_id=fid, filename='a.jpg', extension='.jpg',
+            file_size=100, file_mtime=1.0,
+        )
+        db.conn.execute(
+            "INSERT INTO keywords (name, type, is_species) "
+            "VALUES ('Common waxbill', 'taxonomy', 1)"
+        )
+        db.conn.commit()
+
+        db.set_photo_preference("life_list", "Common Waxbill", pid)
+        prefs = db.conn.execute(
+            "SELECT DISTINCT species FROM photo_preferences"
+        ).fetchall()
+        assert {r["species"] for r in prefs} == {"Common waxbill"}
+
+        rank = db.add_species_highlight("Common Waxbill", pid)
+        assert rank == 1
+        rows = db.conn.execute(
+            "SELECT species FROM species_highlights"
+        ).fetchall()
+        assert [r["species"] for r in rows] == ["Common waxbill"]
+
+        # Re-adding under yet another casing reuses the canonical row
+        # instead of appending a second rank.
+        assert db.add_species_highlight("COMMON WAXBILL", pid) == 1
+
+        removed = db.remove_species_highlight("Common Waxbill", pid)
+        assert removed == 1
+    finally:
+        db.close()

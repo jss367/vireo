@@ -1,10 +1,23 @@
 import json
 import os
+import threading
 import time
 
 import pytest
 from PIL import Image
 from wait import wait_for_job_via_client, wait_for_job_via_runner
+
+
+def _wait_for_runner_status(runner, job_id, status, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = runner.get(job_id)
+        if job and job.get("status") == status:
+            return job
+        time.sleep(0.01)
+    raise AssertionError(
+        f"job {job_id} did not reach {status}; last={runner.get(job_id)!r}"
+    )
 
 
 def test_job_scan_returns_job_id(app_and_db, tmp_path):
@@ -219,6 +232,17 @@ def test_pipeline_slots_counts_only_pipeline_jobs(app_and_db):
         "config": {},
         "result": {"ok": True},
     }
+    paused_pipeline = {
+        "id": "pipe-paused-1",
+        "type": "pipeline",
+        "status": "paused",
+        "started_at": "2026-05-27T09:45:00",
+        "finished_at": None,
+        "progress": {"current": 5, "total": 10},
+        "errors": [],
+        "config": {},
+        "result": None,
+    }
     running_scan = {
         "id": "scan-running-1",
         "type": "scan",
@@ -233,14 +257,15 @@ def test_pipeline_slots_counts_only_pipeline_jobs(app_and_db):
     with runner._lock:
         runner._jobs["pipe-running-1"] = running_pipeline
         runner._jobs["pipe-done-1"] = finished_pipeline
+        runner._jobs["pipe-paused-1"] = paused_pipeline
         runner._jobs["scan-running-1"] = running_scan
 
     from jobs import SLOT_CAP
     resp = client.get('/api/pipeline/slots')
     assert resp.status_code == 200
     data = resp.get_json()
-    assert data["active"] == 1, \
-        "only running pipelines count toward active slots"
+    assert data["active"] == 2, \
+        "running and paused pipelines both occupy active slots"
     assert data["queued"] == 0
     assert data["slot_cap"] == SLOT_CAP
 
@@ -525,6 +550,8 @@ def test_jobs_page_returns_200(app_and_db):
     resp = client.get('/jobs')
     assert resp.status_code == 200
     assert b'Jobs' in resp.data
+    assert b'data-pause-job' in resp.data
+    assert b'data-resume-job' in resp.data
 
 
 def test_navbar_has_jobs_link(app_and_db):
@@ -1105,6 +1132,59 @@ def test_job_cancel_finished_job_returns_404(app_and_db):
         assert resp.status_code == 404
 
 
+def test_job_pause_and_resume_api(app_and_db):
+    """The Jobs API exposes cooperative pause/resume state transitions."""
+    app, _ = app_and_db
+    runner = app._job_runner
+    progress = {"count": 0}
+    finish = threading.Event()
+
+    def work(job):
+        while not finish.is_set():
+            if runner.is_cancelled(job["id"]):
+                break
+            progress["count"] += 1
+            time.sleep(0.01)
+        return {"count": progress["count"]}
+
+    job_id = runner.start("scan", work, pausable=True)
+
+    with app.test_client() as c:
+        paused = c.post(f"/api/jobs/{job_id}/pause")
+        assert paused.status_code == 200
+        assert paused.get_json()["status"] == "pausing"
+        _wait_for_runner_status(runner, job_id, "paused")
+
+        before = progress["count"]
+        time.sleep(0.08)
+        assert progress["count"] == before
+
+        resumed = c.post(f"/api/jobs/{job_id}/resume")
+        assert resumed.status_code == 200
+        assert resumed.get_json()["status"] == "running"
+        finish.set()
+
+    assert wait_for_job_via_runner(runner, job_id)["status"] == "completed"
+
+
+def test_job_pause_api_rejects_unsupported_job(app_and_db):
+    app, _ = app_and_db
+    runner = app._job_runner
+    release = threading.Event()
+
+    def work(_job):
+        release.wait(timeout=2)
+        return {}
+
+    job_id = runner.start("test", work)
+    with app.test_client() as c:
+        resp = c.post(f"/api/jobs/{job_id}/pause")
+        assert resp.status_code == 409
+        assert "does not support" in resp.get_json()["error"]
+    release.set()
+    wait_for_job_via_runner(runner, job_id)
+
+
 # --- Pipeline metadata auto-repair tests ---
 
 def test_find_broken_metadata_folders_returns_empty_when_healthy(app_and_db):
@@ -1400,7 +1480,8 @@ def test_pipeline_with_broken_collection_repairs_metadata(app_and_db, tmp_path, 
 
     # Mock ExifTool so the test doesn't depend on the binary.
     import scanner
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
@@ -1473,7 +1554,8 @@ def test_pipeline_repair_does_not_ingest_untracked_files(app_and_db, tmp_path, m
     db.conn.commit()
 
     import scanner
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
@@ -1597,7 +1679,8 @@ def test_pipeline_repair_does_not_double_process_thumbnails(
     db.conn.commit()
 
     import scanner
-    def fake_extract(paths, restricted_tags=None, progress_callback=None):
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
         return {p: {"File": {"ImageWidth": 640, "ImageHeight": 480},
                     "EXIF": {"DateTimeOriginal": "2024:06:15 10:00:00"},
                     "Composite": {}} for p in paths}
@@ -3357,6 +3440,84 @@ def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
     for photo_id in result["photo_ids"]:
         names = {row["name"] for row in db.get_photo_keywords(photo_id)}
         assert {"Kenya trip", "Portfolio"} <= names
+
+
+def test_import_pause_waits_for_tag_transaction_to_commit(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Tag writes reach a transaction boundary before honoring Pause."""
+    import import_job
+    from db import Database
+
+    app, db = app_and_db
+    runner = app._job_runner
+    client = app.test_client()
+    photo_id = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    tag_written = threading.Event()
+    release_tag_write = threading.Event()
+    pause_requested = threading.Event()
+
+    def imported_result(job, runner, db_path, workspace_id, params):
+        return {
+            "ok": True,
+            "cancelled": False,
+            "photo_ids": [photo_id],
+            "discovered": 1,
+            "copied": 1,
+            "verified": 1,
+            "skipped_duplicate": 0,
+            "failed": 0,
+            "safe_to_format": True,
+            "unsafe_files": [],
+            "folders": {},
+            "errors": [],
+        }
+
+    original_tag_photo = Database.tag_photo
+
+    def pause_after_uncommitted_tag(self, tagged_photo_id, keyword_id, _commit=True):
+        original_tag_photo(self, tagged_photo_id, keyword_id, _commit=_commit)
+        if not pause_requested.is_set():
+            job_id = next(
+                job_id for job_id, job in runner._jobs.items()
+                if job["type"] == "import" and job["status"] == "running"
+            )
+            assert runner.pause_job(job_id) is True
+            pause_requested.set()
+            tag_written.set()
+            assert release_tag_write.wait(timeout=2)
+
+    monkeypatch.setattr(import_job, "run_import_job", imported_result)
+    monkeypatch.setattr(Database, "tag_photo", pause_after_uncommitted_tag)
+    response = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": None,
+        "tags": ["First import tag", "Second import tag"],
+    })
+    assert response.status_code == 200, response.get_json()
+    job_id = response.get_json()["job_id"]
+    assert tag_written.wait(timeout=2)
+    assert runner.get(job_id)["status"] == "pausing"
+
+    release_tag_write.set()
+    _wait_for_runner_status(runner, job_id, "paused")
+
+    # Reaching paused means the first tag transaction has committed; a pause
+    # can no longer pin an uncommitted SQLite write lock indefinitely.
+    first_tag = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ?", ("First import tag",),
+    ).fetchone()
+    assert first_tag is not None
+    assert db.conn.execute(
+        "SELECT 1 FROM photo_keywords WHERE photo_id = ? AND keyword_id = ?",
+        (photo_id, first_tag["id"]),
+    ).fetchone() is not None
+
+    assert runner.resume_job(job_id) is True
+    job = wait_for_job_via_runner(runner, job_id)
+    assert job["status"] == "completed", job
+    assert job["result"]["tagging"]["tagged_photos"] == 1
 
 
 def test_import_tag_reuses_keyword_repaired_from_legacy_peer(

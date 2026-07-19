@@ -2098,3 +2098,66 @@ def test_move_folder_endpoint_refuses_while_transition_job_is_pending(tmp_path, 
         finally:
             hold.set()
         wait_for_job_via_client(client, job_id)
+
+
+def test_stage_endpoint_refuses_while_scan_is_paused(tmp_path, monkeypatch):
+    """A paused (or pausing) scan/import still holds the workspace.
+
+    Once ``pause_job`` moves a scan/import out of ``running``, the worker
+    thread is asleep but its in-memory workspace and root assumptions are
+    intact and will pick up again on resume. A stage/sync/discard slipping
+    through in that window would leave the paused job resuming against a
+    layout the local manifest never covers, so ``_busy_job`` must treat
+    ``pausing``/``paused`` as live too.
+    """
+    import time
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "photos"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+
+    db = Database(db_path)
+    db.add_folder(str(source), name="photos")
+    workspace_id = db._active_workspace_id
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+
+    runner = app._job_runner
+
+    def pausable_scan(job):
+        # Loop through the runner's checkpoint so pause_job can actually
+        # pause the worker (is_cancelled is what emits the ``paused`` state).
+        while not runner.is_cancelled(job["id"]):
+            time.sleep(0.01)
+        return {"stopped": True}
+
+    with app.test_client() as client:
+        job_id = runner.start(
+            "scan", pausable_scan, workspace_id=workspace_id, pausable=True
+        )
+        try:
+            assert runner.pause_job(job_id) is True
+            deadline = time.monotonic() + 2
+            while runner.get(job_id)["status"] != "paused" and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert runner.get(job_id)["status"] == "paused"
+
+            blocked = client.post(
+                "/api/workspaces/active/local-workspace/stage", json={}
+            )
+            assert blocked.status_code == 409
+            body = blocked.get_json()["error"].lower()
+            assert "scan" in body
+        finally:
+            runner.cancel_job(job_id)
+        wait_for_job_via_client(client, job_id)

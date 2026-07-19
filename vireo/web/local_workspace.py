@@ -41,8 +41,17 @@ def create_local_workspace_blueprint(
         return db, workspace_id, None
 
     def _busy_job(workspace_id):
+        # ``pausing``/``paused`` jobs still own the workspace: their worker
+        # threads keep their original workspace and root assumptions in
+        # memory and will resume writing catalog rows against the pre-
+        # transition layout. Letting a stage/sync/discard proceed while a
+        # scan/import is paused would silently orphan rows the manifest
+        # doesn't cover once the paused job resumes.
         for job in get_runner().list_jobs():
-            if job.get("workspace_id") == workspace_id and job.get("status") in {"queued", "running"}:
+            if (
+                job.get("workspace_id") == workspace_id
+                and job.get("status") in {"queued", "running", "pausing", "paused"}
+            ):
                 return job
         return None
 

@@ -202,6 +202,83 @@ def test_sort_and_numbering_preferences_persist(live_server, page):
     expect(page.locator(".lifer-number").first).to_have_text("#1")
 
 
+def test_taxonomic_group_and_identification_level_filters(live_server, page):
+    db = live_server["db"]
+    folder_id = live_server["data"]["folders"][0]
+
+    aves = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
+        ("Aves", "Birds", "class"),
+    ).lastrowid
+    mammalia = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
+        ("Mammalia", "Mammals", "class"),
+    ).lastrowid
+    hawk_taxon = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank, parent_id) "
+        "VALUES (?, ?, ?, ?)",
+        ("Buteo jamaicensis", "Red-tailed Hawk", "species", aves),
+    ).lastrowid
+    accipiter_taxon = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank, parent_id) "
+        "VALUES (?, ?, ?, ?)",
+        ("Accipiter", None, "genus", aves),
+    ).lastrowid
+    fox_taxon = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank, parent_id) "
+        "VALUES (?, ?, ?, ?)",
+        ("Vulpes vulpes", "Red Fox", "species", mammalia),
+    ).lastrowid
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ?, type = 'taxonomy' WHERE name = ?",
+        (hawk_taxon, "Red-tailed Hawk"),
+    )
+
+    for name, taxon_id in (("Accipiter", accipiter_taxon),
+                           ("Red Fox", fox_taxon)):
+        keyword_id = db.add_keyword(name, kw_type="taxonomy")
+        db.conn.execute(
+            "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+            (taxon_id, keyword_id),
+        )
+        photo_id = db.add_photo(
+            folder_id=folder_id,
+            filename=f"{name.lower().replace(' ', '-')}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=500.0 + taxon_id,
+            timestamp="2024-06-01T12:00:00",
+        )
+        db.tag_photo(photo_id, keyword_id)
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/life-list")
+    page.locator(".species-card").first.wait_for(state="visible")
+
+    group = page.locator("#taxonomicGroupSelect")
+    rank = page.locator("#identificationRankSelect")
+    expect(group.locator("option", has_text="Birds")).to_have_count(1)
+    expect(group.locator("option", has_text="Mammals")).to_have_count(1)
+
+    group.select_option(str(aves))
+    expect(page.locator(".species-name")).to_have_count(2)
+    expect(page.locator(".species-name")).to_contain_text([
+        "Accipiter", "Red-tailed Hawk",
+    ])
+
+    rank.select_option("species")
+    expect(page.locator(".species-name")).to_have_count(1)
+    expect(page.locator(".species-name")).to_have_text(["Red-tailed Hawk"])
+    expect(page.locator("#meta")).to_contain_text("1 shown")
+
+    group.select_option(str(mammalia))
+    expect(page.locator(".species-name")).to_have_text(["Red Fox"])
+
+    rank.select_option("all")
+    group.select_option("unknown")
+    expect(page.locator(".species-name")).to_have_text(["American Robin"])
+
+
 def test_life_list_loads_more_than_initial_100(live_server, page):
     _seed_large_hawk_life_list(live_server)
     page.goto(f"{live_server['url']}/life-list")

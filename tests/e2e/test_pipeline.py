@@ -204,14 +204,18 @@ def test_pipeline_labels_get_more_opens_download_modal(live_server, page):
     expect(page.locator("#pipelineTaxonCheckboxes")).to_contain_text("Birds")
 
 
-def test_pipeline_toggling_classify_off_marks_downstream_will_skip(live_server, page):
+def test_pipeline_toggling_classify_off_keeps_group_available(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("#card-classify .stage-header")
     page.uncheck("#enableClassify")
-    for suffix in ["Classify", "Extract", "Group"]:
+    for suffix in ["Classify", "Extract"]:
         pill = page.locator(f"#pill{suffix}")
         expect(pill).to_contain_text("Will skip")
+    group = page.locator("#enableGroup")
+    expect(group).to_be_checked()
+    expect(group).to_be_enabled()
+    expect(page.locator("#pillGroup")).not_to_contain_text("Will skip")
     # Indexing stages are unaffected.
     expect(page.locator("#pillScan")).to_contain_text("Will run")
 
@@ -239,10 +243,13 @@ def test_pipeline_plan_summary_updates_on_toggle(live_server, page):
     page.click("#card-classify .stage-header")
     page.uncheck("#enableClassify")
     summary = page.locator("[data-testid='pipeline-plan-summary']")
-    for label in ("Classify", "Extract Features", "Group & Score"):
+    for label in ("Classify", "Extract Features"):
         expect(
             summary.locator(".plan-stage-row.will-skip", has_text=label)
         ).to_be_visible()
+    expect(
+        summary.locator(".plan-stage-row.will-run", has_text="Group & Score")
+    ).to_be_visible()
 
 
 def test_pipeline_concurrent_running_stages_keep_running_pill(live_server, page):
@@ -390,9 +397,9 @@ def test_pipeline_eye_keypoints_toggle_off_marks_will_skip(live_server, page):
     expect(page.locator("#pillGroup")).not_to_contain_text("Will skip")
 
 
-def test_pipeline_disabling_extract_cascades_to_eye_keypoints(live_server, page):
+def test_pipeline_disabling_extract_keeps_group_available(live_server, page):
     """Eye Keypoints needs masks from Extract, so toggling Extract off must
-    uncheck and disable the Eye Keypoints checkbox alongside Group."""
+    disable Eye Keypoints while leaving cached-feature grouping available."""
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     page.click("#card-extract .stage-header")
@@ -401,6 +408,10 @@ def test_pipeline_disabling_extract_cascades_to_eye_keypoints(live_server, page)
     expect(ek).not_to_be_checked()
     expect(ek).to_be_disabled()
     expect(page.locator("#pillEyeKeypoints")).to_contain_text("Will skip")
+    group = page.locator("#enableGroup")
+    expect(group).to_be_checked()
+    expect(group).to_be_enabled()
+    expect(page.locator("#pillGroup")).not_to_contain_text("Will skip")
 
 
 def test_pipeline_previews_pill_shows_pending_count(live_server, page):

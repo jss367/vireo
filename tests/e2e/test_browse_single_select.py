@@ -378,6 +378,59 @@ def test_add_keyword_input_suggests_existing_keyword(live_server, page):
     expect(page.locator("#detailKeywords")).to_contain_text("Alan's Hummingbird")
 
 
+def test_species_badge_tracks_detail_keyword_edits_without_reload(live_server, page):
+    """The grid's taxonomy badge must stay in sync with detail keyword edits."""
+    db = live_server["db"]
+    source_id = live_server["data"]["photos"][0]
+    target_id = live_server["data"]["photos"][1]
+    old_name = "Hawaii Creeper"
+    new_name = "Hawaii Amakihi"
+    old_id = db.add_keyword(old_name, kw_type="taxonomy")
+    new_id = db.add_keyword(new_name, kw_type="taxonomy")
+    db.tag_photo(target_id, old_id)
+    db.tag_photo(source_id, new_id)
+
+    page.goto(f"{live_server['url']}/browse")
+    card = page.locator(f'.grid-card[data-id="{target_id}"]')
+    expect(card.locator(".grid-card-img-wrap .species-badge")).to_have_text(
+        old_name
+    )
+    card.click()
+
+    old_tag = page.locator("#detailKeywords .keyword-tag", has_text=old_name)
+    expect(old_tag).to_be_visible()
+    with page.expect_response(
+        lambda r: f"/api/photos/{target_id}/keywords/{old_id}" in r.url
+        and r.request.method == "DELETE"
+        and r.status == 200
+    ):
+        old_tag.locator(".remove-kw").click()
+
+    expect(card.locator(".grid-card-img-wrap .species-badge")).to_have_count(0)
+    expect(old_tag).to_have_count(0)
+
+    keyword_input = page.locator("#addKeywordInput")
+    keyword_input.fill(new_name)
+    suggestion = page.locator(
+        "#addKeywordSuggestions .keyword-suggestion-option",
+        has_text=new_name,
+    )
+    expect(suggestion).to_be_visible()
+    with page.expect_response(
+        lambda r: f"/api/photos/{target_id}/keywords" in r.url
+        and r.request.method == "POST"
+        and r.status == 200
+    ):
+        suggestion.click()
+
+    expect(card.locator(".grid-card-img-wrap .species-badge")).to_have_text(
+        new_name
+    )
+    expect(card.locator(".grid-card-img-wrap .species-badge")).not_to_contain_text(
+        old_name
+    )
+
+
 def test_needs_identification_refreshes_after_identification_added(live_server, page):
     """A photo should leave the active Needs Identification grid after tagging."""
     db = live_server["db"]
@@ -847,9 +900,11 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
         );
       }
     """, timeout=3000)
-    expect(
-        page.locator(".selection-keyword-row", has_text="Red-tailed Hawk")
-    ).to_have_count(0)
+    row = page.locator(".selection-keyword-row", has_text="Red-tailed Hawk")
+    expect(row).to_be_visible()
+    expect(row).to_contain_text("On 5 of 5")
+    expect(row.locator("button", has_text="Add to")).to_have_count(0)
+    expect(row.locator("button", has_text="Remove from 5")).to_be_visible()
 
     page.evaluate("async () => (await fetch('/api/undo', {method: 'POST'})).ok")
     restored_with_keyword = page.evaluate("""
@@ -865,6 +920,47 @@ def test_multiselect_offers_partial_keyword_fill(live_server, page):
       }
     """)
     assert restored_with_keyword == original_with_keyword
+
+
+def test_multiselect_shows_and_removes_keyword_shared_by_all_photos(live_server, page):
+    """A keyword shared by the selection remains visible and removable."""
+    db = live_server["db"]
+    selected_ids = live_server["data"]["photos"]
+    keyword_name = "Shared selection keyword"
+    keyword_id = db.add_keyword(keyword_name)
+    for photo_id in selected_ids:
+        db.tag_photo(photo_id, keyword_id)
+
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.wait_for(state="visible")
+    page.evaluate("""
+      photos.forEach(function(p) { selectedPhotos.add(p.id); });
+      renderGrid();
+      updateBatchBar();
+    """)
+
+    row = page.locator(".selection-keyword-row", has_text=keyword_name)
+    expect(row).to_be_visible()
+    expect(row).to_contain_text("On 5 of 5")
+    expect(row.locator("button", has_text="Add to")).to_have_count(0)
+    remove_button = row.locator("button", has_text="Remove from 5")
+    expect(remove_button).to_be_visible()
+
+    remove_button.click()
+    page.wait_for_function(
+        """
+        async ({photoIds, keywordId}) => {
+          const details = await Promise.all(
+            photoIds.map(id => fetch('/api/photos/' + id).then(r => r.json()))
+          );
+          return details.every(p =>
+            !(p.keywords || []).some(k => k.id === keywordId)
+          );
+        }
+        """,
+        arg={"photoIds": selected_ids, "keywordId": keyword_id},
+    )
+    expect(row).to_have_count(0)
 
 
 def test_multiselect_shrink_to_focused_photo_restores_detail(live_server, page):

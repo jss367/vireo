@@ -23,7 +23,11 @@ DEFAULTS = {
     "w_time": 0.35,
     "w_subj": 0.35,
     "w_global": 0.15,
-    "w_species": 0.10,
+    # Raised from the design-doc 0.10: at 0.10 a species mismatch barely dented
+    # the score, so a lone bird got merged into a neighboring encounter of a
+    # different species (and inherited its majority-vote label). A heavier
+    # species vote lets a disjoint top-5 (sim_species == 0) resist the merge.
+    "w_species": 0.40,
     "w_meta": 0.05,
     # Similarity parameters
     "tau_enc": 40.0,  # time constant for sim_time (seconds)
@@ -31,6 +35,14 @@ DEFAULTS = {
     "hard_cut_time": 180.0,  # seconds
     "hard_cut_score": 0.42,
     "soft_cut_score": 0.52,
+    # A confident classifier change is stronger evidence than the blended
+    # similarity score: two clearly identified, different species should not
+    # remain in one encounter merely because they were photographed seconds
+    # apart against the same background. Confidence is averaged across the
+    # models present on each photo; the winning species must also clear the
+    # runner-up by the configured margin.
+    "species_hard_cut_confidence": 0.80,
+    "species_hard_cut_margin": 0.60,
     # Pass 2 merge thresholds
     "merge_score": 0.62,
     "merge_max_gap": 60.0,  # seconds
@@ -166,6 +178,105 @@ def sim_species(species_a, species_b):
     if not shared:
         return 0.0
     return sum(math.sqrt(dict_a[s] * dict_b[s]) for s in shared)
+
+
+def _normalized_species_name(name):
+    """Return a stable comparison key for classifier species labels."""
+    return " ".join(str(name or "").strip().casefold().split())
+
+
+def _confident_species_prediction(photo, config=None):
+    """Return a trustworthy winning species for one photo, or ``None``.
+
+    Classifier rows are grouped by model so repeated detections from one model
+    cannot manufacture consensus. Support for a species is its mean confidence
+    across all models represented on the photo, with zero support from a model
+    that chose another species. This makes two disagreeing classifiers
+    appropriately cautious while still allowing a single strongly decisive
+    classifier to provide evidence when it is the only model available.
+
+    An explicit detector ``subject_absent`` verdict vetoes the prediction. The
+    pipeline normally filters such predictions before grouping, but honoring
+    the verdict here protects regrouping from stale cached classifications.
+    """
+    if photo.get("subject_absent"):
+        return None
+
+    entries = photo.get("species_top5") or []
+    if not entries:
+        return None
+
+    cfg = {**DEFAULTS, **(config or {})}
+    min_confidence = cfg["species_hard_cut_confidence"]
+    min_margin = cfg["species_hard_cut_margin"]
+
+    by_model = defaultdict(dict)
+    display_names = {}
+    for entry in entries:
+        if not entry or len(entry) < 2:
+            continue
+        name = str(entry[0] or "").strip()
+        key = _normalized_species_name(name)
+        try:
+            confidence = float(entry[1])
+        except (TypeError, ValueError):
+            continue
+        if not key or not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            continue
+        model = str(entry[2] or "unknown") if len(entry) >= 3 else "unknown"
+        prior = by_model[model].get(key)
+        if prior is None or confidence > prior:
+            by_model[model][key] = confidence
+            display_names[key] = name
+
+    if not by_model:
+        return None
+
+    model_count = len(by_model)
+    species_keys = {key for predictions in by_model.values() for key in predictions}
+    support = {
+        key: sum(predictions.get(key, 0.0) for predictions in by_model.values()) / model_count
+        for key in species_keys
+    }
+    ranked = sorted(support, key=lambda key: (-support[key], key))
+    winner = ranked[0]
+    winner_support = support[winner]
+    runner_up_support = support[ranked[1]] if len(ranked) > 1 else 0.0
+
+    # Require a strict majority of the represented classifiers to rank the
+    # same winner first. Two models must therefore agree; with a larger
+    # ensemble, one dissenting model cannot veto an otherwise clear result.
+    model_wins = 0
+    for predictions in by_model.values():
+        model_winner = min(
+            predictions,
+            key=lambda key: (-predictions[key], key),
+        )
+        if model_winner == winner:
+            model_wins += 1
+    if model_wins < math.floor(model_count / 2) + 1:
+        return None
+    if winner_support < min_confidence:
+        return None
+    if winner_support - runner_up_support < min_margin:
+        return None
+
+    return {
+        "species": display_names[winner],
+        "key": winner,
+        "confidence": winner_support,
+        "margin": winner_support - runner_up_support,
+        "model_count": model_count,
+    }
+
+
+def _confident_species_conflict(photo_a, photo_b, config=None):
+    """Return the two confident predictions when adjacent photos conflict."""
+    pred_a = _confident_species_prediction(photo_a, config=config)
+    pred_b = _confident_species_prediction(photo_b, config=config)
+    if pred_a is None or pred_b is None or pred_a["key"] == pred_b["key"]:
+        return None
+    return pred_a, pred_b
 
 
 def sim_meta(photo_a, photo_b):
@@ -355,7 +466,7 @@ def cut_microsegments(photos, config=None, emit_trace=False):
         emit_trace: when True, return (segments, trace) where each trace
             entry is {pair_index, score, dt_seconds, decision, components,
             thresholds}. Decisions: kept, cut_time, cut_score, cut_soft,
-            burst_id_kept.
+            cut_species, burst_id_kept.
 
     Returns:
         list of lists (each inner list is a microsegment of photo dicts), or
@@ -403,6 +514,9 @@ def cut_microsegments(photos, config=None, emit_trace=False):
         bid_a = sorted_photos[i].get("burst_id")
         bid_b = sorted_photos[i + 1].get("burst_id")
         decision = None
+        species_conflict = _confident_species_conflict(
+            sorted_photos[i], sorted_photos[i + 1], config=cfg
+        )
 
         both_null = ts_a is None and ts_b is None
         folder_a = sorted_photos[i].get("folder_id")
@@ -433,7 +547,15 @@ def cut_microsegments(photos, config=None, emit_trace=False):
             )
         )
 
-        if bid_a is not None and bid_b is not None and bid_a == bid_b:
+        if species_conflict is not None:
+            # A camera burst id is not allowed to conceal a confidently
+            # identified species change. Burst mode can span a subject switch,
+            # and the classifier evidence is the more relevant encounter
+            # boundary signal in that case.
+            cuts.add(i)
+            recent_scores = []
+            decision = "cut_species"
+        elif bid_a is not None and bid_b is not None and bid_a == bid_b:
             decision = "burst_id_kept"
             recent_scores.append(score)
             if len(recent_scores) > 3:
@@ -490,11 +612,25 @@ def cut_microsegments(photos, config=None, emit_trace=False):
                 "score": float(score),
                 "dt_seconds": float(dt) if dt != float("inf") else None,
                 "decision": decision,
+                "species_conflict": (
+                    {
+                        "photo_a_species": species_conflict[0]["species"],
+                        "photo_a_confidence": species_conflict[0]["confidence"],
+                        "photo_a_margin": species_conflict[0]["margin"],
+                        "photo_b_species": species_conflict[1]["species"],
+                        "photo_b_confidence": species_conflict[1]["confidence"],
+                        "photo_b_margin": species_conflict[1]["margin"],
+                    }
+                    if species_conflict is not None
+                    else None
+                ),
                 "components": components,
                 "thresholds": {
                     "hard_cut_time": cfg["hard_cut_time"],
                     "hard_cut_score": cfg["hard_cut_score"],
                     "soft_cut_score": cfg["soft_cut_score"],
+                    "species_hard_cut_confidence": cfg["species_hard_cut_confidence"],
+                    "species_hard_cut_margin": cfg["species_hard_cut_margin"],
                 },
             })
 
@@ -637,7 +773,13 @@ def _merge_microsegments_with_map(segments, config=None):
         gap = _time_delta_seconds(last_a, first_b)
 
         did_merge = False
-        if gap <= cfg["merge_max_gap"]:
+        # Never stitch back across the same trustworthy classifier conflict
+        # that forced a pass-1 boundary. Without this guard, identical scene
+        # embeddings and a short time gap can immediately undo cut_species.
+        species_conflict = _confident_species_conflict(
+            merged[-1][-1], seg[0], config=cfg
+        )
+        if species_conflict is None and gap <= cfg["merge_max_gap"]:
             s_seg = compute_s_seg(merged[-1], seg, config=cfg)
             if s_seg > cfg["merge_score"]:
                 # Merge: extend the last segment
