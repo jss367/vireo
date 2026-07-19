@@ -10991,36 +10991,49 @@ class Database:
                         chunk,
                     )
 
-                # Any keyword name still tagged on the photo (species or
-                # general, root or hierarchical) means the scanner's flat
-                # dedup during a later XMP re-import already skips the
-                # matching ``dc:subject`` entry, so no sidecar remove is
-                # needed — a hierarchical remove would additionally strip
-                # a surviving hierarchical entry that shares a segment
-                # name. Walk each surviving keyword's parent chain so an
-                # ancestor spelling counts as "still present" too: a
-                # detached root ``Verdin`` whose name matches the parent
-                # of a preserved ``Verdin|Desert Verdin`` leaf would
-                # otherwise queue a ``keyword_remove`` that sync_to_xmp
-                # applies hierarchically, stripping the very hierarchy
-                # the repair kept in the DB. Read the post-repair state.
-                surviving_keys = {
-                    keyword_match_key(row["name"])
-                    for row in self.conn.execute(
-                        """WITH RECURSIVE anc(id, name, parent_id) AS (
-                               SELECT k.id, k.name, k.parent_id
-                                 FROM photo_keywords pk
-                                 JOIN keywords k ON k.id = pk.keyword_id
-                                WHERE pk.photo_id = ?
-                               UNION
-                               SELECT k.id, k.name, k.parent_id
-                                 FROM keywords k
-                                 JOIN anc ON anc.parent_id = k.id
-                           )
-                           SELECT DISTINCT name FROM anc""",
-                        (photo_id,),
-                    ).fetchall()
-                }
+                # Split post-repair surviving names into two buckets:
+                #
+                # * attached-leaf keys — names of keywords still directly
+                #   tagged on the photo. The scanner's flat dedup during
+                #   a later XMP re-import already skips a matching
+                #   ``dc:subject`` entry, so no sidecar remove is needed.
+                # * ancestor-only keys — names that appear only in the
+                #   parent chain of a surviving hierarchical leaf. The
+                #   scanner does NOT count these when building its
+                #   per-photo ``existing_keys`` (it uses attached leaf
+                #   names only, see ``scanner._import_keywords_for_photo``),
+                #   so a stale ``dc:subject: Verdin`` next to a preserved
+                #   ``Verdin|Desert Verdin`` will be reimported and
+                #   reattach the flat root — recreating the very
+                #   duplicate this repair just removed. Queue a
+                #   flat-only sidecar remove for these; a plain
+                #   ``keyword_remove`` cannot be used because
+                #   ``sync_to_xmp`` applies it hierarchically and would
+                #   strip the preserved ``lr:hierarchicalSubject`` entry.
+                attached_leaf_keys = set()
+                ancestor_only_keys = set()
+                for row in self.conn.execute(
+                    """WITH RECURSIVE anc(id, name, parent_id, is_leaf) AS (
+                           SELECT k.id, k.name, k.parent_id, 1
+                             FROM photo_keywords pk
+                             JOIN keywords k ON k.id = pk.keyword_id
+                            WHERE pk.photo_id = ?
+                           UNION
+                           SELECT k.id, k.name, k.parent_id, 0
+                             FROM keywords k
+                             JOIN anc ON anc.parent_id = k.id
+                       )
+                       SELECT name, MAX(is_leaf) AS leaf
+                         FROM anc GROUP BY id""",
+                    (photo_id,),
+                ).fetchall():
+                    key = keyword_match_key(row["name"])
+                    if not key:
+                        continue
+                    if row["leaf"]:
+                        attached_leaf_keys.add(key)
+                    else:
+                        ancestor_only_keys.add(key)
                 # The repair scans photo_keywords globally, but
                 # pending_changes are filtered by workspace at read
                 # time (get_pending_changes uses the active workspace).
@@ -11045,22 +11058,31 @@ class Database:
                 ]
                 for removed in remove:
                     key = keyword_match_key(removed["name"])
-                    if not key or key in surviving_keys:
+                    if not key or key in attached_leaf_keys:
                         continue
                     if key in cancelled_add_keys:
                         # The flat root add was still pending — cancelling
                         # it above already prevents the sidecar from ever
                         # receiving it, so no remove is required.
                         continue
+                    # Ancestor-only survivors need flat-only cleanup:
+                    # strip the stale ``dc:subject`` entry without the
+                    # hierarchical sweep that would also drop the
+                    # preserved ``lr:hierarchicalSubject`` line.
+                    change_type = (
+                        "keyword_remove_flat"
+                        if key in ancestor_only_keys
+                        else "keyword_remove"
+                    )
                     if photo_workspaces:
                         for ws_id in photo_workspaces:
                             self.queue_change(
-                                photo_id, "keyword_remove", removed["name"],
+                                photo_id, change_type, removed["name"],
                                 workspace_id=ws_id, _commit=False,
                             )
                     else:
                         self.queue_change(
-                            photo_id, "keyword_remove", removed["name"],
+                            photo_id, change_type, removed["name"],
                             _commit=False,
                         )
 
@@ -15190,14 +15212,25 @@ class Database:
                     # layout migrates. Sidecar removes above still use
                     # the raw ``old_name`` because the XMP file carries
                     # the alias, not the root spelling.
+                    # Dedupe with the same ASCII-only case fold SQLite
+                    # applies via COLLATE NOCASE (``keyword_match_key``).
+                    # Python's ``str.lower()`` collapses non-ASCII case
+                    # distinctions — ``"Éclair".lower() == "éclair"`` —
+                    # even though ``add_keyword``/the ``keywords`` uniqueness
+                    # constraint intentionally treats those as separate
+                    # rows. Using ``.lower()`` here would drop the second
+                    # distinct removed row's spelling from the curation
+                    # rename source list, leaving highlights or
+                    # representatives keyed on it stranded under a species
+                    # the photo no longer carries.
                     curation_sources = []
                     seen_sources = set()
                     for row in to_remove:
                         for candidate in (row["name"], self._species_root_name_for_taxon(row["taxon_id"])):
                             if not candidate:
                                 continue
-                            key = candidate.lower()
-                            if key in seen_sources:
+                            key = keyword_match_key(candidate)
+                            if not key or key in seen_sources:
                                 continue
                             seen_sources.add(key)
                             curation_sources.append(candidate)
@@ -16150,7 +16183,7 @@ class Database:
         # add_keyword stores the clean spelling. Normalizing in one place
         # also keeps the (photo_id, change_type, value) dedupe below and
         # the add/remove cancellation in app.py working on one spelling.
-        if change_type in ("keyword_add", "keyword_remove"):
+        if change_type in ("keyword_add", "keyword_remove", "keyword_remove_flat"):
             value = normalize_keyword_display(value)
             if not value:
                 return None

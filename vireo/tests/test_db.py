@@ -14747,7 +14747,11 @@ def test_repair_duplicate_photo_species_skips_remove_when_survivor_ancestor_matc
     ``sync_to_xmp`` applies keyword_remove hierarchically (``remove_keywords``
     strips any ``lr:hierarchicalSubject`` whose segment matches), so the
     next sync would delete the very ``Verdin|Desert Verdin`` hierarchy the
-    repair kept in the DB."""
+    repair kept in the DB. Queue a ``keyword_remove_flat`` instead so the
+    stale ``dc:subject: Verdin`` still gets stripped — otherwise the
+    scanner reimports it on the next XMP scan (its per-photo dedup only
+    considers attached leaf names, not ancestor segments) and recreates
+    the duplicate root."""
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -14791,10 +14795,24 @@ def test_repair_duplicate_photo_species_skips_remove_when_survivor_ancestor_matc
         if row["change_type"] == "keyword_remove"
         and row["value"] == "Verdin"
     ], (
-        f"expected no keyword_remove for 'Verdin' (it appears as an "
-        f"ancestor segment of the preserved 'Verdin|Desert Verdin' "
+        f"expected no plain keyword_remove for 'Verdin' (it appears as "
+        f"an ancestor segment of the preserved 'Verdin|Desert Verdin' "
         f"hierarchy — a hierarchical sync remove would strip that "
         f"preserved entry from the sidecar), got: {pending}"
+    )
+    # A flat-only cleanup must still be queued so ``sync_to_xmp`` strips
+    # the stale ``dc:subject: Verdin`` line without touching the
+    # preserved hierarchical entry. Without it, the next XMP scan
+    # reimports ``Verdin`` and reattaches the duplicate root.
+    flat_removes = [
+        row for row in pending
+        if row["change_type"] == "keyword_remove_flat"
+        and row["value"] == "Verdin"
+    ]
+    assert flat_removes, (
+        f"expected a queued keyword_remove_flat for 'Verdin' to strip "
+        f"the stale flat root from dc:subject without touching the "
+        f"preserved 'Verdin|Desert Verdin' hierarchy, got: {pending}"
     )
 
 

@@ -123,6 +123,46 @@ def test_sync_to_xmp_keyword_add_preserves_hierarchies_with_matching_segment(
     assert 'Animals|Birds|Hawk' in read_hierarchical_keywords(xmp_path)
 
 
+def test_sync_to_xmp_keyword_remove_flat_leaves_matching_hierarchy(tmp_path):
+    """``keyword_remove_flat`` strips the flat ``dc:subject`` entry only.
+
+    ``repair_duplicate_photo_species`` queues this variant when a
+    surviving hierarchical leaf's parent chain still carries the
+    detached root's spelling (e.g. root ``Verdin`` detached while
+    ``Verdin|Desert Verdin`` is preserved). A regular
+    ``keyword_remove`` would run ``remove_keywords`` in hierarchical
+    mode and strip that preserved hierarchy — dropping the very
+    ``lr:hierarchicalSubject`` line the repair kept — whereas
+    ``keyword_remove_flat`` cleans only the stale ``dc:subject`` line.
+    """
+    from db import Database
+    from sync import sync_to_xmp
+    from xmp import read_hierarchical_keywords, read_keywords, write_sidecar
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    pid, xmp_path = _setup_photo_with_xmp(tmp_path, db)
+    write_sidecar(
+        xmp_path,
+        flat_keywords={'Verdin', 'Desert Verdin'},
+        hierarchical_keywords={'Verdin|Desert Verdin'},
+    )
+
+    db.queue_change(pid, 'keyword_remove_flat', 'Verdin')
+
+    result = sync_to_xmp(db)
+    assert result['synced'] == 1
+    assert result['failed'] == 0
+
+    # Flat ``Verdin`` is gone; the hierarchy stays intact.
+    flat = read_keywords(xmp_path)
+    assert 'Verdin' not in flat
+    assert 'Desert Verdin' in flat
+    assert 'Verdin|Desert Verdin' in read_hierarchical_keywords(xmp_path)
+    assert len(db.get_pending_changes()) == 0
+
+
 def test_sync_to_xmp_writes_rating(tmp_path):
     """sync_to_xmp writes rating changes to XMP sidecars."""
     from xml.etree import ElementTree as ET
