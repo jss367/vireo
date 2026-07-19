@@ -730,6 +730,7 @@ body { padding-bottom: 36px; }
       <button type="button" id="btnProcessSaveNew" onclick="saveProcessAsNew()" title="Save the current toggles as a new process" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Save as new&hellip;</button>
       <button type="button" id="btnProcessRename" onclick="renameProcess()" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Rename</button>
       <button type="button" id="btnProcessDelete" onclick="deleteProcess()" style="font-size:12px;padding:3px 8px;background:var(--bg-tertiary);color:var(--text-primary);border:1px solid var(--border-secondary);border-radius:4px;cursor:pointer;">Delete</button>
+      <span id="processEditorStatus" role="status" aria-live="polite" style="display:none;text-transform:none;letter-spacing:0;font-weight:400;"></span>
     </span>
   </div>
   <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--text-secondary);margin:2px 0 6px;">
@@ -971,6 +972,24 @@ body { padding-bottom: 36px; }
   </div>
 </div>
 </div><!-- end pipeline-layout -->
+
+<div class="modal-overlay" id="processEditorModal" onclick="if(event.target===this)closeProcessDialog()">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="processEditorModalTitle" aria-describedby="processEditorModalDescription" style="width:440px;max-width:calc(100vw - 32px);">
+    <form id="processEditorForm" onsubmit="submitProcessDialog(event)">
+      <h3 id="processEditorModalTitle">Save process as new</h3>
+      <p id="processEditorModalDescription" style="font-size:13px;color:var(--text-dim);line-height:1.5;margin:0 0 14px;"></p>
+      <div id="processEditorNameField">
+        <label class="modal-label" for="processEditorName">Process name</label>
+        <input type="text" id="processEditorName" class="modal-input" maxlength="120" autocomplete="off">
+      </div>
+      <div class="modal-error" id="processEditorError" role="alert"></div>
+      <div class="modal-actions">
+        <button type="button" class="modal-btn modal-btn-cancel" id="processEditorCancelBtn" onclick="closeProcessDialog()">Cancel</button>
+        <button type="submit" class="modal-btn modal-btn-primary" id="processEditorSubmitBtn">Save process</button>
+      </div>
+    </form>
+  </div>
+</div>
 
 <div class="modal-overlay" id="pipelineLabelsModal" onclick="if(event.target===this)closePipelineLabelsModal()">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pipelineLabelsModalTitle" style="width:560px;max-width:calc(100vw - 32px);">
@@ -1484,6 +1503,10 @@ var _processesById = {};        // id -> process dict (from /api/processes)
 var _selectedProcessId = null;  // currently-loaded process, or null (Custom)
 var _processDirty = false;      // toggles diverge from the loaded process
 var _applyingProcess = false;   // guard: programmatic toggle changes
+var _processDialogMode = null;  // "create", "rename", or "delete"
+var _processDialogBusy = false;
+var _processDialogRestoreFocus = null;
+var _processDialogEscHandler = null;
 
 async function loadSavedProcesses(selectId) {
   var sel = document.getElementById('strategySelect');
@@ -1650,50 +1673,164 @@ async function saveProcess() {
     _processesById[updated.id] = updated;
     _processDirty = false;
     updateProcessEditorUI();
-  } catch (e) { alert('Save failed: ' + e.message); }
+    showProcessEditorStatus('Saved.', false);
+  } catch (e) {
+    showProcessEditorStatus('Save failed: ' + e.message, true);
+  }
 }
 
-async function saveProcessAsNew() {
-  var name = prompt('Name this process:');
-  if (name == null) return;
-  name = name.trim();
-  if (!name) return;
-  var body = currentProcessFields();
-  body.name = name;
-  try {
-    var created = await _postProcessJSON('/api/processes', 'POST', body);
-    await loadSavedProcesses(created.id);
-  } catch (e) { alert('Save failed: ' + e.message); }
+function showProcessEditorStatus(message, isError) {
+  var status = document.getElementById('processEditorStatus');
+  if (!status) return;
+  status.textContent = message || '';
+  status.style.color = isError ? 'var(--danger)' : 'var(--accent)';
+  status.style.display = message ? 'inline' : 'none';
 }
 
-async function renameProcess() {
-  if (_selectedProcessId == null) return;
+function showProcessDialogError(message) {
+  var error = document.getElementById('processEditorError');
+  if (!error) return;
+  error.textContent = message || '';
+  error.style.display = message ? 'block' : 'none';
+}
+
+function setProcessDialogBusy(busy) {
+  _processDialogBusy = busy;
+  var submit = document.getElementById('processEditorSubmitBtn');
+  var cancel = document.getElementById('processEditorCancelBtn');
+  var input = document.getElementById('processEditorName');
+  if (submit) submit.disabled = busy;
+  if (cancel) cancel.disabled = busy;
+  if (input) input.disabled = busy;
+}
+
+function openProcessDialog(mode) {
+  if (mode !== 'create' && _selectedProcessId == null) return;
   var cur = _processesById[_selectedProcessId];
-  var name = prompt('Rename process:', cur ? cur.name : '');
-  if (name == null) return;
-  name = name.trim();
-  if (!name) return;
-  try {
-    await _postProcessJSON(
-      '/api/processes/' + _selectedProcessId, 'PUT', { name: name });
-    await loadSavedProcesses(_selectedProcessId);
-  } catch (e) { alert('Rename failed: ' + e.message); }
+  var modal = document.getElementById('processEditorModal');
+  var title = document.getElementById('processEditorModalTitle');
+  var description = document.getElementById('processEditorModalDescription');
+  var nameField = document.getElementById('processEditorNameField');
+  var input = document.getElementById('processEditorName');
+  var submit = document.getElementById('processEditorSubmitBtn');
+  if (!modal || !title || !description || !nameField || !input || !submit) return;
+
+  _processDialogMode = mode;
+  _processDialogRestoreFocus = document.activeElement;
+  showProcessDialogError('');
+  showProcessEditorStatus('', false);
+  setProcessDialogBusy(false);
+
+  if (mode === 'create') {
+    title.textContent = 'Save process as new';
+    description.textContent =
+      'Save the current processing-stage choices as a reusable process.';
+    nameField.style.display = '';
+    input.value = '';
+    submit.textContent = 'Save process';
+    submit.style.background = '';
+  } else if (mode === 'rename') {
+    title.textContent = 'Rename process';
+    description.textContent = 'Choose a new name for this saved process.';
+    nameField.style.display = '';
+    input.value = cur ? cur.name : '';
+    submit.textContent = 'Rename';
+    submit.style.background = '';
+  } else {
+    title.textContent = 'Delete process';
+    description.textContent = 'Delete “' + (cur ? cur.name : '') +
+      '”? Any workspace using it as the default will fall back to import only.';
+    nameField.style.display = 'none';
+    input.value = '';
+    submit.textContent = 'Delete';
+    submit.style.background = 'var(--danger)';
+  }
+
+  modal.classList.add('open');
+  _processDialogEscHandler = function(e) {
+    if (e.key === 'Escape') closeProcessDialog();
+  };
+  document.addEventListener('keydown', _processDialogEscHandler);
+  setTimeout(function() {
+    if (mode === 'delete') submit.focus();
+    else {
+      input.focus();
+      input.select();
+    }
+  }, 0);
 }
 
-async function deleteProcess() {
-  if (_selectedProcessId == null) return;
-  var cur = _processesById[_selectedProcessId];
-  if (!confirm('Delete process "' + (cur ? cur.name : '') +
-               '"? Any workspace defaulting to it falls back to import-only.')) {
+function closeProcessDialog() {
+  if (_processDialogBusy) return;
+  var modal = document.getElementById('processEditorModal');
+  if (modal) modal.classList.remove('open');
+  if (_processDialogEscHandler) {
+    document.removeEventListener('keydown', _processDialogEscHandler);
+    _processDialogEscHandler = null;
+  }
+  _processDialogMode = null;
+  var restore = _processDialogRestoreFocus;
+  _processDialogRestoreFocus = null;
+  if (restore && typeof restore.focus === 'function') restore.focus();
+}
+
+async function submitProcessDialog(event) {
+  event.preventDefault();
+  if (_processDialogBusy || !_processDialogMode) return;
+  var mode = _processDialogMode;
+  var input = document.getElementById('processEditorName');
+  var name = input ? input.value.trim() : '';
+  if (mode !== 'delete' && !name) {
+    showProcessDialogError('Enter a process name.');
+    if (input) input.focus();
     return;
   }
-  var id = _selectedProcessId;
+
+  setProcessDialogBusy(true);
   try {
-    await _postProcessJSON('/api/processes/' + id, 'DELETE');
-    _selectedProcessId = null;
-    _processDirty = false;
-    await loadSavedProcesses(null);
-  } catch (e) { alert('Delete failed: ' + e.message); }
+    if (mode === 'create') {
+      var body = currentProcessFields();
+      body.name = name;
+      var created = await _postProcessJSON('/api/processes', 'POST', body);
+      await loadSavedProcesses(created.id);
+      setProcessDialogBusy(false);
+      closeProcessDialog();
+      showProcessEditorStatus('Saved “' + created.name + '”.', false);
+    } else if (mode === 'rename') {
+      var renamed = await _postProcessJSON(
+        '/api/processes/' + _selectedProcessId, 'PUT', { name: name });
+      await loadSavedProcesses(_selectedProcessId);
+      setProcessDialogBusy(false);
+      closeProcessDialog();
+      showProcessEditorStatus('Renamed to “' + renamed.name + '”.', false);
+    } else {
+      var deleted = _processesById[_selectedProcessId];
+      await _postProcessJSON(
+        '/api/processes/' + _selectedProcessId, 'DELETE');
+      _selectedProcessId = null;
+      _processDirty = false;
+      await loadSavedProcesses(null);
+      setProcessDialogBusy(false);
+      closeProcessDialog();
+      showProcessEditorStatus(
+        'Deleted “' + (deleted ? deleted.name : 'process') + '”.', false);
+    }
+  } catch (e) {
+    setProcessDialogBusy(false);
+    showProcessDialogError(e.message || 'The process could not be saved.');
+  }
+}
+
+function saveProcessAsNew() {
+  openProcessDialog('create');
+}
+
+function renameProcess() {
+  openProcessDialog('rename');
+}
+
+function deleteProcess() {
+  openProcessDialog('delete');
 }
 
 // Saved processes have no advanced tier, so there's nothing to hide/show.
