@@ -14582,6 +14582,117 @@ def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
     assert db.get_photo_life_list_species(pid) == ["Verdin"]
 
 
+def test_species_display_name_uses_leaf_spelling_when_no_root_exists(tmp_path):
+    """When a linked hierarchy leaf's canonical taxon has no top-level
+    root keyword (for example a hierarchy-only accept whose top-level
+    ``Black Phoebe`` was never created), ``resolve_species_display_name``
+    must return the matched leaf's stored spelling. The case-convention
+    fallback would otherwise mint ``Black Phoebe`` from a submitted
+    ``black phoebe`` while the photo only carries the leaf ``black
+    phoebe``, so highlight / preference eligibility (still keyed on
+    exact ``k.name`` for hierarchy-only tags) would drop the bucket on
+    reload."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db, [(9876, "Sayornis nigricans", "Black Phoebe")]
+    )
+    parent = db.add_keyword("Tyrant flycatchers")
+    leaf = db.add_keyword("black phoebe", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Black Phoebe"], leaf),
+    )
+    db.conn.commit()
+
+    assert db.resolve_species_display_name("black phoebe") == "black phoebe"
+
+
+def test_photo_life_list_species_preserves_linked_homonyms(tmp_path):
+    """When a photo carries two linked species rows whose canonical
+    roots share a SQLite-NOCASE key but point at different taxa (for
+    example a legacy ``Robin`` bound to the American robin taxon and a
+    taxonomy ``robin`` bound to the European robin taxon), both must
+    surface in the per-photo life-list species so ``api_photo_detail``
+    can match either against its ``species_representative_lists`` /
+    ``species_highlights`` state. Folding by an ASCII-case-fold match
+    key would hide one taxon even though its keyword remains
+    attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(
+        db,
+        [
+            (5001, "Turdus migratorius", "American Robin"),
+            (5002, "Erithacus rubecula", "European Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # ``add_keyword`` collapses NOCASE duplicates through its typed
+    # lookup, so create the two homonym rows directly to reproduce a
+    # legacy catalog that preserved both distinct spellings.
+    upper = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES (?, 'taxonomy', 1, ?)",
+        ("Robin", taxa["American Robin"]),
+    ).lastrowid
+    lower = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES (?, 'taxonomy', 1, ?)",
+        ("robin", taxa["European Robin"]),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(pid, upper)
+    db.tag_photo(pid, lower)
+
+    assert set(db.get_photo_life_list_species(pid)) == {"Robin", "robin"}
+
+
+def test_photo_life_list_species_preserves_unlinked_case_variants(tmp_path):
+    """A photo carrying two NULL-taxon species rows that differ only by
+    SQLite-NOCASE spelling (root ``Foo`` plus hierarchy leaf ``foo``,
+    both preserved by the duplicate-repair path) must surface both
+    names. Unlinked highlight / representative curation compares by
+    exact ``k.name``; folding by ASCII case-fold here would drop one
+    spelling and strand its curation lookups even though the keyword
+    remains attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    nested = db.add_keyword("foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+
+    assert set(db.get_photo_life_list_species(pid)) == {"Foo", "foo"}
+
+
 def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path):
     """The one-shot repair detaches only the redundant root association."""
     from db import Database

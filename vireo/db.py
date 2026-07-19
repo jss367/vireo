@@ -9354,6 +9354,26 @@ class Database:
             ).fetchone()
             if root is not None:
                 return root["name"]
+            # No canonical root row exists for this linked taxon (for
+            # example a hierarchy-only accept whose top-level ``Verdin``
+            # never got created). Return the matched leaf's stored
+            # spelling so callers that gate on exact ``k.name``
+            # (highlight/preference/life-list eligibility for a
+            # hierarchy-only tag) still see a bucket the photo actually
+            # carries — the case-convention fallback below would mint a
+            # different spelling (``black phoebe`` -> ``Black Phoebe``)
+            # and the saved highlight would disappear on reload.
+            leaf = self.conn.execute(
+                """SELECT name FROM keywords
+                   WHERE name = ? COLLATE NOCASE
+                     AND parent_id IS NOT NULL
+                     AND (is_species = 1 OR type = 'taxonomy')
+                     AND taxon_id = ?
+                   ORDER BY id LIMIT 1""",
+                (name, linked_taxa[0]["taxon_id"]),
+            ).fetchone()
+            if leaf is not None and leaf["name"]:
+                return leaf["name"]
         import config as cfg
         override = cfg.get("keyword_case")
         if override and override != "auto":
@@ -12930,6 +12950,15 @@ class Database:
         tag is a differently-spelled hierarchy leaf (``verdin`` after repair
         detached the ``Verdin`` root) would fail those lookups and the
         lightbox/context menu would offer to set it as representative again.
+
+        Dedup identity mirrors :meth:`get_species_keywords_for_photos`:
+        linked rows collapse by ``taxon_id`` and NULL-taxon rows key on
+        the exact stored name. Two distinct linked homonyms (``Robin`` /
+        ``robin`` pointing at different taxa) or preserved NULL-taxon case
+        variants (root ``Foo`` alongside hierarchy leaf ``foo``) would
+        otherwise collapse under an ASCII case-fold match key and hide
+        one from ``api_photo_detail`` even though its keyword remains
+        attached and its curation is keyed by the exact stored name.
         """
         ws = self._ws_id()
         rows = self.conn.execute(
@@ -12965,15 +12994,16 @@ class Database:
                 ).fetchall()
                 for row in root_rows:
                     canonical_roots.setdefault(row["taxon_id"], row["name"])
-        seen = {}
+        chosen = {}
         for r in rows:
-            name = (
-                canonical_roots.get(r["taxon_id"], r["name"])
-                if r["taxon_id"] is not None
-                else r["name"]
-            )
-            seen.setdefault(keyword_match_key(name), name)
-        return sorted(seen.values(), key=lambda n: keyword_match_key(n))
+            if r["taxon_id"] is not None:
+                identity = ("taxon", r["taxon_id"])
+                name = canonical_roots.get(r["taxon_id"], r["name"])
+            else:
+                identity = ("name", r["name"])
+                name = r["name"]
+            chosen.setdefault(identity, name)
+        return sorted(chosen.values(), key=lambda n: keyword_match_key(n))
 
     def get_life_list_locations(self, species=None):
         """Return {species name: [location keyword names]} for the life list.
