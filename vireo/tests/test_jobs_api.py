@@ -3470,6 +3470,54 @@ def test_import_readiness_surfaces_and_starts_metadata_repair(
         assert json.loads(repaired)["EXIF"]["Make"] == "Repair Camera"
 
 
+def test_import_readiness_skips_excluded_bundle_roots(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The readiness endpoint fires as soon as the Import page opens; it
+    must never stat a workspace root that resolves inside a macOS
+    ``.photoslibrary`` bundle, since that stat itself trips the TCC
+    "access data from other apps" prompt for Photos Library-style
+    bundles."""
+    import metadata
+    import app as app_module
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    reachable = tmp_path / "reachable"
+    reachable.mkdir()
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    db.add_folder(str(reachable), name="reachable")
+    db.add_folder(str(bundle), name="legacy-library")
+
+    original_isdir = os.path.isdir
+    isdir_calls = []
+
+    def tracking_isdir(path):
+        isdir_calls.append(path)
+        return original_isdir(path)
+
+    monkeypatch.setattr(app_module.os.path, "isdir", tracking_isdir)
+
+    with app.test_client() as client:
+        resp = client.get("/api/import/readiness")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload["reachable_root_count"] == 1
+
+    assert str(bundle) not in isdir_calls, (
+        f"os.path.isdir must not be called on excluded bundle roots; "
+        f"got calls: {isdir_calls!r}"
+    )
+
+
 def test_lightroom_import_route_not_shadowed(app_and_db):
     """POST /api/jobs/import (Lightroom catalogs) keeps its contract —
     the photo import route is a NEW endpoint, not a rename."""

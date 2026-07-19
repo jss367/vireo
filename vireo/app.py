@@ -18023,6 +18023,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/import/readiness")
     def api_import_readiness():
         """Report metadata tooling and repairable degraded-import rows."""
+        from image_loader import is_excluded_scan_path
         from metadata import exiftool_status
 
         db = _get_db()
@@ -18030,7 +18031,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         status = exiftool_status()
         repair_count = _metadata_repair_count(db, active_ws)
         roots = [r["path"] for r in db.get_workspace_folder_roots(active_ws)]
-        reachable_roots = [root for root in roots if os.path.isdir(root)]
+        # Filter macOS app-managed library bundles before ``os.path.isdir``:
+        # stat-ing a ``.photoslibrary`` root (or a symlink into one) itself
+        # trips the "access data from other apps" TCC prompt, and this
+        # readiness call fires automatically as soon as the Import page
+        # opens. See ``api_job_scan`` for the same guard on user-supplied
+        # roots; legacy workspace roots need the same treatment.
+        reachable_roots = [
+            root for root in roots
+            if not is_excluded_scan_path(root) and os.path.isdir(root)
+        ]
         return jsonify({
             "exiftool": status,
             "requires_exiftool": app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"],
@@ -18044,6 +18054,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     @app.route("/api/jobs/repair-metadata", methods=["POST"])
     def api_job_repair_metadata():
         """Incrementally rescan reachable roots that contain missing EXIF."""
+        from image_loader import is_excluded_scan_path
         from metadata import exiftool_status
 
         status = exiftool_status()
@@ -18060,7 +18071,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not repair_count:
             return json_error("no photos need metadata repair", 409)
         roots = [r["path"] for r in db.get_workspace_folder_roots(active_ws)]
-        existing = [root for root in roots if os.path.isdir(root)]
+        # See api_import_readiness for why excluded bundles must be filtered
+        # before os.path.isdir here (macOS TCC prompt on Photos Library).
+        existing = [
+            root for root in roots
+            if not is_excluded_scan_path(root) and os.path.isdir(root)
+        ]
         if not existing:
             return json_error("no metadata-repair folders are currently on disk")
 
