@@ -592,39 +592,38 @@ def relocate_developed_dir(developed_dir, old_folder_path, new_folder_path):
         return False
 
 
-def relocate_developed_file(developed_dir, old_folder_path, new_folder_path,
-                            stem):
-    """Rebase a single photo's developed outputs after its folder changes.
+def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
+    """Rename files matching ``stem`` from ``old_subdir`` to ``new_subdir``.
 
-    Sibling to `relocate_developed_dir` for per-photo moves (e.g. date-
-    organized folder moves fan photos from one source folder into many
-    date destinations, so the whole-subdir rename doesn't apply). Moves
-    every developed file whose stem matches ``stem`` from the old key's
-    subdir into the new key's subdir. Extensions are enumerated from disk
-    rather than a fixed list so a develop job configured for an unusual
-    output format still gets its render moved.
+    Shared helper for both developed-output layouts (configured
+    ``darktable_output_dir`` and the default ``<folder>/developed/``).
 
-    Returns the number of files relocated. Never raises; a filesystem
-    hiccup here logs a warning and is treated as a no-op so it doesn't
-    also fail the move itself.
+    ``listing_cache`` is an optional dict mapping ``old_subdir`` to its
+    cached ``os.listdir`` result (or ``None`` for a missing/unreadable
+    directory). Reuses cached listings across per-photo calls so
+    ``move_folder_by_date`` — which routes every photo in a source folder
+    through ``move_photos`` — doesn't rescan the same developed
+    directory once per photo (a quadratic hazard on large libraries).
+
+    Returns the number of files relocated. Never raises.
     """
-    if not developed_dir or not old_folder_path or not new_folder_path \
-            or not stem:
+    if not old_subdir or not new_subdir or old_subdir == new_subdir:
         return 0
-    if old_folder_path == new_folder_path:
-        return 0
-    old_key = developed_folder_key(old_folder_path)
-    new_key = developed_folder_key(new_folder_path)
-    if not old_key or not new_key or old_key == new_key:
-        return 0
-    old_subdir = os.path.join(developed_dir, old_key)
-    if not os.path.isdir(old_subdir):
-        return 0
-    new_subdir = os.path.join(developed_dir, new_key)
-    try:
-        names = os.listdir(old_subdir)
-    except OSError as exc:
-        log.warning("Failed to list developed dir %s: %s", old_subdir, exc)
+    if listing_cache is not None and old_subdir in listing_cache:
+        names = listing_cache[old_subdir]
+    else:
+        names = None
+        if os.path.isdir(old_subdir):
+            try:
+                names = os.listdir(old_subdir)
+            except OSError as exc:
+                log.warning(
+                    "Failed to list developed dir %s: %s", old_subdir, exc,
+                )
+                names = None
+        if listing_cache is not None:
+            listing_cache[old_subdir] = names
+    if not names:
         return 0
     relocated = 0
     for name in names:
@@ -636,6 +635,12 @@ def relocate_developed_file(developed_dir, old_folder_path, new_folder_path,
         if entry_stem != stem:
             continue
         src_file = os.path.join(old_subdir, name)
+        if not os.path.exists(src_file):
+            # Stale cache entry: a prior per-photo call in this batch
+            # already renamed this file (two catalog rows sharing a stem,
+            # e.g. RAW+JPEG). Skip silently — the render is already at
+            # the new location.
+            continue
         dst_file = os.path.join(new_subdir, name)
         if os.path.exists(dst_file):
             # Preserve the existing render at the destination — matches
@@ -659,9 +664,78 @@ def relocate_developed_file(developed_dir, old_folder_path, new_folder_path,
         try:
             if not os.listdir(old_subdir):
                 os.rmdir(old_subdir)
+                if listing_cache is not None:
+                    listing_cache[old_subdir] = None
         except OSError:
             pass
     return relocated
+
+
+def relocate_developed_file(developed_dir, old_folder_path, new_folder_path,
+                            stem, listing_cache=None):
+    """Rebase a single photo's developed outputs after its folder changes.
+
+    Sibling to `relocate_developed_dir` for per-photo moves (e.g. date-
+    organized folder moves fan photos from one source folder into many
+    date destinations, so the whole-subdir rename doesn't apply). Moves
+    every developed file whose stem matches ``stem`` from the old key's
+    subdir into the new key's subdir. Extensions are enumerated from disk
+    rather than a fixed list so a develop job configured for an unusual
+    output format still gets its render moved.
+
+    ``listing_cache`` is an optional dict shared across per-photo calls
+    to amortize the ``os.listdir`` of the old-key subdir. Passing one is
+    important for ``move_folder_by_date``, which fans a source folder's
+    photos through many per-destination ``move_photos`` calls; without it
+    the same developed subdir would be listed once per moved photo.
+
+    Returns the number of files relocated. Never raises; a filesystem
+    hiccup here logs a warning and is treated as a no-op so it doesn't
+    also fail the move itself.
+    """
+    if not developed_dir or not old_folder_path or not new_folder_path \
+            or not stem:
+        return 0
+    if old_folder_path == new_folder_path:
+        return 0
+    old_key = developed_folder_key(old_folder_path)
+    new_key = developed_folder_key(new_folder_path)
+    if not old_key or not new_key or old_key == new_key:
+        return 0
+    old_subdir = os.path.join(developed_dir, old_key)
+    new_subdir = os.path.join(developed_dir, new_key)
+    return _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache)
+
+
+def relocate_default_developed_file(old_folder_path, new_folder_path, stem,
+                                    listing_cache=None):
+    """Rebase a photo's default-location developed render after a move.
+
+    When ``darktable_output_dir`` is unset, the develop job writes to
+    ``<folder>/developed/<stem>.<ext>``. The catalog's export/full-
+    resolution lookup then probes ``<folder>/developed/`` first (see
+    ``_iter_developed_outputs``), so a per-photo move that leaves the
+    render under the old source folder orphans it — the app silently
+    falls back to the RAW/original. This helper rebases the render to
+    the destination folder's ``developed/`` subdir to match.
+
+    A whole-folder move (``move_folder``) naturally carries the
+    ``developed/`` subdir along in the recursive copy; this helper is
+    specifically for per-photo moves (``move_photos``,
+    ``move_folder_by_date``) where photos fan out to different
+    destinations and the source subdir stays behind.
+
+    ``listing_cache`` — see ``relocate_developed_file``.
+
+    Returns the number of files relocated. Never raises.
+    """
+    if not old_folder_path or not new_folder_path or not stem:
+        return 0
+    if old_folder_path == new_folder_path:
+        return 0
+    old_subdir = os.path.join(old_folder_path, "developed")
+    new_subdir = os.path.join(new_folder_path, "developed")
+    return _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache)
 
 
 class _DevelopedDirIndex:

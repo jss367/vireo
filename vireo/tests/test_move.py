@@ -296,6 +296,127 @@ def test_move_photos_preserves_existing_developed_at_destination(move_env):
     assert (developed / old_key / "bird1.jpg").read_bytes() == b"src-dev"
 
 
+def test_move_folder_by_date_rebases_default_developed_renders(tmp_path):
+    """Regression: when ``darktable_output_dir`` is unset, the develop job
+    writes to ``<folder>/developed/<stem>.<ext>`` — the export/full-
+    resolution lookup's default probe location. Per-photo date-organized
+    moves must rebase those renders too, or the catalog silently points
+    at a destination folder whose ``developed/`` subdir is empty and the
+    app falls back to the RAW/original.
+    """
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "first.jpg").write_bytes(b"first")
+    (src / "second.jpg").write_bytes(b"second")
+    db.add_photo(
+        folder_id=fid, filename="first.jpg", extension=".jpg",
+        file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid, filename="second.jpg", extension=".jpg",
+        file_size=6, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    default_developed = src / "developed"
+    default_developed.mkdir()
+    (default_developed / "first.jpg").write_bytes(b"first-dev")
+    (default_developed / "second.tiff").write_bytes(b"second-dev")
+
+    result = move_folder_by_date(db, fid, str(archive), "%Y-%m-%d")
+    assert result["errors"] == []
+    assert result["moved"] == 2
+
+    # Each photo's default-location developed render moved alongside its
+    # photo to the destination date folder's ``developed/`` subdir.
+    assert (archive / "2026-07-12" / "developed" / "first.jpg").read_bytes() \
+        == b"first-dev"
+    assert (archive / "2026-07-13" / "developed" / "second.tiff").read_bytes() \
+        == b"second-dev"
+    # Source ``developed/`` is cleaned up once emptied.
+    assert not default_developed.exists()
+
+
+def test_move_folder_by_date_lists_developed_dir_once_per_source(
+    tmp_path, monkeypatch,
+):
+    """Regression: fanning N developed photos through per-date destinations
+    must not rescan the source developed subdir once per photo. Prior to
+    the shared listing cache, ``move_folder_by_date`` would call the
+    per-photo relocate helper N times and each call would re-list the
+    same directory — quadratic on large libraries.
+    """
+    import export as export_mod
+    from export import developed_folder_key
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    # Three distinct capture-date destinations so the group loop runs
+    # three times, each of which used to list the source developed subdir
+    # independently.
+    photos = [
+        ("first.jpg", "2026-07-12T09:30:00"),
+        ("second.jpg", "2026-07-13T10:15:00"),
+        ("third.jpg", "2026-07-14T08:00:00"),
+    ]
+    for name, ts in photos:
+        (src / name).write_bytes(b"x")
+        db.add_photo(
+            folder_id=fid, filename=name, extension=".jpg",
+            file_size=1, file_mtime=1.0, timestamp=ts,
+        )
+
+    developed = tmp_path / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(src))
+    (developed / old_key).mkdir()
+    for name, _ in photos:
+        (developed / old_key / name).write_bytes(b"dev")
+
+    target = str(developed / old_key)
+    listdir_calls = []
+    real_listdir = os.listdir
+
+    def counting_listdir(path):
+        if str(path) == target:
+            listdir_calls.append(str(path))
+        return real_listdir(path)
+
+    monkeypatch.setattr(export_mod.os, "listdir", counting_listdir)
+
+    result = move_folder_by_date(
+        db, fid, str(archive), "%Y-%m-%d",
+        developed_dir=str(developed),
+    )
+    assert result["errors"] == []
+    assert result["moved"] == 3
+    # With the shared listing cache the initial scan of the old-key subdir
+    # runs once for the whole run instead of once per photo — so we allow
+    # at most 1 initial listdir + one post-rename cleanup listdir per
+    # relocated photo (3 here). Without the cache we would see 3 initial
+    # scans + 3 cleanup scans = 6.
+    assert len(listdir_calls) <= 4, (
+        f"expected at most 4 listdirs of the source developed subdir, "
+        f"got {len(listdir_calls)}"
+    )
+
+
 def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path):
     from move import plan_folder_date_moves
 

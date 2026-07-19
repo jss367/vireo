@@ -1667,6 +1667,12 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
     errors = []
     destinations = []
 
+    # Share one listing cache across all groups so the developed-output
+    # subdirs of each source folder are listed once per move-folder-by-date
+    # run rather than once per photo. Without this the per-photo relocate
+    # helper's ``os.listdir`` would run N times for a folder with N
+    # developed photos, degrading large jobs quadratically.
+    developed_listing_cache = {}
     for group in groups:
         group_start = completed
 
@@ -1681,6 +1687,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
             group["destination"],
             progress_cb=group_progress,
             developed_dir=developed_dir,
+            developed_listing_cache=developed_listing_cache,
         )
         group_moved = int(result.get("moved", 0))
         moved += group_moved
@@ -1706,7 +1713,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
 
 
 def move_photos(db, photo_ids, destination, progress_cb=None,
-                developed_dir=""):
+                developed_dir="", developed_listing_cache=None):
     """Move individual photos to a destination directory.
 
     Args:
@@ -1720,9 +1727,17 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             path via ``export.developed_folder_key`` — is rebased to
             match the new folder key so exports/full-resolution lookups
             still find the render instead of falling back to RAW.
+        developed_listing_cache: optional dict shared across successive
+            ``move_photos`` calls (e.g. from ``move_folder_by_date``) to
+            amortize ``os.listdir`` on the per-source-folder developed
+            subdirs. Without this, fanning N photos from one source
+            folder across many destination groups relists the same
+            developed subdir N times.
 
     Returns dict with keys: moved (int), errors (list of str)
     """
+    if developed_listing_cache is None:
+        developed_listing_cache = {}
     os.makedirs(destination, exist_ok=True)
     total = len(photo_ids)
     moved = 0
@@ -1827,24 +1842,37 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             )
             db.conn.commit()
 
-            # Rebase this photo's developed-output file for the new folder
-            # key BEFORE removing originals. `developed_folder_key` hashes the
-            # folder path, so the folder_id update above just invalidated the
-            # lookup — without this rebase, `_iter_developed_outputs` would
-            # look under the new hash, miss the render, and fall back to the
-            # RAW. Doing it before cleanup means a subsequent os.remove
-            # failure (read-only source dir, locked file on Windows) still
-            # leaves the catalog and developed render pointing at the same
-            # (new) folder key.
+            # Rebase this photo's developed-output file(s) for the new folder
+            # BEFORE removing originals. Both develop-job layouts need to
+            # move — the configured ``darktable_output_dir`` (hashed under
+            # ``developed_folder_key``) and the default ``<folder>/developed/``
+            # subdir the job writes to when no output dir is configured. The
+            # folder_id update above just invalidated both lookups; without
+            # this rebase, ``_iter_developed_outputs`` probes the destination
+            # folder and misses renders left under the old source folder, so
+            # exports/full-resolution fall back to the RAW. Doing it before
+            # cleanup means a subsequent os.remove failure (read-only source
+            # dir, locked file on Windows) still leaves catalog and developed
+            # renders in agreement at the new location.
+            try:
+                from .export import (
+                    relocate_default_developed_file,
+                    relocate_developed_file,
+                )
+            except ImportError:
+                from export import (
+                    relocate_default_developed_file,
+                    relocate_developed_file,
+                )
+            stem = os.path.splitext(photo["filename"])[0]
             if developed_dir:
-                try:
-                    from .export import relocate_developed_file
-                except ImportError:
-                    from export import relocate_developed_file
-                stem = os.path.splitext(photo["filename"])[0]
                 relocate_developed_file(
                     developed_dir, src_dir, destination, stem,
+                    developed_listing_cache,
                 )
+            relocate_default_developed_file(
+                src_dir, destination, stem, developed_listing_cache,
+            )
 
             # Now safe to delete originals. The catalog and developed
             # outputs are already at the new location, so a cleanup failure
