@@ -3707,6 +3707,12 @@ def test_chain_happy_path_enqueues_moves(app_and_db, tmp_path, stub_move):
     assert isinstance(planned["folders"], list) and planned["folders"]
     for entry in planned["folders"]:
         assert set(entry) == {"folder_id", "subpath"}
+    # The handoff shows in the process job's step tree — the only surface a
+    # stepped job renders.
+    step = next(s for s in process_job["steps"] if s["id"] == "after-move")
+    assert step["status"] == "completed"
+    assert step["error_count"] == 0
+    assert "started" in step["summary"] and "NAS" in step["summary"]
 
 
 def test_chain_moves_even_when_process_raises(app_and_db, tmp_path, stub_move, monkeypatch):
@@ -3801,6 +3807,11 @@ def test_chain_root_level_import_reports_honest_skip(app_and_db, tmp_path, stub_
     assert "archive root" in process_job["result"]["after_move_skipped"]
     assert "move_job_ids" not in process_job["result"]
     assert stub_move == []
+    # The honest reason also reaches the step tree as a warning.
+    step = next(s for s in process_job["steps"] if s["id"] == "after-move")
+    assert step["status"] == "completed"
+    assert step["error_count"] == 1
+    assert "archive root" in step["error"]
 
 
 def test_after_process_move_bad_target_does_not_strand_new_workspace(
@@ -3882,6 +3893,31 @@ def test_chain_accepts_case_alias_destination(app_and_db, tmp_path, stub_move):
     for mid in move_ids:
         wait_for_job_via_client(client, mid)
     assert stub_move
+
+
+def test_chain_move_enqueue_failure_surfaces_as_step(app_and_db, tmp_path, monkeypatch):
+    """Processing succeeds but the chained move cannot even be enqueued (no
+    usable rsync here). Stepped pipeline jobs render only the step tree, so
+    the failure must appear there — not just in result.after_move_errors."""
+    import move as move_mod
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: None)
+    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    import_job = _run_chained_import(client, tmp_path, cull_ready_id)
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    assert process_job["status"] == "completed", process_job
+    assert process_job["result"]["after_move_errors"]
+    assert "move_job_ids" not in process_job["result"]
+    step = next(s for s in process_job["steps"] if s["id"] == "after-move")
+    assert step["status"] == "failed"
+    assert step["error_count"] == 1
+    assert "rsync" in step["error"]
 
 
 def test_chain_cancel_while_waiting_for_serialize_lock(app_and_db, tmp_path, monkeypatch):

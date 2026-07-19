@@ -23459,6 +23459,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if skip:
                 if isinstance(result, dict):
                     result["after_move_skipped"] = skip
+                if skip != "process cancelled":
+                    # Stepped pipeline jobs render ONLY the step tree, so a
+                    # skip recorded just on the result would be invisible —
+                    # and a skip_note means photos the user expected on the
+                    # NAS stay local. Surface it as a warning step.
+                    runner.append_step(
+                        job["id"], "after-move", "Move to NAS",
+                        summary="Skipped",
+                        error=skip, error_count=1,
+                    )
                 log.info("after-process move skipped: %s", skip)
                 return
             thread_db = Database(db_path)
@@ -23501,12 +23511,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # takes the lock, and that handler dedups before
                 # appending.
                 job["errors"].extend(failures)
+            # Stepped pipeline jobs render ONLY the step tree, so the
+            # handoff outcome must live there too: a completed process job
+            # whose chained move never started (missing rsync/ssh, folder
+            # guard, bad mount) would otherwise look clean while the photos
+            # silently stay in the local archive.
+            target_name = (after_move.get("target") or {}).get("name") or "NAS"
+            if failures and not move_ids:
+                runner.append_step(
+                    job["id"], "after-move", "Move to NAS",
+                    status="failed",
+                    summary="Failed to start the chained move",
+                    error="; ".join(failures), error_count=len(failures),
+                )
+            else:
+                n = len(move_ids)
+                warn_bits = list(failures)
+                if after_move.get("skip_note"):
+                    warn_bits.append(after_move["skip_note"])
+                runner.append_step(
+                    job["id"], "after-move", "Move to NAS",
+                    summary=(
+                        f"{n} move job{'s' if n != 1 else ''} started → "
+                        f"{target_name}"
+                    ),
+                    error="; ".join(warn_bits) or None,
+                    error_count=len(warn_bits),
+                )
         except Exception as e:
             # This hook runs in the process job's ``finally`` — raising
             # here would mask a run_pipeline_job failure with a chaining
             # bug, so log and swallow.
             log.exception("after-process move chaining failed")
             msg = f"after-process move chaining failed: {e}"
+            try:
+                # Same visibility rule as above: the step tree is the only
+                # surface a stepped job shows, so record the machinery
+                # failure there too. Best-effort — never let step plumbing
+                # mask the original failure being handled here.
+                app._job_runner.append_step(
+                    job["id"], "after-move", "Move to NAS",
+                    status="failed", summary="Chaining failed",
+                    error=msg, error_count=1,
+                )
+            except Exception:
+                pass
             if isinstance(result, dict):
                 # The pipeline succeeded but the chain machinery itself
                 # failed (e.g. creating the thread Database) — surface it
