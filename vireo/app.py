@@ -17494,6 +17494,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _build_scan_work(
         roots, incremental, active_ws, repair_missing_metadata=False,
+        repair_targets=None,
     ):
         """Build the background work function for a scan job.
 
@@ -17508,6 +17509,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         writer lock, so we now process roots one after another. A failure
         on one root does not abort the others; the error is recorded and
         the job ends in ``"failed"`` (mixed-outcome rollup convention).
+
+        ``repair_targets`` scopes a repair-metadata scan to specific known
+        photo file paths per root (``{root: {"dirs": [str], "files":
+        {str}}}``). Without this, a normal incremental scan of the root
+        would discover and import untracked images that happen to sit in
+        the same folder as the NULL-EXIF rows we came to repair — a
+        Repair click could then side-effect an unrelated import while the
+        response's ``photo_count`` only reflected repair candidates.
         """
         import config as cfg
 
@@ -17635,6 +17644,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "current_file": phase,
                     "rate": 0,
                 })
+                # For repair-metadata scans, restrict discovery to the
+                # known NULL-EXIF file paths in this root. A bare
+                # incremental do_scan would walk the whole tree and
+                # ingest untracked photos as a side effect of Repair —
+                # the response ``photo_count`` only reflects the repair
+                # candidates, so any extra imports would surprise the
+                # user. When there are no targets for this root it is
+                # simply not scanned.
+                root_restrict_dirs = None
+                root_restrict_files = None
+                if repair_targets is not None:
+                    target = repair_targets.get(root)
+                    if not target:
+                        advance_scan_acc()
+                        continue
+                    root_restrict_dirs = list(target.get("dirs") or ())
+                    files = target.get("files")
+                    root_restrict_files = (
+                        set(files) if files is not None else None
+                    )
                 try:
                     do_scan(
                         root, thread_db,
@@ -17646,6 +17675,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
                         cancel_check=cancel_check,
                         repair_missing_metadata=repair_missing_metadata,
+                        restrict_dirs=root_restrict_dirs,
+                        restrict_files=root_restrict_files,
                     )
                 except Exception as exc:
                     if isinstance(exc, ScanCancelled) and cancel_check():
@@ -18029,39 +18060,58 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id, "roots": existing, "skipped": skipped})
 
-    def _metadata_repair_count(db, workspace_id, root_paths=None):
-        # Don't filter by ``folders.status``: that column is only refreshed
-        # by ``check_folder_health`` (10-minute loop or the manual
-        # "check missing folders" flow), so a workspace whose drive was
-        # unplugged and is now reconnected still reads as ``status='missing'``
-        # until then. The readiness endpoint fires as soon as the Import
-        # page opens; if we filtered by ``status``, users would see 0
-        # repairable photos and the repair route would 409 with "no
-        # photos need metadata repair" even though ``os.path.isdir`` would
-        # let the repair job scan them.
-        #
-        # ``root_paths`` scopes the count to real-time reachable roots
-        # (based on ``os.path.isdir``). When a workspace mixes an offline
-        # drive with photos missing EXIF and a separate reachable drive
-        # with no repairable rows, an unscoped count combined with a
-        # non-empty ``reachable_roots`` list would enable the Repair
-        # button and start a job that finishes without ever touching the
-        # offline photos — Codex's "repeating repair job" pathology. The
-        # scoped count reflects only what the repair pass would actually
-        # process. ``None`` preserves the unscoped legacy shape for any
-        # future caller that wants a workspace-wide figure.
+    def _metadata_repair_candidates(db, workspace_id, root_paths=None):
+        """Discover on-disk repair candidates and group them per root.
+
+        Returns ``{"count": int, "by_root": {root: {"dirs": [str],
+        "files": {str}}}}``. ``by_root`` is populated only when
+        ``root_paths`` is provided; the entries are the exact keys
+        needed to hand to ``do_scan(restrict_dirs=..., restrict_files=...)``
+        so a repair pass touches only known NULL-EXIF photos rather than
+        walking the whole tree and side-effecting an import of unrelated
+        files that happen to sit in the same folder.
+
+        Don't filter by ``folders.status``: that column is only refreshed
+        by ``check_folder_health`` (10-minute loop or the manual
+        "check missing folders" flow), so a workspace whose drive was
+        unplugged and is now reconnected still reads as ``status='missing'``
+        until then. The readiness endpoint fires as soon as the Import
+        page opens; if we filtered by ``status``, users would see 0
+        repairable photos and the repair route would 409 with "no
+        photos need metadata repair" even though ``os.path.isdir`` would
+        let the repair job scan them.
+
+        ``root_paths`` scopes the query to real-time reachable roots
+        (based on ``os.path.isdir``). When a workspace mixes an offline
+        drive with photos missing EXIF and a separate reachable drive
+        with no repairable rows, an unscoped count combined with a
+        non-empty ``reachable_roots`` list would enable the Repair
+        button and start a job that finishes without ever touching the
+        offline photos — Codex's "repeating repair job" pathology. The
+        scoped count reflects only what the repair pass would actually
+        process. ``None`` preserves the unscoped legacy shape for any
+        future caller that wants a workspace-wide figure.
+        """
+        empty = {"count": 0, "by_root": {}}
         params = [workspace_id]
         where_extra = ""
+        # Preserve caller order so an "existing"-ordered ``by_root`` can
+        # feed straight back into the scan work builder without a
+        # per-caller sort.
+        normalized_roots_map = {}  # normalized -> original path
         if root_paths is not None:
             if not root_paths:
-                return 0
-            normalized_roots = [
-                r.replace("\\", "/").rstrip("/") for r in root_paths if r
-            ]
-            if not normalized_roots:
-                return 0
+                return empty
+            for r in root_paths:
+                if not r:
+                    continue
+                norm = r.replace("\\", "/").rstrip("/")
+                if norm and norm not in normalized_roots_map:
+                    normalized_roots_map[norm] = r
+            if not normalized_roots_map:
+                return empty
             clauses = []
-            for norm in normalized_roots:
+            for norm in normalized_roots_map:
                 prefix = norm + "/"
                 # Match ``f.path`` normalized to forward slashes either
                 # exactly against the root or as a boundary-preserving
@@ -18097,8 +18147,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # this keeps readiness responsive for large degraded imports.
         from image_loader import is_excluded_scan_path
 
+        def _owning_root(folder_path):
+            # Return the caller-supplied root path that owns
+            # ``folder_path``. Matching uses the same forward-slash
+            # normalization the SQL predicate used, so a hit here can't
+            # disagree with what fell out of the query.
+            if not normalized_roots_map:
+                return None
+            norm = folder_path.replace("\\", "/").rstrip("/")
+            for root_norm, original in normalized_roots_map.items():
+                if norm == root_norm or norm.startswith(root_norm + "/"):
+                    return original
+            return None
+
         folder_files = {}
-        repairable = 0
+        count = 0
+        by_root = {}
         for row in rows:
             folder_id = row["folder_id"]
             folder_path = row["folder_path"]
@@ -18122,14 +18186,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 continue
             filename = row["filename"]
             if filename in names:
-                repairable += 1
+                matched = filename
+            elif os.path.isfile(os.path.join(folder_path, filename)):
+                # Preserve the filesystem's own case and Unicode matching
+                # rules for a catalog name that did not compare
+                # byte-for-byte with the directory entry (notably default
+                # APFS and NTFS volumes).
+                matched = filename
+            else:
                 continue
-            # Preserve the filesystem's own case and Unicode matching rules
-            # for a catalog name that did not compare byte-for-byte with the
-            # directory entry (notably default APFS and NTFS volumes).
-            if os.path.isfile(os.path.join(folder_path, filename)):
-                repairable += 1
-        return repairable
+            count += 1
+            if root_paths is None:
+                continue
+            owner = _owning_root(folder_path)
+            if owner is None:
+                # SQL matched but the Python re-check didn't — treat as
+                # not-repairable rather than dropping it into a bucket
+                # the scanner can't reach.
+                continue
+            bucket = by_root.setdefault(
+                owner, {"dirs": set(), "files": set()},
+            )
+            bucket["dirs"].add(folder_path)
+            bucket["files"].add(os.path.join(folder_path, matched))
+        # Sort dirs for stable ordering (helps tests and log readability).
+        for bucket in by_root.values():
+            bucket["dirs"] = sorted(bucket["dirs"])
+        return {"count": count, "by_root": by_root}
+
+    def _metadata_repair_count(db, workspace_id, root_paths=None):
+        """Thin wrapper for the readiness endpoint's count-only shape."""
+        return _metadata_repair_candidates(db, workspace_id, root_paths)["count"]
 
     @app.route("/api/import/readiness")
     def api_import_readiness():
@@ -18193,26 +18280,39 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ]
         if not existing:
             return json_error("no metadata-repair folders are currently on disk")
-        # Count against the actually-reachable roots so the response's
-        # ``photo_count`` matches what the job will process. An unscoped
-        # count could report photos under an offline sibling root that
-        # this job will never touch.
-        repair_count = _metadata_repair_count(db, active_ws, existing)
-        if not repair_count:
+        # Discover repair candidates against the actually-reachable roots so
+        # the response's ``photo_count`` matches what the job will process,
+        # and hand the scanner the exact file paths to touch. Without
+        # ``restrict_dirs``/``restrict_files``, a plain incremental scan of
+        # each reachable root would also ingest any untracked photos it
+        # walked past — a Repair click would silently import unrelated
+        # files while the reported ``photo_count`` only covered the repair
+        # set.
+        candidates = _metadata_repair_candidates(db, active_ws, existing)
+        repair_count = candidates["count"]
+        by_root = candidates["by_root"]
+        if not repair_count or not by_root:
             return json_error("no photos need metadata repair", 409)
+
+        # Only scan roots that actually have repair candidates. A root
+        # that's reachable but contributes zero rows is skipped entirely
+        # so the job doesn't fire an empty scan on it.
+        targeted_roots = [root for root in existing if root in by_root]
 
         runner = app._job_runner
         work = _build_scan_work(
-            existing, True, active_ws, repair_missing_metadata=True,
+            targeted_roots, True, active_ws,
+            repair_missing_metadata=True,
+            repair_targets=by_root,
         )
         job_config = {
-            "roots": existing,
+            "roots": targeted_roots,
             "incremental": True,
             "repair_metadata": True,
             "repair_photo_count": repair_count,
         }
-        if len(existing) == 1:
-            job_config["root"] = existing[0]
+        if len(targeted_roots) == 1:
+            job_config["root"] = targeted_roots[0]
         job_id = runner.start(
             "metadata-repair", work, config=job_config,
             workspace_id=active_ws, pausable=True,
@@ -18220,7 +18320,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return jsonify({
             "job_id": job_id,
             "photo_count": repair_count,
-            "roots": existing,
+            "roots": targeted_roots,
         })
 
     @app.route("/api/jobs/thumbnails", methods=["POST"])

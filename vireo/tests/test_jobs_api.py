@@ -3724,6 +3724,78 @@ def test_import_readiness_excludes_deleted_originals_from_repair_count(
         assert "no photos need metadata repair" in blocked.get_json()["error"]
 
 
+def test_repair_metadata_does_not_ingest_untracked_files(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The repair job must touch only known NULL-EXIF photos, not walk
+    the reachable root and side-effect an import of untracked images
+    that happen to sit alongside them. The response's ``photo_count``
+    reflects the repair candidates only, so any drive-by ingest of
+    unrelated files would surprise the user with photos they never
+    asked to import.
+    """
+    import metadata
+    import scanner
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **kwargs: {
+        path: {"EXIF": {"Make": "Repair Camera"}, "File": {"FileType": "JPEG"}}
+        for path in paths
+    })
+
+    photos = tmp_path / "mixed-folder"
+    photos.mkdir()
+
+    known = photos / "known.jpg"
+    Image.new("RGB", (32, 24), "green").save(known)
+    untracked = photos / "untracked.jpg"
+    Image.new("RGB", (32, 24), "blue").save(untracked)
+
+    folder_id = db.add_folder(str(photos), name="mixed-folder")
+    known_pid = db.add_photo(
+        folder_id=folder_id,
+        filename=known.name,
+        extension=".jpg",
+        file_size=known.stat().st_size,
+        file_mtime=known.stat().st_mtime,
+    )
+    assert db.conn.execute(
+        "SELECT exif_data FROM photos WHERE id = ?", (known_pid,),
+    ).fetchone()["exif_data"] is None
+
+    with app.test_client() as client:
+        started = client.post("/api/jobs/repair-metadata")
+        assert started.status_code == 200, started.get_json()
+        payload = started.get_json()
+        # Only the DB-tracked NULL-EXIF row is a repair candidate.
+        assert payload["photo_count"] == 1
+
+        wait_for_job_via_client(client, payload["job_id"])
+
+        # The tracked row's EXIF is filled in.
+        repaired = db.conn.execute(
+            "SELECT exif_data FROM photos WHERE id = ?", (known_pid,),
+        ).fetchone()["exif_data"]
+        assert json.loads(repaired)["EXIF"]["Make"] == "Repair Camera"
+
+        # And no drive-by ingest of the untracked sibling.
+        untracked_rows = db.conn.execute(
+            "SELECT id FROM photos WHERE folder_id = ? AND filename = ?",
+            (folder_id, untracked.name),
+        ).fetchall()
+        assert untracked_rows == [], (
+            "Repair scan ingested an untracked photo — restrict_files "
+            "must scope discovery to known NULL-EXIF file paths."
+        )
+
+
 def test_lightroom_import_route_not_shadowed(app_and_db):
     """POST /api/jobs/import (Lightroom catalogs) keeps its contract —
     the photo import route is a NEW endpoint, not a rename."""
