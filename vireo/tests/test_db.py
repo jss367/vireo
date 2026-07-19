@@ -14658,6 +14658,121 @@ def test_repair_duplicate_photo_species_cancels_unsynced_root_add(tmp_path):
     )
 
 
+def test_repair_duplicate_photo_species_queues_sidecar_remove_in_photo_workspace(tmp_path):
+    """When the photo's folder lives only in a workspace other than the
+    active one, the sidecar ``keyword_remove`` must be queued under that
+    workspace. ``get_pending_changes`` filters by the active workspace,
+    so a remove queued under the wrong workspace would leave the stale
+    root spelling in the sidecar for the real workspace's next sync."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace("Other")
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    # Move the folder out of the active workspace and into "Other".
+    db.remove_workspace_folder(active_ws, fid)
+    db.add_workspace_folder(other_ws, fid)
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    # No remove should appear in the active workspace's queue…
+    assert not [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+        and row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ], (
+        "expected no queued remove in the (empty) active workspace"
+    )
+
+    # …but the "Other" workspace (which actually contains the photo)
+    # must have exactly one queued keyword_remove for the orphaned root.
+    db.set_active_workspace(other_ws)
+    removes = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+        and row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ]
+    assert len(removes) == 1, (
+        f"expected a queued keyword_remove for 'Verdin' in the "
+        f"photo's workspace, got: {removes}"
+    )
+
+
+def test_repair_duplicate_photo_species_queues_sidecar_remove_in_every_photo_workspace(tmp_path):
+    """When a photo's folder is shared across multiple workspaces, the
+    sidecar keyword_remove must be queued in each so any workspace that
+    later syncs strips the orphaned root spelling from the sidecar."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace("Other")
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(other_ws, fid)
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    for ws_id in (active_ws, other_ws):
+        db.set_active_workspace(ws_id)
+        removes = [
+            row for row in db.get_pending_changes()
+            if row["photo_id"] == pid
+            and row["change_type"] == "keyword_remove"
+            and row["value"] == "Verdin"
+        ]
+        assert len(removes) == 1, (
+            f"workspace {ws_id} should have exactly one queued "
+            f"keyword_remove for 'Verdin', got: {removes}"
+        )
+
+
 def test_repair_duplicate_photo_species_waits_for_local_taxa(tmp_path):
     """An empty taxa table must not consume the one-shot repair marker."""
     from db import Database

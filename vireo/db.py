@@ -10934,6 +10934,28 @@ class Database:
                         (photo_id,),
                     ).fetchall()
                 }
+                # The repair scans photo_keywords globally, but
+                # pending_changes are filtered by workspace at read
+                # time (get_pending_changes uses the active workspace).
+                # A photo whose folder is not in the active workspace
+                # would otherwise get its sidecar remove queued under
+                # a workspace that will never sync it, leaving the
+                # stale root spelling in XMP for the real workspace(s)
+                # to re-import. Queue the remove for every workspace
+                # that actually contains this photo; fall back to the
+                # active workspace only when the photo has no
+                # workspace membership at all.
+                photo_workspaces = [
+                    row["workspace_id"]
+                    for row in self.conn.execute(
+                        """SELECT DISTINCT wf.workspace_id
+                           FROM photos p
+                           JOIN workspace_folders wf
+                             ON wf.folder_id = p.folder_id
+                           WHERE p.id = ?""",
+                        (photo_id,),
+                    ).fetchall()
+                ]
                 for removed in remove:
                     key = keyword_match_key(removed["name"])
                     if not key or key in surviving_keys:
@@ -10943,10 +10965,17 @@ class Database:
                         # it above already prevents the sidecar from ever
                         # receiving it, so no remove is required.
                         continue
-                    self.queue_change(
-                        photo_id, "keyword_remove", removed["name"],
-                        _commit=False,
-                    )
+                    if photo_workspaces:
+                        for ws_id in photo_workspaces:
+                            self.queue_change(
+                                photo_id, "keyword_remove", removed["name"],
+                                workspace_id=ws_id, _commit=False,
+                            )
+                    else:
+                        self.queue_change(
+                            photo_id, "keyword_remove", removed["name"],
+                            _commit=False,
+                        )
 
             self.set_meta(
                 self._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY, "1", _commit=False
