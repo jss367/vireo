@@ -12460,26 +12460,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if result is None:
             return json_error("prediction not found", 404)
         if result["affected"]:
-            # If every underlying accept was a no-op (photo already
-            # carried the target species via an equivalent hierarchical
-            # or root row), only the prediction-review statuses flipped
-            # and the aggregate history item must not untag on undo.
-            # Encode ``no_tag`` in that case, aggregating all prediction
-            # ids so undo/redo still restore every sibling status.
+            # Accept-subject can accept agreeing predictions from
+            # multiple classifier models on one detection. Undo/redo
+            # must reset every sibling scope, so always encode the full
+            # ``prediction_ids`` list as JSON — the compact
+            # comma-separated fallback cannot be parsed by
+            # ``_edit_prediction_ids`` and would drop every sibling
+            # status flip. ``no_tag`` is set only when every underlying
+            # accept was a no-op (photo already carried the target via
+            # an equivalent hierarchical or root row); in mixed batches
+            # one accept actually tagged the species, so undo must
+            # untag exactly once.
             _all_no_tag = all(
                 not a.get("changed_tag", True) for a in result["affected"]
             )
+            payload = {
+                "prediction_ids": [
+                    int(pred_id) for pred_id in result["prediction_ids"]
+                ],
+            }
             if _all_no_tag:
-                old_value = json.dumps({
-                    "prediction_ids": [
-                        int(pred_id) for pred_id in result["prediction_ids"]
-                    ],
-                    "no_tag": True,
-                })
-            else:
-                old_value = ",".join(
-                    str(pred_id) for pred_id in result["prediction_ids"]
-                )
+                payload["no_tag"] = True
+            old_value = json.dumps(payload)
             db.record_edit(
                 "prediction_accept",
                 f'Accepted additional subject species: added "{result["species"]}"',

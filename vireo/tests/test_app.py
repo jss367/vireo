@@ -1622,6 +1622,119 @@ def test_subject_accept_undo_restores_every_classifier_scope_on_no_tag(app_and_d
         )
 
 
+def test_subject_accept_mixed_batch_undo_restores_every_scope(app_and_db):
+    """Accept-subject batches naturally mix a real tag (the first accept
+    adds the species) with follow-up no-op accepts (later classifiers see
+    the species already attached). The aggregate edit item must encode
+    every accepted prediction id as JSON ``prediction_ids`` — the compact
+    comma-separated fallback cannot be parsed by ``_edit_prediction_ids``
+    and would drop every sibling status flip on undo, leaving the second
+    classifier's accepted row accepted.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    folder_id = db.get_folder_tree()[0]["id"]
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="verdin-mixed.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries NO species keyword up front, so the first accept in
+    # the loop actually tags Verdin (changed_tag=True); every later
+    # classifier's accept sees the species already attached and returns
+    # changed_tag=False. The aggregate history item must still carry
+    # every prediction id so undo resets both scopes.
+    db.add_keyword("Verdin", is_species=True)
+
+    detection_id = db.save_detections(
+        photo_id,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(
+        detection_id, "Verdin", 0.9, "bioclip", labels_fingerprint="fp1",
+    )
+    db.add_prediction(
+        detection_id, "Verdin", 0.87, "inat", labels_fingerprint="fp2",
+    )
+    db.add_prediction(
+        detection_id, "Other", 0.5, "bioclip", labels_fingerprint="fp1",
+    )
+    db.add_prediction(
+        detection_id, "Other", 0.4, "inat", labels_fingerprint="fp2",
+    )
+    target_pred = next(
+        row for row in db.get_predictions()
+        if row["classifier_model"] == "bioclip" and row["species"] == "Verdin"
+    )
+
+    response = client.post(
+        f"/api/predictions/{target_pred['id']}/accept-subject",
+    )
+    assert response.status_code == 200, response.get_data(as_text=True)
+
+    # Both models' Verdin predictions are accepted; the species is
+    # attached exactly once.
+    statuses_by_model = {
+        row["classifier_model"]: row["status"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+        if row["species"] == "Verdin"
+    }
+    assert statuses_by_model == {"bioclip": "accepted", "inat": "accepted"}
+    assert [k["name"] for k in db.get_photo_keywords(photo_id)].count("Verdin") == 1
+
+    # The recorded prediction_accept edit stores prediction ids as JSON,
+    # not a comma-separated fallback string.
+    accept_rows = [
+        row for row in db.get_edit_history()
+        if row["action_type"] == "prediction_accept"
+    ]
+    assert len(accept_rows) == 1
+    items = db.conn.execute(
+        "SELECT old_value FROM edit_history_items WHERE edit_id = ?",
+        (accept_rows[0]["id"],),
+    ).fetchall()
+    assert len(items) == 1
+    stored_old = items[0]["old_value"] or ""
+    assert stored_old.lstrip().startswith("{"), (
+        "mixed accept-subject must encode prediction_ids as JSON so undo "
+        f"can parse every scope; got {stored_old!r}"
+    )
+    parsed = json.loads(stored_old)
+    assert set(parsed.get("prediction_ids") or []) == {
+        row["id"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+        if row["species"] == "Verdin"
+    }
+    # Mixed (not all no_tag) — the aggregate item must NOT declare
+    # no_tag, so undo still untags the species that was actually added.
+    assert not parsed.get("no_tag")
+
+    # Undo must reset BOTH classifier scopes AND untag the species that
+    # was actually added by the first accept in the loop.
+    undone = db.undo_last_edit()
+    assert undone is not None
+    assert undone["action_type"] == "prediction_accept"
+    assert "Verdin" not in {k["name"] for k in db.get_photo_keywords(photo_id)}
+
+    statuses_after_undo = {
+        row["classifier_model"]: row["status"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+        if row["species"] == "Verdin"
+    }
+    for model, status in statuses_after_undo.items():
+        assert status != "accepted", (
+            f"undo must reset the {model!r} Verdin prediction; a still-"
+            "accepted sibling scope means the mixed batch dropped a "
+            "prediction id from history"
+        )
+
+
 def test_encounter_species_records_only_newly_tagged(app_and_db):
     """A mixed set (some already carry the species, some don't) records edit
     items ONLY for the newly-tagged photos.
