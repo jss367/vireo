@@ -19194,6 +19194,61 @@ def test_mark_species_keywords_rebinds_higher_rank_taxonomy_link(tmp_path):
     assert row["taxon_id"] == species_taxon
 
 
+def test_mark_species_keywords_leaves_taxon_null_when_only_higher_rank_available(tmp_path):
+    """A legacy accepted species keyword (``type='taxonomy'``,
+    ``is_species=1``, ``taxon_id=NULL``) whose name only resolves to a
+    higher-rank taxon (genus/family) must NOT be bound to that
+    non-species taxon on the next ``mark_species_keywords`` pass. Binding
+    the row to a genus/family would satisfy the marking pass while making
+    the row invisible to every rank-filtered reader (Life List, Compare,
+    highlight/preference eligibility) that restricts to
+    ``t.rank = 'species' OR t.rank IS NULL``, so upgraded catalogs would
+    silently lose every photo carrying the accepted keyword.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+        ],
+    )
+    db.conn.commit()
+
+    # Simulate an accepted species keyword created before the local taxa
+    # table was populated: fully typed as species but with a NULL taxon
+    # link. add_keyword's species path already refuses to bind to a
+    # higher-rank taxon, so bypass it with direct SQL.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'taxonomy', 1, NULL)",
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        # Only the genus is known — no species-rank alternative exists.
+        def lookup(self, name):
+            if name.lower() == "puma":
+                return {"taxon_id": 46272}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 0
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] is None
+
+
 def test_mark_species_keywords_keeps_species_taxon_when_only_higher_rank_available(tmp_path):
     """``mark_species_keywords`` must not clobber an existing species-rank
     binding just because the taxonomy lookup only resolves to a higher-rank

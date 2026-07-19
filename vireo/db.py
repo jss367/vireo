@@ -18099,7 +18099,12 @@ class Database:
         genus).
 
         Matching rows get ``is_species=1``, ``type='taxonomy'``, and (if the
-        local taxa table is populated) a ``taxon_id`` link by iNaturalist id.
+        local taxa table is populated and the lookup resolves to a
+        species-rank taxon) a ``taxon_id`` link by iNaturalist id.
+        ``taxon_id`` is left NULL when only a higher-rank (genus/family)
+        match exists — binding to a non-species-rank taxon would satisfy the
+        marking pass but make the row invisible to every rank-filtered
+        reader that restricts to ``t.rank = 'species' OR t.rank IS NULL``.
         A ``type='taxonomy'`` row whose ``taxon_id`` was bound by the old
         species-agnostic lookup to a non-species-rank taxon (genus/family)
         is rebound to the species-rank taxon whenever ``taxonomy.lookup``
@@ -18147,8 +18152,19 @@ class Database:
                 if row:
                     lookup_local_id = row["id"]
                     lookup_rank = row["rank"]
-            if local_taxon_id is None:
+            if local_taxon_id is None and lookup_rank == "species":
                 local_taxon_id = lookup_local_id
+            # Only bind ``taxon_id`` to a species-rank local taxon. Binding a
+            # species-marked keyword to a genus/family id would let the new
+            # rank filters (Life List, Compare, highlight/preference
+            # eligibility) silently drop every photo carrying that keyword,
+            # because those readers require ``t.rank = 'species' OR
+            # t.rank IS NULL``. Leaving ``taxon_id`` NULL for non-species
+            # matches mirrors ``add_keyword``'s species-add path (see
+            # ``test_add_species_leaves_taxon_null_when_only_higher_rank_matches``)
+            # so upgraded catalogs stay visible under the ``rank IS NULL``
+            # branch until a species-rank taxon becomes available.
+            #
             # Rebind an existing higher-rank link when the taxonomy lookup
             # resolves to a species-rank local taxon. Without this pass,
             # mark_species_keywords skipped fully typed rows and legacy
