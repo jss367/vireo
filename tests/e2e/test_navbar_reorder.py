@@ -1,10 +1,4 @@
-"""Drag-reorder of the navbar tab strip.
-
-Covers the "dropped tab snaps back" bug: the reorder must be committed on
-`dragend` (which fires reliably on the source element) and not depend on the
-`drop` event, because the macOS WKWebView the desktop app renders in
-frequently never fires `drop` for HTML5 drag-and-drop.
-"""
+"""Pointer drag-reorder of the navbar tab strip."""
 
 
 def _nav_ids(page):
@@ -38,6 +32,7 @@ def test_drag_reorder_persists_with_real_mouse(live_server, page):
     page.mouse.up()
 
     page.wait_for_timeout(300)
+    assert page.url.endswith("/browse"), "drag release unexpectedly followed the tab link"
     page.reload()
     page.wait_for_selector(".nav-tab[data-nav-id='cull']")
     after = _nav_ids(page)
@@ -47,13 +42,8 @@ def test_drag_reorder_persists_with_real_mouse(live_server, page):
     )
 
 
-def test_reorder_commits_without_drop_event(live_server, page):
-    """Regression: WKWebView fires dragstart/dragover/dragend but not drop.
-
-    Dispatch that exact event sequence (no `drop`) and assert the reorder is
-    still committed and persisted. On the old drop-only code the tab snapped
-    back; this must now succeed.
-    """
+def test_reorder_uses_pointer_release_without_html_drop(live_server, page):
+    """Regression: reordering must not depend on WKWebView HTML drag events."""
     url = live_server["url"]
     page.goto(f"{url}/browse")
     page.wait_for_selector(".nav-tab[data-nav-id='cull']")
@@ -64,20 +54,25 @@ def test_reorder_commits_without_drop_event(live_server, page):
         const strip = document.getElementById('navTabStrip');
         const src = strip.querySelector(".nav-tab[data-nav-id='cull']");
         const importTab = strip.querySelector(".nav-tab[data-nav-id='import']");
+        const srcRect = src.getBoundingClientRect();
         const rect = importTab.getBoundingClientRect();
-        // Aim just left of the first tab's midpoint so cull lands at the front.
+        const startX = srcRect.left + srcRect.width / 2;
         const clientX = rect.left + 1;
+        const clientY = rect.top + rect.height / 2;
 
-        const fire = (el, type, x) => {
-            const ev = new DragEvent(type, {
-                bubbles: true, cancelable: true,
-                dataTransfer: new DataTransfer(), clientX: x,
+        const fire = (type, x) => {
+            const ev = new PointerEvent(type, {
+                bubbles: true, cancelable: true, isPrimary: true,
+                pointerId: 7, pointerType: 'mouse', button: 0,
+                buttons: type === 'pointerup' ? 0 : 1,
+                clientX: x, clientY,
             });
             el.dispatchEvent(ev);
         };
-        fire(src, 'dragstart', 0);
-        fire(strip, 'dragover', clientX);
-        fire(src, 'dragend', clientX);   // NOTE: no 'drop' event
+        const el = src;
+        fire('pointerdown', startX);
+        fire('pointermove', clientX);
+        fire('pointerup', clientX);
         return true;
     }""")
     assert moved
@@ -85,7 +80,7 @@ def test_reorder_commits_without_drop_event(live_server, page):
     page.wait_for_timeout(300)
     dom_after = _nav_ids(page)
     assert dom_after[0] == "cull", (
-        f"tab did not move on dragend without drop: {dom_after}"
+        f"tab did not move on pointer release: {dom_after}"
     )
 
     page.reload()
@@ -97,46 +92,23 @@ def test_reorder_commits_without_drop_event(live_server, page):
 
 
 def test_aborted_drag_outside_strip_does_not_reorder(live_server, page):
-    """Regression: dragging a tab, leaving the strip, then releasing outside
-    the navbar must NOT commit a reorder from the stale in-strip pointer X.
-
-    Before the fix, `dragend` unconditionally called `commitReorder(lastClientX)`
-    and the strip `dragleave` handler only cleared the visual indicator, so an
-    aborted drag would silently reshuffle the tab order.
-    """
+    """Releasing outside the navbar must not persist the last inside position."""
     url = live_server["url"]
     page.goto(f"{url}/browse")
     page.wait_for_selector(".nav-tab[data-nav-id='cull']")
 
     before = _nav_ids(page)
-
-    result = page.evaluate("""() => {
-        const strip = document.getElementById('navTabStrip');
-        const src = strip.querySelector(".nav-tab[data-nav-id='cull']");
-        const importTab = strip.querySelector(".nav-tab[data-nav-id='import']");
-        const rect = importTab.getBoundingClientRect();
-        // A position that WOULD land cull at the front if it committed.
-        const inStripX = rect.left + 1;
-
-        const fire = (el, type, init) => {
-            const ev = new DragEvent(type, Object.assign({
-                bubbles: true, cancelable: true, dataTransfer: new DataTransfer(),
-            }, init || {}));
-            el.dispatchEvent(ev);
-        };
-        fire(src, 'dragstart', {clientX: 0});
-        fire(strip, 'dragover', {clientX: inStripX});
-        // Pointer leaves the strip: relatedTarget points at something
-        // outside the strip so the handler's !contains(relatedTarget)
-        // check fires.
-        fire(strip, 'dragleave', {clientX: inStripX, relatedTarget: document.body});
-        // User releases the mouse outside the navbar; dragend still fires
-        // on the source element, but there is no dragover to refresh
-        // lastClientX.
-        fire(src, 'dragend', {clientX: 0});
-        return true;
-    }""")
-    assert result
+    src = page.query_selector(".nav-tab[data-nav-id='cull']")
+    dst = page.query_selector(".nav-tab[data-nav-id='import']")
+    sb, db = src.bounding_box(), dst.bounding_box()
+    start_x = sb["x"] + sb["width"] / 2
+    strip_y = db["y"] + db["height"] / 2
+    destination_x = db["x"] + 1
+    page.mouse.move(start_x, strip_y)
+    page.mouse.down()
+    page.mouse.move(destination_x, strip_y, steps=10)
+    page.mouse.move(destination_x, db["y"] + db["height"] + 100, steps=5)
+    page.mouse.up()
 
     page.wait_for_timeout(300)
     dom_after = _nav_ids(page)
