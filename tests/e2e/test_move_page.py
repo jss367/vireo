@@ -109,6 +109,45 @@ def test_existing_destination_confirmation_is_scannable(live_server, page):
     expect(modal.locator("#confirmOkBtn")).to_have_text("Merge & Resume")
 
 
+def test_existing_destination_confirmation_scrolls_on_short_viewport(
+    live_server, page
+):
+    live_server["db"].update_folder_counts()
+    page.set_viewport_size({"width": 800, "height": 420})
+    page.goto(f"{live_server['url']}/move")
+
+    page.route(
+        "**/api/move-folder/preflight",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "resolved_dest": (
+                    "/archive/long-destination-name/another-long-segment/park"
+                ),
+                "exists": True,
+                "file_count": 8,
+                "file_count_truncated": False,
+                "preview": {
+                    "will_copy": 5,
+                    "will_skip": 3,
+                    "will_block": 1,
+                },
+            }),
+        ),
+    )
+    page.locator("#quickFolderSelect").select_option(index=1)
+    page.locator("#quickDestInput").fill("/archive")
+    page.locator("#quickMoveBtn").click()
+
+    modal = page.locator("#confirmModal .move-confirm-modal")
+    content = modal.locator(".confirm-content")
+    actions = modal.locator(".confirm-actions")
+    expect(actions).to_be_in_viewport()
+    expect(modal.locator("#confirmOkBtn")).to_be_visible()
+    assert content.evaluate("el => el.scrollHeight > el.clientHeight")
+
+
 def test_move_folder_shows_source_while_choosing_destination(live_server, page):
     live_server["db"].update_folder_counts()
     url = live_server["url"]
