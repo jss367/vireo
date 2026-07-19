@@ -14334,6 +14334,56 @@ def test_equivalent_species_skips_unlinked_row_when_homonym_taxon_exists(tmp_pat
     assert db.get_photos_with_equivalent_species([pid], european) == set()
 
 
+def test_equivalent_species_unlinked_target_skips_linked_homonym(tmp_path):
+    """When the accept target is an unlinked legacy species keyword and a
+    distinct taxonomy-linked keyword shares its NOCASE match key (e.g.
+    upgraded/offline catalog with legacy ``Robin`` alongside taxonomy
+    ``robin``), the name-only fallback must not treat the linked homonym on
+    a photo as the target. Folding them would let accept/confirm skip
+    ``tag_photo``/``queue_change`` for the unlinked target while marking the
+    prediction accepted, leaving the intended keyword row absent."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(19001, "Turdus migratorius", "American Robin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Distinct linked taxonomy row that intentionally shares the match key
+    # with the unlinked legacy target below.
+    linked = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    ).lastrowid
+    # An intentionally-preserved legacy row with no taxon_id — the target.
+    legacy_target = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    # The photo carries the LINKED homonym, not the legacy target.
+    db.tag_photo(pid, linked)
+
+    # Accepting/confirming the unlinked legacy target must not fold in the
+    # linked homonym row, or the confirm would skip tagging.
+    assert db.get_photos_with_equivalent_species(
+        [pid], legacy_target,
+    ) == set()
+
+    # If the same photo actually carries the legacy target row, that
+    # exact-row match is still recognized.
+    other = db.add_photo(
+        folder_id=fid, filename="b.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.tag_photo(other, legacy_target)
+    assert db.get_photos_with_equivalent_species(
+        [pid, other], legacy_target,
+    ) == {other}
+
+
 def test_species_display_name_resolves_hierarchy_alias_through_taxon(tmp_path):
     """A differently-spelled hierarchy leaf canonicalizes to the root species
     row linked to the same unique taxon."""
@@ -18874,6 +18924,93 @@ def test_get_species_highlights_prediction_fallback_rejects_wrong_taxon(tmp_path
         "prediction-fallback canonicalization must respect the taxon "
         "boundary — a highlight under 'American Robin' must not be "
         "eligible for a photo whose top prediction resolves to 'Verdin'"
+    )
+
+
+def test_get_species_highlights_prediction_fallback_skips_ambiguous_alias(tmp_path):
+    """When multiple linked hierarchy leaves share a predicted label but point
+    at DIFFERENT taxa, the prediction-fallback canonicalization must NOT pick
+    an arbitrary root for the alias — that would silently promote an
+    ambiguous prediction into a specific root bucket. ``_collect_highlight_buckets``
+    keeps such ambiguous labels raw, so the eligibility reload path must too:
+    highlights saved under either root name must not become eligible for a
+    photo whose top prediction is the ambiguous shared label.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (30001, "Turdus migratorius", "American Robin"),
+        (30002, "Erithacus rubecula", "European Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Two hierarchy leaves both named "Robin" but linked to distinct taxa.
+    parent_a = db.add_keyword("Old World")
+    leaf_a = db.add_keyword("Robin", parent_id=parent_a)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["European Robin"], leaf_a),
+    )
+    parent_b = db.add_keyword("New World")
+    leaf_b = db.add_keyword("Robin", parent_id=parent_b)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["American Robin"], leaf_b),
+    )
+    # Corresponding roots for each linked taxon.
+    american_root = db.add_keyword("American Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], american_root),
+    )
+    european_root = db.add_keyword("European Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["European Robin"], european_root),
+    )
+    # A prediction on the photo carries the ambiguous shared label.
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Robin', 0.95)",
+        (did,),
+    )
+    # Simulate highlights saved directly under each root's canonical name.
+    db.conn.execute(
+        "INSERT INTO species_highlights (species, photo_id, rank, workspace_id) "
+        "VALUES ('American Robin', ?, 0, 1)",
+        (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO species_highlights (species, photo_id, rank, workspace_id) "
+        "VALUES ('European Robin', ?, 0, 1)",
+        (pid,),
+    )
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid not in highlights.get("American Robin", {}), (
+        "ambiguous prediction label must not silently canonicalize to an "
+        "arbitrary root — the 'American Robin' highlight must not become "
+        "eligible when the top prediction 'Robin' resolves to multiple taxa"
+    )
+    assert pid not in highlights.get("European Robin", {}), (
+        "ambiguous prediction label must not silently canonicalize to an "
+        "arbitrary root — the 'European Robin' highlight must not become "
+        "eligible when the top prediction 'Robin' resolves to multiple taxa"
     )
 
 

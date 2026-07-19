@@ -12379,6 +12379,12 @@ class Database:
         # let a confirm/accept skip ``tag_photo``/``queue_change`` and
         # leave the intended species keyword absent. Detect the homonym
         # conflict once and gate the fallback.
+        #
+        # The same guard applies when the *target* itself is unlinked:
+        # if any other same-key row IS linked to a taxon, that linked
+        # row is a distinct species that must not be folded into the
+        # unlinked target during accept/confirm. In that case the
+        # name-only fallback matches only the exact target row.
         homonym_conflict = False
         if target["taxon_id"] is not None:
             for row in self.conn.execute(
@@ -12387,6 +12393,17 @@ class Database:
                      AND taxon_id IS NOT NULL
                      AND taxon_id != ?""",
                 (target["taxon_id"],),
+            ).fetchall():
+                if keyword_match_key(row["name"]) == target_key:
+                    homonym_conflict = True
+                    break
+        else:
+            for row in self.conn.execute(
+                """SELECT name FROM keywords
+                   WHERE (is_species = 1 OR type = 'taxonomy')
+                     AND taxon_id IS NOT NULL
+                     AND id != ?""",
+                (keyword_id,),
             ).fetchall():
                 if keyword_match_key(row["name"]) == target_key:
                     homonym_conflict = True
@@ -12435,6 +12452,20 @@ class Database:
                     row["photo_id"] for row in rows
                     if keyword_match_key(row["name"]) == target_key
                 )
+                continue
+            # Target is unlinked. When a distinct linked row shares this
+            # match key, any same-key row on the photo could be either
+            # species; only the exact target keyword row is safe to
+            # treat as equivalent.
+            if homonym_conflict:
+                rows = self.conn.execute(
+                    f"""SELECT pk.photo_id
+                        FROM photo_keywords pk
+                        WHERE pk.photo_id IN ({placeholders})
+                          AND pk.keyword_id = ?""",
+                    [*chunk, keyword_id],
+                ).fetchall()
+                result.update(row["photo_id"] for row in rows)
                 continue
             rows = self.conn.execute(
                 f"""SELECT pk.photo_id, k.name
@@ -13321,6 +13352,14 @@ class Database:
                          AND sh.species = (
                              SELECT COALESCE(
                                  (
+                                     -- Canonicalize only when the raw
+                                     -- prediction label resolves to a
+                                     -- unique linked taxon. When multiple
+                                     -- hierarchy leaves share the label
+                                     -- but point at different taxa, keep
+                                     -- the raw ``pr.species`` so buckets
+                                     -- key on the ambiguous label instead
+                                     -- of an arbitrary root.
                                      SELECT root.name
                                      FROM keywords k_pred
                                      JOIN keywords root
@@ -13343,6 +13382,23 @@ class Database:
                                            t_root.rank = 'species'
                                            OR t_root.rank IS NULL
                                        )
+                                       AND (
+                                           SELECT COUNT(DISTINCT k2.taxon_id)
+                                           FROM keywords k2
+                                           LEFT JOIN taxa t2
+                                             ON t2.id = k2.taxon_id
+                                           WHERE k2.name = pr.species COLLATE NOCASE
+                                             AND k2.parent_id IS NOT NULL
+                                             AND k2.taxon_id IS NOT NULL
+                                             AND (
+                                                 k2.is_species = 1
+                                                 OR k2.type = 'taxonomy'
+                                             )
+                                             AND (
+                                                 t2.rank = 'species'
+                                                 OR t2.rank IS NULL
+                                             )
+                                       ) = 1
                                      ORDER BY root.id
                                      LIMIT 1
                                  ),
