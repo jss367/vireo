@@ -12941,7 +12941,8 @@ class Database:
         already 'taxonomy' and the new name matches a different taxon,
         taxon_id is updated. Manually-set non-'general' types (e.g.
         'location', 'individual') are preserved. Explicit type/taxon_id
-        kwargs always win over auto-detection.
+        kwargs always win over auto-detection, and an explicit type change
+        reconciles the legacy ``is_species`` flag with the requested type.
         """
         if 'type' in kwargs:
             kt = kwargs['type']
@@ -12999,6 +13000,16 @@ class Database:
                 if 'type' not in updates and cur_type == 'general' and taxon_id:
                     effective_type = 'taxonomy'
                 type_changed = effective_type != cur_type
+                # The type dropdown sends only {type: ...}. Keep the legacy
+                # is_species flag coherent on an actual type transition:
+                # otherwise demoting a taxonomy homonym to a deliberate type
+                # such as 'location' leaves is_species=1, and downstream
+                # queries that accept ``type='taxonomy' OR is_species=1`` still
+                # treat it as a species. Do not touch no-op type submissions:
+                # legacy general rows can legitimately retain is_species=1
+                # until taxonomy marking normalizes them.
+                if 'type' in updates and type_changed:
+                    updates['is_species'] = int(effective_type == 'taxonomy')
                 if name_changed or type_changed:
                     # Merge into a same-slot same-type peer instead of
                     # writing a duplicate. Without this, top-level renames
@@ -16724,9 +16735,15 @@ class Database:
     def mark_species_keywords(self, taxonomy):
         """Mark keywords that are recognized species in the taxonomy.
 
-        Retypes any keyword whose name matches a taxon lookup: sets
-        is_species=1, type='taxonomy', and (if the local taxa table is
-        populated) links taxon_id to the matching taxa row by inat_id.
+        Retypes untyped and ``type='general'`` keywords whose names match a
+        taxon lookup, and repairs incomplete ``type='taxonomy'`` rows. Explicit
+        non-taxonomy types such as ``location``, ``genre``, and ``individual``
+        are user intent and must be preserved even when their names are taxon
+        homonyms (for example, the location "California" is also a plant
+        genus).
+
+        Matching rows get ``is_species=1``, ``type='taxonomy'``, and (if the
+        local taxa table is populated) a ``taxon_id`` link by iNaturalist id.
 
         Uses the local taxonomy only (no network requests).
 
@@ -16736,11 +16753,14 @@ class Database:
         # Also include already-typed taxonomy keywords whose taxon_id is
         # still NULL — those were created before the local taxa table was
         # populated (e.g. via add_keyword(..., is_species=True) from the
-        # classifier), and still need their hierarchy link filled in.
+        # classifier), and still need their hierarchy link filled in. Deliberate
+        # non-taxonomy types are excluded before lookup so a taxon homonym can
+        # never silently retype them.
         keywords = self.conn.execute(
             "SELECT id, name, type, taxon_id, is_species FROM keywords "
-            "WHERE is_species = 0 OR type IS NULL OR type != 'taxonomy' "
-            "   OR taxon_id IS NULL"
+            "WHERE (type IS NULL OR type IN ('general', 'taxonomy')) "
+            "  AND (is_species = 0 OR type IS NULL OR type != 'taxonomy' "
+            "       OR taxon_id IS NULL)"
         ).fetchall()
         updated = 0
         for kw in keywords:
