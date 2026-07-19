@@ -9607,6 +9607,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     def _photo_can_be_life_list_preference(db, species, photo_id):
         ws = db._ws_id()
+        # Accept a hierarchy leaf whose taxon links back to a root species
+        # with the same curation name. See the matching comment on
+        # Database.get_species_representative_lists: after root-repair the
+        # photo may only carry the hierarchical leaf ("verdin"), whose
+        # spelling differs from the root ("Verdin") even though the same
+        # taxon is still attached. Without this fallback, updating a
+        # preserved root-key preference would fail eligibility.
         row = db.conn.execute(
             """SELECT 1
                FROM photo_keywords pk
@@ -9618,9 +9625,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 AND wf.workspace_id = ?
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
-               WHERE pk.photo_id = ? AND k.name = ?
+               WHERE pk.photo_id = ?
+                 AND (
+                     k.name = ?
+                     OR (
+                         k.taxon_id IS NOT NULL
+                         AND EXISTS (
+                             SELECT 1 FROM keywords root
+                             WHERE root.parent_id IS NULL
+                               AND (root.is_species = 1
+                                    OR root.type = 'taxonomy')
+                               AND root.taxon_id = k.taxon_id
+                               AND root.name = ?
+                         )
+                     )
+                 )
                LIMIT 1""",
-            (ws, photo_id, species),
+            (ws, photo_id, species, species),
         ).fetchone()
         return row is not None
 

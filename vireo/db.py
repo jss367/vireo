@@ -12578,6 +12578,16 @@ class Database:
         ws = self._ws_id()
         eligibility_filter = ""
         if eligible_only:
+            # Accept a hierarchy leaf whose taxon links back to a root
+            # species with the curation-keyed name. After
+            # repair_duplicate_photo_species detaches a redundant root but
+            # leaves the hierarchical leaf attached, the leaf's stored
+            # spelling may differ from the root ("verdin" vs "Verdin"), yet
+            # the photo still represents the same species via a shared
+            # taxon_id. An exact k.name = sr.species compare would then
+            # silently drop that photo from Life List / Representative
+            # eligibility even though curation was intentionally preserved
+            # on the root key.
             eligibility_filter = """
                  AND COALESCE(p.flag, 'none') != 'rejected'
                  AND f.status IN ('ok', 'partial')
@@ -12587,7 +12597,20 @@ class Database:
                      JOIN keywords k ON k.id = pk.keyword_id
                       AND (k.is_species = 1 OR k.type = 'taxonomy')
                      WHERE pk.photo_id = sr.photo_id
-                       AND k.name = sr.species
+                       AND (
+                           k.name = sr.species
+                           OR (
+                               k.taxon_id IS NOT NULL
+                               AND EXISTS (
+                                   SELECT 1 FROM keywords root
+                                   WHERE root.parent_id IS NULL
+                                     AND (root.is_species = 1
+                                          OR root.type = 'taxonomy')
+                                     AND root.taxon_id = k.taxon_id
+                                     AND root.name = sr.species
+                               )
+                           )
+                       )
                  )"""
         species_filter = ""
         params = [ws]

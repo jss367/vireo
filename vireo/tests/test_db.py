@@ -14222,6 +14222,90 @@ def test_repair_duplicate_photo_species_keeps_curation_on_root_key(tmp_path):
         assert species == {"Verdin"}
 
 
+def test_repair_duplicate_photo_species_preserves_curation_eligibility(tmp_path):
+    """Root-key curation stays eligible after repair when the surviving
+    hierarchy leaf's stored spelling differs from the root.
+
+    ``get_species_representative_lists(eligible_only=True)`` and the
+    life-list preference validator previously required an exact
+    ``k.name = sr.species`` match. After repair detaches the redundant
+    root row but leaves the hierarchical leaf attached with a differently
+    spelled name, an existing "Verdin" representative would be silently
+    dropped and updating the preserved root-key preference would fail
+    eligibility even though the same taxon is still attached via
+    hierarchy.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], root),
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.set_species_representative("Verdin", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    # Root keyword row is no longer attached, only the differently-spelled
+    # hierarchy leaf remains.
+    attached_names = {
+        row["name"] for row in db.conn.execute(
+            """SELECT k.name FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pk.photo_id = ?""",
+            (pid,),
+        ).fetchall()
+    }
+    assert "verdin" in attached_names
+    assert "Verdin" not in attached_names
+
+    # The stored representative under the canonical "Verdin" key must
+    # still surface under eligible_only=True even though only the lower-
+    # cased hierarchy leaf is attached.
+    eligible = db.get_species_representative_lists(eligible_only=True)
+    assert eligible.get("Verdin") == [pid]
+    assert db.get_species_representatives(eligible_only=True) == {"Verdin": pid}
+
+    # The life-list preference validator that gates /api/photo-preferences
+    # writes must accept the same photo for the preserved root key so a
+    # user updating their "Verdin" representative doesn't get an
+    # eligibility error after repair.
+    from app import create_app  # noqa: WPS433 (test-scoped import)
+
+    app = create_app(str(tmp_path / "test.db"), str(tmp_path / "thumbs"))
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/photo-preferences",
+            json={
+                "purpose": "species_representative",
+                "species": "Verdin",
+                "photo_id": pid,
+            },
+        )
+        assert resp.status_code == 200, resp.get_json()
+
+
 def test_update_keyword_rename_general_no_match_stays_general(tmp_path):
     """Renaming a 'general' keyword to a name with no taxon match leaves
     it as 'general' with NULL taxon_id."""
