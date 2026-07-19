@@ -14739,6 +14739,65 @@ def test_repair_duplicate_photo_species_skips_sidecar_remove_when_survivor_match
     ]
 
 
+def test_repair_duplicate_photo_species_skips_remove_when_survivor_ancestor_matches(tmp_path):
+    """When the surviving hierarchy leaf has a distinct leaf name but the
+    detached root's spelling matches one of its ancestor segments (e.g.
+    root ``Verdin`` detached while ``Verdin|Desert Verdin`` is kept), the
+    repair must NOT queue a plain ``keyword_remove`` for ``Verdin``:
+    ``sync_to_xmp`` applies keyword_remove hierarchically (``remove_keywords``
+    strips any ``lr:hierarchicalSubject`` whose segment matches), so the
+    next sync would delete the very ``Verdin|Desert Verdin`` hierarchy the
+    repair kept in the DB."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Surviving hierarchy: Verdin -> Desert Verdin. The leaf is what
+    # gets tagged, but the parent chain includes the ``Verdin`` segment.
+    hier_parent = db.add_keyword("Verdin")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=hier_parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    assert not [
+        row for row in pending
+        if row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ], (
+        f"expected no keyword_remove for 'Verdin' (it appears as an "
+        f"ancestor segment of the preserved 'Verdin|Desert Verdin' "
+        f"hierarchy — a hierarchical sync remove would strip that "
+        f"preserved entry from the sidecar), got: {pending}"
+    )
+
+
 def test_repair_duplicate_photo_species_cancels_unsynced_root_add(tmp_path):
     """When a still-unsynced ``keyword_add`` for the detached root name
     is pending, the repair must cancel it and NOT queue a

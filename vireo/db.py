@@ -10997,15 +10997,27 @@ class Database:
                 # matching ``dc:subject`` entry, so no sidecar remove is
                 # needed — a hierarchical remove would additionally strip
                 # a surviving hierarchical entry that shares a segment
-                # name. Read the post-repair state so a detached root
-                # whose spelling matches a surviving nested leaf is
-                # correctly treated as "still present".
+                # name. Walk each surviving keyword's parent chain so an
+                # ancestor spelling counts as "still present" too: a
+                # detached root ``Verdin`` whose name matches the parent
+                # of a preserved ``Verdin|Desert Verdin`` leaf would
+                # otherwise queue a ``keyword_remove`` that sync_to_xmp
+                # applies hierarchically, stripping the very hierarchy
+                # the repair kept in the DB. Read the post-repair state.
                 surviving_keys = {
                     keyword_match_key(row["name"])
                     for row in self.conn.execute(
-                        """SELECT k.name FROM photo_keywords pk
-                           JOIN keywords k ON k.id = pk.keyword_id
-                           WHERE pk.photo_id = ?""",
+                        """WITH RECURSIVE anc(id, name, parent_id) AS (
+                               SELECT k.id, k.name, k.parent_id
+                                 FROM photo_keywords pk
+                                 JOIN keywords k ON k.id = pk.keyword_id
+                                WHERE pk.photo_id = ?
+                               UNION
+                               SELECT k.id, k.name, k.parent_id
+                                 FROM keywords k
+                                 JOIN anc ON anc.parent_id = k.id
+                           )
+                           SELECT DISTINCT name FROM anc""",
                         (photo_id,),
                     ).fetchall()
                 }
