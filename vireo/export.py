@@ -653,7 +653,12 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
             continue
         try:
             os.makedirs(new_subdir, exist_ok=True)
-            os.rename(src_file, dst_file)
+            # Date-organized moves commonly cross from local storage to a
+            # mounted archive. shutil.move keeps the fast atomic rename on a
+            # single filesystem and falls back to copy+remove on EXDEV,
+            # while the existence check above preserves our no-overwrite
+            # policy.
+            shutil.move(src_file, dst_file)
             relocated += 1
         except OSError as exc:
             log.warning(

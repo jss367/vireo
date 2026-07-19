@@ -1,6 +1,7 @@
 """Tests for photo export operations."""
 
 import contextlib
+import errno
 import json
 import os
 import sys
@@ -1970,6 +1971,39 @@ def test_relocate_developed_file_preserves_existing_target(tmp_path):
     assert moved == 0
     assert (developed / old_key / "IMG_0001.jpg").read_bytes() == b"src"
     assert (developed / new_key / "IMG_0001.jpg").read_bytes() == b"dst"
+
+
+def test_relocate_developed_file_falls_back_across_filesystems(
+    tmp_path, monkeypatch,
+):
+    """EXDEV falls back to copy+remove for mounted archive destinations."""
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    old_path = "/srv/photos/card"
+    new_path = "/mnt/archive/2026-07-12"
+    old_key = developed_folder_key(old_path)
+    new_key = developed_folder_key(new_path)
+    old_subdir = developed / old_key
+    old_subdir.mkdir()
+    source = old_subdir / "IMG_0001.jpg"
+    source.write_bytes(b"developed")
+
+    real_rename = os.rename
+
+    def cross_device_rename(src, dst):
+        if os.fspath(src) == str(source):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", cross_device_rename)
+
+    moved = relocate_developed_file(
+        str(developed), old_path, new_path, "IMG_0001",
+    )
+
+    assert moved == 1
+    assert not source.exists()
+    assert (developed / new_key / "IMG_0001.jpg").read_bytes() == b"developed"
 
 
 def test_relocate_developed_file_noop_without_configuration(tmp_path):
