@@ -19068,6 +19068,37 @@ def test_add_species_prefers_alternate_common_name_over_higher_rank_direct(tmp_p
     assert row["taxon_id"] == 2
 
 
+def test_add_species_leaves_taxon_null_when_only_higher_rank_matches(tmp_path):
+    """When a species-typed add finds only a higher-rank taxon (no
+    species-rank direct or common-name match), ``taxon_id`` must be left
+    NULL. Binding the row to a genus/family would satisfy the caller's
+    reconciliation (``is_species = 1``/``type = 'taxonomy'`` still get
+    stamped) while making the row invisible to every rank-filtered reader
+    (Life List, Compare, Explorer, highlight/preference eligibility) that
+    restricts to ``t.rank = 'species' OR t.rank IS NULL``.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (10001, "Corvidae", "Corvids", "family"),
+        ],
+    )
+    db.conn.commit()
+
+    kid = db.add_keyword("Corvidae", is_species=True)
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] is None
+
+
 def test_mark_species_keywords_rebinds_higher_rank_taxonomy_link(tmp_path):
     """A keyword row already typed ``taxonomy`` and linked by the old
     species-agnostic lookup to a genus/family taxon must be rebound to a
@@ -19512,6 +19543,87 @@ def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
     assert "American Robin" not in highlights, (
         "highlight stored under one species must not become eligible "
         "for a photo whose only species keyword links to a different taxon"
+    )
+
+
+def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_path):
+    """The prediction-only highlight fallback must mirror
+    ``resolve_species_display_name``'s root-first preference: when a
+    top-level species root shares the prediction label with a hierarchy
+    leaf that points at a different taxon, the reload canonicalization
+    must return the root's stored spelling, not the leaf's root spelling.
+
+    Without this, ``add_species_highlight`` stores the highlight under
+    the root name (case 1) but the eligibility reload canonicalizes
+    through the mismatched leaf's taxon and drops the saved highlight.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (40001, "Turdus migratorius", "American Robin"),
+        (40002, "Erithacus rubecula", "European Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Top-level species root named "Robin" linked to the American Robin
+    # taxon (this is the row ``resolve_species_display_name`` case 1
+    # returns for the label "Robin").
+    root = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], root),
+    )
+    # A hierarchy leaf also named "Robin" but linked to a DIFFERENT taxon
+    # (European Robin), plus a canonical root for that taxon whose
+    # stored spelling differs from the prediction label.
+    parent = db.add_keyword("Old World")
+    leaf = db.add_keyword("Robin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["European Robin"], leaf),
+    )
+    european_root = db.add_keyword("European Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["European Robin"], european_root),
+    )
+    # The photo carries only the American Robin root — its taxon matches
+    # the "Robin" root and highlights saved under "Robin" belong to it.
+    db.tag_photo(pid, root)
+    # A prediction on the photo carries the shared label "Robin"; the
+    # reload canonicalization runs against this string.
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Robin', 0.95)",
+        (did,),
+    )
+    # ``add_species_highlight`` funnels through
+    # ``resolve_species_display_name``, which returns "Robin" (root-first)
+    # for the label "Robin".
+    db.add_species_highlight("Robin", pid)
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(
+        species="Robin", eligible_only=True,
+    )
+    assert pid in highlights.get("Robin", {}), (
+        "highlight stored under root 'Robin' must remain eligible when "
+        "the prediction label 'Robin' also matches a hierarchy leaf "
+        "pointing at a different taxon — the reload path must prefer the "
+        "same-name root rather than canonicalizing through the leaf"
     )
 
 

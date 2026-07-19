@@ -9407,7 +9407,9 @@ class Database:
             return None
         return row["name"] or None
 
-    def _lookup_taxon_id_for_keyword(self, name, prefer_species=False):
+    def _lookup_taxon_id_for_keyword(
+        self, name, prefer_species=False, species_only=False,
+    ):
         """Return the local taxa.id matching a keyword name, if any.
 
         When ``prefer_species`` is true, break ties in favor of a
@@ -9422,14 +9424,34 @@ class Database:
         When ``prefer_species`` is true, the direct ``taxa`` match is only
         returned immediately if it is species-rank. Otherwise the
         ``taxa_common_names`` fallback is still consulted for a species-rank
-        alternate name before the higher-rank direct hit wins. Without this,
-        an alternate English species name that collides with a genus/family
-        (``populate_taxa_db_from_json`` explicitly indexes alternates in
-        ``taxa_common_names``) would silently bind a species accept to the
-        non-species direct hit and the new rank filters would hide the tag.
+        alternate name before the higher-rank direct hit wins.
+        ``populate_taxa_db_from_json`` explicitly indexes alternate English
+        names in ``taxa_common_names``, so accepting an alternate species
+        label that collides with a genus/family can and does happen.
+
+        ``species_only`` tightens ``prefer_species`` from "prefer" to
+        "require": if no lookup variant surfaces a species-rank taxon,
+        return ``None`` instead of falling back to the higher-rank hit.
+        Explicit-species callers (``is_species=True`` inserts and rebinds
+        along ``add_keyword``'s taxonomy path) must set this — the row
+        gets stamped ``is_species=1`` unconditionally once ``taxon_id``
+        is returned, and downstream rank readers restrict to
+        ``t.rank = 'species' OR t.rank IS NULL``. Silently binding an
+        accepted species to a genus/family would make the just-created
+        tag invisible to Life List, Compare, Explorer, and highlight /
+        preference eligibility; leaving ``taxon_id`` NULL keeps the
+        ``rank IS NULL`` branch honoring the tag until a genuine
+        species-rank match becomes available.
+
+        General-keyword auto-detect callers (``is_species=False`` INSERT
+        path, rename auto-promotion) must NOT set ``species_only``: they
+        legitimately link general/typed keywords to family/genus taxa
+        (e.g. a hand-tagged ``Penduline tits`` linked to the family
+        taxon), and ``is_keyword_species`` already filters those out via
+        ``taxon_rank`` for species-specific readers.
         """
         for variant in _taxon_lookup_variants(name):
-            if prefer_species:
+            if prefer_species or species_only:
                 direct = self.conn.execute(
                     """SELECT t.id, t.rank FROM taxa t
                        WHERE t.common_name = ? COLLATE NOCASE
@@ -9453,6 +9475,11 @@ class Database:
                 ).fetchone()
                 if common and common["rank"] == "species":
                     return common["id"]
+                if species_only:
+                    # Reject the higher-rank fallback: an explicit
+                    # species add would stamp is_species=1 on this row
+                    # and every rank reader would then hide the tag.
+                    continue
                 # No species-rank match on this variant; prefer the direct
                 # (higher-rank) hit, otherwise fall back to the common-name
                 # hit if one exists.
@@ -9602,8 +9629,12 @@ class Database:
             # ``t.rank = 'species'`` filter (Life List, Compare, Explorer)
             # silently drops photos carrying the accepted keyword.
             if is_species or kw_type == 'taxonomy':
+                # species_only: this branch stamps the row is_species=1
+                # via the taxonomy promotion below, so binding to a
+                # higher-rank homonym would silently hide the accepted
+                # keyword behind every downstream rank='species' filter.
                 taxon_id = self._lookup_taxon_id_for_keyword(
-                    name, prefer_species=True,
+                    name, species_only=True,
                 )
                 if taxon_id:
                     self.conn.execute(
@@ -9692,13 +9723,15 @@ class Database:
         # The earlier kw_type reconciliation turns is_species=True into
         # kw_type='taxonomy'; limiting lookup to kw_type is None therefore
         # created new confirmed-species rows with taxon_id=NULL, defeating
-        # taxon-aware dedupe against hierarchical XMP leaves. Prefer a
-        # species-rank taxon here — the INSERT below stamps is_species=1 as
-        # soon as any taxon is found, and downstream rank filters would then
-        # drop the just-linked keyword if we bound it to a genus/family
-        # homonym.
+        # taxon-aware dedupe against hierarchical XMP leaves. Require a
+        # species-rank taxon here (species_only=True) — the INSERT below
+        # stamps is_species=1 as soon as any taxon is found, and
+        # downstream rank filters would drop the just-linked keyword if
+        # we bound it to a genus/family homonym. Leaving ``taxon_id``
+        # NULL when no species-rank match exists keeps the tag visible
+        # to readers via the ``t.rank IS NULL`` branch.
         taxon_id = (
-            self._lookup_taxon_id_for_keyword(name, prefer_species=True)
+            self._lookup_taxon_id_for_keyword(name, species_only=True)
             if kw_type == 'taxonomy'
             else None
         )
@@ -13428,7 +13461,68 @@ class Database:
                          AND sh.species = (
                              SELECT COALESCE(
                                  (
-                                     -- Canonicalize only when the raw
+                                     -- Root-first, exact spelling:
+                                     -- mirror ``resolve_species_display_name``'s
+                                     -- case 2 preference for an
+                                     -- exact-spelling same-name top-level
+                                     -- species row. Keeps intentional
+                                     -- ASCII/typography homonyms (e.g.
+                                     -- general ``Robin`` +
+                                     -- taxonomy ``robin``) routed to
+                                     -- their own stored spelling instead
+                                     -- of collapsing them onto one.
+                                     -- (SQLite doesn't support
+                                     -- correlated column references in a
+                                     -- subquery ORDER BY, so the exact
+                                     -- preference is expressed as its
+                                     -- own subquery rather than an
+                                     -- ORDER BY key on a NOCASE match.)
+                                     SELECT root_exact.name
+                                     FROM keywords root_exact
+                                     WHERE root_exact.name = pr.species
+                                       AND root_exact.parent_id IS NULL
+                                       AND (
+                                           root_exact.is_species = 1
+                                           OR root_exact.type = 'taxonomy'
+                                       )
+                                     ORDER BY (root_exact.type = 'taxonomy') DESC,
+                                              root_exact.id ASC
+                                     LIMIT 1
+                                 ),
+                                 (
+                                     -- Root-first, NOCASE fallback:
+                                     -- mirror
+                                     -- ``resolve_species_display_name``'s
+                                     -- case 1 — when a single same-name
+                                     -- top-level species row exists,
+                                     -- ``add_species_highlight`` stored
+                                     -- the highlight under its stored
+                                     -- spelling regardless of the
+                                     -- caller's casing. Without this
+                                     -- branch, the hierarchy-alias
+                                     -- canonicalization below could pick
+                                     -- a different-taxon leaf sharing
+                                     -- the label (e.g. root ``Robin``
+                                     -- for one taxon plus a hierarchy
+                                     -- leaf ``Robin`` under a different
+                                     -- taxon), canonicalize to that
+                                     -- leaf's root spelling, and drop
+                                     -- the saved highlight on reload.
+                                     SELECT root_direct.name
+                                     FROM keywords root_direct
+                                     WHERE root_direct.name = pr.species COLLATE NOCASE
+                                       AND root_direct.parent_id IS NULL
+                                       AND (
+                                           root_direct.is_species = 1
+                                           OR root_direct.type = 'taxonomy'
+                                       )
+                                     ORDER BY (root_direct.type = 'taxonomy') DESC,
+                                              root_direct.id ASC
+                                     LIMIT 1
+                                 ),
+                                 (
+                                     -- Hierarchy-alias fallback:
+                                     -- canonicalize only when the raw
                                      -- prediction label resolves to a
                                      -- unique linked taxon. When multiple
                                      -- hierarchy leaves share the label
