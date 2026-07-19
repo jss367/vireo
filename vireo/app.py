@@ -19599,34 +19599,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # the batch one shared lock so the transfers run one at a
             # time while all N jobs (and their ids) still enqueue up
             # front.
-            if serialize_lock is not None:
-                if not serialize_lock.acquire(blocking=False):
-                    # UI transparency: a job blocked on the batch lock
-                    # must say why it isn't moving anything yet.
-                    runner.push_event(job["id"], "progress", {
-                        "current": 0,
-                        "total": 0,
-                        "current_file": "",
-                        "phase": (
-                            "Waiting for an earlier chained move to finish"
-                        ),
-                    })
-                    # Poll instead of blocking outright: this wait is the
-                    # one boundary where Cancel can be honored without
-                    # touching mid-transfer semantics — a blocking acquire
-                    # would run the whole transfer anyway after the user
-                    # pressed Stop.
-                    while not serialize_lock.acquire(timeout=0.5):
-                        if runner.is_cancelled(job["id"]):
-                            # Returning with the lock NOT held, before the
-                            # try below — so the release in its finally
-                            # never fires on this path.
-                            return {
-                                "ok": False, "moved": 0, "errors": [],
-                                "summary": (
-                                    "Cancelled before transfer started"
-                                ),
-                            }
+            if serialize_lock is not None and not serialize_lock.acquire(blocking=False):
+                # UI transparency: a job blocked on the batch lock
+                # must say why it isn't moving anything yet.
+                runner.push_event(job["id"], "progress", {
+                    "current": 0,
+                    "total": 0,
+                    "current_file": "",
+                    "phase": (
+                        "Waiting for an earlier chained move to finish"
+                    ),
+                })
+                # Poll instead of blocking outright: this wait is the
+                # one boundary where Cancel can be honored without
+                # touching mid-transfer semantics — a blocking acquire
+                # would run the whole transfer anyway after the user
+                # pressed Stop.
+                while not serialize_lock.acquire(timeout=0.5):
+                    if runner.is_cancelled(job["id"]):
+                        # Returning with the lock NOT held, before the
+                        # try below — so the release in its finally
+                        # never fires on this path.
+                        return {
+                            "ok": False, "moved": 0, "errors": [],
+                            "summary": (
+                                "Cancelled before transfer started"
+                            ),
+                        }
             try:
                 result = move_folder(
                     db=thread_db,
