@@ -2428,6 +2428,69 @@ def test_compare_accepted_matches_are_not_marked_missing(app_and_db):
     assert data["summary"]["missing_predictions"] == 0
 
 
+def test_compare_predictions_api_canonicalizes_alias_prediction(app_and_db):
+    """An alias prediction (hierarchy leaf name) whose taxon matches the
+    photo's canonical species keyword must not be shown as a conflict.
+
+    ``get_species_keywords_for_photos`` returns species keyword names
+    canonicalized to the same-taxon root spelling. When the prediction
+    label is a hierarchy alias for the same taxon (for example
+    ``Desert Verdin`` under a ``Verdin`` root), the Compare endpoint
+    used to feed the raw alias string into ``compare_prediction_to_keywords``
+    and — because taxonomy.json is not available in the test environment —
+    fall through the exact-text fallback and mark it a conflict. The fix
+    routes the prediction through ``resolve_species_display_name`` so
+    both sides agree on the canonical root spelling.
+    """
+    app, db = app_and_db
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 2912 WHERE id = ?", (root,),
+    )
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Desert Verdin', ?, 1, 'taxonomy', 2912)",
+        (parent,),
+    ).lastrowid
+    db.tag_photo(photo_id, leaf)
+    db.conn.commit()
+
+    rules = json.dumps([{"field": "photo_ids", "value": [photo_id]}])
+    cid = db.add_collection("Alias Compare", rules)
+    det_id = db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "confidence": 0.9,
+            "category": "animal",
+        }],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(det_id, "Desert Verdin", 0.95, "model-a")
+
+    resp = app.test_client().get(f"/api/predictions/compare?collection_id={cid}")
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    row = next(p for p in data["photos"] if p["photo_id"] == photo_id)
+    # get_species_keywords_for_photos canonicalizes the hierarchy leaf
+    # (``Desert Verdin``) to the same-taxon root (``Verdin``); the
+    # prediction label must agree so Compare records a match rather than
+    # a conflict.
+    assert row["species_keywords"] == ["Verdin"]
+    preds = row["predictions"]["model-a"]
+    assert preds[0]["category"] == "match"
+
+
 def test_replace_prediction_keywords_updates_grouped_photos(app_and_db):
     """Replacing a grouped prediction removes old species keywords from the group."""
     app, db = app_and_db

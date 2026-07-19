@@ -12240,8 +12240,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             models.add(model)
             if model not in by_photo[pid]["predictions"]:
                 by_photo[pid]["predictions"][model] = []
+            # get_species_keywords_for_photos now canonicalizes hierarchy
+            # aliases through their linked taxon's root (e.g. an attached
+            # ``Desert Verdin`` leaf is reported as ``Verdin`` when a root
+            # ``Verdin`` row exists). If the raw prediction label is that
+            # alias and it is not present in the on-disk taxonomy JSON,
+            # ``compare_prediction_to_keywords`` would fall through to its
+            # exact-text fallback and flag a needless conflict because
+            # ``"Verdin" != "Desert Verdin"``. Route the prediction label
+            # through the same DB-side resolver so it agrees with the
+            # canonical species spellings we already returned.
+            comparison_prediction = db.resolve_species_display_name(d["species"])
             comparison = compare_prediction_to_keywords(
-                d["species"],
+                comparison_prediction,
                 species_by_photo.get(pid, []),
                 taxonomy,
             )
