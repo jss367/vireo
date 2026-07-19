@@ -12358,18 +12358,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         result = db.accept_subject_species(pred_id)
         if result is None:
             return json_error("prediction not found", 404)
-        db.record_edit(
-            "prediction_accept",
-            f'Accepted additional subject species: added "{result["species"]}"',
-            str(result["keyword_id"]),
-            [{
-                "photo_id": result["photo_id"],
-                "old_value": ",".join(
-                    str(pred_id) for pred_id in result["prediction_ids"]
-                ),
-                "new_value": str(result["keyword_id"]),
-            }],
-        )
+        if result["affected"]:
+            db.record_edit(
+                "prediction_accept",
+                f'Accepted additional subject species: added "{result["species"]}"',
+                str(result["keyword_id"]),
+                [{
+                    "photo_id": result["photo_id"],
+                    "old_value": ",".join(
+                        str(pred_id) for pred_id in result["prediction_ids"]
+                    ),
+                    "new_value": str(result["keyword_id"]),
+                }],
+            )
         return jsonify({
             "ok": True,
             "species": result["species"],

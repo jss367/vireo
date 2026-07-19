@@ -5434,6 +5434,7 @@ def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_pa
 
     assert result["species"] == "Blue-winged Teal"
     assert len(result["prediction_ids"]) == 2
+    assert len(result["affected"]) == 1
     assert {row["name"] for row in db.get_photo_keywords(photo_id)} >= {
         "American Wigeon", "Blue-winged Teal",
     }

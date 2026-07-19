@@ -14693,6 +14693,7 @@ class Database:
         ).fetchall()
 
         accepted_ids = []
+        affected = []
         result = None
         try:
             for row in agreeing:
@@ -14704,6 +14705,7 @@ class Database:
                 if accepted is not None:
                     result = accepted
                     accepted_ids.append(row["id"])
+                    affected.extend(accepted["affected"])
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -14716,6 +14718,7 @@ class Database:
             "keyword_id": result["keyword_id"],
             "photo_id": target["photo_id"],
             "prediction_ids": accepted_ids,
+            "affected": affected,
         }
 
     # -- Detections --

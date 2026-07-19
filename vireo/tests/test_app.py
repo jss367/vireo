@@ -1424,6 +1424,55 @@ def test_prediction_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and
     ).fetchone()["status"] == "accepted"
 
 
+def test_subject_accept_with_equivalent_hierarchy_records_no_tag_edit(app_and_db):
+    """Additional-subject acceptance mirrors regular acceptance when the
+    species already exists through a hierarchy leaf."""
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    folder_id = db.get_folder_tree()[0]["id"]
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="subject-verdin.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    db.tag_photo(photo_id, nested)
+    detection_id = db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+            "confidence": 0.9,
+            "category": "animal",
+        }],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Verdin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?",
+        (detection_id,),
+    ).fetchone()["id"]
+
+    response = client.post(f"/api/predictions/{prediction_id}/accept-subject")
+
+    assert response.status_code == 200
+    assert not [
+        row for row in db.get_edit_history()
+        if row["action_type"] == "prediction_accept"
+    ]
+    names = [row["name"] for row in db.get_photo_keywords(photo_id)]
+    assert names.count("Verdin") == 1
+    assert db.conn.execute(
+        "SELECT status FROM prediction_review WHERE prediction_id = ? "
+        "AND workspace_id = ?",
+        (prediction_id, db._active_workspace_id),
+    ).fetchone()["status"] == "accepted"
+
+
 def test_encounter_species_records_only_newly_tagged(app_and_db):
     """A mixed set (some already carry the species, some don't) records edit
     items ONLY for the newly-tagged photos.
