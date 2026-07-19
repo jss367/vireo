@@ -18535,6 +18535,145 @@ def test_repair_duplicate_photo_species_preserves_highlight_eligibility(tmp_path
     assert pid in single.get("Verdin", {})
 
 
+def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
+    """``resolve_species_display_name`` routes a linked hierarchy alias
+    (e.g. ``Desert Verdin`` bound to the ``Verdin`` species taxon) to the
+    canonical root spelling, so ``add_species_highlight`` /
+    ``_collect_highlight_buckets`` store an unconfirmed prediction's
+    highlight under ``Verdin``. The prediction-fallback branch of
+    ``get_species_highlights(eligible_only=True)`` must apply the same
+    canonicalization when it looks up the photo's top prediction —
+    otherwise the highlight vanishes on reload because ``pr.species``
+    is still the raw ``Desert Verdin`` label.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Root "Verdin" + hierarchy leaf "Desert Verdin" both bound to the
+    # same species taxon. resolve_species_display_name canonicalizes
+    # "Desert Verdin" through the shared taxon to root "Verdin".
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], root),
+    )
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], leaf),
+    )
+
+    # Photo has NO species keyword tagged (unconfirmed) but has a top
+    # classifier prediction labelled with the hierarchy alias.
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Desert Verdin', 0.95)",
+        (did,),
+    )
+    db.conn.commit()
+
+    # add_species_highlight canonicalizes the label via
+    # resolve_species_display_name — the leaf's linked taxon resolves
+    # back to root "Verdin", so the highlight lands under "Verdin".
+    db.add_species_highlight("Desert Verdin", pid)
+    stored = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE photo_id = ?", (pid,)
+    ).fetchone()
+    assert stored["species"] == "Verdin"
+
+    # Prediction-fallback eligibility must canonicalize pr.species the
+    # same way, so the stored highlight remains eligible on reload.
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights.get("Verdin", {}), (
+        "highlight canonicalized to root spelling must still match a photo "
+        "whose top prediction is the linked hierarchy alias"
+    )
+    single = db.get_species_highlights(species="Verdin", eligible_only=True)
+    assert pid in single.get("Verdin", {})
+
+
+def test_get_species_highlights_prediction_fallback_rejects_wrong_taxon(tmp_path):
+    """Canonicalizing pr.species through the leaf's taxon must not
+    loosen the taxon boundary: an unconfirmed photo whose top prediction
+    is a leaf linked to taxon A must NOT satisfy a highlight stored
+    under a canonical root name resolving to taxon B, even when the
+    strings would collide after case-folding.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (2912, "Auriparus flaviceps", "Verdin"),
+        (7000, "Turdus migratorius", "American Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Leaf "Desert Verdin" bound to the Verdin species taxon.
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], leaf),
+    )
+    verdin_root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], verdin_root),
+    )
+    # Unrelated root "American Robin" bound to a different species taxon.
+    robin_root = db.add_keyword("American Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], robin_root),
+    )
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Desert Verdin', 0.95)",
+        (did,),
+    )
+    # A highlight under a different root — must not become eligible for
+    # a photo whose top prediction canonicalizes to another root.
+    db.add_species_highlight("American Robin", pid)
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(
+        species="American Robin", eligible_only=True,
+    )
+    assert "American Robin" not in highlights, (
+        "prediction-fallback canonicalization must respect the taxon "
+        "boundary — a highlight under 'American Robin' must not be "
+        "eligible for a photo whose top prediction resolves to 'Verdin'"
+    )
+
+
 def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
     """The new taxon-linked fallback must only match the leaf back to a
     root whose taxon_id shares identity with the leaf's taxon_id. A

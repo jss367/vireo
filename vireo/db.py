@@ -13147,6 +13147,16 @@ class Database:
             # every highlight starred from an unconfirmed bucket.
             # Applying NOCASE only to the fallback keeps the
             # ambiguous-homonym boundary intact.
+            # The prediction subquery also routes ``pr.species`` through
+            # the same hierarchy-alias → root canonicalization
+            # ``resolve_species_display_name`` applies, so a highlight
+            # saved from a canonicalized prediction bucket (leaf
+            # ``Desert Verdin`` bucketed under root ``Verdin`` when the
+            # linked taxon has a top-level row) still matches on
+            # reload. ``COALESCE`` falls back to the raw prediction
+            # spelling whenever the alias has no linked species-rank
+            # root, mirroring ``add_species_highlight`` /
+            # ``_collect_highlight_buckets``.
             # The accepted-keyword branch mirrors
             # :meth:`get_species_representative_lists`: restrict to
             # species-rank taxonomy rows so a genus/family keyword named
@@ -13200,7 +13210,35 @@ class Database:
                                AND (t.rank = 'species' OR t.rank IS NULL)
                          )
                          AND sh.species = (
-                             SELECT pr.species
+                             SELECT COALESCE(
+                                 (
+                                     SELECT root.name
+                                     FROM keywords k_pred
+                                     JOIN keywords root
+                                       ON root.parent_id IS NULL
+                                      AND root.taxon_id = k_pred.taxon_id
+                                      AND (
+                                          root.is_species = 1
+                                          OR root.type = 'taxonomy'
+                                      )
+                                     LEFT JOIN taxa t_root
+                                       ON t_root.id = root.taxon_id
+                                     WHERE k_pred.name = pr.species COLLATE NOCASE
+                                       AND k_pred.parent_id IS NOT NULL
+                                       AND k_pred.taxon_id IS NOT NULL
+                                       AND (
+                                           k_pred.is_species = 1
+                                           OR k_pred.type = 'taxonomy'
+                                       )
+                                       AND (
+                                           t_root.rank = 'species'
+                                           OR t_root.rank IS NULL
+                                       )
+                                     ORDER BY root.id
+                                     LIMIT 1
+                                 ),
+                                 pr.species
+                             )
                              FROM detections d
                              JOIN predictions pr ON pr.detection_id = d.id
                              LEFT JOIN prediction_review pr_rev
