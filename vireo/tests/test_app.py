@@ -2353,6 +2353,90 @@ def test_encounter_species_replacement_skips_unrelated_root_when_only_leaf_attac
     assert "Verdin" not in names
 
 
+def test_encounter_species_replacement_removes_repaired_alias_leaf(app_and_db):
+    """When the submitted photo carries only a repaired hierarchy leaf whose
+    display name DIFFERS from ``previous_species`` but shares the same taxon
+    as the linked root, the removal must still find and untag it.
+
+    Regression: the per-photo old-row query required the attached leaf's
+    ``k.name`` to equal ``previous_species`` (COLLATE NOCASE), so after
+    duplicate repair detached the redundant root and left only a
+    differently-named alias leaf (for example ``Birds|Desert Verdin`` under
+    linked root ``Verdin``), the resolver picked no old row for the photo.
+    ``is_replacement`` stayed true but ``old_kid_row`` was None, so the
+    endpoint recorded a plain add and left the photo tagged with both the
+    stale alias leaf and the new species. Match rows by the linked root's
+    ``taxon_id`` in addition to name so the alias leaf is caught and
+    removed.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) VALUES "
+        "(9401, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    # Linked root species ``Verdin`` at taxon 9401 — exists in the catalog
+    # but is NOT attached to the submitted photo (duplicate repair detached
+    # the redundant root when the photo already carried a hierarchy leaf).
+    root_verdin = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9401, type = 'taxonomy' WHERE id = ?",
+        (root_verdin,),
+    )
+    # The photo carries only a repaired hierarchy leaf whose display name
+    # (``Desert Verdin``) differs from the root's name but points at the
+    # same taxon. A name-only lookup misses it entirely.
+    attached_parent = db.add_keyword("Birds")
+    attached_leaf = db.add_keyword("Desert Verdin", parent_id=attached_parent)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9401, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (attached_leaf,),
+    )
+    db.conn.commit()
+    db.tag_photo(photo_id, attached_leaf)
+    # Cached ``confirmed_species`` is the canonical root display name
+    # (``Verdin``) — the encounter was confirmed under that name before
+    # duplicate repair rewrote the DB tags.
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Verdin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json().get("previous_species") == "Verdin"
+
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    # The repaired alias leaf must be gone — not left behind alongside the
+    # new species. Matching only by name would miss it because
+    # ``Desert Verdin`` != ``Verdin``.
+    assert attached_leaf not in tagged_ids, (
+        "Taxon-based per-photo resolution should have picked the attached "
+        "alias leaf (same taxon as the linked root) so the removal loop "
+        "matches and untags it."
+    )
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Blue Jay" in names
+    # Neither the alias leaf nor the canonical root should remain on the
+    # photo — a lingering ``Desert Verdin`` would leave the photo tagged
+    # with the old species alongside ``Blue Jay``.
+    assert "Desert Verdin" not in names
+    assert "Verdin" not in names
+
+    # The unrelated root row for the same taxon must remain in the catalog
+    # — it was never attached to this photo, so replacement must not affect
+    # its existence.
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE id = ?", (root_verdin,),
+    ).fetchone() is not None
+
+
 def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
     """Old-species lookup must be scoped to root species keywords only."""
     app, db = app_and_db

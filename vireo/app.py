@@ -24054,36 +24054,77 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # rows and accept ``is_species = 1`` rows too — for the
                 # same taxonomy-typed vs. legacy-species reason as the
                 # root lookup.
+                #
+                # When a linked root exists, ALSO match rows whose
+                # ``taxon_id`` equals the root's taxon even if the leaf
+                # display name differs from ``previous_species`` — this
+                # is how repaired hierarchy leaves (e.g. ``Desert Verdin``
+                # under root ``Verdin`` after duplicate repair detached
+                # the redundant root) get resolved. Without it, the
+                # removal loop can't find any old row on the photo and
+                # the endpoint records a plain add, leaving the photo
+                # tagged with both the old leaf and the new species.
+                linked_root_taxon = (
+                    old_kid_row["taxon_id"] if old_kid_row is not None else None
+                )
                 old_kid_row = None
                 candidate_rows = []
                 for chunk in _chunked(photo_ids):
                     placeholders_ids = ",".join("?" for _ in chunk)
-                    candidate_rows.extend(
-                        db.conn.execute(
-                            f"""SELECT k.id, k.name, k.taxon_id, pk.photo_id
-                                FROM photo_keywords pk
-                                JOIN keywords k ON k.id = pk.keyword_id
-                                LEFT JOIN taxa t ON t.id = k.taxon_id
-                                WHERE pk.photo_id IN ({placeholders_ids})
-                                  AND k.name = ? COLLATE NOCASE
-                                  AND (k.is_species = 1 OR k.type = 'taxonomy')
-                                  AND (t.rank = 'species' OR t.rank IS NULL)
-                                ORDER BY CASE WHEN k.parent_id IS NULL
-                                              THEN 0 ELSE 1 END,
-                                         k.id""",
-                            [*chunk, previous_species],
-                        ).fetchall()
-                    )
+                    if linked_root_taxon is not None:
+                        # Match by the linked root's taxon OR by
+                        # ``previous_species`` name. The taxon arm catches
+                        # repaired aliases (e.g. ``Desert Verdin`` sharing
+                        # the root's taxon); the name arm preserves the
+                        # existing behavior for attached same-name rows
+                        # under a different taxon (a legitimate homonym
+                        # duplicate repair leaves alone).
+                        candidate_rows.extend(
+                            db.conn.execute(
+                                f"""SELECT k.id, k.name, k.taxon_id, pk.photo_id
+                                    FROM photo_keywords pk
+                                    JOIN keywords k ON k.id = pk.keyword_id
+                                    LEFT JOIN taxa t ON t.id = k.taxon_id
+                                    WHERE pk.photo_id IN ({placeholders_ids})
+                                      AND (k.is_species = 1 OR k.type = 'taxonomy')
+                                      AND (t.rank = 'species' OR t.rank IS NULL)
+                                      AND (k.taxon_id = ?
+                                           OR k.name = ? COLLATE NOCASE)
+                                    ORDER BY CASE WHEN k.parent_id IS NULL
+                                                  THEN 0 ELSE 1 END,
+                                             k.id""",
+                                [*chunk, linked_root_taxon, previous_species],
+                            ).fetchall()
+                        )
+                    else:
+                        candidate_rows.extend(
+                            db.conn.execute(
+                                f"""SELECT k.id, k.name, k.taxon_id, pk.photo_id
+                                    FROM photo_keywords pk
+                                    JOIN keywords k ON k.id = pk.keyword_id
+                                    LEFT JOIN taxa t ON t.id = k.taxon_id
+                                    WHERE pk.photo_id IN ({placeholders_ids})
+                                      AND k.name = ? COLLATE NOCASE
+                                      AND (k.is_species = 1 OR k.type = 'taxonomy')
+                                      AND (t.rank = 'species' OR t.rank IS NULL)
+                                    ORDER BY CASE WHEN k.parent_id IS NULL
+                                                  THEN 0 ELSE 1 END,
+                                             k.id""",
+                                [*chunk, previous_species],
+                            ).fetchall()
+                        )
                 for row in candidate_rows:
                     # SQL orders root rows first, then by id — first
                     # candidate per photo is the most canonical.
                     per_photo_old_row.setdefault(row["photo_id"], row)
                 if per_photo_old_row:
-                    # ``old_kid_row`` gates the removal block below and
-                    # feeds ``old_target_key`` (the shared display name
-                    # of the previous species — same for every candidate
-                    # row since they were filtered by name). Any resolved
-                    # row will do as a representative.
+                    # ``old_kid_row`` gates the removal block below.
+                    # ``old_target_key`` is derived from
+                    # ``previous_species`` (not this representative row)
+                    # so the NULL-taxon fallback in the removal loop
+                    # stays keyed to the requested display name even
+                    # when the resolved row is a differently-named
+                    # hierarchy alias.
                     old_kid_row = next(iter(per_photo_old_row.values()))
 
         # Run all mutations in a single transaction so that a mid-loop failure
@@ -24114,12 +24155,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # replacement must remove and record all of them for undo/redo.
             old_rows_by_photo = {}
             if is_replacement and old_kid_row is not None:
-                # ``old_target_key`` is shared across all resolved old rows
-                # (they were filtered by ``k.name = ? COLLATE NOCASE``
-                # against ``previous_species``). Per-photo variance is
-                # only in ``taxon_id``/``id``, which drive the homonym
-                # guards and the same-species predicate below.
-                old_target_key = keyword_match_key(old_kid_row["name"])
+                # ``old_target_key`` keys the NULL-taxon fallback in the
+                # removal loop below. Derive it from ``previous_species``
+                # (the requested display name) rather than the resolved
+                # representative row's stored name — with the taxon-based
+                # per-photo resolution above, that row can be a hierarchy
+                # alias whose leaf name differs from what the user typed
+                # (e.g. resolved ``Desert Verdin`` for requested
+                # ``Verdin``), and the NULL-taxon fallback should still
+                # match a legacy ``Verdin`` row on the photo.
+                old_target_key = keyword_match_key(previous_species)
                 # When the previous species is linked to a taxon and another
                 # taxonomy row anywhere in the catalog shares the same
                 # normalized name but points at a different taxon (e.g.
