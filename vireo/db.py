@@ -18218,6 +18218,23 @@ class Database:
                 and lookup_local_id != kw["taxon_id"]
             ):
                 rebind_taxon_id = lookup_local_id
+            # When the existing binding is non-species-rank and no
+            # species-rank replacement is available, clear ``taxon_id`` to
+            # NULL. Leaving the higher-rank link in place would satisfy
+            # ``mark_species_keywords`` but make the row invisible to
+            # every rank-filtered reader (Life List, Compare,
+            # highlight/preference eligibility) that restricts to
+            # ``t.rank = 'species' OR t.rank IS NULL``; NULLing it lets
+            # the accepted keyword stay visible via the ``rank IS NULL``
+            # fallback until a species-rank taxon becomes available,
+            # mirroring ``add_keyword``'s reuse-path clearing (see
+            # ``test_add_species_clears_higher_rank_taxon_when_no_species_match``).
+            should_clear_taxon = (
+                kw["taxon_id"] is not None
+                and kw["taxon_rank"] is not None
+                and kw["taxon_rank"] != "species"
+                and rebind_taxon_id is None
+            )
             # Skip no-op updates so the "updated" count reflects real
             # changes. A matched row is fully consistent when type is
             # 'taxonomy', is_species is 1, and (taxon_id is already set to
@@ -18226,13 +18243,25 @@ class Database:
             is_species_fix = kw["is_species"] != 1
             is_taxon_link = kw["taxon_id"] is None and local_taxon_id is not None
             is_rebind = rebind_taxon_id is not None
-            if not (is_type_change or is_species_fix or is_taxon_link or is_rebind):
+            if not (
+                is_type_change
+                or is_species_fix
+                or is_taxon_link
+                or is_rebind
+                or should_clear_taxon
+            ):
                 continue
             if is_rebind:
                 self.conn.execute(
                     "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
                     "taxon_id = ? WHERE id = ?",
                     (rebind_taxon_id, kw["id"]),
+                )
+            elif should_clear_taxon:
+                self.conn.execute(
+                    "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+                    "taxon_id = NULL WHERE id = ?",
+                    (kw["id"],),
                 )
             else:
                 self.conn.execute(

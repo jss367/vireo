@@ -19392,6 +19392,68 @@ def test_mark_species_keywords_keeps_species_taxon_when_only_higher_rank_availab
     assert row["taxon_id"] == species_taxon
 
 
+def test_mark_species_keywords_clears_higher_rank_taxon_when_no_species_match(tmp_path):
+    """A fully typed taxonomy row already bound by the old species-agnostic
+    lookup to a higher-rank taxon (genus/family) must have its stale
+    non-species ``taxon_id`` cleared to NULL on the next
+    ``mark_species_keywords`` pass when no species-rank replacement is
+    available. Leaving the higher-rank link in place would satisfy the
+    marking pass but make the row invisible to every rank-filtered reader
+    (Life List, Compare, Explorer, highlight/preference eligibility) that
+    restricts to ``t.rank = 'species' OR t.rank IS NULL`` — clearing the
+    binding keeps the accepted keyword visible via the ``rank IS NULL``
+    fallback until a species-rank taxon becomes available. Mirrors
+    ``add_keyword``'s reuse-path clearing (see
+    ``test_add_species_clears_higher_rank_taxon_when_no_species_match``).
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (10001, "Corvidae", "Corvids", "family"),
+        ],
+    )
+    db.conn.commit()
+    family_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'family'"
+    ).fetchone()["id"]
+
+    # Legacy row: fully typed taxonomy species but bound to the
+    # non-species-rank family taxon by the old species-agnostic lookup.
+    # add_keyword auto-promotes/clears on insert, so bypass it with
+    # direct SQL to simulate the upgraded catalog.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Corvidae', 'taxonomy', 1, ?)",
+        (family_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        # Only the family is known — no species-rank alternative exists.
+        def lookup(self, name):
+            if name.lower() == "corvidae":
+                return {"taxon_id": 10001}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 1
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] is None
+
+
 def test_repair_duplicate_photo_species_preserves_highlight_eligibility(tmp_path):
     """After ``repair_duplicate_photo_species`` detaches the redundant
     root, ``get_species_highlights(eligible_only=True)`` must still
