@@ -1765,6 +1765,14 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                 "SELECT id FROM folders WHERE path = ?", (destination,)
             ).fetchone()["id"]
     workspace_linked = False
+    destination_stem_origins = {
+        os.path.splitext(row["filename"])[0]: None
+        for row in db.conn.execute(
+            "SELECT filename FROM photos WHERE folder_id = ?",
+            (dest_folder_id,),
+        )
+    }
+    no_destination_stem = object()
 
     photos_map = db.get_photos_by_ids(photo_ids)
     source_stem_counts = {}
@@ -1791,10 +1799,32 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             ).fetchone()
             src_dir = folder_row["path"]
             src_file = os.path.join(src_dir, photo["filename"])
+            stem = os.path.splitext(photo["filename"])[0]
 
             if not os.path.isfile(src_file):
                 log.warning("Move skipped for %s: source file missing", photo["filename"])
                 errors.append(f"{photo['filename']}: source file missing")
+                continue
+
+            # Developed outputs are addressed by destination folder + stem,
+            # not by the original extension. Same-stem photos from one source
+            # folder intentionally share a render (RAW+JPEG), but two source
+            # folders can hold distinct renders with the same filename. Do not
+            # merge the latter into one destination and silently make one row
+            # display/export the other's edit.
+            existing_origin = destination_stem_origins.get(
+                stem, no_destination_stem,
+            )
+            if existing_origin is not no_destination_stem \
+                    and existing_origin != photo["folder_id"]:
+                log.warning(
+                    "Move skipped for %s: developed render stem collides at "
+                    "destination", photo["filename"],
+                )
+                errors.append(
+                    f"{photo['filename']}: developed render stem already "
+                    "exists at destination"
+                )
                 continue
 
             dst_file = os.path.join(destination, photo["filename"])
@@ -1853,6 +1883,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                 (dest_folder_id, pid),
             )
             db.conn.commit()
+            destination_stem_origins.setdefault(stem, photo["folder_id"])
 
             # Rebase this photo's developed-output file(s) for the new folder
             # BEFORE removing originals. Both develop-job layouts need to
@@ -1876,7 +1907,6 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                     relocate_default_developed_file,
                     relocate_developed_file,
                 )
-            stem = os.path.splitext(photo["filename"])[0]
             source_stem_key = (photo["folder_id"], stem)
             source_stem_counts[source_stem_key] = max(
                 0, source_stem_counts.get(source_stem_key, 1) - 1,

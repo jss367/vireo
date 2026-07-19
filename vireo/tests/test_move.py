@@ -536,6 +536,57 @@ def test_move_folder_by_date_copies_shared_stem_render_configured_dir(
     assert (developed / second_key / "IMG.jpg").read_bytes() == b"shared-dev"
 
 
+def test_move_folder_by_date_rejects_distinct_same_stem_renders(tmp_path):
+    """Distinct source-folder renders cannot share one destination stem."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    parent = tmp_path / "card"
+    first_src = parent / "a"
+    second_src = parent / "b"
+    first_src.mkdir(parents=True)
+    second_src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    parent_fid = db.add_folder(str(parent), name="card")
+    first_fid = db.add_folder(str(first_src), name="a", parent_id=parent_fid)
+    second_fid = db.add_folder(str(second_src), name="b", parent_id=parent_fid)
+
+    (first_src / "IMG.CR3").write_bytes(b"first-raw")
+    (second_src / "IMG.NEF").write_bytes(b"second-raw")
+    first_pid = db.add_photo(
+        folder_id=first_fid, filename="IMG.CR3", extension=".cr3",
+        file_size=9, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    second_pid = db.add_photo(
+        folder_id=second_fid, filename="IMG.NEF", extension=".nef",
+        file_size=10, file_mtime=2.0, timestamp="2026-07-12T10:15:00",
+    )
+    (first_src / "developed").mkdir()
+    (second_src / "developed").mkdir()
+    (first_src / "developed" / "IMG.jpg").write_bytes(b"first-render")
+    (second_src / "developed" / "IMG.jpg").write_bytes(b"second-render")
+
+    result = move_folder_by_date(
+        db, parent_fid, str(archive), "%Y-%m-%d",
+    )
+
+    assert result["moved"] == 1
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    destination = archive / "2026-07-12"
+    assert (destination / "IMG.CR3").read_bytes() == b"first-raw"
+    assert (destination / "developed" / "IMG.jpg").read_bytes() \
+        == b"first-render"
+    assert (second_src / "IMG.NEF").read_bytes() == b"second-raw"
+    assert (second_src / "developed" / "IMG.jpg").read_bytes() \
+        == b"second-render"
+    assert db.get_photo(first_pid)["folder_id"] != first_fid
+    assert db.get_photo(second_pid)["folder_id"] == second_fid
+
+
 def test_move_folder_by_date_lists_developed_dir_once_per_source(
     tmp_path, monkeypatch,
 ):
