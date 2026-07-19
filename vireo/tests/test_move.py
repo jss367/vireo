@@ -476,6 +476,66 @@ def test_move_folder_by_date_copies_shared_stem_render_to_each_date(tmp_path):
     assert not default_developed.exists()
 
 
+def test_move_folder_by_date_copies_shared_stem_render_configured_dir(
+    tmp_path,
+):
+    """Same shared-stem fan-out regression, configured-``darktable_output_dir``
+    variant. Sibling of
+    ``test_move_folder_by_date_copies_shared_stem_render_to_each_date`` —
+    that one only exercises the default ``<folder>/developed/`` layout via
+    ``relocate_default_developed_file``. This one exercises the flat-key
+    layout via ``relocate_developed_file``, which routes through the same
+    ``_relocate_stem_files`` helper but from a different call site with
+    different old/new subdirs. Without the shared-move record in the
+    listing cache, the second destination's folder key would be empty
+    even though the render existed under the source key.
+    """
+    from export import developed_folder_key
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "IMG.CR3").write_bytes(b"raw")
+    (src / "IMG.JPG").write_bytes(b"jpg")
+    db.add_photo(
+        folder_id=fid, filename="IMG.CR3", extension=".cr3",
+        file_size=3, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid, filename="IMG.JPG", extension=".jpg",
+        file_size=3, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    developed = tmp_path / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(src))
+    (developed / old_key).mkdir()
+    (developed / old_key / "IMG.jpg").write_bytes(b"shared-dev")
+
+    result = move_folder_by_date(
+        db, fid, str(archive), "%Y-%m-%d",
+        developed_dir=str(developed),
+    )
+    assert result["errors"] == []
+    assert result["moved"] == 2
+
+    first_key = developed_folder_key(str(archive / "2026-07-12"))
+    second_key = developed_folder_key(str(archive / "2026-07-13"))
+    # Both new folder keys carry the render — one arrived via
+    # ``shutil.move`` and the other via ``shutil.copy2`` from the first
+    # destination — so neither photo silently loses its edit under the
+    # flat-key layout.
+    assert (developed / first_key / "IMG.jpg").read_bytes() == b"shared-dev"
+    assert (developed / second_key / "IMG.jpg").read_bytes() == b"shared-dev"
+
+
 def test_move_folder_by_date_lists_developed_dir_once_per_source(
     tmp_path, monkeypatch,
 ):
