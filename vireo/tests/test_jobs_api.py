@@ -3644,6 +3644,45 @@ def test_import_readiness_excludes_offline_root_photos_from_repair_count(
         assert "no photos need metadata repair" in blocked.get_json()["error"]
 
 
+def test_import_readiness_excludes_deleted_originals_from_repair_count(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A DB-only photo cannot be repaired by the disk-discovery scan."""
+    import metadata
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    photos = tmp_path / "reachable-with-deleted-original"
+    photos.mkdir()
+    folder_id = db.add_folder(str(photos), name=photos.name)
+    db.add_photo(
+        folder_id=folder_id,
+        filename="deleted.jpg",
+        extension=".jpg",
+        file_size=1024,
+        file_mtime=0.0,
+    )
+
+    with app.test_client() as client:
+        ready = client.get("/api/import/readiness")
+        assert ready.status_code == 200
+        payload = ready.get_json()
+        assert payload["reachable_root_count"] == 1
+        assert payload["metadata_repair_count"] == 0
+        assert payload["metadata_repair_available"] is False
+
+        blocked = client.post("/api/jobs/repair-metadata")
+        assert blocked.status_code == 409
+        assert "no photos need metadata repair" in blocked.get_json()["error"]
+
+
 def test_lightroom_import_route_not_shadowed(app_and_db):
     """POST /api/jobs/import (Lightroom catalogs) keeps its contract —
     the photo import route is a NEW endpoint, not a rename."""

@@ -18057,17 +18057,60 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 params.extend([norm, len(prefix), prefix])
             where_extra = " AND (" + " OR ".join(clauses) + ")"
-        row = db.conn.execute(
-            "SELECT COUNT(DISTINCT p.id) AS count "
+        rows = db.conn.execute(
+            "SELECT DISTINCT p.id, p.filename, "
+            "f.id AS folder_id, f.path AS folder_path "
             "FROM photos p "
             "JOIN folders f ON f.id = p.folder_id "
             "JOIN workspace_folders wf ON wf.folder_id = f.id "
             "WHERE wf.workspace_id = ? "
             "AND p.exif_data IS NULL"
-            + where_extra,
+            + where_extra
+            + " ORDER BY f.path, p.filename",
             params,
-        ).fetchone()
-        return int(row["count"] if row else 0)
+        ).fetchall()
+
+        # A database row is only repairable when its original still exists.
+        # The incremental repair scan discovers files from disk, so counting
+        # a deleted/moved original here would leave the Repair button enabled
+        # forever for a job that can never visit that row. Enumerate each
+        # candidate folder once instead of statting every photo individually;
+        # this keeps readiness responsive for large degraded imports.
+        from image_loader import is_excluded_scan_path
+
+        folder_files = {}
+        repairable = 0
+        for row in rows:
+            folder_id = row["folder_id"]
+            folder_path = row["folder_path"]
+            if folder_id not in folder_files:
+                if is_excluded_scan_path(folder_path):
+                    folder_files[folder_id] = None
+                else:
+                    try:
+                        with os.scandir(folder_path) as entries:
+                            folder_files[folder_id] = {
+                                entry.name for entry in entries if entry.is_file()
+                            }
+                    except OSError:
+                        # The folder disappeared or became unreadable after
+                        # root reachability was checked. Treat its rows as
+                        # unavailable rather than offering a no-op repair.
+                        folder_files[folder_id] = None
+
+            names = folder_files[folder_id]
+            if names is None:
+                continue
+            filename = row["filename"]
+            if filename in names:
+                repairable += 1
+                continue
+            # Preserve the filesystem's own case and Unicode matching rules
+            # for a catalog name that did not compare byte-for-byte with the
+            # directory entry (notably default APFS and NTFS volumes).
+            if os.path.isfile(os.path.join(folder_path, filename)):
+                repairable += 1
+        return repairable
 
     @app.route("/api/import/readiness")
     def api_import_readiness():
