@@ -12061,8 +12061,14 @@ class Database:
 
         Multiple keyword nodes can represent the same taxon (for example a
         Lightroom hierarchy leaf plus an older top-level confirmation row).
-        Collapse those by taxon_id, preferring the hierarchy-bearing spelling.
-        Taxonomy-less legacy rows fall back to the normalized keyword name.
+        Collapse those by taxon_id and canonicalize to the same-taxon root's
+        stored spelling when one exists — species_representatives,
+        species_highlights, and life-list preference rows key on that root
+        spelling, so a photo whose only surviving species tag is a hierarchy
+        leaf ("verdin" after repair detached the redundant "Verdin" root)
+        would otherwise miss those curation lookups. Falls back to the
+        row's own name when no root exists, and taxonomy-less legacy rows
+        continue to use the normalized keyword name.
         """
         if not photo_ids:
             return {}
@@ -12093,11 +12099,35 @@ class Database:
                     else ("name", keyword_match_key(r["name"]))
                 )
                 chosen.setdefault(r["photo_id"], {}).setdefault(identity, r["name"])
+        taxon_ids = {
+            identity[1]
+            for by_identity in chosen.values()
+            for identity in by_identity
+            if identity[0] == "taxon"
+        }
+        canonical_roots = {}
+        if taxon_ids:
+            for chunk in _chunks(list(taxon_ids)):
+                placeholders = ",".join("?" for _ in chunk)
+                root_rows = self.conn.execute(
+                    f"""SELECT taxon_id, name FROM keywords
+                        WHERE taxon_id IN ({placeholders})
+                          AND parent_id IS NULL
+                          AND (is_species = 1 OR type = 'taxonomy')
+                        ORDER BY id""",
+                    list(chunk),
+                ).fetchall()
+                for row in root_rows:
+                    canonical_roots.setdefault(row["taxon_id"], row["name"])
         result = {}
         for photo_id, by_identity in chosen.items():
-            result[photo_id] = sorted(
-                by_identity.values(), key=lambda name: keyword_match_key(name)
-            )
+            names = []
+            for identity, name in by_identity.items():
+                if identity[0] == "taxon":
+                    names.append(canonical_roots.get(identity[1], name))
+                else:
+                    names.append(name)
+            result[photo_id] = sorted(names, key=lambda n: keyword_match_key(n))
         return result
 
     def get_photos_with_equivalent_species(

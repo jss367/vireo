@@ -14067,6 +14067,38 @@ def test_species_display_name_resolves_hierarchy_alias_through_taxon(tmp_path):
     assert db.resolve_species_display_name("Desert Verdin") == "Verdin"
 
 
+def test_species_keywords_canonicalize_hierarchy_leaf_to_root_spelling(tmp_path):
+    """After repair leaves only a differently-spelled hierarchy leaf, the
+    per-photo species list must still surface the canonical root spelling so
+    `_attach_species_representatives` can match `species_representatives`
+    rows keyed on that root. Otherwise browse/review/pipeline cards drop the
+    representative badge for a taxon that is still eligibly attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+
+    # Only the leaf is attached (repair detached the redundant root), but
+    # both root and leaf share the taxon — the returned name must be the
+    # canonical root spelling used by species_representatives.
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+
+
 def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path):
     """The one-shot repair detaches only the redundant root association."""
     from db import Database
