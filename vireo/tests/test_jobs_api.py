@@ -3570,6 +3570,80 @@ def test_import_readiness_counts_photos_in_stale_missing_folders(
         assert started.get_json()["photo_count"] >= 1
 
 
+def test_import_readiness_excludes_offline_root_photos_from_repair_count(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Photos under an offline workspace root must not inflate the count.
+
+    Concrete pathology this closes: a workspace with two roots, one whose
+    drive is currently unplugged (photos there have ``exif_data IS NULL``)
+    and another that's fully imported. An unscoped count combined with a
+    non-empty reachable-roots list would enable the Repair button and
+    start a job that finishes without ever touching the offline photos —
+    the reported count would then stay the same, so the button would
+    remain enabled and the user could re-run the same no-op forever.
+    """
+    import metadata
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    # Reachable root — every photo already has EXIF, so this root
+    # contributes zero to the repair count on its own.
+    reachable = tmp_path / "reachable-drive"
+    reachable.mkdir()
+    reach_src = reachable / "ok.jpg"
+    Image.new("RGB", (32, 24), "green").save(reach_src)
+    reach_fid = db.add_folder(str(reachable), name="reachable-drive")
+    reach_pid = db.add_photo(
+        folder_id=reach_fid,
+        filename=reach_src.name,
+        extension=".jpg",
+        file_size=reach_src.stat().st_size,
+        file_mtime=reach_src.stat().st_mtime,
+    )
+    db.conn.execute(
+        "UPDATE photos SET exif_data = ? WHERE id = ?",
+        ('{"EXIF": {"Make": "cam"}}', reach_pid),
+    )
+
+    # Offline root — path lives in the DB, but the directory is not on
+    # disk (drive unplugged). The photo under it has NULL EXIF.
+    offline_path = str(tmp_path / "unplugged-drive")
+    off_fid = db.add_folder(offline_path, name="unplugged-drive")
+    db.add_photo(
+        folder_id=off_fid,
+        filename="orphan.jpg",
+        extension=".jpg",
+        file_size=1024,
+        file_mtime=0.0,
+    )
+    db.conn.commit()
+
+    with app.test_client() as client:
+        resp = client.get("/api/import/readiness")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload["reachable_root_count"] == 1
+        # The offline root's photo is exif_data IS NULL but its root is
+        # not reachable, so the scoped count must exclude it. The
+        # reachable root has no NULL-EXIF photos, so the count is 0 and
+        # the Repair button stays disabled.
+        assert payload["metadata_repair_count"] == 0
+        assert payload["metadata_repair_available"] is False
+
+        # /api/jobs/repair-metadata must refuse to start the no-op job.
+        blocked = client.post("/api/jobs/repair-metadata")
+        assert blocked.status_code == 409
+        assert "no photos need metadata repair" in blocked.get_json()["error"]
+
+
 def test_lightroom_import_route_not_shadowed(app_and_db):
     """POST /api/jobs/import (Lightroom catalogs) keeps its contract —
     the photo import route is a NEW endpoint, not a rename."""

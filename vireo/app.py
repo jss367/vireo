@@ -18010,26 +18010,62 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id, "roots": existing, "skipped": skipped})
 
-    def _metadata_repair_count(db, workspace_id):
+    def _metadata_repair_count(db, workspace_id, root_paths=None):
         # Don't filter by ``folders.status``: that column is only refreshed
         # by ``check_folder_health`` (10-minute loop or the manual
         # "check missing folders" flow), so a workspace whose drive was
         # unplugged and is now reconnected still reads as ``status='missing'``
         # until then. The readiness endpoint fires as soon as the Import
-        # page opens; if we filtered here, users would see 0 repairable
-        # photos and the repair route would 409 with "no photos need
-        # metadata repair" even though ``os.path.isdir`` would let the
-        # repair job scan them. ``metadata_repair_available`` (readiness)
-        # and the repair job's own reachable-root preflight still gate
-        # whether a repair can actually start.
+        # page opens; if we filtered by ``status``, users would see 0
+        # repairable photos and the repair route would 409 with "no
+        # photos need metadata repair" even though ``os.path.isdir`` would
+        # let the repair job scan them.
+        #
+        # ``root_paths`` scopes the count to real-time reachable roots
+        # (based on ``os.path.isdir``). When a workspace mixes an offline
+        # drive with photos missing EXIF and a separate reachable drive
+        # with no repairable rows, an unscoped count combined with a
+        # non-empty ``reachable_roots`` list would enable the Repair
+        # button and start a job that finishes without ever touching the
+        # offline photos — Codex's "repeating repair job" pathology. The
+        # scoped count reflects only what the repair pass would actually
+        # process. ``None`` preserves the unscoped legacy shape for any
+        # future caller that wants a workspace-wide figure.
+        params = [workspace_id]
+        where_extra = ""
+        if root_paths is not None:
+            if not root_paths:
+                return 0
+            normalized_roots = [
+                r.replace("\\", "/").rstrip("/") for r in root_paths if r
+            ]
+            if not normalized_roots:
+                return 0
+            clauses = []
+            for norm in normalized_roots:
+                prefix = norm + "/"
+                # Match ``f.path`` normalized to forward slashes either
+                # exactly against the root or as a boundary-preserving
+                # prefix. ``substr(...)=prefix`` avoids the wildcard
+                # collision LIKE would introduce (e.g. a folder called
+                # ``photos_backup`` incorrectly matching a reachable
+                # ``photos`` root because ``_`` matches any character
+                # in LIKE without ESCAPE).
+                clauses.append(
+                    "(REPLACE(f.path, '\\', '/') = ? "
+                    "OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?)"
+                )
+                params.extend([norm, len(prefix), prefix])
+            where_extra = " AND (" + " OR ".join(clauses) + ")"
         row = db.conn.execute(
-            """SELECT COUNT(DISTINCT p.id) AS count
-               FROM photos p
-               JOIN folders f ON f.id = p.folder_id
-               JOIN workspace_folders wf ON wf.folder_id = f.id
-               WHERE wf.workspace_id = ?
-                 AND p.exif_data IS NULL""",
-            (workspace_id,),
+            "SELECT COUNT(DISTINCT p.id) AS count "
+            "FROM photos p "
+            "JOIN folders f ON f.id = p.folder_id "
+            "JOIN workspace_folders wf ON wf.folder_id = f.id "
+            "WHERE wf.workspace_id = ? "
+            "AND p.exif_data IS NULL"
+            + where_extra,
+            params,
         ).fetchone()
         return int(row["count"] if row else 0)
 
@@ -18042,7 +18078,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         active_ws = db._active_workspace_id
         status = exiftool_status()
-        repair_count = _metadata_repair_count(db, active_ws)
         roots = [r["path"] for r in db.get_workspace_folder_roots(active_ws)]
         # Filter macOS app-managed library bundles before ``os.path.isdir``:
         # stat-ing a ``.photoslibrary`` root (or a symlink into one) itself
@@ -18054,12 +18089,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             root for root in roots
             if not is_excluded_scan_path(root) and os.path.isdir(root)
         ]
+        # Scope the count to reachable roots so an offline drive can't
+        # inflate ``metadata_repair_count`` and enable a Repair button
+        # for a job that would immediately no-op on the photos it can't
+        # touch. When there are no reachable roots the scoped count is
+        # 0, which itself gates ``metadata_repair_available`` — no need
+        # for the previous explicit ``reachable_roots`` conjunction.
+        repair_count = _metadata_repair_count(db, active_ws, reachable_roots)
         return jsonify({
             "exiftool": status,
             "requires_exiftool": app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"],
             "metadata_repair_count": repair_count,
             "metadata_repair_available": bool(
-                status["available"] and repair_count and reachable_roots
+                status["available"] and repair_count
             ),
             "reachable_root_count": len(reachable_roots),
         })
@@ -18080,9 +18122,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         db = _get_db()
         active_ws = db._active_workspace_id
-        repair_count = _metadata_repair_count(db, active_ws)
-        if not repair_count:
-            return json_error("no photos need metadata repair", 409)
         roots = [r["path"] for r in db.get_workspace_folder_roots(active_ws)]
         # See api_import_readiness for why excluded bundles must be filtered
         # before os.path.isdir here (macOS TCC prompt on Photos Library).
@@ -18092,6 +18131,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ]
         if not existing:
             return json_error("no metadata-repair folders are currently on disk")
+        # Count against the actually-reachable roots so the response's
+        # ``photo_count`` matches what the job will process. An unscoped
+        # count could report photos under an offline sibling root that
+        # this job will never touch.
+        repair_count = _metadata_repair_count(db, active_ws, existing)
+        if not repair_count:
+            return json_error("no photos need metadata repair", 409)
 
         runner = app._job_runner
         work = _build_scan_work(
