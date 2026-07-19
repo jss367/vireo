@@ -43,41 +43,46 @@ def test_drag_reorder_persists_with_real_mouse(live_server, page):
 
 
 def test_reorder_uses_pointer_release_without_html_drop(live_server, page):
-    """Regression: reordering must not depend on WKWebView HTML drag events."""
+    """Regression: reordering must not depend on WKWebView HTML drag events.
+
+    Drives the drag with Playwright's real mouse API (so ``setPointerCapture``
+    works — synthetic ``PointerEvent`` dispatches throw ``NotFoundError``
+    because their ``pointerId`` isn't a real browser pointer) while asserting
+    that no ``dragstart``/``drop`` events fire on the strip. That combination
+    proves the reorder happens purely through the pointer-event path.
+    """
     url = live_server["url"]
     page.goto(f"{url}/browse")
     page.wait_for_selector(".nav-tab[data-nav-id='cull']")
 
     before = _nav_ids(page)
 
-    moved = page.evaluate("""() => {
+    page.evaluate("""() => {
         const strip = document.getElementById('navTabStrip');
-        const src = strip.querySelector(".nav-tab[data-nav-id='cull']");
-        const importTab = strip.querySelector(".nav-tab[data-nav-id='import']");
-        const srcRect = src.getBoundingClientRect();
-        const rect = importTab.getBoundingClientRect();
-        const startX = srcRect.left + srcRect.width / 2;
-        const clientX = rect.left + 1;
-        const clientY = rect.top + rect.height / 2;
-
-        const fire = (type, x) => {
-            const ev = new PointerEvent(type, {
-                bubbles: true, cancelable: true, isPrimary: true,
-                pointerId: 7, pointerType: 'mouse', button: 0,
-                buttons: type === 'pointerup' ? 0 : 1,
-                clientX: x, clientY,
-            });
-            el.dispatchEvent(ev);
-        };
-        const el = src;
-        fire('pointerdown', startX);
-        fire('pointermove', clientX);
-        fire('pointerup', clientX);
-        return true;
+        window.__htmlDragCount = 0;
+        ['dragstart', 'dragover', 'drop', 'dragend'].forEach(type => {
+            strip.addEventListener(type, () => { window.__htmlDragCount += 1; }, true);
+        });
     }""")
-    assert moved
+
+    src = page.query_selector(".nav-tab[data-nav-id='cull']")
+    dst = page.query_selector(".nav-tab[data-nav-id='import']")
+    sb, db = src.bounding_box(), dst.bounding_box()
+    page.mouse.move(sb["x"] + sb["width"] / 2, sb["y"] + sb["height"] / 2)
+    page.mouse.down()
+    for i in range(1, 11):
+        page.mouse.move(
+            sb["x"] + (db["x"] + 1 - sb["x"]) * i / 10,
+            db["y"] + db["height"] / 2,
+            steps=2,
+        )
+    page.mouse.up()
 
     page.wait_for_timeout(300)
+    html_drag_count = page.evaluate("window.__htmlDragCount")
+    assert html_drag_count == 0, (
+        f"reorder should not fire HTML5 drag events, saw {html_drag_count}"
+    )
     dom_after = _nav_ids(page)
     assert dom_after[0] == "cull", (
         f"tab did not move on pointer release: {dom_after}"
