@@ -10608,15 +10608,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # relabel of >999 photos would blow SQLITE_MAX_VARIABLE_NUMBER
         # on the legacy builds this file already guards against.
 
-        # Snapshot each photo's current taxonomy keywords before the relabel
-        # touches them. Used to skip stale curation rows for species the
-        # photo no longer carries across all three curation tables
-        # (species_highlights, photo_preferences, species_representatives):
-        # untag_photo does not clear any of them, so a photo can retain a
-        # curation row for species A after that keyword was removed. Without
-        # this filter, relabeling the photo's current species B→C would
-        # sweep the stale A rows into A→C renames — losing the preserved A
-        # state and making C look manually selected.
+        # Snapshot each photo's current species-rank taxonomy keywords
+        # before the relabel touches them. Used to skip stale curation rows
+        # for species the photo no longer carries across all three curation
+        # tables (species_highlights, photo_preferences,
+        # species_representatives): untag_photo does not clear any of them,
+        # so a photo can retain a curation row for species A after that
+        # keyword was removed. Without this filter, relabeling the photo's
+        # current species B→C would sweep the stale A rows into A→C
+        # renames — losing the preserved A state and making C look
+        # manually selected.
+        #
+        # Species-rank filter matches the old_rows removal query below —
+        # higher-rank taxonomy keywords (genus/family) are not untagged by
+        # the relabel, so treating them as "current" would migrate their
+        # curation onto the new species while leaving the higher-rank
+        # keyword attached with its curation stripped.
         current_species_by_pid = {}
         for chunk in _chunked(photo_ids):
             placeholders = ",".join("?" for _ in chunk)
@@ -10624,8 +10631,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f"""SELECT pk.photo_id, k.name
                     FROM photo_keywords pk
                     JOIN keywords k ON k.id = pk.keyword_id
+                    LEFT JOIN taxa t ON t.id = k.taxon_id
                     WHERE pk.photo_id IN ({placeholders})
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')
+                      AND (t.rank = 'species' OR t.rank IS NULL)""",
                 chunk,
             ).fetchall()
             for row in rows:

@@ -12159,6 +12159,26 @@ class Database:
         excluded = tuple(dict.fromkeys(int(x) for x in (exclude_keyword_ids or ())))
         excl_placeholders = ",".join("?" for _ in excluded)
         excl_clause = f" AND k.id NOT IN ({excl_placeholders})" if excluded else ""
+        # When another taxonomy/species keyword row shares the target's
+        # match key but points at a different taxon (e.g. legacy
+        # ``Robin`` alongside taxonomy ``robin``), the taxon_id-is-NULL
+        # fallback below is ambiguous: an unlinked same-key row on the
+        # photo could be either species. Treating it as the target would
+        # let a confirm/accept skip ``tag_photo``/``queue_change`` and
+        # leave the intended species keyword absent. Detect the homonym
+        # conflict once and gate the fallback.
+        homonym_conflict = False
+        if target["taxon_id"] is not None:
+            for row in self.conn.execute(
+                """SELECT name FROM keywords
+                   WHERE (is_species = 1 OR type = 'taxonomy')
+                     AND taxon_id IS NOT NULL
+                     AND taxon_id != ?""",
+                (target["taxon_id"],),
+            ).fetchall():
+                if keyword_match_key(row["name"]) == target_key:
+                    homonym_conflict = True
+                    break
         for chunk in _chunks(ids):
             placeholders = ",".join("?" for _ in chunk)
             if target["taxon_id"] is not None:
@@ -12175,6 +12195,8 @@ class Database:
                     [*chunk, target["taxon_id"], *excluded],
                 ).fetchall()
                 result.update(row["photo_id"] for row in rows)
+                if homonym_conflict:
+                    continue
                 # Fallback: upgraded libraries can carry a hierarchical
                 # species leaf typed as taxonomy/is_species that
                 # mark_species_keywords hasn't yet linked to a taxon_id
@@ -12185,7 +12207,8 @@ class Database:
                 # linked top-level root would not recognize the existing
                 # hierarchy and would queue a duplicate root tag plus
                 # sidecar add. Match unlinked rows by normalized display
-                # name to preserve the hierarchy.
+                # name to preserve the hierarchy. Guarded above so an
+                # ambiguous same-key homonym doesn't get folded in.
                 rows = self.conn.execute(
                     f"""SELECT pk.photo_id, k.name
                         FROM photo_keywords pk

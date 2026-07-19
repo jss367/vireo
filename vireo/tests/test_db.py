@@ -14047,6 +14047,63 @@ def test_equivalent_species_matches_unlinked_legacy_hierarchy_by_name(tmp_path):
     assert db.get_photos_with_equivalent_species([pid], root) == {pid}
 
 
+def test_equivalent_species_skips_unlinked_row_when_homonym_taxon_exists(tmp_path):
+    """When two distinct taxonomy rows share a NOCASE match key but link to
+    different taxa (legacy `Robin` vs taxonomy `robin`), an unlinked same-key
+    row on a photo must not satisfy the target species — the row is ambiguous
+    and treating it as equivalent would let accept/confirm skip tagging the
+    intended species keyword."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (18001, "Erithacus rubecula", "European Robin"),
+            (18002, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Two intentionally-distinct linked species keywords share the NOCASE
+    # match key "robin" but resolve to different taxa. add_keyword dedupes
+    # case-insensitively so INSERT directly to preserve both rows.
+    european = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["European Robin"],),
+    ).lastrowid
+    american = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    ).lastrowid
+    # An unlinked, typed legacy row with the same match key. The user
+    # tagged this row before taxonomy was populated; it could be either
+    # species, so equivalence lookups must not accept it as the target.
+    legacy = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('ROBIN', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    db.tag_photo(pid, legacy)
+
+    # Neither linked target should treat the unlinked homonym as equivalent.
+    assert db.get_photos_with_equivalent_species([pid], european) == set()
+    assert db.get_photos_with_equivalent_species([pid], american) == set()
+
+    # Once the ambiguous legacy row is linked to the taxon that the target
+    # resolves to, equivalence is authoritative again.
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], legacy),
+    )
+    assert db.get_photos_with_equivalent_species([pid], american) == {pid}
+    assert db.get_photos_with_equivalent_species([pid], european) == set()
+
+
 def test_species_display_name_resolves_hierarchy_alias_through_taxon(tmp_path):
     """A differently-spelled hierarchy leaf canonicalizes to the root species
     row linked to the same unique taxon."""

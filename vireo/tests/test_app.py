@@ -10114,6 +10114,96 @@ def test_highlights_relabel_ignores_stale_reps_on_prediction_only_relabel(app_an
     assert "New Species" not in hl
 
 
+def test_highlights_relabel_preserves_higher_rank_taxonomy_curation(app_and_db):
+    """When a photo carries a linked higher-rank taxonomy keyword (family,
+    genus, ...) with its own curation, the relabel query intentionally
+    leaves that keyword attached — the ``t.rank = 'species' OR t.rank IS
+    NULL`` filter on ``old_rows`` restricts removal to species-rank rows.
+    The source-curation snapshot must apply the same rank filter, otherwise
+    ``_accept_curation_source`` migrates the higher-rank tag's curation to
+    the new species even though the higher-rank keyword still holds the
+    photo — leaving the family/genus keyword attached with its curation
+    stripped away.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    fid = db.conn.execute(
+        "INSERT INTO folders (path, name, status) "
+        "VALUES ('/higherrank', 'higherrank', 'ok')"
+    ).lastrowid
+    ws_id = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO workspace_folders (workspace_id, folder_id) VALUES (?, ?)",
+        (ws_id, fid),
+    )
+    # Family-rank taxon and a linked taxonomy keyword for it. The relabel
+    # removal query filters to species-rank rows (species or NULL rank),
+    # so this family keyword is intentionally left attached.
+    family_taxon = db.conn.execute(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (5040, 'Corvidae', 'Corvids', 'family', 'Animalia')"
+    ).lastrowid
+    family_kid = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+        "VALUES ('Corvids', NULL, 1, 'taxonomy', ?)",
+        (family_taxon,),
+    ).lastrowid
+    # Destination species.
+    db.add_keyword("Common Raven", is_species=True)
+    pid = db.conn.execute(
+        "INSERT INTO photos (folder_id, filename, quality_score, flag) "
+        "VALUES (?, 'higherrank.jpg', 0.9, 'none')",
+        (fid,),
+    ).lastrowid
+    db.tag_photo(pid, family_kid)
+    # Curation on the family-rank keyword: a highlight and a global
+    # representative. Both must stay under 'Corvids' after the relabel
+    # because the keyword itself is not being removed.
+    db.add_species_highlight("Corvids", pid)
+    db.set_species_representative("Corvids", pid)
+    db.conn.commit()
+
+    resp = client.post(
+        "/api/highlights/relabel",
+        json={"photo_ids": [pid], "species": "Common Raven"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+    # The family-rank keyword must still be attached to the photo — the
+    # old_rows removal query excludes non-species ranks.
+    attached = {
+        r["id"] for r in db.conn.execute(
+            "SELECT k.id FROM photo_keywords pk "
+            "JOIN keywords k ON k.id = pk.keyword_id "
+            "WHERE pk.photo_id = ?",
+            (pid,),
+        ).fetchall()
+    }
+    assert family_kid in attached, (
+        "family-rank taxonomy keyword must remain attached — its curation "
+        "cannot be swept into the relabel target"
+    )
+
+    # The highlight and representative for the family name must remain
+    # under 'Corvids', not be migrated to 'Common Raven'.
+    hl = db.get_species_highlights()
+    assert pid in (hl.get("Corvids") or {}), (
+        "family-rank highlight must stay under its own species key"
+    )
+    assert pid not in (hl.get("Common Raven") or {}), (
+        "family-rank highlight must not migrate to the new species while "
+        "the family keyword is still attached to the photo"
+    )
+    reps = db.get_species_representatives()
+    assert reps.get("Corvids") == pid, (
+        "family-rank representative must stay under its own species key"
+    )
+    assert reps.get("Common Raven") != pid, (
+        "family-rank representative must not migrate to the new species "
+        "while the family keyword is still attached to the photo"
+    )
+
+
 def test_highlights_relabel_does_not_fold_non_ascii_case_variants(app_and_db):
     """`_accept_curation_source` must key by ``keyword_match_key`` (SQLite's
     ASCII-only NOCASE fold), not Python's ``str.lower()``. SQLite/add_keyword
