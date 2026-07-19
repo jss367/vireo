@@ -9651,6 +9651,28 @@ class Database:
                         ")",
                         (taxon_id, existing["id"], taxon_id),
                     )
+                else:
+                    # No species-rank taxon available. Clear a stale
+                    # non-species taxon_id (e.g. a legacy row bound to
+                    # the genus/family from the old species-agnostic
+                    # lookup) so the row falls under the readers'
+                    # ``t.rank IS NULL`` branch until a genuine
+                    # species-rank match becomes available. Without
+                    # this the is_species/taxonomy promotion below
+                    # still succeeds, but every downstream
+                    # ``t.rank = 'species' OR t.rank IS NULL`` filter
+                    # (Life List, Compare, Explorer, highlight /
+                    # preference eligibility) silently hides the
+                    # just-accepted keyword.
+                    self.conn.execute(
+                        "UPDATE keywords SET taxon_id = NULL "
+                        "WHERE id = ? AND type IN ('general', 'taxonomy') "
+                        "AND taxon_id IS NOT NULL "
+                        "AND COALESCE("
+                        "  (SELECT rank FROM taxa WHERE id = keywords.taxon_id), ''"
+                        ") != 'species'",
+                        (existing["id"],),
+                    )
             if kw_type is None and not is_species and existing["type"] == "general":
                 taxon_id = self._lookup_taxon_id_for_keyword(
                     name, prefer_species=True,

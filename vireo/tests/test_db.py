@@ -19177,6 +19177,60 @@ def test_add_species_leaves_taxon_null_when_only_higher_rank_matches(tmp_path):
     assert row["taxon_id"] is None
 
 
+def test_add_species_clears_higher_rank_taxon_when_no_species_match(tmp_path):
+    """A pre-existing keyword row bound to a higher-rank taxon
+    (e.g. a legacy row stamped with the genus/family taxon before
+    ``prefer_species`` existed) must have that stale non-species
+    ``taxon_id`` cleared to NULL when the next species accept cannot
+    find a species-rank match. Without the clear the reuse branch
+    leaves the higher-rank binding in place while the taxonomy
+    promotion below still stamps ``is_species = 1``/``type =
+    'taxonomy'``, so every rank-filtered reader (Life List,
+    Compare, Explorer, highlight/preference eligibility) that
+    restricts to ``t.rank = 'species' OR t.rank IS NULL`` silently
+    hides the just-accepted keyword.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (10001, "Corvidae", "Corvids", "family"),
+        ],
+    )
+    db.conn.commit()
+    family_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'family'"
+    ).fetchone()["id"]
+
+    # Legacy row: correctly typed taxonomy species but bound to the
+    # non-species-rank family taxon by the old species-agnostic lookup.
+    kid = db.add_keyword("Corvidae", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (family_taxon, kid),
+    )
+    db.conn.commit()
+    pre = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert pre["taxon_id"] == family_taxon
+
+    # Accepting again with is_species=True should clear the stale
+    # higher-rank binding rather than leaving it in place.
+    same = db.add_keyword("Corvidae", is_species=True)
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["is_species"] == 1
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] is None
+
+
 def test_mark_species_keywords_rebinds_higher_rank_taxonomy_link(tmp_path):
     """A keyword row already typed ``taxonomy`` and linked by the old
     species-agnostic lookup to a genus/family taxon must be rebound to a
