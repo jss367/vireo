@@ -460,6 +460,137 @@ body { padding-bottom: 48px; }
   padding: 12px 0;
 }
 
+/* Move confirmation: keep paths, counts, and safety details scannable. */
+#confirmModal .move-confirm-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100vw - 32px));
+  max-width: 560px;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.24);
+}
+.confirm-content {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px 24px 20px;
+}
+.confirm-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  margin-bottom: 18px;
+}
+.confirm-heading-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 10px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border-primary));
+}
+.confirm-heading-icon svg { width: 19px; height: 19px; }
+.confirm-eyebrow {
+  margin: 0 0 3px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.075em;
+  text-transform: uppercase;
+}
+#confirmModal .confirm-heading h3 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+}
+.confirm-message { color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
+.confirm-route {
+  overflow: hidden;
+  margin-bottom: 14px;
+  border: 1px solid var(--border-primary);
+  border-radius: 9px;
+  background: var(--bg-panel);
+}
+.confirm-route-row {
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  padding: 10px 12px;
+}
+.confirm-route-row + .confirm-route-row { border-top: 1px solid var(--border-subtle); }
+.confirm-route-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.confirm-route-path {
+  min-width: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.confirm-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.confirm-stat {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--bg-tertiary);
+}
+.confirm-stat-value {
+  display: block;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 720;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+.confirm-stat-label { display: block; margin-top: 2px; color: var(--text-dim); font-size: 11px; }
+.confirm-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 11px;
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-secondary));
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border-primary));
+  font-size: 12px;
+  line-height: 1.45;
+}
+.confirm-note + .confirm-note { margin-top: 8px; }
+.confirm-note-icon { flex: 0 0 auto; color: var(--accent); font-weight: 800; }
+.confirm-note strong { color: var(--text-secondary); }
+.confirm-note.warning {
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg-secondary));
+  border-color: color-mix(in srgb, var(--warning) 28%, var(--border-primary));
+}
+.confirm-note.warning .confirm-note-icon,
+.confirm-note.warning strong { color: var(--warning); }
+#confirmModal .confirm-actions {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 14px 24px;
+  border-top: 1px solid var(--border-primary);
+  background: var(--bg-tertiary);
+}
+#confirmModal .confirm-actions .modal-btn { min-width: 92px; padding: 8px 17px; border-radius: 6px; }
+
 /* Folder browser modal (move-specific, reuses modal base from navbar) */
 .browser-shortcuts {
   display: flex;
@@ -541,6 +672,9 @@ body { padding-bottom: 48px; }
   .move-route-arrow { transform: rotate(90deg); text-align: left; padding-left: 4px; }
   .move-actions { align-items: stretch; flex-direction: column; }
   .quick-submit { width: 100%; }
+  .confirm-content { padding: 19px 18px 17px; }
+  #confirmModal .confirm-actions { padding: 13px 18px; }
+  .confirm-stats { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -732,12 +866,25 @@ body { padding-bottom: 48px; }
 
 <!-- Confirm Modal -->
 <div class="modal-overlay" id="confirmModal">
-  <div class="modal" style="max-width:450px;">
-    <h3 id="confirmTitle">Confirm Move</h3>
-    <p id="confirmMessage" style="font-size:13px;color:var(--text-secondary);"></p>
-    <div class="modal-actions">
-      <button class="modal-btn modal-btn-primary" id="confirmOkBtn" onclick="confirmOk()">Move</button>
+  <div class="modal move-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <div class="confirm-content">
+      <div class="confirm-heading" id="confirmHeading">
+        <div class="confirm-heading-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3.5 7.5h6l2 2h9v9a2 2 0 0 1-2 2h-15z"></path>
+            <path d="M3.5 7.5V5.8a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v1.7"></path>
+          </svg>
+        </div>
+        <div>
+          <div class="confirm-eyebrow" id="confirmEyebrow">Please confirm</div>
+          <h3 id="confirmTitle">Confirm Move</h3>
+        </div>
+      </div>
+      <div class="confirm-message" id="confirmMessage"></div>
+    </div>
+    <div class="modal-actions confirm-actions">
       <button class="modal-btn modal-btn-cancel" onclick="closeConfirm()">Cancel</button>
+      <button class="modal-btn modal-btn-primary" id="confirmOkBtn" onclick="confirmOk()">Move</button>
     </div>
   </div>
 </div>
@@ -1374,47 +1521,20 @@ async function startQuickMove() {
     var copyN = p.will_copy;
     var skipN = p.will_skip;
     var blockN = p.will_block || 0;
-    var msg;
-    if (typeof copyN === 'number') {
-      // Truthful transfer counts. These count every file under the source
-      // (sidecars included), not just tracked photos — that's what rsync moves.
-      // Files already present are left untouched, never overwritten; a
-      // same-name file whose content differs cancels the whole merge, so only
-      // mention that caveat when there are overlapping files (skipN > 0).
-      // blockN is the count of source files whose destination entry is a
-      // symlink, a directory, or otherwise not a plain file: rsync would skip
-      // those by name, but the post-copy verifier rejects them and the merge
-      // would abort with "Verification failed". Surface the block so the
-      // dialog never says "all already present" when the move would not in
-      // fact complete.
-      var conflictNote = skipN ? ' If a same-name file differs, the merge is canceled and nothing is changed.' : '';
-      var blockNote = blockN ?
-        ' ⚠ ' + blockN.toLocaleString() + ' source file' + (blockN !== 1 ? 's have' : ' has') +
-        ' a destination entry that is a symlink or non-file — the merge will be canceled at the verify step before any originals are removed.' : '';
-      if (copyN === 0 && blockN === 0) {
-        msg = 'All ' + skipN.toLocaleString() + ' file' + (skipN !== 1 ? 's' : '') +
-          ' from "' + sourcePath + '" are already present at "' + finalPath +
-          '". Merging copies nothing new.' + conflictNote +
-          ' Originals are removed only after every source file is verified at the destination. Continue?';
-      } else {
-        var skipPart = skipN ? ', ' + skipN.toLocaleString() + ' already present will be left untouched' : '';
-        var blockPart = blockN ? ', ' + blockN.toLocaleString() + ' blocked by a non-file at the destination' : '';
-        msg = 'Merge "' + sourcePath + '" into "' + finalPath + '"? ' +
-          copyN.toLocaleString() + ' file' + (copyN !== 1 ? 's' : '') + ' will be copied' +
-          skipPart + blockPart + '.' + conflictNote + blockNote +
-          ' Originals are removed only after every source file is verified at the destination.';
-      }
-    } else {
-      // Preview unavailable (e.g. server omitted it) — fall back to the
-      // destination file count rather than inventing a transfer number.
-      var n = pf.file_count || 0;
-      var countText = pf.file_count_truncated ? ('at least ' + n.toLocaleString()) : n.toLocaleString();
-      msg = '"' + finalPath + '" already exists and contains ' + countText + ' file' + (n !== 1 || pf.file_count_truncated ? 's' : '') +
-        '. Merge "' + sourcePath + '" (' + photoCount + ' photos) into it? Files already there are left untouched; only missing files are copied. If a same-name file differs, the merge is canceled and nothing is changed. Originals are removed only after every source file is verified at the destination.';
-    }
-    showConfirm(
-      'Destination Exists — Merge & Resume',
-      moveSummary + ' ' + msg,
+    // Truthful transfer counts include every file under the source (sidecars
+    // included), not just tracked photos. Keep each fact in its own visual
+    // region instead of flattening this safety-critical review into prose.
+    showMergeConfirm({
+      sourcePath: sourcePath,
+      destinationPath: finalPath,
+      photoCount: photoCount,
+      copyCount: typeof copyN === 'number' ? copyN : null,
+      skipCount: typeof skipN === 'number' ? skipN : null,
+      blockCount: blockN,
+      destinationFileCount: pf.file_count || 0,
+      destinationFileCountTruncated: !!pf.file_count_truncated,
+      remote: !!remoteId,
+    },
       function() {
         executeQuickMove(Object.assign({folder_id: fid, merge: true}, destBody));
       }
@@ -2032,8 +2152,115 @@ async function createNewFolder() {
 
 /* ---------- Confirm Modal ---------- */
 function showConfirm(title, message, callback) {
+  document.querySelector('#confirmHeading .confirm-heading-icon').style.display = 'none';
+  document.getElementById('confirmEyebrow').textContent = 'Please confirm';
   document.getElementById('confirmTitle').textContent = title;
   document.getElementById('confirmMessage').textContent = message;
+  document.getElementById('confirmOkBtn').textContent = 'Move';
+  confirmCallback = callback;
+  document.getElementById('confirmModal').classList.add('open');
+}
+
+function appendConfirmRoute(container, label, path) {
+  var row = document.createElement('div');
+  row.className = 'confirm-route-row';
+  var routeLabel = document.createElement('span');
+  routeLabel.className = 'confirm-route-label';
+  routeLabel.textContent = label;
+  var routePath = document.createElement('span');
+  routePath.className = 'confirm-route-path';
+  routePath.textContent = path;
+  row.appendChild(routeLabel);
+  row.appendChild(routePath);
+  container.appendChild(row);
+}
+
+function appendConfirmStat(container, value, label) {
+  var stat = document.createElement('div');
+  stat.className = 'confirm-stat';
+  var statValue = document.createElement('span');
+  statValue.className = 'confirm-stat-value';
+  statValue.textContent = value;
+  var statLabel = document.createElement('span');
+  statLabel.className = 'confirm-stat-label';
+  statLabel.textContent = label;
+  stat.appendChild(statValue);
+  stat.appendChild(statLabel);
+  container.appendChild(stat);
+}
+
+function appendConfirmNote(container, icon, title, detail, warning) {
+  var note = document.createElement('div');
+  note.className = 'confirm-note' + (warning ? ' warning' : '');
+  var noteIcon = document.createElement('span');
+  noteIcon.className = 'confirm-note-icon';
+  noteIcon.setAttribute('aria-hidden', 'true');
+  noteIcon.textContent = icon;
+  var copy = document.createElement('div');
+  var strong = document.createElement('strong');
+  strong.textContent = title;
+  copy.appendChild(strong);
+  copy.appendChild(document.createTextNode(' ' + detail));
+  note.appendChild(noteIcon);
+  note.appendChild(copy);
+  container.appendChild(note);
+}
+
+function showMergeConfirm(details, callback) {
+  var heading = document.getElementById('confirmHeading');
+  heading.querySelector('.confirm-heading-icon').style.display = 'grid';
+  document.getElementById('confirmEyebrow').textContent = 'Destination already exists';
+  document.getElementById('confirmTitle').textContent = 'Merge with the existing folder?';
+  document.getElementById('confirmOkBtn').textContent = 'Merge & Resume';
+
+  var message = document.getElementById('confirmMessage');
+  message.replaceChildren();
+
+  var route = document.createElement('div');
+  route.className = 'confirm-route';
+  appendConfirmRoute(route, 'From', details.sourcePath);
+  appendConfirmRoute(route, 'Into', details.destinationPath);
+  message.appendChild(route);
+
+  var stats = document.createElement('div');
+  stats.className = 'confirm-stats';
+  var photos = Number(details.photoCount) || 0;
+  appendConfirmStat(stats, photos.toLocaleString(), 'photo' + (photos !== 1 ? 's' : '') + ' in source');
+  if (details.copyCount !== null) {
+    appendConfirmStat(stats, details.copyCount.toLocaleString(),
+      'file' + (details.copyCount !== 1 ? 's' : '') + ' to copy');
+    if (details.skipCount) {
+      appendConfirmStat(stats, details.skipCount.toLocaleString(),
+        'already present and kept');
+    }
+    if (details.blockCount) {
+      appendConfirmStat(stats, details.blockCount.toLocaleString(),
+        'blocked by a non-file');
+    }
+  } else {
+    var destCount = details.destinationFileCount.toLocaleString();
+    if (details.destinationFileCountTruncated) destCount += '+';
+    appendConfirmStat(stats, destCount, 'file' +
+      (details.destinationFileCount !== 1 || details.destinationFileCountTruncated ? 's' : '') +
+      ' already at destination');
+  }
+  message.appendChild(stats);
+
+  if (details.skipCount || details.copyCount === null) {
+    appendConfirmNote(message, '↔', 'Existing files stay untouched.',
+      'Only missing files are copied. If same-name files differ, the merge is canceled and nothing is changed.', false);
+  }
+  if (details.blockCount) {
+    var blocked = details.blockCount.toLocaleString() + ' source file' +
+      (details.blockCount !== 1 ? 's have' : ' has') +
+      ' a symlink or non-file in the destination. The merge will stop at verification before any originals are removed.';
+    appendConfirmNote(message, '!', 'Merge will not complete.', blocked, true);
+  }
+  var verifyDetail = details.remote
+    ? 'Files are checksum-verified over SSH before any originals are removed.'
+    : 'Originals are removed only after every source file is verified at the destination.';
+  appendConfirmNote(message, '✓', 'Your originals stay put until verification.', verifyDetail, false);
+
   confirmCallback = callback;
   document.getElementById('confirmModal').classList.add('open');
 }
