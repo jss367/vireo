@@ -123,11 +123,12 @@ def main():
         "--hidden-import", "tokenizers",
     ]
 
-    if platform.system() == "Windows":
+    if platform.system() in {"Windows", "Darwin"}:
         # ExifTool is the metadata backbone, not an optional integration.  A
-        # Windows desktop install cannot assume it exists on PATH, so include
-        # the pinned, checksum-verified official distribution in the one-file
-        # sidecar.  metadata.py resolves it from PyInstaller's _MEIPASS.
+        # desktop install cannot assume it exists on PATH, so include the
+        # pinned, checksum-verified official distribution in the one-file
+        # sidecar on Windows and macOS. metadata.py resolves it from
+        # PyInstaller's _MEIPASS.
         from fetch_exiftool import fetch
 
         exiftool_dir = fetch(Path(repo_root) / "build" / "vendor" / "exiftool")
