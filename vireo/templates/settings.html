@@ -1767,6 +1767,7 @@ async function loadConfig() {
         ssh_key: typeof t.ssh_key === 'string' ? t.ssh_key : '',
         remote_path: typeof t.remote_path === 'string' ? t.remote_path : '',
         mount_path: typeof t.mount_path === 'string' ? t.mount_path : '',
+        local_archive_root: typeof t.local_archive_root === 'string' ? t.local_archive_root : '',
         bwlimit_kbps: t.bwlimit_kbps == null ? 0 : t.bwlimit_kbps,
       });
     });
