@@ -3050,6 +3050,57 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # tags or stale XMP. The method is idempotent (db_meta-gated) so
     # subsequent boots are a cheap SELECT.
     init_db.normalize_keyword_data()
+
+    def _sync_mark_species_only(db, log_label):
+        """Load taxonomy and run mark_species_keywords synchronously.
+
+        Returns True when the pass ran (marking either updated rows or
+        found nothing to update), False when taxonomy is missing or the
+        pass raised. Callers use the return value to gate follow-up work
+        that depends on hierarchy leaves being correctly typed as
+        taxonomy/is_species.
+        """
+        from taxonomy import load_local_taxonomy
+
+        tax = load_local_taxonomy()
+        if tax is None:
+            log.debug(
+                "[%s] taxonomy not loaded; deferring species marking",
+                log_label,
+            )
+            return False
+        try:
+            updated = db.mark_species_keywords(tax)
+            if updated:
+                log.info(
+                    "[%s] Marked %d keywords as species from taxonomy",
+                    log_label, updated,
+                )
+            return True
+        except Exception:
+            log.debug(
+                "[%s] mark_species_keywords failed",
+                log_label, exc_info=True,
+            )
+            return False
+
+    # Remove same-photo, same-taxon duplicate associations left by the old
+    # hierarchy-import + top-level-confirmation interaction. Idempotent and
+    # db_meta-gated, so later boots only pay for a single marker lookup.
+    #
+    # The repair identifies duplicates via
+    # ``(is_species = 1 OR type = 'taxonomy') AND (rank = 'species' OR
+    # taxon_id IS NULL)``. On upgraded databases a hierarchical species
+    # leaf can still be a plain/general row until mark_species_keywords
+    # retypes it, so run marking synchronously first — otherwise the
+    # repair query cannot see the leaf, removes nothing, and still stamps
+    # its one-shot marker; a subsequent background mark_species_keywords
+    # pass could then make the leaf eligible while the redundant root
+    # association remains permanently skipped. When taxonomy isn't
+    # loaded yet (or marking fails), defer the repair to a later boot
+    # rather than stamping the marker over an unmarked hierarchy.
+    if _sync_mark_species_only(init_db, "sync-startup-species-mark"):
+        init_db.repair_duplicate_photo_species()
     # One-time rewrite of the previous miss-threshold defaults (0.25 / 0.15)
     # to the new defaults (0.20 / 0.12) in both ~/.vireo/config.json and
     # workspace overrides. Gated by a marker so it runs once; re-saved
