@@ -1609,39 +1609,43 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
         descendant_predicate = f"substr({path_expr}, 1, ?) = ?"
         descendant_params = (len(prefix), prefix)
     else:
-        root = folder["path"].rstrip("/")
-        prefix = root + "/"
-        path_expr = "f.path"
+        # Always route POSIX descendant matching through the alias-aware
+        # containment helper. A raw lexical SQL prefix misses two real-world
+        # aliasing surfaces:
+        #   - Symlinks. The selected folder ``/photos/card`` may resolve to
+        #     ``/mnt/card`` while a tracked child row is stored as
+        #     ``/mnt/card/day``. ``substr(f.path, ...)`` compares strings and
+        #     never touches the FS, so the descendant is silently dropped
+        #     from the date-move plan even though it belongs under the
+        #     selected subtree.
+        #   - Case-insensitive POSIX volumes (default macOS APFS, mounted
+        #     CIFS, opt-in APFS on Linux). Lexical prefixes omit
+        #     differently-cased descendants; scoping the fold via
+        #     ``_case_insensitive_root`` keeps mixed mount trees safe.
+        # ``_path_equal_or_descends`` collapses both — plus normcase on
+        # Windows — via ``realpath`` and ``samefile``. On a plain
+        # case-sensitive POSIX FS with no symlinks the helper still degrades
+        # to a fast string comparison inside ``realpath``. Cache by folder
+        # path because the join can visit the same folder once per photo.
         case_insensitive_root = _case_insensitive_root(folder["path"])
-        if case_insensitive_root:
-            # On default macOS APFS and other case-folding POSIX volumes,
-            # lexical SQL prefixes can omit a real descendant whose stored
-            # path differs only by case. Reuse the alias-aware containment
-            # helper so the fold stays scoped to the filesystem that was
-            # actually probed as case-insensitive (important for mixed mount
-            # trees). Cache by folder path because the join can visit the
-            # same folder once per photo.
-            descendant_cache = {}
+        descendant_cache = {}
 
-            def _date_move_descends(candidate):
-                if candidate not in descendant_cache:
-                    descendant_cache[candidate] = int(
-                        _path_equal_or_descends(
-                            candidate,
-                            folder["path"],
-                            case_insensitive_root=case_insensitive_root,
-                        )
+        def _date_move_descends(candidate):
+            if candidate not in descendant_cache:
+                descendant_cache[candidate] = int(
+                    _path_equal_or_descends(
+                        candidate,
+                        folder["path"],
+                        case_insensitive_root=case_insensitive_root,
                     )
-                return descendant_cache[candidate]
+                )
+            return descendant_cache[candidate]
 
-            db.conn.create_function(
-                "VIREO_DATE_MOVE_DESCENDS", 1, _date_move_descends,
-            )
-            descendant_predicate = "VIREO_DATE_MOVE_DESCENDS(f.path) = 1"
-            descendant_params = ()
-        else:
-            descendant_predicate = f"substr({path_expr}, 1, ?) = ?"
-            descendant_params = (len(prefix), prefix)
+        db.conn.create_function(
+            "VIREO_DATE_MOVE_DESCENDS", 1, _date_move_descends,
+        )
+        descendant_predicate = "VIREO_DATE_MOVE_DESCENDS(f.path) = 1"
+        descendant_params = ()
     photos = db.conn.execute(
         f"""SELECT p.*, f.path AS folder_path
            FROM photos p

@@ -904,6 +904,52 @@ def test_plan_folder_date_moves_matches_case_alias_on_casefolding_posix(
     assert [pid for item in plan for pid in item["photo_ids"]] == [child_pid]
 
 
+def test_plan_folder_date_moves_matches_symlink_alias_descendants_on_posix(
+    tmp_path,
+):
+    """A tracked child stored through a symlink target must still be planned
+    as a descendant of the selected folder.
+
+    Regression: on case-sensitive POSIX the descendants query used a raw
+    ``substr(f.path, ...)`` prefix, which is false when the selected folder is
+    stored as ``/photos/card`` (a symlink to ``/mnt/card``) but the child row
+    is stored as ``/mnt/card/day``. Those photos were silently dropped from
+    the date-move plan and left behind on disk.
+    """
+    if sys.platform == "win32":
+        pytest.skip("POSIX-only symlink semantics")
+
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    target_root = tmp_path / "mnt" / "card"
+    target_root.mkdir(parents=True)
+    (target_root / "day").mkdir()
+
+    alias_root = tmp_path / "photos" / "card"
+    alias_root.parent.mkdir(parents=True)
+    try:
+        os.symlink(target_root, alias_root, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("filesystem does not support symlinks")
+
+    parent_fid = db.add_folder(str(alias_root), name="card")
+    child_fid = db.add_folder(str(target_root / "day"), name="day")
+    child_pid = db.add_photo(
+        folder_id=child_fid, filename="child.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+
+    plan = plan_folder_date_moves(
+        db, parent_fid, str(tmp_path / "archive"), "%Y-%m-%d",
+    )
+
+    assert [pid for item in plan for pid in item["photo_ids"]] == [child_pid]
+
+
 def test_move_photos_allows_incremental_same_stem_siblings(tmp_path):
     """A RAW/JPEG pair may be moved to one destination in separate calls."""
     from move import move_photos
