@@ -2371,11 +2371,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             payload["message"] = message
         return jsonify(payload), status
 
-    def _photo_not_found_error():
+    def _photo_not_found_error(*, legacy_error="photo_not_found"):
         return json_error(
-            "photo_not_found",
+            legacy_error,
             404,
-            code="photo_not_found",
             message=(
                 "This photo is no longer available in the active workspace. "
                 "Refresh the page and try again."
@@ -2386,7 +2385,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return json_error(
             "keyword_not_found",
             404,
-            code="keyword_not_found",
             message=(
                 "That saved location no longer exists. Refresh the page and "
                 "select another location."
@@ -2397,7 +2395,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return json_error(
             "no_api_key",
             400,
-            code="no_api_key",
             message=(
                 "Google Maps isn’t configured. Add an API key in Settings to "
                 "use Google place search."
@@ -2408,7 +2405,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return json_error(
             "place_not_found",
             404,
-            code="place_not_found",
             message=(
                 "Google Maps couldn’t find that place. Search again and choose "
                 "another result."
@@ -5370,7 +5366,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # mirrors serve_thumbnail / api_files_reveal.
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return _photo_not_found_error()
+            return _photo_not_found_error(legacy_error="not found")
 
         result = dict(photo)
         _attach_location_statuses(db, [result])
@@ -6629,7 +6625,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("excluded must be a boolean")
         old = db.get_photo(photo_id)
         if not old:
-            return _photo_not_found_error()
+            return _photo_not_found_error(legacy_error="not found")
         old_value = "1" if old["wildlife_excluded"] else "0"
         new_value = "1" if excluded else "0"
         try:
@@ -6649,7 +6645,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return _photo_not_found_error()
+            return _photo_not_found_error(legacy_error="not found")
         recipe = db.get_photo_edit_recipe(photo_id)
         payload = {"photo_id": photo_id, "recipe": recipe}
         if recipe and recipe.get("local"):
@@ -6680,7 +6676,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return _photo_not_found_error()
+            return _photo_not_found_error(legacy_error="not found")
         import local_masks
         variant_row = db.conn.execute(
             "SELECT active_mask_variant FROM photos WHERE id=?",
@@ -6713,7 +6709,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("recipe must be a JSON object")
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return _photo_not_found_error()
+            return _photo_not_found_error(legacy_error="not found")
         from image_edits import RecipeError, normalize_recipe, recipe_to_json
         try:
             normalized = normalize_recipe(recipe)
@@ -6756,7 +6752,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return _photo_not_found_error()
+            return _photo_not_found_error(legacy_error="not found")
         from image_edits import recipe_to_json
         old_recipe = db.get_photo_edit_recipe(photo_id)
         old_value = recipe_to_json(old_recipe) or ""
@@ -6941,7 +6937,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         photo = db.get_photo(photo_id, verify_workspace=True)
         if not photo:
-            return _photo_not_found_error()
+            return _photo_not_found_error(legacy_error="not found")
         limit = min(max(1, request.args.get("limit", 50, type=int)), 200)
         rows = db.conn.execute(
             """SELECT eh.id, eh.description, eh.created_at, eh.undone,
@@ -8226,7 +8222,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if "is type" in msg:
                 return jsonify({
                     "error": "wrong_keyword_type",
-                    "code": "wrong_keyword_type",
+                    "code": "invalid_request",
                     "message": (
                         "Only location keywords can be linked to Google Maps "
                         "places."

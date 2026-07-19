@@ -19,8 +19,8 @@ def test_json_error_custom_status(app_and_db):
     resp = client.get('/api/photos/999999')
     assert resp.status_code == 404
     data = resp.get_json()
-    assert data['error'] == 'photo_not_found'
-    assert data['code'] == 'photo_not_found'
+    assert data['error'] == 'not found'
+    assert data['code'] == 'not_found'
     assert 'no longer available in the active workspace' in data['message']
 
 
