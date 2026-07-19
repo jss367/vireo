@@ -9306,6 +9306,11 @@ class Database:
            so pre-existing curation from predictions (which inserted
            `Black Phoebe`) is matched even when the request submits
            `black phoebe`.
+
+        A hierarchy leaf whose spelling differs from its root alias is also
+        canonicalized through a unique linked taxon. This keeps accepted
+        hierarchy buckets and species curation on the same root key while the
+        photo itself retains the hierarchy-bearing keyword association.
         """
         name = normalize_keyword_display(name)
         if not name:
@@ -9330,6 +9335,25 @@ class Database:
                         return r["name"]
                 return name
             return rows[0]["name"]
+        linked_taxa = self.conn.execute(
+            """SELECT DISTINCT taxon_id FROM keywords
+               WHERE name = ? COLLATE NOCASE
+                 AND parent_id IS NOT NULL
+                 AND (is_species = 1 OR type = 'taxonomy')
+                 AND taxon_id IS NOT NULL""",
+            (name,),
+        ).fetchall()
+        if len(linked_taxa) == 1:
+            root = self.conn.execute(
+                """SELECT name FROM keywords
+                   WHERE parent_id IS NULL
+                     AND taxon_id = ?
+                     AND (is_species = 1 OR type = 'taxonomy')
+                   ORDER BY id LIMIT 1""",
+                (linked_taxa[0]["taxon_id"],),
+            ).fetchone()
+            if root is not None:
+                return root["name"]
         import config as cfg
         override = cfg.get("keyword_case")
         if override and override != "auto":
@@ -10619,8 +10643,9 @@ class Database:
         rows are useful globally, but one photo should not carry both for the
         same species-rank taxon. Remove only top-level associations when at
         least one hierarchy-bearing association exists; multiple deliberate
-        hierarchy placements remain intact. Retarget photo-scoped curation to
-        the first hierarchical spelling, and leave all keyword rows intact.
+        hierarchy placements remain intact. Leave photo-scoped curation on
+        the root spelling because that keyword row remains the canonical
+        species key, and leave all keyword rows intact.
 
         Pending keyword changes are name-based rather than keyword-id-based.
         Once the hierarchy association survives, a queued remove for either
@@ -10677,7 +10702,6 @@ class Database:
                 for taxon_id, linked_rows in linked.items():
                     grouped[(photo_id, "taxon", taxon_id)] = linked_rows
 
-            curation_pairs = {}
             for group_key, group in grouped.items():
                 photo_id = group_key[0]
                 if len(group) < 2:
@@ -10689,10 +10713,7 @@ class Database:
                 remove = [row for row in group if row["parent_id"] is None]
                 if not nested or not remove:
                     continue
-                # Preserve every hierarchy placement. The earliest nested row
-                # is only the spelling/id target for history and curation that
-                # previously pointed at the redundant root association.
-                keep = nested[0]
+                # Preserve every hierarchy placement; detach only root rows.
                 remove_ids = [row["keyword_id"] for row in remove]
                 placeholders = ",".join("?" for _ in remove_ids)
                 self.conn.execute(
@@ -10761,33 +10782,6 @@ class Database:
                         f"DELETE FROM pending_changes WHERE id IN ({pending_placeholders})",
                         chunk,
                     )
-
-                if any(row["name"] != keep["name"] for row in remove):
-                    workspace_rows = self.conn.execute(
-                        """SELECT wf.workspace_id
-                           FROM photos p
-                           JOIN workspace_folders wf ON wf.folder_id = p.folder_id
-                           WHERE p.id = ?""",
-                        (photo_id,),
-                    ).fetchall()
-                    pairs = [(photo_id, row["workspace_id"])
-                             for row in workspace_rows]
-                    for removed in remove:
-                        if removed["name"] == keep["name"]:
-                            continue
-                        curation_pairs.setdefault(
-                            (removed["name"], keep["name"]), []
-                        ).extend(pairs)
-
-            for (old_name, new_name), pairs in curation_pairs.items():
-                self.rename_species_highlights_species(
-                    old_name, new_name,
-                    photo_workspace_pairs=pairs, _commit=False,
-                )
-                self.rename_photo_preferences_species(
-                    old_name, new_name,
-                    photo_workspace_pairs=pairs, _commit=False,
-                )
 
             self.set_meta(
                 self._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY, "1", _commit=False

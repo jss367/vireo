@@ -630,6 +630,8 @@ def _collect_highlight_buckets(
         predicted_conf = r.get("predicted_confidence")
         if accepted:
             species = accepted
+            if canonicalize_species is not None:
+                species = canonicalize_species(species) or species
             is_accepted = True
         elif (
             r.get("predicted_species")

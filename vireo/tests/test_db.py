@@ -14012,6 +14012,26 @@ def test_equivalent_species_matches_unlinked_legacy_hierarchy_by_name(tmp_path):
     assert db.get_photos_with_equivalent_species([pid], root) == {pid}
 
 
+def test_species_display_name_resolves_hierarchy_alias_through_taxon(tmp_path):
+    """A differently-spelled hierarchy leaf canonicalizes to the root species
+    row linked to the same unique taxon."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+
+    assert db.resolve_species_display_name("Desert Verdin") == "Verdin"
+
+
 def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path):
     """The one-shot repair detaches only the redundant root association."""
     from db import Database
@@ -14108,6 +14128,48 @@ def test_repair_duplicate_photo_species_drops_root_redo_history(tmp_path):
     tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
     assert nested in tagged_ids
     assert root not in tagged_ids
+
+
+def test_repair_duplicate_photo_species_keeps_curation_on_root_key(tmp_path):
+    """Hierarchy spelling differences do not move curation away from the
+    canonical root species key used by subsequent API requests."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.add_species_highlight("Verdin", pid)
+    db.set_photo_preference("highlights", "Verdin", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    for table in (
+        "species_highlights", "photo_preferences", "species_representatives",
+    ):
+        species = {
+            row["species"] for row in db.conn.execute(
+                f"SELECT species FROM {table} WHERE photo_id = ?", (pid,),
+            ).fetchall()
+        }
+        assert species == {"Verdin"}
 
 
 def test_update_keyword_rename_general_no_match_stays_general(tmp_path):

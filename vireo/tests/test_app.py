@@ -4781,6 +4781,26 @@ def test_highlights_candidates_exclude_unscored_when_quality_floor_raised(app_an
     assert names == {"np_high.jpg"}
 
 
+def test_highlight_bucket_canonicalizes_accepted_hierarchy_species():
+    """Accepted hierarchy aliases use the same canonical bucket key as
+    curation setters and root species rows."""
+    from app import _collect_highlight_buckets
+
+    candidates = [{
+        "id": 1,
+        "filename": "verdin.jpg",
+        "species": "Desert Verdin",
+        "quality_score": 0.8,
+    }]
+    buckets, _unidentified = _collect_highlight_buckets(
+        candidates,
+        0.7,
+        canonicalize_species=lambda _name: "Verdin",
+    )
+
+    assert [bucket["species"] for bucket in buckets] == ["Verdin"]
+
+
 def test_highlights_unscored_only_workspace_returns_content_with_empty_folders(app_and_db):
     """Unscored-only workspaces must not silently blank the Highlights page.
 
