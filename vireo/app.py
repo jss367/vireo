@@ -23990,6 +23990,35 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         if same_species:
                             old_rows_by_photo.setdefault(row["photo_id"], []).append(row)
 
+                # Same-taxon replacements (e.g., renaming to a scientific-name
+                # alias) make the earlier taxon-equivalence precheck stale:
+                # every equivalent row is scheduled for removal, so the photo
+                # would end up carrying no species keyword. Recompute
+                # equivalence while ignoring the rows about to be untagged and
+                # move any now-uncovered photo back into ``newly_tagged`` so
+                # the tag_photo/keyword_add loop below still writes ``kid``.
+                excluded_ids = {
+                    row["id"]
+                    for rows in old_rows_by_photo.values()
+                    for row in rows
+                }
+                if excluded_ids:
+                    replacement_covered = list(
+                        already_has_new & set(old_rows_by_photo)
+                    )
+                    if replacement_covered:
+                        survivors = db.get_photos_with_equivalent_species(
+                            replacement_covered, kid,
+                            exclude_keyword_ids=excluded_ids,
+                        )
+                        lost_equivalence = set(replacement_covered) - survivors
+                        if lost_equivalence:
+                            already_has_new -= lost_equivalence
+                            newly_tagged = [
+                                pid for pid in photo_ids
+                                if pid not in already_has_new
+                            ]
+
                 for pid, old_rows in old_rows_by_photo.items():
                     remove_names = []
                     for old in old_rows:

@@ -12071,13 +12071,21 @@ class Database:
             )
         return result
 
-    def get_photos_with_equivalent_species(self, photo_ids, keyword_id):
+    def get_photos_with_equivalent_species(
+        self, photo_ids, keyword_id, exclude_keyword_ids=None,
+    ):
         """Return submitted photo ids already carrying the target species.
 
         Species identity is the linked taxon when available, not a particular
         keyword row. This lets a hierarchical ``Birds|Verdin`` tag satisfy a
         later confirmation that resolved to the top-level Verdin keyword.
         Unlinked legacy species fall back to the normalized display name.
+
+        When ``exclude_keyword_ids`` is provided, keyword rows with those ids
+        are ignored during the match. Callers use this to look past rows that
+        are about to be removed — for example, a same-taxon replacement where
+        the "already carries this species" answer must reflect only the rows
+        that will survive the mutation.
         """
         if not photo_ids:
             return set()
@@ -12089,6 +12097,9 @@ class Database:
         result = set()
         ids = list(dict.fromkeys(int(pid) for pid in photo_ids))
         target_key = keyword_match_key(target["name"])
+        excluded = tuple(dict.fromkeys(int(x) for x in (exclude_keyword_ids or ())))
+        excl_placeholders = ",".join("?" for _ in excluded)
+        excl_clause = f" AND k.id NOT IN ({excl_placeholders})" if excluded else ""
         for chunk in _chunks(ids):
             placeholders = ",".join("?" for _ in chunk)
             if target["taxon_id"] is not None:
@@ -12100,8 +12111,9 @@ class Database:
                         JOIN keywords k ON k.id = pk.keyword_id
                         WHERE pk.photo_id IN ({placeholders})
                           AND k.taxon_id = ?
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')""",
-                    [*chunk, target["taxon_id"]],
+                          AND (k.is_species = 1 OR k.type = 'taxonomy')
+                          {excl_clause}""",
+                    [*chunk, target["taxon_id"], *excluded],
                 ).fetchall()
                 result.update(row["photo_id"] for row in rows)
                 # Fallback: upgraded libraries can carry a hierarchical
@@ -12121,8 +12133,9 @@ class Database:
                         JOIN keywords k ON k.id = pk.keyword_id
                         WHERE pk.photo_id IN ({placeholders})
                           AND k.taxon_id IS NULL
-                          AND (k.is_species = 1 OR k.type = 'taxonomy')""",
-                    chunk,
+                          AND (k.is_species = 1 OR k.type = 'taxonomy')
+                          {excl_clause}""",
+                    [*chunk, *excluded],
                 ).fetchall()
                 result.update(
                     row["photo_id"] for row in rows
@@ -12134,8 +12147,9 @@ class Database:
                     FROM photo_keywords pk
                     JOIN keywords k ON k.id = pk.keyword_id
                     WHERE pk.photo_id IN ({placeholders})
-                      AND (k.is_species = 1 OR k.type = 'taxonomy')""",
-                chunk,
+                      AND (k.is_species = 1 OR k.type = 'taxonomy')
+                      {excl_clause}""",
+                [*chunk, *excluded],
             ).fetchall()
             result.update(
                 row["photo_id"] for row in rows

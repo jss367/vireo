@@ -1655,6 +1655,79 @@ def test_encounter_species_replacement_removes_hierarchical_previous(app_and_db)
     assert alternate_nested not in tagged_ids
 
 
+def test_encounter_species_replacement_retags_same_taxon_alias(app_and_db):
+    """Same-taxon replacement (e.g. common name → scientific alias) must still
+    end up tagging the photo with the new keyword row instead of stripping the
+    old row and leaving the photo without any species.
+
+    ``get_photos_with_equivalent_species`` matches by taxon_id, so a photo
+    tagged with the previous species alias gets flagged as "already carrying"
+    the new one. Without excluding rows scheduled for removal from that
+    precheck, the replacement loop untags the old row, ``newly_tagged`` stays
+    empty, and the photo ends up carrying no species keyword.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) "
+        "VALUES (2912, 'Auriparus flaviceps', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+    # Prior confirmation left a linked root "Verdin" row plus a hierarchical
+    # leaf that also carries the taxon — replacement must strip both and
+    # still leave the photo with the new scientific-name row.
+    root_verdin = db.add_keyword("Verdin", is_species=True)
+    parent = db.add_keyword("Penduline tits")
+    nested_verdin = db.add_keyword("Verdin", parent_id=parent)
+    # Backfill taxon on the nested leaf so the same-taxon removal loop
+    # includes it (matches mark_species_keywords' link behavior).
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 2912, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (nested_verdin,),
+    )
+    db.conn.commit()
+    db.tag_photo(photo_id, root_verdin)
+    db.tag_photo(photo_id, nested_verdin)
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Verdin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Auriparus flaviceps", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+
+    def _species_names_on(pid):
+        return sorted(
+            row["name"] for row in db.conn.execute(
+                """SELECT k.name FROM keywords k
+                   JOIN photo_keywords pk ON pk.keyword_id = k.id
+                   WHERE pk.photo_id = ?
+                     AND (k.is_species = 1 OR k.type = 'taxonomy')""",
+                (pid,),
+            ).fetchall()
+        )
+
+    remaining = _species_names_on(photo_id)
+    assert remaining == ["Auriparus flaviceps"], (
+        f"expected only the new scientific-name row, got {remaining!r}"
+    )
+    history = db.get_edit_history()
+    assert history[0]["action_type"] == "species_replace"
+
+    db.undo_last_edit()
+    restored = _species_names_on(photo_id)
+    assert "Verdin" in restored
+    assert "Auriparus flaviceps" not in restored
+
+    db.redo_last_undo()
+    redone = _species_names_on(photo_id)
+    assert redone == ["Auriparus flaviceps"]
+
+
 def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
     """Old-species lookup must be scoped to root species keywords only."""
     app, db = app_and_db
