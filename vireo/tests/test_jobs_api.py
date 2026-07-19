@@ -3672,6 +3672,80 @@ def test_chain_skips_move_on_cancelled_process(app_and_db, tmp_path, stub_move, 
     assert process_job["result"]["after_move_skipped"] == "process cancelled"
 
 
+def test_chain_cancel_while_waiting_for_serialize_lock(app_and_db, tmp_path, monkeypatch):
+    """A chained move blocked on the batch serialization lock honors Cancel
+    at the wait boundary instead of running the transfer anyway."""
+    import move as move_mod
+
+    release = threading.Event()
+    calls = []
+
+    def fake_move_folder(db, folder_id, destination, progress_cb=None,
+                         developed_dir="", merge=False, remote=None,
+                         destination_name=""):
+        first = not calls
+        calls.append(folder_id)
+        if first:
+            # Hold the chain lock until the test releases us, pinning the
+            # other move job in its lock-wait loop.
+            assert release.wait(timeout=30), "test never released the holder"
+        return {"moved": 1, "errors": []}
+
+    monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+
+    # Two photos whose (mtime-derived) dates differ land in two archive
+    # folders, producing two chained move jobs that share the batch lock.
+    card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(os.path.join(card, "DSC_0002.jpg"))
+    os.utime(os.path.join(card, "DSC_0001.jpg"), (1577880000, 1577880000))
+    os.utime(os.path.join(card, "DSC_0002.jpg"), (1609502400, 1609502400))
+    dest = str(tmp_path / "archive")
+    _save_nas_target(tmp_path, local_root=dest)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    move_ids = process_job["result"]["move_job_ids"]
+    assert len(move_ids) == 2, process_job["result"]
+
+    try:
+        # Wait until one job holds the lock inside the stub; the other is
+        # then pinned in the waiting loop.
+        deadline = time.time() + 10
+        while not calls and time.time() < deadline:
+            time.sleep(0.05)
+        assert len(calls) == 1, calls
+        waiting = [mid for mid in move_ids
+                   if _job_config(client, mid)["folder_id"] != calls[0]]
+        assert len(waiting) == 1
+        resp = client.post(f"/api/jobs/{waiting[0]}/cancel")
+        assert resp.status_code == 200, resp.get_json()
+        cancelled = wait_for_job_via_client(client, waiting[0])
+    finally:
+        release.set()
+
+    assert cancelled["status"] == "cancelled", cancelled
+    assert cancelled["result"]["summary"] == "Cancelled before transfer started"
+    holder = next(mid for mid in move_ids if mid != waiting[0])
+    held = wait_for_job_via_client(client, holder)
+    assert held["status"] == "completed", held
+    # The cancelled job never ran its transfer.
+    assert len(calls) == 1, calls
+
+
 def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()

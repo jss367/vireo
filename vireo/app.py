@@ -19611,7 +19611,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "Waiting for an earlier chained move to finish"
                         ),
                     })
-                    serialize_lock.acquire()
+                    # Poll instead of blocking outright: this wait is the
+                    # one boundary where Cancel can be honored without
+                    # touching mid-transfer semantics — a blocking acquire
+                    # would run the whole transfer anyway after the user
+                    # pressed Stop.
+                    while not serialize_lock.acquire(timeout=0.5):
+                        if runner.is_cancelled(job["id"]):
+                            # Returning with the lock NOT held, before the
+                            # try below — so the release in its finally
+                            # never fires on this path.
+                            return {
+                                "ok": False, "moved": 0, "errors": [],
+                                "summary": (
+                                    "Cancelled before transfer started"
+                                ),
+                            }
             try:
                 result = move_folder(
                     db=thread_db,
@@ -23401,12 +23416,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # here would mask a run_pipeline_job failure with a chaining
             # bug, so log and swallow.
             log.exception("after-process move chaining failed")
-            if not isinstance(result, dict):
+            msg = f"after-process move chaining failed: {e}"
+            if isinstance(result, dict):
+                # The pipeline succeeded but the chain machinery itself
+                # failed (e.g. creating the thread Database) — surface it
+                # on the result so the planned move doesn't just silently
+                # never happen.
+                result.setdefault("after_move_errors", []).append(msg)
+            elif msg not in job["errors"]:
                 # Raise path: no result dict to surface the failure on, so
                 # record it on the job itself (see the dedup note above).
-                msg = f"after-process move chaining failed: {e}"
-                if msg not in job["errors"]:
-                    job["errors"].append(msg)
+                job["errors"].append(msg)
 
     def _enqueue_process_job(thread_db, runner, workspace_id, *,
                              collection_id, process_id,
