@@ -13984,6 +13984,34 @@ def test_species_queries_use_taxon_rank_and_dedupe_hierarchy_by_taxon(tmp_path):
     assert rows[nested]["taxon_rank"] == "species"
 
 
+def test_equivalent_species_matches_unlinked_legacy_hierarchy_by_name(tmp_path):
+    """A linked root target still matches a typed legacy hierarchy leaf whose
+    taxon link has not yet been backfilled."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL, is_species = 1, "
+        "type = 'taxonomy' WHERE id = ?",
+        (nested,),
+    )
+    db.tag_photo(pid, nested)
+
+    assert db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (root,),
+    ).fetchone()["taxon_id"] == taxa["Verdin"]
+    assert db.get_photos_with_equivalent_species([pid], root) == {pid}
+
+
 def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path):
     """The one-shot repair detaches only the redundant root association."""
     from db import Database
@@ -14002,9 +14030,17 @@ def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path)
     db.tag_photo(pid, nested)
     db.tag_photo(pid, root)
     db.queue_change(pid, "keyword_add", "Verdin")
-    db.record_edit(
+    keyword_edit_id = db.record_edit(
         "keyword_add", 'Confirmed species "Verdin"', str(root),
         [{"photo_id": pid, "old_value": "", "new_value": str(root)}],
+    )
+    rating_edit_id = db.record_edit(
+        "rating", "Changed rating", "5",
+        [{
+            "photo_id": pid,
+            "old_value": str(root),
+            "new_value": str(root),
+        }],
     )
     db.conn.execute(
         "DELETE FROM db_meta WHERE key = ?",
@@ -14024,9 +14060,18 @@ def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path)
         if row["photo_id"] == pid and row["value"] == "Verdin"
     ]
     history_item = db.conn.execute(
-        "SELECT new_value FROM edit_history_items WHERE photo_id = ?", (pid,)
+        "SELECT new_value FROM edit_history_items WHERE edit_id = ?",
+        (keyword_edit_id,),
     ).fetchone()
     assert history_item["new_value"] == str(nested)
+    rating_item = db.conn.execute(
+        "SELECT old_value, new_value FROM edit_history_items WHERE edit_id = ?",
+        (rating_edit_id,),
+    ).fetchone()
+    assert dict(rating_item) == {
+        "old_value": str(root),
+        "new_value": str(root),
+    }
     assert db.repair_duplicate_photo_species() == 0
 
 

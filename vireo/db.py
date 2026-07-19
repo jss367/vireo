@@ -506,11 +506,6 @@ class Database:
         # have already advanced some live DBs past the next free version
         # number, which would silently skip a version-gated migration.
         self.normalize_keyword_data()
-        # One-shot repair for photos that carry both a hierarchical species
-        # keyword and a top-level confirmation keyword for the same taxon.
-        # Keep the hierarchy-bearing association; the root keyword row can
-        # still be used legitimately by other photos.
-        self.repair_duplicate_photo_species()
         self._restore_active_workspace()
 
     def _restore_active_workspace(self):
@@ -10709,14 +10704,28 @@ class Database:
 
                 # Exact-id history payloads should point at the surviving
                 # association so an old undo/redo never references a tag this
-                # repair deliberately detached.
+                # repair deliberately detached. Values in these columns are
+                # action-dependent, so only rewrite action/column pairs that
+                # actually store keyword ids; a rating or prediction id can
+                # legitimately have the same numeric value as a keyword id.
+                keyword_id_actions = {
+                    "new_value": (
+                        "keyword_add", "species_replace", "prediction_accept",
+                    ),
+                    "old_value": ("keyword_remove", "species_replace"),
+                }
                 for removed in remove:
-                    for column in ("old_value", "new_value"):
+                    for column, actions in keyword_id_actions.items():
+                        action_placeholders = ",".join("?" for _ in actions)
                         self.conn.execute(
                             f"""UPDATE edit_history_items SET {column} = ?
-                                WHERE photo_id = ? AND {column} = ?""",
+                                WHERE photo_id = ? AND {column} = ?
+                                  AND edit_id IN (
+                                      SELECT id FROM edit_history
+                                      WHERE action_type IN ({action_placeholders})
+                                  )""",
                             (str(keep["keyword_id"]), photo_id,
-                             str(removed["keyword_id"])),
+                             str(removed["keyword_id"]), *actions),
                         )
 
                 names = {keyword_match_key(row["name"]) for row in group}
@@ -12011,15 +12020,20 @@ class Database:
             placeholders = ",".join("?" for _ in chunk)
             if target["taxon_id"] is not None:
                 rows = self.conn.execute(
-                    f"""SELECT DISTINCT pk.photo_id
+                    f"""SELECT pk.photo_id, k.name, k.taxon_id
                         FROM photo_keywords pk
                         JOIN keywords k ON k.id = pk.keyword_id
                         WHERE pk.photo_id IN ({placeholders})
-                          AND k.taxon_id = ?
+                          AND (k.taxon_id = ? OR k.taxon_id IS NULL)
                           AND (k.is_species = 1 OR k.type = 'taxonomy')""",
                     [*chunk, target["taxon_id"]],
                 ).fetchall()
-                result.update(row["photo_id"] for row in rows)
+                target_key = keyword_match_key(target["name"])
+                result.update(
+                    row["photo_id"] for row in rows
+                    if row["taxon_id"] == target["taxon_id"]
+                    or keyword_match_key(row["name"]) == target_key
+                )
                 continue
             rows = self.conn.execute(
                 f"""SELECT pk.photo_id, k.name
@@ -14555,14 +14569,15 @@ class Database:
                             old_name, species, [(photo_id, ws)],
                             _commit=False,
                         )
-                if replace_species or not already_has_species:
+                changed_tag = replace_species or not already_has_species
+                if changed_tag:
                     self.tag_photo(photo_id, kid, _commit=False)
                     self.queue_change(photo_id, "keyword_add", species, _commit=False)
-                affected.append({
-                    "photo_id": photo_id,
-                    "prediction_id": this_pred_id,
-                    "old_species": old_species,
-                })
+                    affected.append({
+                        "photo_id": photo_id,
+                        "prediction_id": this_pred_id,
+                        "old_species": old_species,
+                    })
 
             # If grouped, accept all predictions in the group (in this workspace).
             if pred["group_id"]:

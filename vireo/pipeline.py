@@ -388,7 +388,7 @@ def load_photo_features(db, collection_id=None, config=None,
            JOIN photos p ON p.id = pk.photo_id
            JOIN keywords k ON k.id = pk.keyword_id
            LEFT JOIN taxa t ON t.id = k.taxon_id
-           WHERE k.is_species = 1
+           WHERE (k.is_species = 1 OR k.type = 'taxonomy')
              AND (t.rank = 'species' OR t.rank IS NULL)
              {scope_sql}
            ORDER BY k.name""",

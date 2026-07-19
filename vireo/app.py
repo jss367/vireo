@@ -3050,10 +3050,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # tags or stale XMP. The method is idempotent (db_meta-gated) so
     # subsequent boots are a cheap SELECT.
     init_db.normalize_keyword_data()
-    # Remove same-photo, same-taxon duplicate associations left by the old
-    # hierarchy-import + top-level-confirmation interaction. Idempotent and
-    # db_meta-gated, so later boots only pay for a single marker lookup.
-    init_db.repair_duplicate_photo_species()
     # One-time rewrite of the previous miss-threshold defaults (0.25 / 0.15)
     # to the new defaults (0.20 / 0.12) in both ~/.vireo/config.json and
     # workspace overrides. Gated by a marker so it runs once; re-saved
@@ -3144,8 +3140,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if updated:
                 log.info("[%s] Marked %d keywords as species from taxonomy",
                          log_label, updated)
+            repaired = db.repair_duplicate_photo_species()
+            if repaired:
+                log.info(
+                    "[%s] Removed %d duplicate root species associations",
+                    log_label, repaired,
+                )
         except Exception:
-            log.debug("[%s] mark_species_keywords failed", log_label, exc_info=True)
+            log.debug(
+                "[%s] species marking/repair failed", log_label, exc_info=True,
+            )
             return
         try:
             db.backfill_wildlife_genre()
@@ -12282,7 +12286,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_accept_prediction(pred_id):
         db = _get_db()
         result = db.accept_prediction(pred_id)
-        if result:
+        if result and result["affected"]:
             items = [{'photo_id': a['photo_id'],
                       'old_value': str(a['prediction_id']),
                       'new_value': str(result['keyword_id'])}

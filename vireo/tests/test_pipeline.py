@@ -1502,6 +1502,26 @@ def test_load_photo_features_confirmed_species(tmp_path):
     assert len(unconfirmed) == len(ids[1])
 
 
+def test_load_photo_features_includes_taxonomy_type_without_species_flag(tmp_path):
+    """Taxonomy-typed legacy rows remain confirmed species even when their
+    redundant is_species flag is unset."""
+    from pipeline import load_photo_features
+
+    db, ids = _setup_db_with_photos(tmp_path)
+    pid = ids[0][0]
+    keyword_id = db.add_keyword("Verdin")
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 0 "
+        "WHERE id = ?",
+        (keyword_id,),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, keyword_id)
+
+    photo = next(p for p in load_photo_features(db) if p["id"] == pid)
+    assert photo["confirmed_species"] == "Verdin"
+
+
 def test_load_photo_features_ignores_taxonomy_ancestors_as_species(tmp_path):
     """A family keyword may be taxonomy-typed, but only the species-rank
     hierarchy leaf should become confirmed_species."""
