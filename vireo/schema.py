@@ -7,6 +7,7 @@ web requests open an initialized database and never perform schema work.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -125,6 +126,384 @@ def _restore_direct_default_navigation(conn):
     )
 
 
+_LEGACY_DETECTOR_MODEL = "MegaDetector"
+_CANONICAL_DETECTOR_MODEL = "megadetector-v6"
+
+
+def _merge_review_status_sql():
+    """Return the status expression used when two prediction reviews collide."""
+    return """
+        CASE
+          WHEN prediction_review.status = 'pending'
+               AND excluded.status <> 'pending'
+            THEN excluded.status
+          WHEN prediction_review.status <> 'pending'
+               AND excluded.status = 'pending'
+            THEN prediction_review.status
+          WHEN COALESCE(excluded.reviewed_at, '')
+               > COALESCE(prediction_review.reviewed_at, '')
+            THEN excluded.status
+          ELSE prediction_review.status
+        END
+    """
+
+
+def _merge_legacy_detector_alias(conn):
+    """Consolidate pre-versioned MegaDetector cache rows without losing review data.
+
+    Older builds stored MegaDetector V6 rows under ``MegaDetector``. A short-lived
+    startup migration renamed that key to ``megadetector-v6``, but catalogs that
+    skipped that build could later accumulate a second, canonical copy of every
+    box. Multi-subject Compare then rendered the two cache rows as two subjects.
+
+    Prefer an existing canonical detection for each identical box. If a box exists
+    only under the legacy key, keep its lowest-id row. Predictions, classifier-run
+    markers, review state, and edit-history prediction references are moved to the
+    survivor before duplicate detections are deleted.
+    """
+    legacy_count = conn.execute(
+        "SELECT COUNT(*) FROM detections WHERE detector_model = ?",
+        (_LEGACY_DETECTOR_MODEL,),
+    ).fetchone()[0]
+    if not legacy_count:
+        # Zero-box detector runs can carry the old key even when no detection row
+        # exists, so normalize them on the warm/empty path too.
+        conn.execute(
+            """
+            INSERT INTO detector_runs
+                (photo_id, detector_model, run_at, box_count)
+            SELECT photo_id, ?, run_at, box_count
+            FROM detector_runs
+            WHERE detector_model = ?
+            ON CONFLICT(photo_id, detector_model) DO UPDATE SET
+              run_at = CASE
+                WHEN detector_runs.run_at IS NULL THEN excluded.run_at
+                WHEN excluded.run_at IS NULL THEN detector_runs.run_at
+                WHEN excluded.run_at > detector_runs.run_at THEN excluded.run_at
+                ELSE detector_runs.run_at
+              END,
+              box_count = MAX(detector_runs.box_count, excluded.box_count)
+            """,
+            (_CANONICAL_DETECTOR_MODEL, _LEGACY_DETECTOR_MODEL),
+        )
+        conn.execute(
+            "DELETE FROM detector_runs WHERE detector_model = ?",
+            (_LEGACY_DETECTOR_MODEL,),
+        )
+        return
+
+    conn.execute("DROP TABLE IF EXISTS temp.legacy_detector_groups")
+    conn.execute("DROP TABLE IF EXISTS temp.legacy_detection_merge")
+    conn.execute("DROP TABLE IF EXISTS temp.legacy_prediction_merge")
+
+    # Build one group for every geometry touched by the legacy alias. An existing
+    # canonical row wins; otherwise retain the lowest legacy id. ``IS`` joins below
+    # intentionally make NULL coordinates/category compare equal for old fixtures.
+    conn.execute(
+        """
+        CREATE TEMP TABLE legacy_detector_groups AS
+        SELECT
+          COALESCE(
+            MIN(CASE WHEN detector_model = 'megadetector-v6' THEN id END),
+            MIN(id)
+          ) AS survivor_id,
+          photo_id, box_x, box_y, box_w, box_h, category,
+          MAX(detector_confidence) AS max_confidence,
+          MIN(created_at) AS first_created
+        FROM detections
+        WHERE detector_model IN ('MegaDetector', 'megadetector-v6')
+        GROUP BY photo_id, box_x, box_y, box_w, box_h, category
+        HAVING SUM(CASE WHEN detector_model = 'MegaDetector' THEN 1 ELSE 0 END) > 0
+        """
+    )
+    conn.execute("CREATE UNIQUE INDEX temp.idx_legacy_detector_groups_survivor ON legacy_detector_groups(survivor_id)")
+    conn.execute(
+        """
+        CREATE TEMP TABLE legacy_detection_merge AS
+        SELECT d.id AS old_id, g.survivor_id
+        FROM detections d
+        JOIN legacy_detector_groups g
+          ON g.photo_id = d.photo_id
+         AND g.box_x IS d.box_x
+         AND g.box_y IS d.box_y
+         AND g.box_w IS d.box_w
+         AND g.box_h IS d.box_h
+         AND g.category IS d.category
+        WHERE d.detector_model IN ('MegaDetector', 'megadetector-v6')
+          AND d.id <> g.survivor_id
+        """
+    )
+    conn.execute("CREATE UNIQUE INDEX temp.idx_legacy_detection_merge_old ON legacy_detection_merge(old_id)")
+
+    # Keep the strongest cached confidence and oldest creation timestamp on the
+    # survivor. In the normal duplicate case these values are already identical.
+    conn.execute(
+        """
+        UPDATE detections
+        SET detector_confidence = (
+              SELECT max_confidence FROM legacy_detector_groups
+              WHERE survivor_id = detections.id
+            ),
+            created_at = COALESCE(created_at, (
+              SELECT first_created FROM legacy_detector_groups
+              WHERE survivor_id = detections.id
+            ))
+        WHERE id IN (SELECT survivor_id FROM legacy_detector_groups)
+        """
+    )
+
+    # Copy loser predictions onto their survivor detection. The identity UNIQUE
+    # makes this both an insert for legacy-only information and a merge for output
+    # already regenerated under the canonical detection id.
+    conn.execute(
+        """
+        INSERT INTO predictions (
+          detection_id, classifier_model, labels_fingerprint, species,
+          confidence, category, scientific_name, taxonomy_kingdom,
+          taxonomy_phylum, taxonomy_class, taxonomy_order, taxonomy_family,
+          taxonomy_genus, created_at
+        )
+        SELECT m.survivor_id, p.classifier_model, p.labels_fingerprint,
+               p.species, p.confidence, p.category, p.scientific_name,
+               p.taxonomy_kingdom, p.taxonomy_phylum, p.taxonomy_class,
+               p.taxonomy_order, p.taxonomy_family, p.taxonomy_genus,
+               p.created_at
+        FROM predictions p
+        JOIN legacy_detection_merge m ON m.old_id = p.detection_id
+        WHERE 1
+        ON CONFLICT(detection_id, classifier_model, labels_fingerprint, species)
+        DO UPDATE SET
+          confidence = CASE
+            WHEN predictions.confidence IS NULL THEN excluded.confidence
+            WHEN excluded.confidence IS NULL THEN predictions.confidence
+            WHEN excluded.confidence > predictions.confidence THEN excluded.confidence
+            ELSE predictions.confidence
+          END,
+          category = COALESCE(predictions.category, excluded.category),
+          scientific_name = COALESCE(predictions.scientific_name, excluded.scientific_name),
+          taxonomy_kingdom = COALESCE(predictions.taxonomy_kingdom, excluded.taxonomy_kingdom),
+          taxonomy_phylum = COALESCE(predictions.taxonomy_phylum, excluded.taxonomy_phylum),
+          taxonomy_class = COALESCE(predictions.taxonomy_class, excluded.taxonomy_class),
+          taxonomy_order = COALESCE(predictions.taxonomy_order, excluded.taxonomy_order),
+          taxonomy_family = COALESCE(predictions.taxonomy_family, excluded.taxonomy_family),
+          taxonomy_genus = COALESCE(predictions.taxonomy_genus, excluded.taxonomy_genus),
+          created_at = CASE
+            WHEN predictions.created_at IS NULL THEN excluded.created_at
+            WHEN excluded.created_at IS NULL THEN predictions.created_at
+            WHEN excluded.created_at < predictions.created_at THEN excluded.created_at
+            ELSE predictions.created_at
+          END
+        """
+    )
+
+    # Map every soon-to-be-deleted prediction id to the prediction that now owns
+    # its identity on the survivor. This drives both review-state and undo-history
+    # repair before the loser rows cascade away.
+    conn.execute(
+        """
+        CREATE TEMP TABLE legacy_prediction_merge AS
+        SELECT old_p.id AS old_id, MIN(new_p.id) AS survivor_id
+        FROM predictions old_p
+        JOIN legacy_detection_merge dm ON dm.old_id = old_p.detection_id
+        JOIN predictions new_p
+          ON new_p.detection_id = dm.survivor_id
+         AND new_p.classifier_model = old_p.classifier_model
+         AND new_p.labels_fingerprint = old_p.labels_fingerprint
+         AND new_p.species IS old_p.species
+        GROUP BY old_p.id
+        """
+    )
+    conn.execute("CREATE UNIQUE INDEX temp.idx_legacy_prediction_merge_old ON legacy_prediction_merge(old_id)")
+
+    conn.execute(
+        f"""
+        INSERT INTO prediction_review (
+          prediction_id, workspace_id, status, reviewed_at,
+          individual, group_id, vote_count, total_votes
+        )
+        SELECT pm.survivor_id, r.workspace_id, r.status, r.reviewed_at,
+               r.individual, r.group_id, r.vote_count, r.total_votes
+        FROM prediction_review r
+        JOIN legacy_prediction_merge pm ON pm.old_id = r.prediction_id
+        WHERE 1
+        ON CONFLICT(prediction_id, workspace_id) DO UPDATE SET
+          status = {_merge_review_status_sql()},
+          reviewed_at = CASE
+            WHEN prediction_review.reviewed_at IS NULL THEN excluded.reviewed_at
+            WHEN excluded.reviewed_at IS NULL THEN prediction_review.reviewed_at
+            WHEN excluded.reviewed_at > prediction_review.reviewed_at
+              THEN excluded.reviewed_at
+            ELSE prediction_review.reviewed_at
+          END,
+          individual = COALESCE(prediction_review.individual, excluded.individual),
+          group_id = COALESCE(prediction_review.group_id, excluded.group_id),
+          vote_count = COALESCE(prediction_review.vote_count, excluded.vote_count),
+          total_votes = COALESCE(prediction_review.total_votes, excluded.total_votes)
+        """
+    )
+
+    # prediction_accept history stores a bare prediction id in old_value. Newer
+    # history payloads can store it in JSON; update both forms so undo/redo keeps
+    # addressing the surviving prediction after duplicate rows are removed.
+    conn.execute(
+        """
+        UPDATE edit_history_items
+        SET old_value = (
+          SELECT CAST(pm.survivor_id AS TEXT)
+          FROM legacy_prediction_merge pm
+          WHERE CAST(pm.old_id AS TEXT) = edit_history_items.old_value
+        )
+        WHERE edit_id IN (
+          SELECT id FROM edit_history WHERE action_type = 'prediction_accept'
+        )
+          AND old_value IN (
+            SELECT CAST(old_id AS TEXT) FROM legacy_prediction_merge
+          )
+        """
+    )
+    prediction_id_map = dict(conn.execute("SELECT old_id, survivor_id FROM legacy_prediction_merge").fetchall())
+    json_history = conn.execute(
+        "SELECT id, old_value FROM edit_history_items WHERE ltrim(old_value) LIKE '{%'"
+    ).fetchall()
+    for item_id, raw_value in json_history:
+        try:
+            payload = json.loads(raw_value)
+            old_prediction_id = int(payload.get("prediction_id"))
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        survivor_id = prediction_id_map.get(old_prediction_id)
+        if survivor_id is None:
+            continue
+        payload["prediction_id"] = survivor_id
+        conn.execute(
+            "UPDATE edit_history_items SET old_value = ? WHERE id = ?",
+            (json.dumps(payload, separators=(",", ":")), item_id),
+        )
+
+    # Preserve classifier completion markers and prefer the later run time / larger
+    # recorded output count when both aliases already have the same run identity.
+    conn.execute(
+        """
+        INSERT INTO classifier_runs (
+          detection_id, classifier_model, labels_fingerprint,
+          run_at, prediction_count
+        )
+        SELECT dm.survivor_id, cr.classifier_model, cr.labels_fingerprint,
+               cr.run_at, cr.prediction_count
+        FROM classifier_runs cr
+        JOIN legacy_detection_merge dm ON dm.old_id = cr.detection_id
+        WHERE 1
+        ON CONFLICT(detection_id, classifier_model, labels_fingerprint)
+        DO UPDATE SET
+          run_at = CASE
+            WHEN classifier_runs.run_at IS NULL THEN excluded.run_at
+            WHEN excluded.run_at IS NULL THEN classifier_runs.run_at
+            WHEN excluded.run_at > classifier_runs.run_at THEN excluded.run_at
+            ELSE classifier_runs.run_at
+          END,
+          prediction_count = MAX(
+            classifier_runs.prediction_count, excluded.prediction_count
+          )
+        """
+    )
+
+    merged_detection_count = conn.execute("SELECT COUNT(*) FROM legacy_detection_merge").fetchone()[0]
+    merged_prediction_count = conn.execute("SELECT COUNT(*) FROM legacy_prediction_merge").fetchone()[0]
+
+    # Deleting loser detections now safely cascades only records already copied to
+    # their survivor. Normalize every retained legacy-only survivor afterward.
+    conn.execute("DELETE FROM detections WHERE id IN (SELECT old_id FROM legacy_detection_merge)")
+    conn.execute(
+        "UPDATE detections SET detector_model = ? WHERE detector_model = ?",
+        (_CANONICAL_DETECTOR_MODEL, _LEGACY_DETECTOR_MODEL),
+    )
+
+    # Merge zero-box and populated detector-run aliases, then make box_count agree
+    # with the repaired cache for every photo touched by legacy detections.
+    conn.execute(
+        """
+        INSERT INTO detector_runs (photo_id, detector_model, run_at, box_count)
+        SELECT photo_id, ?, run_at, box_count
+        FROM detector_runs
+        WHERE detector_model = ?
+        ON CONFLICT(photo_id, detector_model) DO UPDATE SET
+          run_at = CASE
+            WHEN detector_runs.run_at IS NULL THEN excluded.run_at
+            WHEN excluded.run_at IS NULL THEN detector_runs.run_at
+            WHEN excluded.run_at > detector_runs.run_at THEN excluded.run_at
+            ELSE detector_runs.run_at
+          END,
+          box_count = MAX(detector_runs.box_count, excluded.box_count)
+        """,
+        (_CANONICAL_DETECTOR_MODEL, _LEGACY_DETECTOR_MODEL),
+    )
+    conn.execute(
+        "DELETE FROM detector_runs WHERE detector_model = ?",
+        (_LEGACY_DETECTOR_MODEL,),
+    )
+    conn.execute(
+        """
+        INSERT INTO detector_runs (photo_id, detector_model, run_at, box_count)
+        SELECT g.photo_id, 'megadetector-v6', MIN(d.created_at), COUNT(d.id)
+        FROM (SELECT DISTINCT photo_id FROM legacy_detector_groups) g
+        JOIN detections d
+          ON d.photo_id = g.photo_id
+         AND d.detector_model = 'megadetector-v6'
+        GROUP BY g.photo_id
+        ON CONFLICT(photo_id, detector_model) DO UPDATE SET
+          box_count = excluded.box_count,
+          run_at = COALESCE(detector_runs.run_at, excluded.run_at)
+        """
+    )
+
+    # Recompute counts after prediction identities have been folded together.
+    conn.execute(
+        """
+        UPDATE classifier_runs
+        SET prediction_count = (
+          SELECT COUNT(*) FROM predictions p
+          WHERE p.detection_id = classifier_runs.detection_id
+            AND p.classifier_model = classifier_runs.classifier_model
+            AND p.labels_fingerprint = classifier_runs.labels_fingerprint
+        )
+        WHERE detection_id IN (
+          SELECT survivor_id FROM legacy_detector_groups
+        )
+        """
+    )
+
+    conn.execute(
+        "INSERT OR REPLACE INTO db_meta(key, value) VALUES (?, ?)",
+        (
+            "legacy_megadetector_alias_repair",
+            json.dumps(
+                {
+                    "legacy_detections": legacy_count,
+                    "merged_detections": merged_detection_count,
+                    "remapped_predictions": merged_prediction_count,
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
+def _validate_legacy_detector_alias_merge(conn):
+    legacy_detections = conn.execute(
+        "SELECT COUNT(*) FROM detections WHERE detector_model = ?",
+        (_LEGACY_DETECTOR_MODEL,),
+    ).fetchone()[0]
+    legacy_runs = conn.execute(
+        "SELECT COUNT(*) FROM detector_runs WHERE detector_model = ?",
+        (_LEGACY_DETECTOR_MODEL,),
+    ).fetchone()[0]
+    if legacy_detections or legacy_runs:
+        raise RuntimeError("schema migration validation failed: legacy MegaDetector aliases remain")
+    fk_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_errors:
+        raise RuntimeError("schema migration validation failed: detector repair broke foreign keys")
+
+
 MIGRATIONS = (
     Migration(
         version=5,
@@ -142,6 +521,12 @@ MIGRATIONS = (
         name="restore-direct-default-navigation",
         apply=_restore_direct_default_navigation,
     ),
+    Migration(
+        version=8,
+        name="merge-legacy-megadetector-alias",
+        apply=_merge_legacy_detector_alias,
+        validate=_validate_legacy_detector_alias_merge,
+    ),
 )
 
 
@@ -149,9 +534,7 @@ def _apply_pending(conn):
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     latest = MIGRATIONS[-1].version if MIGRATIONS else current
     if current > latest:
-        raise RuntimeError(
-            f"database schema version {current} is newer than supported {latest}"
-        )
+        raise RuntimeError(f"database schema version {current} is newer than supported {latest}")
 
     for migration in MIGRATIONS:
         if migration.version <= current:
