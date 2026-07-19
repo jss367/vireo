@@ -303,6 +303,18 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
                 (empty_photo_id, "MegaDetector", "2026-04-23T04:01:00", 0),
             ],
         )
+        db.conn.execute(
+            """
+            INSERT INTO photo_masks (
+              photo_id, variant, path, created_at, detector_model,
+              prompt_x, prompt_y, prompt_w, prompt_h
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                photo_id, "sam2-small", "/masks/bird.png", 1,
+                "MegaDetector", 0.1, 0.2, 0.3, 0.4,
+            ),
+        )
         db.conn.executemany(
             """
             INSERT INTO edit_history (
@@ -409,6 +421,12 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
             "no_tag": True,
         }
 
+        mask_model = conn.execute(
+            "SELECT detector_model FROM photo_masks WHERE photo_id = ?",
+            (photo_id,),
+        ).fetchone()[0]
+        assert mask_model == "megadetector-v6"
+
         detector_runs = conn.execute(
             """
             SELECT photo_id, detector_model, box_count
@@ -424,6 +442,9 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
         ]
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    with Database(db_path, initialize_schema=False) as migrated_db:
+        assert migrated_db.find_stale_masks() == []
 
 
 def test_legacy_megadetector_zero_box_run_is_normalized_without_detections(tmp_path):

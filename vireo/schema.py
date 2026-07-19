@@ -161,6 +161,14 @@ def _merge_legacy_detector_alias(conn):
     markers, review state, and edit-history prediction references are moved to the
     survivor before duplicate detections are deleted.
     """
+    # Masks persist the detector key alongside the prompt geometry. Keep that
+    # denormalized key aligned with the detection rows so a valid mask does not
+    # become stale merely because this migration canonicalized its model name.
+    conn.execute(
+        "UPDATE photo_masks SET detector_model = ? WHERE detector_model = ?",
+        (_CANONICAL_DETECTOR_MODEL, _LEGACY_DETECTOR_MODEL),
+    )
+
     legacy_count = conn.execute(
         "SELECT COUNT(*) FROM detections WHERE detector_model = ?",
         (_LEGACY_DETECTOR_MODEL,),
