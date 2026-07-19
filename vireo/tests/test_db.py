@@ -14799,6 +14799,7 @@ def test_repair_duplicate_photo_species_preserves_no_tag_prediction_accepts(tmp_
     would erase the only audit/undo record of the accepted prediction-
     status flip — the repair must leave those items intact."""
     import json as _json
+
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
