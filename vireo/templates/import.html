@@ -2455,12 +2455,22 @@ function renderChainInfo(res) {
   }
   // Set only when the chained process job actually enqueued with a move
   // plan, so this states what WILL happen, not what was merely requested.
+  // `note` carries the honest reason when folders were skipped (photos
+  // cataloged directly on the archive root have no folder to move).
   if (res.after_process_move_planned) {
-    const n = (res.after_process_move_planned.folders || []).length;
-    parts.push(
-      'Processing will be followed by a move to NAS ('
-      + res.after_process_move_planned.target_name + '): '
-      + n + ' folder' + (n === 1 ? '' : 's') + '.');
+    const plan = res.after_process_move_planned;
+    const n = (plan.folders || []).length;
+    if (n === 0) {
+      parts.push(
+        'Move to NAS (' + plan.target_name + ') will not run: '
+        + (plan.note || 'no folders to move') + '.');
+    } else {
+      parts.push(
+        'Processing will be followed by a move to NAS ('
+        + plan.target_name + '): '
+        + n + ' folder' + (n === 1 ? '' : 's') + '.');
+      if (plan.note) parts.push('Note: ' + plan.note + '.');
+    }
   }
   chain.textContent = parts.join(' ');
 }

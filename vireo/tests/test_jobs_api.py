@@ -3751,6 +3751,80 @@ def test_chain_skips_move_on_cancelled_process(app_and_db, tmp_path, stub_move, 
     assert process_job["result"]["after_move_skipped"] == "process cancelled"
 
 
+def test_chain_root_level_import_reports_honest_skip(app_and_db, tmp_path, stub_move):
+    """Photos cataloged ON the archive root itself get an honest chain report.
+
+    The request-time guard rejects the obvious empty/"." templates, but it
+    cannot see every template that renders to the root at runtime ("./."
+    normalizes to the destination; a strftime directive can render empty for
+    some locales/timestamps). When that happens, the plan on the import card
+    and the process job's skip reason must both say the photos stay local —
+    not a bare "no folders to move"."""
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    card = _import_card(tmp_path)
+    dest = str(tmp_path / "archive")
+    _save_nas_target(tmp_path, local_root=dest)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "folder_template": "./.",
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed", import_job
+    planned = import_job["result"]["after_process_move_planned"]
+    assert planned["folders"] == []
+    assert "archive root" in planned["note"]
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    assert "archive root" in process_job["result"]["after_move_skipped"]
+    assert "move_job_ids" not in process_job["result"]
+    assert stub_move == []
+
+
+def test_after_process_move_bad_target_does_not_strand_new_workspace(
+        app_and_db, tmp_path):
+    """An invalid after_process_move must be rejected BEFORE
+    _prepare_import_workspace creates the requested workspace — otherwise
+    the 400 leaves an empty stray workspace behind."""
+    app, db = app_and_db
+    client = app.test_client()
+    before = client.get("/api/workspaces").get_json()
+    active_before = client.get("/api/workspaces/active").get_json()
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nope"},
+        "new_workspace_name": "Stranded",
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "nope" in resp.get_json()["error"]
+    assert client.get("/api/workspaces").get_json() == before
+    assert client.get("/api/workspaces/active").get_json() == active_before
+
+    # Same guarantee for the explicit after_import-null pairing error.
+    local_root = tmp_path / "archive"
+    _save_nas_target(tmp_path, local_root=local_root)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(local_root / "sub"),
+        "after_import": None,
+        "after_process_move": {"remote_target_id": "nas1"},
+        "new_workspace_name": "Stranded",
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "after_import" in resp.get_json()["error"]
+    assert client.get("/api/workspaces").get_json() == before
+    assert client.get("/api/workspaces/active").get_json() == active_before
+
+
 def test_chain_cancel_while_waiting_for_serialize_lock(app_and_db, tmp_path, monkeypatch):
     """A chained move blocked on the batch serialization lock honors Cancel
     at the wait boundary instead of running the transfer anyway."""

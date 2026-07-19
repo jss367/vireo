@@ -11,25 +11,35 @@ import os
 
 
 def minimal_move_set(archive_root, folders):
-    """Return the minimal covering set of folders to move, with subpaths.
+    """Return ``(moves, skipped)``: the minimal covering move set plus skips.
 
     ``folders`` is an iterable of ``(folder_id, path)`` for catalog folders
-    that received imported photos. Returns a list of
+    that received imported photos. ``moves`` is a list of
     ``{"folder_id": int, "subpath": str}`` where ``subpath`` is the folder's
     path relative to ``archive_root`` in POSIX form (the move job's remote
-    subpath). Folders outside the root — and the root itself — are skipped:
-    request-time validation prevents both, so this is defensive, and moving
-    the root would sweep unrelated shoots into the transfer.
+    subpath). ``skipped`` lists folders that cannot get a move job, as
+    ``{"folder_id": int, "reason": "root" | "outside_root"}``: the root
+    itself (an empty folder template catalogs photos directly on the root,
+    and moving the root would sweep unrelated shoots into the transfer) and
+    folders outside the root (request-time validation prevents this, so it
+    is defensive). Callers must surface skips — photos in a skipped folder
+    stay local after the chain completes.
     """
     root = os.path.realpath(archive_root)
-    inside = []
+    inside, skipped = [], []
     for folder_id, path in folders:
         real = os.path.realpath(path)
         try:
             common = os.path.commonpath([real, root])
         except ValueError:
-            continue  # different drives — cannot be under the root
-        if common != root or real == root:
+            # Different drives — cannot be under the root.
+            skipped.append({"folder_id": folder_id, "reason": "outside_root"})
+            continue
+        if real == root:
+            skipped.append({"folder_id": folder_id, "reason": "root"})
+            continue
+        if common != root:
+            skipped.append({"folder_id": folder_id, "reason": "outside_root"})
             continue
         inside.append((folder_id, real))
     # Shortest paths first so ancestors are considered before descendants;
@@ -43,10 +53,11 @@ def minimal_move_set(archive_root, folders):
         )
         if not covered:
             kept.append((folder_id, real))
-    return [
+    moves = [
         {
             "folder_id": folder_id,
             "subpath": os.path.relpath(real, root).replace(os.sep, "/"),
         }
         for folder_id, real in kept
     ]
+    return moves, skipped

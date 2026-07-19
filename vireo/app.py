@@ -21237,11 +21237,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "JOIN folders f ON f.id = p.folder_id "
                             f"WHERE p.id IN ({ph})", chunk).fetchall())
                     root = move_target_snapshot["local_archive_root"]
+                    moves, move_skips = minimal_move_set(
+                        root, [(r["id"], r["path"]) for r in folder_rows])
                     after_move = {
                         "target": move_target_snapshot,
-                        "folders": minimal_move_set(
-                            root, [(r["id"], r["path"]) for r in folder_rows]),
+                        "folders": moves,
                     }
+                    if move_skips:
+                        # Importing straight into the archive root with a
+                        # template that renders empty catalogs photos ON
+                        # the root folder itself; minimal_move_set refuses
+                        # to move the root (it would sweep unrelated
+                        # shoots into the transfer). Say so instead of a
+                        # bare "no folders to move" — the user accepted a
+                        # chain that ends on the NAS, and these photos
+                        # won't get there.
+                        prefix = "photos" if not moves else "some photos"
+                        if any(s["reason"] == "root" for s in move_skips):
+                            after_move["skip_note"] = (
+                                prefix + " landed directly in the archive "
+                                "root — moving the root would sweep "
+                                "unrelated shoots into the transfer, so "
+                                "they stay local; move them from the Move "
+                                "page")
+                        else:
+                            after_move["skip_note"] = (
+                                prefix + " landed outside the archive "
+                                "root, so they stay local; move them from "
+                                "the Move page")
                 process_job_id, model_warning = _enqueue_process_job(
                     thread_db, runner, active_ws,
                     collection_id=col_id,
@@ -21253,11 +21276,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 result["process_job_id"] = process_job_id
                 if after_move is not None:
                     # Surface the planned move on the import's result card so
-                    # the user can see what will happen before it fires.
+                    # the user can see what will happen before it fires —
+                    # including, honestly, that nothing (or not everything)
+                    # will move when folders were skipped.
                     result["after_process_move_planned"] = {
                         "target_name": move_target_snapshot["name"],
                         "folders": after_move["folders"],
                     }
+                    if after_move.get("skip_note"):
+                        result["after_process_move_planned"]["note"] = (
+                            after_move["skip_note"])
                 if model_warning:
                     result["model_warning"] = model_warning
             except Exception as e:
@@ -23389,7 +23417,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     isinstance(result, dict) and result.get("cancelled")):
                 skip = "process cancelled"
             elif not after_move.get("folders"):
-                skip = "no folders to move"
+                # skip_note carries the real reason when the import found
+                # folders but every one was unmovable (photos cataloged on
+                # the archive root itself) — "no folders to move" alone
+                # would hide that those photos silently stay local.
+                skip = after_move.get("skip_note") or "no folders to move"
             if skip:
                 if isinstance(result, dict):
                     result["after_move_skipped"] = skip
@@ -23420,6 +23452,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             if isinstance(result, dict):
                 if move_ids:
                     result["move_job_ids"] = move_ids
+                if after_move.get("skip_note"):
+                    # Partial skip: some folders moved but others (e.g.
+                    # photos cataloged on the archive root) stayed local.
+                    result["after_move_note"] = after_move["skip_note"]
                 if failures:
                     result["after_move_errors"] = failures
             elif failures:
@@ -23469,9 +23505,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         Falls back to a live resolve for callers that don't pre-capture.
 
         ``after_move`` — ``{"target": dict, "folders": [{"folder_id",
-        "subpath"}]}`` — chains NAS moves off this run's completion via
-        ``_chain_after_move``. The target dict is the import-enqueue-time
-        snapshot (never re-resolved from Settings).
+        "subpath"}], "skip_note": str (optional)}`` — chains NAS moves off
+        this run's completion via ``_chain_after_move``. The target dict is
+        the import-enqueue-time snapshot (never re-resolved from Settings);
+        ``skip_note`` explains folders the import cataloged but the move
+        must leave local (photos on the archive root itself).
         """
         from pipeline_job import PipelineParams, run_pipeline_job
 
