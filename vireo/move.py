@@ -1767,6 +1767,17 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     workspace_linked = False
 
     photos_map = db.get_photos_by_ids(photo_ids)
+    source_stem_counts = {}
+    for source_folder_id in {
+        photo["folder_id"] for photo in photos_map.values()
+    }:
+        for row in db.conn.execute(
+            "SELECT filename FROM photos WHERE folder_id = ?",
+            (source_folder_id,),
+        ):
+            source_stem = os.path.splitext(row["filename"])[0]
+            key = (source_folder_id, source_stem)
+            source_stem_counts[key] = source_stem_counts.get(key, 0) + 1
 
     try:
         for i, pid in enumerate(photo_ids):
@@ -1866,10 +1877,15 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                     relocate_developed_file,
                 )
             stem = os.path.splitext(photo["filename"])[0]
+            source_stem_key = (photo["folder_id"], stem)
+            source_stem_counts[source_stem_key] = max(
+                0, source_stem_counts.get(source_stem_key, 1) - 1,
+            )
+            preserve_source_render = source_stem_counts[source_stem_key] > 0
             if developed_dir:
                 relocate_developed_file(
                     developed_dir, src_dir, destination, stem,
-                    developed_listing_cache,
+                    developed_listing_cache, preserve_source_render,
                 )
             default_developed_path = os.path.join(src_dir, "developed")
             if src_dir not in managed_default_developed:
@@ -1888,6 +1904,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             if not managed_default_developed[src_dir]:
                 relocate_default_developed_file(
                     src_dir, destination, stem, developed_listing_cache,
+                    preserve_source_render,
                 )
 
             # Now safe to delete originals. The catalog and developed

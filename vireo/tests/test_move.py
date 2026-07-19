@@ -296,6 +296,54 @@ def test_move_photos_preserves_existing_developed_at_destination(move_env):
     assert (developed / old_key / "bird1.jpg").read_bytes() == b"src-dev"
 
 
+def test_move_photos_keeps_render_for_unselected_same_stem_photo(tmp_path):
+    """A same-stem photo left in the source must retain its shared render."""
+    from export import developed_folder_key
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_folder(str(dst), name="dst")
+
+    (src / "IMG.raw").write_bytes(b"raw")
+    (src / "IMG.jpg").write_bytes(b"jpeg")
+    moved_pid = db.add_photo(
+        folder_id=fid, filename="IMG.raw", extension=".raw",
+        file_size=3, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=fid, filename="IMG.jpg", extension=".jpg",
+        file_size=4, file_mtime=2.0,
+    )
+    source_developed = src / "developed"
+    source_developed.mkdir()
+    (source_developed / "IMG.tiff").write_bytes(b"shared-render")
+    configured = tmp_path / "configured-developed"
+    configured.mkdir()
+    old_key = developed_folder_key(str(src))
+    (configured / old_key).mkdir()
+    (configured / old_key / "IMG.jpg").write_bytes(b"configured-render")
+
+    result = move_photos(
+        db, [moved_pid], str(dst), developed_dir=str(configured),
+    )
+
+    assert result["errors"] == []
+    assert (source_developed / "IMG.tiff").read_bytes() == b"shared-render"
+    assert (dst / "developed" / "IMG.tiff").read_bytes() == b"shared-render"
+    new_key = developed_folder_key(str(dst))
+    assert (configured / old_key / "IMG.jpg").read_bytes() \
+        == b"configured-render"
+    assert (configured / new_key / "IMG.jpg").read_bytes() \
+        == b"configured-render"
+
+
 def test_move_folder_by_date_rebases_default_developed_renders(tmp_path):
     """Regression: when ``darktable_output_dir`` is unset, the develop job
     writes to ``<folder>/developed/<stem>.<ext>`` — the export/full-

@@ -592,7 +592,8 @@ def relocate_developed_dir(developed_dir, old_folder_path, new_folder_path):
         return False
 
 
-def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
+def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None,
+                         preserve_source=False):
     """Rename files matching ``stem`` from ``old_subdir`` to ``new_subdir``.
 
     Shared helper for both developed-output layouts (configured
@@ -607,6 +608,10 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
     ``move_folder_by_date`` — which routes every photo in a source folder
     through ``move_photos`` — doesn't rescan the same developed
     directory once per photo (a quadratic hazard on large libraries).
+
+    When ``preserve_source`` is true, matching renders are copied rather
+    than moved because another catalog photo with the same stem still
+    resolves them from the source folder.
 
     Returns the number of files relocated. Never raises.
     """
@@ -651,6 +656,24 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
                 continue
         dst_file = os.path.join(new_subdir, name)
         if os.path.exists(dst_file):
+            created_destination = None
+            if listing_cache is not None:
+                created_destination = listing_cache.get(relocation_key)
+            if not preserve_source and os.path.exists(src_file) \
+                    and created_destination == dst_file:
+                # An earlier same-stem row copied this exact render to the
+                # shared destination while another source row still needed
+                # it. The final row can now remove the source without
+                # overwriting the known-good copy we created.
+                try:
+                    os.remove(src_file)
+                    relocated += 1
+                except OSError as exc:
+                    log.warning(
+                        "Failed to remove relocated developed file %s: %s",
+                        src_file, exc,
+                    )
+                continue
             # Preserve the existing render at the destination — matches
             # the collision policy used by `move_photos` for the photo
             # file itself (skip rather than overwrite).
@@ -663,6 +686,10 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
             os.makedirs(new_subdir, exist_ok=True)
             if prior_destination:
                 shutil.copy2(prior_destination, dst_file)
+            elif preserve_source:
+                shutil.copy2(src_file, dst_file)
+                if listing_cache is not None:
+                    listing_cache.setdefault(relocation_key, dst_file)
             else:
                 # Date-organized moves commonly cross from local storage to a
                 # mounted archive. shutil.move keeps the fast atomic rename on
@@ -671,7 +698,7 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
                 # policy.
                 shutil.move(src_file, dst_file)
                 if listing_cache is not None:
-                    listing_cache[relocation_key] = dst_file
+                    listing_cache.setdefault(relocation_key, dst_file)
             relocated += 1
         except OSError as exc:
             log.warning(
@@ -691,7 +718,7 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None):
 
 
 def relocate_developed_file(developed_dir, old_folder_path, new_folder_path,
-                            stem, listing_cache=None):
+                            stem, listing_cache=None, preserve_source=False):
     """Rebase a single photo's developed outputs after its folder changes.
 
     Sibling to `relocate_developed_dir` for per-photo moves (e.g. date-
@@ -708,6 +735,9 @@ def relocate_developed_file(developed_dir, old_folder_path, new_folder_path,
     photos through many per-destination ``move_photos`` calls; without it
     the same developed subdir would be listed once per moved photo.
 
+    ``preserve_source`` copies instead of moving while another same-stem
+    catalog photo remains in the old folder.
+
     Returns the number of files relocated. Never raises; a filesystem
     hiccup here logs a warning and is treated as a no-op so it doesn't
     also fail the move itself.
@@ -723,11 +753,13 @@ def relocate_developed_file(developed_dir, old_folder_path, new_folder_path,
         return 0
     old_subdir = os.path.join(developed_dir, old_key)
     new_subdir = os.path.join(developed_dir, new_key)
-    return _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache)
+    return _relocate_stem_files(
+        old_subdir, new_subdir, stem, listing_cache, preserve_source,
+    )
 
 
 def relocate_default_developed_file(old_folder_path, new_folder_path, stem,
-                                    listing_cache=None):
+                                    listing_cache=None, preserve_source=False):
     """Rebase a photo's default-location developed render after a move.
 
     When ``darktable_output_dir`` is unset, the develop job writes to
@@ -745,6 +777,8 @@ def relocate_default_developed_file(old_folder_path, new_folder_path, stem,
     destinations and the source subdir stays behind.
 
     ``listing_cache`` — see ``relocate_developed_file``.
+    ``preserve_source`` copies instead of moving while another same-stem
+    catalog photo remains in the old folder.
 
     Returns the number of files relocated. Never raises.
     """
@@ -754,7 +788,9 @@ def relocate_default_developed_file(old_folder_path, new_folder_path, stem,
         return 0
     old_subdir = os.path.join(old_folder_path, "developed")
     new_subdir = os.path.join(new_folder_path, "developed")
-    return _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache)
+    return _relocate_stem_files(
+        old_subdir, new_subdir, stem, listing_cache, preserve_source,
+    )
 
 
 class _DevelopedDirIndex:
