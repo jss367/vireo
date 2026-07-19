@@ -19542,7 +19542,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def _start_move_folder_job(runner, workspace_id, *, folder_id,
                                destination, display_dest, destination_name,
                                merge, remote, developed_dir,
-                               chained_from=None, serialize_lock=None):
+                               chained_from=None, serialize_lock=None,
+                               allow_tracked_merge=False):
         """Enqueue a move-folder job and return its job id.
 
         Shared by the move-folder endpoint and the chained
@@ -19554,6 +19555,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         lock so batch-mates execute one at a time (see the why-comment at
         the acquire site). The job still enqueues — and its id exists —
         immediately.
+
+        ``allow_tracked_merge``: passed through to ``move_folder``. The
+        chained import→process→move hook opts in (see the why-comment in
+        ``_enqueue_move_folder_job``); the manual move endpoint keeps the
+        default refusal of tracked destinations.
         """
         def work(job):
             from move import move_folder
@@ -19636,6 +19642,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     merge=merge,
                     remote=remote,
                     destination_name=destination_name,
+                    allow_tracked_merge=allow_tracked_merge,
                 )
             finally:
                 if serialize_lock is not None:
@@ -23415,6 +23422,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             developed_dir=effective_cfg.get("darktable_output_dir", "") or "",
             chained_from=chained_from,
             serialize_lock=serialize_lock,
+            # Re-importing more photos into an existing shoot folder is the
+            # NORMAL flow, and its chained move lands exactly on the tracked
+            # NAS copy created by the previous chain run. Without tracked-
+            # merge the move would refuse ("Destination overlaps a folder
+            # Vireo already manages") and strand the new photos locally.
+            # Opting in uses move_folder's exact-overlap reconciliation
+            # (fold the new rows into the existing archive rows); the
+            # pre-copy content-conflict scan still refuses any same-name
+            # file whose bytes differ, and manual moves keep the default
+            # refusal.
+            allow_tracked_merge=True,
         )
 
     def _chain_after_move(job, result, after_move, workspace_id):

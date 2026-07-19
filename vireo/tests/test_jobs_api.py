@@ -3648,9 +3648,10 @@ def stub_move(monkeypatch):
 
     def fake_move_folder(db, folder_id, destination, progress_cb=None,
                          developed_dir="", merge=False, remote=None,
-                         destination_name=""):
+                         destination_name="", allow_tracked_merge=False):
         calls.append({"folder_id": folder_id, "destination": destination,
-                      "merge": merge, "remote": remote})
+                      "merge": merge, "remote": remote,
+                      "allow_tracked_merge": allow_tracked_merge})
         return {"moved": 1, "errors": []}
 
     monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
@@ -3687,7 +3688,12 @@ def test_chain_happy_path_enqueues_moves(app_and_db, tmp_path, stub_move):
         mj = wait_for_job_via_client(client, mid)
         assert mj["status"] == "completed", mj
         assert _job_config(client, mid)["chained_from"] == import_job["result"]["process_job_id"]
-    assert all(c["merge"] is True and c["remote"] is not None
+    # merge + allow_tracked_merge: re-importing into an existing shoot
+    # folder chains a move onto the tracked NAS copy of that folder — the
+    # chain must opt into move_folder's exact-overlap reconciliation or the
+    # repeat-import flow refuses and strands the new photos locally.
+    assert all(c["merge"] is True and c["allow_tracked_merge"] is True
+               and c["remote"] is not None
                for c in stub_move)
     # The move must aim at the target's mount view of the archive layout:
     # destination is mount_path + the PARENT of the archive-relative
@@ -3888,7 +3894,7 @@ def test_chain_cancel_while_waiting_for_serialize_lock(app_and_db, tmp_path, mon
 
     def fake_move_folder(db, folder_id, destination, progress_cb=None,
                          developed_dir="", merge=False, remote=None,
-                         destination_name=""):
+                         destination_name="", allow_tracked_merge=False):
         first = not calls
         calls.append(folder_id)
         if first:
