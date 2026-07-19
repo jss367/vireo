@@ -3836,6 +3836,48 @@ def test_after_process_move_bad_target_does_not_strand_new_workspace(
     assert client.get("/api/workspaces/active").get_json() == active_before
 
 
+def test_chain_accepts_case_alias_destination(app_and_db, tmp_path, stub_move):
+    """On a case-insensitive volume, a destination typed with different
+    casing than the saved local_archive_root is the same directory: the
+    request must be accepted AND the chain must still find the imported
+    folders inside the (respelled) root instead of skipping them all as
+    outside_root."""
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("requires a case-insensitive filesystem")
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    card = _import_card(tmp_path)
+    local_root = tmp_path / "Archive"
+    local_root.mkdir()
+    _save_nas_target(tmp_path, local_root=local_root)
+    # Case alias of the saved root.
+    alias_dest = str(tmp_path / "archive" / "sub")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": alias_dest,
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed", import_job
+    planned = import_job["result"]["after_process_move_planned"]
+    assert planned["folders"], planned
+    assert all(e["subpath"].startswith("sub") for e in planned["folders"])
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    move_ids = process_job["result"].get("move_job_ids")
+    assert move_ids, process_job["result"]
+    for mid in move_ids:
+        wait_for_job_via_client(client, mid)
+    assert stub_move
+
+
 def test_chain_cancel_while_waiting_for_serialize_lock(app_and_db, tmp_path, monkeypatch):
     """A chained move blocked on the batch serialization lock honors Cancel
     at the wait boundary instead of running the transfer anyway."""

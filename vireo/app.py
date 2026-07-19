@@ -20475,18 +20475,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error(
                 "this remote target has no local archive root — set one "
                 "under Settings → Remote targets")
-        try:
-            dest_real = os.path.realpath(destination)
-            root_real = os.path.realpath(root)
-            inside = os.path.commonpath([dest_real, root_real]) == root_real
-        except ValueError:
+        # Containment goes through move.py's alias-folding helper, not a raw
+        # commonpath: on the default case-insensitive macOS/Windows volumes a
+        # destination typed with different casing than the saved root (e.g.
+        # "/volumes/photos/…" vs "/Volumes/Photos") is the same directory,
+        # and realpath does not fold case on POSIX — a byte compare would
+        # falsely reject it.
+        from move import _path_equal_or_descends
+        dest_real = os.path.realpath(destination)
+        root_real = os.path.realpath(root)
+        if not _path_equal_or_descends(destination, root):
             return None, json_error(
                 "destination is not inside the remote target's local "
                 f"archive root ({root})")
-        if not inside:
-            return None, json_error(
-                "destination is not inside the remote target's local "
-                f"archive root ({root})")
+        dest_is_root = _path_equal_or_descends(root, destination)
         # Root-level import with a folder template that resolves to "." lands
         # photos on the local_archive_root itself. The chained move
         # deliberately skips the root (moving it would sweep unrelated shoots
@@ -20494,12 +20496,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # silently move nothing. Reject up front instead. Empty and "." both
         # produce a rel of "." in the import job's ``or "."`` fallback.
         template_stripped = (folder_template or "").strip()
-        if dest_real == root_real and template_stripped in ("", "."):
+        if dest_is_root and template_stripped in ("", "."):
             return None, json_error(
                 "after_process_move requires a folder_template when the "
                 "destination is the target's local archive root — a template "
                 "that resolves to \".\" would land photos on the root itself, "
                 "which the chained move deliberately skips")
+        if not (dest_real == root_real
+                or dest_real.startswith(root_real.rstrip(os.sep) + os.sep)):
+            # The destination reaches the root only via an alias (case fold
+            # on a case-insensitive volume). The catalog folders this import
+            # creates will be spelled like the DESTINATION, and
+            # minimal_move_set compares them byte-wise against the snapshot
+            # root at chain time — so respell the snapshot root as the
+            # destination's own prefix (same component count; realpath has
+            # already folded symlinks on both sides, leaving case as the
+            # only difference).
+            n = len(root_real.rstrip(os.sep).split(os.sep))
+            target = dict(target)
+            target["local_archive_root"] = os.sep.join(
+                dest_real.split(os.sep)[:n])
         return target, None
 
     def _create_import_collection(thread_db, photo_ids):
