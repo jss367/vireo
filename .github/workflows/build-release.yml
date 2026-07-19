@@ -125,7 +125,10 @@ jobs:
           TRIPLE=$(rustc --print host-tuple)
           SIDECAR="src-tauri/binaries/vireo-server-${TRIPLE}"
           if [ "$RUNNER_OS" = "Windows" ]; then SIDECAR="${SIDECAR}.exe"; fi
-          VERSION_OUTPUT=$("$SIDECAR" --check-exiftool)
+          # Windows Python's print() emits CRLF and bash command
+          # substitution strips only the trailing LF, leaving a stray \r
+          # that would break the exact string comparison below.
+          VERSION_OUTPUT=$("$SIDECAR" --check-exiftool | tr -d '\r')
           echo "Bundled ExifTool: $VERSION_OUTPUT"
           test "$VERSION_OUTPUT" = "13.59"
 

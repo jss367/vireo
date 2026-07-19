@@ -3518,6 +3518,58 @@ def test_import_readiness_skips_excluded_bundle_roots(
     )
 
 
+def test_import_readiness_counts_photos_in_stale_missing_folders(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A workspace root that was marked ``status='missing'`` while its
+    drive was unplugged, then reconnected, still carries a stale status
+    until ``check_folder_health`` next runs. The readiness count must
+    include those photos anyway — otherwise the Import page would report
+    ``0`` repairable rows in the reconnection window and users would have
+    no button to click even though the repair job could scan the drive.
+    """
+    import metadata
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    photos = tmp_path / "reconnected"
+    photos.mkdir()
+    source = photos / "needs-repair.jpg"
+    Image.new("RGB", (32, 24), "green").save(source)
+    folder_id = db.add_folder(str(photos), name="reconnected")
+    db.add_photo(
+        folder_id=folder_id,
+        filename=source.name,
+        extension=".jpg",
+        file_size=source.stat().st_size,
+        file_mtime=source.stat().st_mtime,
+    )
+    # Simulate the drive-unplugged→plugged-back-in window: folder row
+    # still says missing even though ``os.path.isdir`` sees the tree.
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (folder_id,),
+    )
+    db.conn.commit()
+
+    with app.test_client() as client:
+        ready = client.get("/api/import/readiness")
+        assert ready.status_code == 200
+        payload = ready.get_json()
+        assert payload["metadata_repair_count"] >= 1
+        assert payload["metadata_repair_available"] is True
+
+        started = client.post("/api/jobs/repair-metadata")
+        assert started.status_code == 200, started.get_json()
+        assert started.get_json()["photo_count"] >= 1
+
+
 def test_lightroom_import_route_not_shadowed(app_and_db):
     """POST /api/jobs/import (Lightroom catalogs) keeps its contract —
     the photo import route is a NEW endpoint, not a rename."""

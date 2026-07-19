@@ -18008,13 +18008,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return jsonify({"job_id": job_id, "roots": existing, "skipped": skipped})
 
     def _metadata_repair_count(db, workspace_id):
+        # Don't filter by ``folders.status``: that column is only refreshed
+        # by ``check_folder_health`` (10-minute loop or the manual
+        # "check missing folders" flow), so a workspace whose drive was
+        # unplugged and is now reconnected still reads as ``status='missing'``
+        # until then. The readiness endpoint fires as soon as the Import
+        # page opens; if we filtered here, users would see 0 repairable
+        # photos and the repair route would 409 with "no photos need
+        # metadata repair" even though ``os.path.isdir`` would let the
+        # repair job scan them. ``metadata_repair_available`` (readiness)
+        # and the repair job's own reachable-root preflight still gate
+        # whether a repair can actually start.
         row = db.conn.execute(
             """SELECT COUNT(DISTINCT p.id) AS count
                FROM photos p
                JOIN folders f ON f.id = p.folder_id
                JOIN workspace_folders wf ON wf.folder_id = f.id
                WHERE wf.workspace_id = ?
-                 AND f.status IN ('ok', 'partial')
                  AND p.exif_data IS NULL""",
             (workspace_id,),
         ).fetchone()
