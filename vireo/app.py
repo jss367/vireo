@@ -4541,7 +4541,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return True
         return False
 
-    def _pending_local_workspace_transition(workspace_id):
+    def _pending_local_workspace_transition(workspace_id, db=None):
         # ``has_local_workspace`` only observes the ``local_workspaces`` row
         # a stage worker inserts once it actually runs; a stage/sync/discard
         # that has been enqueued but not yet reached that insert would leave
@@ -4566,7 +4566,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     return job
                 config = job.get("config") or {}
                 root_ids = (config.get("root_folder_ids") or []) if isinstance(config, dict) else []
-                db = _get_db()
+                if db is None:
+                    db = _get_db()
                 if any(
                     workspace_id in workspace_ids_for_folder_tree(db, int(root_id))
                     for root_id in root_ids
@@ -19463,25 +19464,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id, "total": len(photo_ids)})
 
-    @app.route("/api/jobs/move-folder", methods=["POST"])
-    def api_job_move_folder():
-        """Move an entire folder to a destination."""
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict):
-            return json_error("JSON body must be an object")
-        folder_id = body.get("folder_id")
-        destination = body.get("destination", "")
-        destination_name_raw = body.get("destination_name", "")
-        remote_target_id = (body.get("remote_target_id") or "").strip()
-        subpath = body.get("subpath", "")
-        merge_raw = body.get("merge", False)
-        if not isinstance(merge_raw, bool):
-            return json_error("merge must be a boolean")
-        merge = merge_raw
+    def _move_folder_guard_error(guard_db, folder_id):
+        """Return the error message blocking a folder move, or None.
 
-        if not folder_id:
-            return json_error("folder_id required")
-
+        Context-free on purpose: takes the db explicitly and touches no
+        Flask request/app context, so the chained completion hook can run
+        it from a job thread with a thread db.
+        """
         # A folder covered by any workspace's local_workspace_folders row has
         # its folders.path rebased into that workspace's managed copy; a
         # concurrent workspace-membership guard would refuse to touch the
@@ -19491,14 +19480,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # still expect the pre-move layout, so the owning workspace's next
         # status falls into missing-local recovery and sync/discard can no
         # longer restore. Reject the job before enqueue.
-        db_for_guard = _get_db()
         with stage_boundary_lock():
-            local_root_id = local_root_for_folder(db_for_guard, folder_id)
+            local_root_id = local_root_for_folder(guard_db, folder_id)
             if local_root_id is not None:
-                return json_error(
+                return (
                     "Cannot move this folder while it has a shared local copy. "
-                    "Sync or discard the local copy from any linked workspace first.",
-                    409,
+                    "Sync or discard the local copy from any linked workspace first."
                 )
             # A descendant local copy has already had its folders.path rebased
             # under local-folders/, so a folders.path subtree walk from this
@@ -19506,22 +19493,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # still records the original location. Without this check the move
             # job would move/delete the original source directory out from
             # under the manifest, leaving sync/discard unable to restore.
-            descendant_root_id = local_root_under_folder(db_for_guard, folder_id)
+            descendant_root_id = local_root_under_folder(guard_db, folder_id)
             if descendant_root_id is not None:
-                return json_error(
+                return (
                     "Cannot move this folder while a subfolder has a shared local copy. "
-                    "Sync or discard the local copy from any linked workspace first.",
-                    409,
+                    "Sync or discard the local copy from any linked workspace first."
                 )
             staged_here, staged_owner_ws = folder_has_local_workspace(
-                db_for_guard, folder_id,
+                guard_db, folder_id,
             )
             if staged_here:
-                return json_error(
+                return (
                     f"Cannot move this folder — workspace {staged_owner_ws} has it "
                     "staged locally. Switch to that workspace and sync or discard the "
-                    "local copy first.",
-                    409,
+                    "local copy first."
                 )
             # ``folder_has_local_workspace`` only sees a completed stage
             # claim. A stage/sync/discard queued or running against a
@@ -19532,101 +19517,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # ``folders`` row out from under the pending transition —
             # missing-local recovery on the next status. Refuse until the
             # transition finishes.
-            row = db_for_guard.conn.execute(
+            row = guard_db.conn.execute(
                 "SELECT workspace_id FROM workspace_folders WHERE folder_id = ?",
                 (folder_id,),
             ).fetchall()
             for ws_row in row:
-                pending = _pending_local_workspace_transition(int(ws_row["workspace_id"]))
+                pending = _pending_local_workspace_transition(
+                    int(ws_row["workspace_id"]), db=guard_db)
                 if pending:
-                    return json_error(
+                    return (
                         f"Wait for the {pending['type']} job on workspace "
                         f"{int(ws_row['workspace_id'])} to finish before moving this "
                         "folder; otherwise the move would run on paths that workspace "
-                        "is about to claim.",
-                        409,
+                        "is about to claim."
                     )
+        return None
 
-        import config as cfg
-        import move as move_mod
-        try:
-            destination_name = move_mod.normalize_destination_name(
-                destination_name_raw)
-        except ValueError as exc:
-            return json_error(str(exc))
-        effective_cfg = _get_db().get_effective_config(cfg.load())
-        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
+    def _start_move_folder_job(runner, workspace_id, *, folder_id,
+                               destination, display_dest, destination_name,
+                               merge, remote, developed_dir,
+                               chained_from=None):
+        """Enqueue a move-folder job and return its job id.
 
-        # Remote (SSH) destination vs local path. A remote target carries its
-        # own destination (remote_path + optional subpath), so `destination`
-        # is not required in that case.
-        remote = None
-        if remote_target_id:
-            target = cfg.get_remote_target(remote_target_id)
-            if not target:
-                return json_error("Remote target not found", status=404)
-            mount_path = (target.get("mount_path") or "").strip()
-            if not mount_path:
-                return json_error(
-                    "This remote target has no local mount path, so moved "
-                    "photos couldn't stay in your library. Add a mount path "
-                    "under Settings → Remote targets."
-                )
-            # Reject a relative mount path (e.g. saved as "Photos" instead of
-            # "/Volumes/Photos") before any transfer runs. move_folder also
-            # refuses as a defense-in-depth check, but failing here gives the
-            # UI a clean error instead of starting a job that immediately
-            # reports failure.
-            if not os.path.isabs(mount_path):
-                return json_error(
-                    "This remote target's local mount path isn't absolute "
-                    f"(\"{mount_path}\"). Moved photos would be repointed "
-                    "to a path relative to the server's working directory "
-                    "and appear missing. Set an absolute mount path under "
-                    "Settings → Remote targets."
-                )
-            rsync_bin = move_mod.resolve_rsync_bin(
-                effective_cfg.get("rsync_bin", "") or "")
-            if not rsync_bin:
-                return json_error(
-                    "No usable GNU rsync was found for remote moves. Install "
-                    "GNU rsync for your platform or set its executable under "
-                    "Settings → Paths."
-                )
-            ssh_bin = move_mod.resolve_ssh_bin(
-                effective_cfg.get("ssh_bin", "") or "")
-            if not ssh_bin:
-                return json_error(
-                    "OpenSSH Client was not found. Install the Windows "
-                    "OpenSSH Client optional feature or configure ssh.exe in Settings."
-                )
-            try:
-                remote = move_mod.build_remote_move_spec(
-                    target, subpath, rsync_bin, ssh_bin)
-            except ValueError as exc:
-                return json_error(str(exc))
-            # Pass the mount path as `destination` for informational use; the
-            # move uses the SSH base from `remote`.
-            destination = remote["mount_dest_base"]
-            display_dest = move_mod.rsync_dest_spec(
-                target, remote["ssh_dest_base"])
-        else:
-            if not isinstance(destination, str):
-                return json_error("destination must be a string")
-            if not destination:
-                return json_error("destination required")
-            if not os.path.isabs(destination):
-                return json_error("destination must be an absolute path")
-            display_dest = destination
-
-        runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
-
+        Shared by the move-folder endpoint and the chained
+        process-completion hook (which runs on a job thread, so this
+        must not touch Flask request/app context).
+        """
         def work(job):
             from move import move_folder
 
             thread_db = Database(db_path)
-            thread_db.set_active_workspace(active_ws)
+            thread_db.set_active_workspace(workspace_id)
 
             job["_start_time"] = time.time()
 
@@ -19717,10 +19638,120 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "mount_dest_base": remote["mount_dest_base"],
                 "bwlimit_kbps": remote["bwlimit_kbps"],
             }
-        job_id = runner.start(
+        if chained_from:
+            job_config["chained_from"] = chained_from
+        return runner.start(
             "move-folder", work,
             config=job_config,
-            workspace_id=active_ws,
+            workspace_id=workspace_id,
+        )
+
+    @app.route("/api/jobs/move-folder", methods=["POST"])
+    def api_job_move_folder():
+        """Move an entire folder to a destination."""
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return json_error("JSON body must be an object")
+        folder_id = body.get("folder_id")
+        destination = body.get("destination", "")
+        destination_name_raw = body.get("destination_name", "")
+        remote_target_id = (body.get("remote_target_id") or "").strip()
+        subpath = body.get("subpath", "")
+        merge_raw = body.get("merge", False)
+        if not isinstance(merge_raw, bool):
+            return json_error("merge must be a boolean")
+        merge = merge_raw
+
+        if not folder_id:
+            return json_error("folder_id required")
+
+        guard_err = _move_folder_guard_error(_get_db(), folder_id)
+        if guard_err is not None:
+            return json_error(guard_err, 409)
+
+        import config as cfg
+        import move as move_mod
+        try:
+            destination_name = move_mod.normalize_destination_name(
+                destination_name_raw)
+        except ValueError as exc:
+            return json_error(str(exc))
+        effective_cfg = _get_db().get_effective_config(cfg.load())
+        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
+
+        # Remote (SSH) destination vs local path. A remote target carries its
+        # own destination (remote_path + optional subpath), so `destination`
+        # is not required in that case.
+        remote = None
+        if remote_target_id:
+            target = cfg.get_remote_target(remote_target_id)
+            if not target:
+                return json_error("Remote target not found", status=404)
+            mount_path = (target.get("mount_path") or "").strip()
+            if not mount_path:
+                return json_error(
+                    "This remote target has no local mount path, so moved "
+                    "photos couldn't stay in your library. Add a mount path "
+                    "under Settings → Remote targets."
+                )
+            # Reject a relative mount path (e.g. saved as "Photos" instead of
+            # "/Volumes/Photos") before any transfer runs. move_folder also
+            # refuses as a defense-in-depth check, but failing here gives the
+            # UI a clean error instead of starting a job that immediately
+            # reports failure.
+            if not os.path.isabs(mount_path):
+                return json_error(
+                    "This remote target's local mount path isn't absolute "
+                    f"(\"{mount_path}\"). Moved photos would be repointed "
+                    "to a path relative to the server's working directory "
+                    "and appear missing. Set an absolute mount path under "
+                    "Settings → Remote targets."
+                )
+            rsync_bin = move_mod.resolve_rsync_bin(
+                effective_cfg.get("rsync_bin", "") or "")
+            if not rsync_bin:
+                return json_error(
+                    "No usable GNU rsync was found for remote moves. Install "
+                    "GNU rsync for your platform or set its executable under "
+                    "Settings → Paths."
+                )
+            ssh_bin = move_mod.resolve_ssh_bin(
+                effective_cfg.get("ssh_bin", "") or "")
+            if not ssh_bin:
+                return json_error(
+                    "OpenSSH Client was not found. Install the Windows "
+                    "OpenSSH Client optional feature or configure ssh.exe in Settings."
+                )
+            try:
+                remote = move_mod.build_remote_move_spec(
+                    target, subpath, rsync_bin, ssh_bin)
+            except ValueError as exc:
+                return json_error(str(exc))
+            # Pass the mount path as `destination` for informational use; the
+            # move uses the SSH base from `remote`.
+            destination = remote["mount_dest_base"]
+            display_dest = move_mod.rsync_dest_spec(
+                target, remote["ssh_dest_base"])
+        else:
+            if not isinstance(destination, str):
+                return json_error("destination must be a string")
+            if not destination:
+                return json_error("destination required")
+            if not os.path.isabs(destination):
+                return json_error("destination must be an absolute path")
+            display_dest = destination
+
+        runner = app._job_runner
+        active_ws = _get_db()._active_workspace_id
+        job_id = _start_move_folder_job(
+            runner, active_ws,
+            folder_id=folder_id,
+            destination=destination,
+            display_dest=display_dest,
+            destination_name=destination_name,
+            merge=merge,
+            remote=remote,
+            developed_dir=developed_dir,
         )
         return jsonify({"job_id": job_id})
 
@@ -20366,7 +20397,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error(
                 "after_process_move must be an object or null, got "
                 f"{type(value).__name__}")
-        target_id = (value.get("remote_target_id") or "").strip()
+        raw = value.get("remote_target_id")
+        if raw is not None and not isinstance(raw, str):
+            return None, json_error(
+                "after_process_move.remote_target_id must be a string, got "
+                f"{type(raw).__name__}")
+        target_id = (raw or "").strip()
         if not target_id:
             return None, json_error(
                 "after_process_move.remote_target_id required")

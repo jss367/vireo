@@ -3496,6 +3496,24 @@ def test_after_process_move_destination_outside_root(app_and_db, tmp_path):
     assert "archive root" in resp.get_json()["error"]
 
 
+def test_after_process_move_non_string_target_id(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    local_root = tmp_path / "archive"
+    _save_nas_target(tmp_path, local_root=local_root)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(local_root / "sub"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": 123},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "must be a string" in resp.get_json()["error"]
+
+
 def test_after_process_move_rejected_for_remote_destination(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
