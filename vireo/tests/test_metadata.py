@@ -130,21 +130,21 @@ def test_find_exiftool_finds_homebrew_off_path_on_macos(monkeypatch, tmp_path):
     """
     import metadata
 
+    homebrew_bin = tmp_path / "homebrew" / "bin"
+    homebrew_bin.mkdir(parents=True)
+    exiftool = homebrew_bin / "exiftool"
+    exiftool.write_text("#!/usr/bin/perl\n")
+    exiftool.chmod(0o755)
+
     metadata.clear_exiftool_cache()
     monkeypatch.setattr(metadata.sys, "platform", "darwin")
     monkeypatch.delattr(metadata.sys, "_MEIPASS", raising=False)
     monkeypatch.setattr(metadata.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        metadata, "_MACOS_HOMEBREW_BIN_DIRS", (str(homebrew_bin),),
+    )
 
-    def _fake_isfile(path):
-        return path == "/opt/homebrew/bin/exiftool"
-
-    def _fake_access(path, _mode):
-        return path == "/opt/homebrew/bin/exiftool"
-
-    monkeypatch.setattr(metadata.os.path, "isfile", _fake_isfile)
-    monkeypatch.setattr(metadata.os, "access", _fake_access)
-
-    assert metadata.find_exiftool() == "/opt/homebrew/bin/exiftool"
+    assert metadata.find_exiftool() == str(exiftool)
 
 
 def test_find_exiftool_off_path_ignored_on_non_darwin(monkeypatch, tmp_path):
