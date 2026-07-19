@@ -19688,6 +19688,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     destination=destination,
                     folder_template=folder_template,
                     progress_cb=progress_cb,
+                    developed_dir=developed_dir,
                 )
             else:
                 result = move_folder(

@@ -148,6 +148,154 @@ def test_move_folder_by_date_splits_photos_and_moves_sidecars(tmp_path):
     }
 
 
+def test_move_folder_by_date_rebases_developed_outputs(tmp_path):
+    """Regression: when photos in one folder fan out to per-date destinations,
+    each photo's developed-output file must move from the OLD folder-key
+    subdir to the NEW folder-key subdir. Without this rebase, previously
+    developed renders stay under the old key while the catalog points each
+    photo at its date folder — export/full-resolution lookups then miss the
+    render and fall back to RAW.
+    """
+    from export import developed_folder_key
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "first.jpg").write_bytes(b"first")
+    (src / "second.jpg").write_bytes(b"second")
+    db.add_photo(
+        folder_id=fid, filename="first.jpg", extension=".jpg",
+        file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid, filename="second.jpg", extension=".jpg",
+        file_size=6, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    developed = tmp_path / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(src))
+    (developed / old_key).mkdir()
+    (developed / old_key / "first.jpg").write_bytes(b"first-dev")
+    (developed / old_key / "second.tiff").write_bytes(b"second-dev")
+
+    result = move_folder_by_date(
+        db, fid, str(archive), "%Y-%m-%d",
+        developed_dir=str(developed),
+    )
+    assert result["errors"] == []
+    assert result["moved"] == 2
+
+    # Each photo's developed render moved to its new date-folder key.
+    new_first_key = developed_folder_key(str(archive / "2026-07-12"))
+    new_second_key = developed_folder_key(str(archive / "2026-07-13"))
+    assert (developed / new_first_key / "first.jpg").read_bytes() == b"first-dev"
+    assert (developed / new_second_key / "second.tiff").read_bytes() == b"second-dev"
+    # Old key's subdir is emptied and cleaned up.
+    assert not (developed / old_key).exists()
+
+
+def test_move_folder_by_date_without_developed_dir_leaves_disk_alone(tmp_path):
+    """When ``darktable_output_dir`` is unset (or the caller doesn't pass
+    ``developed_dir``), the date move must not touch any external dir —
+    same as before the rebase was added.
+    """
+    from export import developed_folder_key
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+    (src / "first.jpg").write_bytes(b"first")
+    db.add_photo(
+        folder_id=fid, filename="first.jpg", extension=".jpg",
+        file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+
+    developed = tmp_path / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(src))
+    (developed / old_key).mkdir()
+    (developed / old_key / "first.jpg").write_bytes(b"first-dev")
+
+    move_folder_by_date(db, fid, str(archive), "%Y-%m-%d")
+
+    # No developed_dir passed → the old key's subdir stays untouched.
+    assert (developed / old_key / "first.jpg").read_bytes() == b"first-dev"
+
+
+def test_move_photos_relocates_developed_output_per_photo(move_env):
+    """``move_photos`` relocates each moved photo's developed render to the
+    destination folder's key when ``developed_dir`` is supplied — the same
+    helper that ``move_folder_by_date`` relies on for date-fanned moves.
+    """
+    from export import developed_folder_key
+    from move import move_photos
+
+    env = move_env
+    developed = env["tmp_path"] / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(env["src"]))
+    (developed / old_key).mkdir()
+    (developed / old_key / "bird1.jpg").write_bytes(b"bird1-dev")
+    # A sibling render stays behind because its photo isn't in this move.
+    (developed / old_key / "bird2.jpg").write_bytes(b"bird2-dev")
+
+    result = move_photos(
+        db=env["db"],
+        photo_ids=[env["p1"]],
+        destination=str(env["dst"]),
+        developed_dir=str(developed),
+    )
+    assert result["errors"] == []
+
+    new_key = developed_folder_key(str(env["dst"]))
+    assert (developed / new_key / "bird1.jpg").read_bytes() == b"bird1-dev"
+    # bird2's render is left alone under the old key — its photo didn't move.
+    assert (developed / old_key / "bird2.jpg").read_bytes() == b"bird2-dev"
+
+
+def test_move_photos_preserves_existing_developed_at_destination(move_env):
+    """A developed render already at the destination key is preserved (no
+    overwrite), matching the collision policy for the photo itself. The
+    source render stays where it is so it can be recovered manually.
+    """
+    from export import developed_folder_key
+    from move import move_photos
+
+    env = move_env
+    developed = env["tmp_path"] / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(env["src"]))
+    new_key = developed_folder_key(str(env["dst"]))
+    (developed / old_key).mkdir()
+    (developed / new_key).mkdir()
+    (developed / old_key / "bird1.jpg").write_bytes(b"src-dev")
+    (developed / new_key / "bird1.jpg").write_bytes(b"dst-dev")
+
+    move_photos(
+        db=env["db"],
+        photo_ids=[env["p1"]],
+        destination=str(env["dst"]),
+        developed_dir=str(developed),
+    )
+
+    assert (developed / new_key / "bird1.jpg").read_bytes() == b"dst-dev"
+    assert (developed / old_key / "bird1.jpg").read_bytes() == b"src-dev"
+
+
 def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path):
     from move import plan_folder_date_moves
 

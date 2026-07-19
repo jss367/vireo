@@ -592,6 +592,78 @@ def relocate_developed_dir(developed_dir, old_folder_path, new_folder_path):
         return False
 
 
+def relocate_developed_file(developed_dir, old_folder_path, new_folder_path,
+                            stem):
+    """Rebase a single photo's developed outputs after its folder changes.
+
+    Sibling to `relocate_developed_dir` for per-photo moves (e.g. date-
+    organized folder moves fan photos from one source folder into many
+    date destinations, so the whole-subdir rename doesn't apply). Moves
+    every developed file whose stem matches ``stem`` from the old key's
+    subdir into the new key's subdir. Extensions are enumerated from disk
+    rather than a fixed list so a develop job configured for an unusual
+    output format still gets its render moved.
+
+    Returns the number of files relocated. Never raises; a filesystem
+    hiccup here logs a warning and is treated as a no-op so it doesn't
+    also fail the move itself.
+    """
+    if not developed_dir or not old_folder_path or not new_folder_path \
+            or not stem:
+        return 0
+    if old_folder_path == new_folder_path:
+        return 0
+    old_key = developed_folder_key(old_folder_path)
+    new_key = developed_folder_key(new_folder_path)
+    if not old_key or not new_key or old_key == new_key:
+        return 0
+    old_subdir = os.path.join(developed_dir, old_key)
+    if not os.path.isdir(old_subdir):
+        return 0
+    new_subdir = os.path.join(developed_dir, new_key)
+    try:
+        names = os.listdir(old_subdir)
+    except OSError as exc:
+        log.warning("Failed to list developed dir %s: %s", old_subdir, exc)
+        return 0
+    relocated = 0
+    for name in names:
+        entry_stem = os.path.splitext(name)[0]
+        # Stem match is case-sensitive to match the read side in
+        # `_DevelopedDirIndex`, which uses case-sensitive stems so two
+        # photos differing only in case on a case-sensitive filesystem
+        # don't collide onto each other's developed render.
+        if entry_stem != stem:
+            continue
+        src_file = os.path.join(old_subdir, name)
+        dst_file = os.path.join(new_subdir, name)
+        if os.path.exists(dst_file):
+            # Preserve the existing render at the destination — matches
+            # the collision policy used by `move_photos` for the photo
+            # file itself (skip rather than overwrite).
+            log.warning(
+                "Skipping developed relocate %s -> %s: destination exists",
+                src_file, dst_file,
+            )
+            continue
+        try:
+            os.makedirs(new_subdir, exist_ok=True)
+            os.rename(src_file, dst_file)
+            relocated += 1
+        except OSError as exc:
+            log.warning(
+                "Failed to relocate developed file %s -> %s: %s",
+                src_file, dst_file, exc,
+            )
+    if relocated:
+        try:
+            if not os.listdir(old_subdir):
+                os.rmdir(old_subdir)
+        except OSError:
+            pass
+    return relocated
+
+
 class _DevelopedDirIndex:
     """Lazy, per-export cache of directory listings for developed lookups.
 

@@ -1624,13 +1624,21 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
 
 
 def move_folder_by_date(db, folder_id, destination, folder_template,
-                        progress_cb=None):
+                        progress_cb=None, developed_dir=""):
     """Move a folder's tracked photos into capture-date subfolders.
 
     Each photo uses ``move_photos``' copy/verify/catalog-update/delete order,
     including XMP and RAW/JPEG companions. Existing same-name files are never
     overwritten. Unlike ``move_folder``, this intentionally moves photos (and
     their companions), not unrelated untracked files in the source tree.
+
+    When ``developed_dir`` is set (matching the caller's configured
+    ``darktable_output_dir``), each moved photo's developed-output file is
+    rebased to the new folder's key so exports/full-resolution lookups
+    still find the render instead of falling back to RAW. Rebasing has to
+    happen per photo here (not per source folder as ``move_folder`` does)
+    because photos in one source folder can fan out to many date
+    destinations.
     """
     groups = plan_folder_date_moves(
         db, folder_id, destination, folder_template,
@@ -1661,6 +1669,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
             group["photo_ids"],
             group["destination"],
             progress_cb=group_progress,
+            developed_dir=developed_dir,
         )
         group_moved = int(result.get("moved", 0))
         moved += group_moved
@@ -1685,7 +1694,8 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
     }
 
 
-def move_photos(db, photo_ids, destination, progress_cb=None):
+def move_photos(db, photo_ids, destination, progress_cb=None,
+                developed_dir=""):
     """Move individual photos to a destination directory.
 
     Args:
@@ -1693,6 +1703,12 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
         photo_ids: list of photo IDs to move
         destination: absolute path to target directory
         progress_cb: optional callback(current, total, filename)
+        developed_dir: optional path to the configured
+            ``darktable_output_dir``. When set, each moved photo's
+            developed-output file — nested under a hash of its folder
+            path via ``export.developed_folder_key`` — is rebased to
+            match the new folder key so exports/full-resolution lookups
+            still find the render instead of falling back to RAW.
 
     Returns dict with keys: moved (int), errors (list of str)
     """
@@ -1806,6 +1822,21 @@ def move_photos(db, photo_ids, destination, progress_cb=None):
                 comp_src = os.path.join(src_dir, comp)
                 if os.path.isfile(comp_src):
                     os.remove(comp_src)
+
+            # Rebase this photo's developed-output file for the new folder
+            # key. `developed_folder_key` hashes the folder path, so the
+            # folder_id update above just invalidated the lookup — without
+            # this rebase, `_iter_developed_outputs` would look under the
+            # new hash, miss the render, and fall back to the RAW.
+            if developed_dir:
+                try:
+                    from .export import relocate_developed_file
+                except ImportError:
+                    from export import relocate_developed_file
+                stem = os.path.splitext(photo["filename"])[0]
+                relocate_developed_file(
+                    developed_dir, src_dir, destination, stem,
+                )
 
             moved += 1
 
