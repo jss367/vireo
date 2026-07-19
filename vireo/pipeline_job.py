@@ -830,6 +830,12 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # replace the pipeline's abort policy still observe every checkpoint.
         return globals()["_should_abort"](abort_event)
 
+    def _should_abort_without_pause(abort_event):
+        """Check cancellation without parking while a shared lock is held."""
+        if _cancellation_requested():
+            abort_event.set()
+        return globals()["_should_abort"](abort_event)
+
     def _run_pause_participant(participant, work_fn, *, pre_registered=False):
         if not pre_registered:
             pause_gate.register(participant)
@@ -4952,7 +4958,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 skipped += 1
                                 processed = i + 1
                                 continue
-                            if _should_abort(abort):
+                            if _should_abort_without_pause(abort):
                                 break
 
                             # GPU serialisation lives inside masking.generate_mask
@@ -4966,7 +4972,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 skipped += 1
                                 processed = i + 1
                                 continue
-                            if _should_abort(abort):
+                            if _should_abort_without_pause(abort):
                                 break
 
                             mask_path = save_mask(
@@ -4974,7 +4980,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                             completeness = crop_completeness(mask)
                             features = compute_all_quality_features(proxy, mask)
-                            if _should_abort(abort):
+                            if _should_abort_without_pause(abort):
                                 break
 
                             # Per-mask features (move from photos row into
@@ -5843,18 +5849,28 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # miss_stage's own gate covers the regroup-failed and abort cases, so
         # both stages can be invoked unconditionally and still reach a
         # terminal step status.
-        if abort.is_set():
-            # Both stages early-return as "Skipped" without touching grouping
-            # state, so the lock isn't needed — and skipping the calls would
-            # leave their step rows pending forever. Staying outside the lock
-            # also keeps an aborted/cancelled run from blocking behind a
-            # concurrent pipeline's regroup.
-            _run_pause_participant("regroup", regroup_stage)
-            _run_pause_participant("misses", miss_stage)
-        else:
-            with acquire_workspace_regroup(workspace_id):
-                _run_pause_participant("regroup", regroup_stage)
-                _run_pause_participant("misses", miss_stage)
+        def _run_regroup_and_misses():
+            if abort.is_set():
+                # Both stages early-return as "Skipped" without touching
+                # grouping state, so the lock isn't needed — and skipping the
+                # calls would leave their step rows pending forever. Staying
+                # outside the lock also keeps an aborted/cancelled run from
+                # blocking behind a concurrent pipeline's regroup.
+                regroup_stage()
+                miss_stage()
+            else:
+                # Pause checkpoints deliberately surround this critical
+                # section rather than living inside either stage: their shared
+                # lock must span regroup + misses atomically, but a paused job
+                # must not retain it and block another pipeline indefinitely.
+                with acquire_workspace_regroup(workspace_id):
+                    regroup_stage()
+                    miss_stage()
+            _pause_checkpoint()
+
+        _run_pause_participant(
+            "regroup_and_misses", _run_regroup_and_misses,
+        )
 
         _run_pause_participant("archive", archive_stage)
 
