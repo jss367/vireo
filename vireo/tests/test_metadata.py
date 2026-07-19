@@ -77,13 +77,46 @@ def test_find_exiftool_falls_back_to_path_when_bundled_broken(monkeypatch, tmp_p
     bundled = tmp_path / "vendor" / "exiftool" / "exiftool"
     bundled.parent.mkdir(parents=True)
     bundled.write_text("#!/usr/bin/perl\n")
+    system = tmp_path / "homebrew" / "exiftool"
+    system.parent.mkdir()
+    system.write_text("#!/usr/bin/perl\n")
+    system.chmod(0o755)
     monkeypatch.setattr(metadata.sys, "_MEIPASS", str(tmp_path), raising=False)
-    monkeypatch.setattr(
-        metadata.shutil, "which", lambda _name: "/opt/homebrew/bin/exiftool"
-    )
-    monkeypatch.setattr(metadata.subprocess, "run", lambda *a, **k: _ProbeBroken())
+    monkeypatch.setattr(metadata.shutil, "which", lambda _name: str(system))
 
-    assert metadata.find_exiftool() == "/opt/homebrew/bin/exiftool"
+    calls = []
+
+    def _run(command, *args, **kwargs):
+        calls.append(command)
+        if str(bundled) in command:
+            return _ProbeBroken()
+        if "-ver" in command:
+            return _ProbeOk()
+        return type("MetadataResult", (), {
+            "returncode": 0,
+            "stdout": '[{"SourceFile": "/photos/test.jpg"}]',
+            "stderr": "",
+        })()
+
+    monkeypatch.setattr(metadata.subprocess, "run", _run)
+
+    assert metadata.find_exiftool() == str(system)
+    status = metadata.exiftool_status()
+    assert status == {
+        "available": True,
+        "path": str(system),
+        "version": "13.59",
+        "error": None,
+        "hint": "install it with: brew install exiftool",
+    }
+    assert metadata._run_exiftool(["/photos/test.jpg"]) == [
+        {"SourceFile": "/photos/test.jpg"},
+    ]
+
+    assert calls[0] == ["/usr/bin/perl", str(bundled), "-ver"]
+    assert calls[1] == [str(system), "-ver"]
+    assert calls[2][0] == str(system)
+    assert "-json" in calls[2]
 
 
 def test_find_exiftool_bundled_probe_is_cached(monkeypatch, tmp_path):
