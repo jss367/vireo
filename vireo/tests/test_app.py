@@ -2279,6 +2279,80 @@ def test_encounter_species_replacement_resolves_hierarchy_fallback_per_photo(
     assert "Verdin" not in names_b
 
 
+def test_encounter_species_replacement_skips_unrelated_root_when_only_leaf_attached(
+    app_and_db,
+):
+    """When a same-name root species row exists in the catalog for one taxon
+    but the submitted photo actually carries only a hierarchical leaf for a
+    DIFFERENT taxon, the removal must still target the attached leaf.
+
+    Regression: the previous resolver took a catalog-wide root shortcut and
+    assigned that root row to every submitted photo. The removal loop below
+    matches attached rows by ``taxon_id`` — so a photo whose only same-name
+    tag was a leaf under a different taxon kept its old leaf attached while
+    the new species was added on top, leaving a stale duplicate.
+    """
+    app, db = app_and_db
+    client = app.test_client()
+    db.conn.execute(
+        "INSERT OR IGNORE INTO taxa (id, name, common_name, rank) VALUES "
+        "(9301, 'Auriparus flaviceps', 'Verdin', 'species'),"
+        "(9302, 'Fakelatus fake', 'Verdin', 'species')"
+    )
+    db.conn.commit()
+    photo_id = db.conn.execute(
+        "SELECT id FROM photos ORDER BY id LIMIT 1"
+    ).fetchone()["id"]
+
+    # Root species row named "Verdin" exists in the catalog, linked to
+    # taxon 9301. NOT attached to the submitted photo. The old resolver
+    # short-circuited on this row and assigned taxon 9301 as the removal
+    # target for every submitted photo.
+    root_verdin = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9301, type = 'taxonomy' WHERE id = ?",
+        (root_verdin,),
+    )
+    # The photo actually carries only a nested "Verdin" leaf under a
+    # different taxon (9302) — a legitimate homonym under a different
+    # parent (the kind of row duplicate repair deliberately preserves).
+    attached_parent = db.add_keyword("Other family")
+    attached_leaf = db.add_keyword("Verdin", parent_id=attached_parent)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = 9302, is_species = 1, type = 'taxonomy' "
+        "WHERE id = ?",
+        (attached_leaf,),
+    )
+    db.conn.commit()
+    db.tag_photo(photo_id, attached_leaf)
+    _seed_encounter_cache(app, db, [photo_id], confirmed_species="Verdin")
+
+    resp = client.post(
+        "/api/encounters/species",
+        json={"species": "Blue Jay", "photo_ids": [photo_id]},
+    )
+    assert resp.status_code == 200
+
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(photo_id)}
+    # The attached hierarchy leaf (taxon 9302) on the submitted photo
+    # must be gone. A catalog-wide root shortcut on the 9301 row would
+    # have left the 9302 leaf attached because taxon_id mismatch.
+    assert attached_leaf not in tagged_ids, (
+        "Per-photo resolution should have picked the attached 9302 leaf "
+        "as the old row so the removal loop matches and untags it, even "
+        "though a same-name root row for a different taxon exists in the "
+        "catalog."
+    )
+    # The unrelated root row for taxon 9301 must remain untouched — it
+    # was never attached to this photo, so replacement must not affect it.
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE id = ?", (root_verdin,),
+    ).fetchone() is not None
+    names = {row["name"] for row in db.get_photo_keywords(photo_id)}
+    assert "Blue Jay" in names
+    assert "Verdin" not in names
+
+
 def test_encounter_species_replacement_ignores_nested_homonym(app_and_db):
     """Old-species lookup must be scoped to root species keywords only."""
     app, db = app_and_db

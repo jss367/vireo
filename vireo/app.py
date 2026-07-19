@@ -24018,31 +24018,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                      AND (is_species = 1 OR type = 'taxonomy')""",
                 (previous_species,),
             ).fetchone()
-            if old_kid_row is not None:
+            if old_kid_row is not None and old_kid_row["taxon_id"] is None:
+                # Unlinked root: ``previous_species`` names a specific
+                # legacy row whose identity is that row's own id, not a
+                # taxon. Assign it to every submitted photo — the removal
+                # loop below relies on this exact-row identity to route
+                # through the ``eff_taxon_id is None`` branch of its
+                # homonym-conflict guard, which distinguishes the unlinked
+                # legacy species from any linked same-name row on the
+                # photo (a distinct species that must be preserved). A
+                # per-photo resolution would pick up the attached linked
+                # homonym row and treat that linked species AS the
+                # previous species, queueing it for removal.
                 for pid in photo_ids:
                     per_photo_old_row[pid] = old_kid_row
             else:
-                # Hierarchical species intentionally have parent_id set. A
-                # prior confirmation may therefore be represented only by a
-                # nested leaf after duplicate repair; use that leaf as the
-                # identity target when no root row exists.
+                # Linked root (its identity IS the taxon, and taxon-based
+                # matching in the removal loop is what actually decides
+                # equivalence) OR no root at all: resolve per-photo from
+                # the rows actually attached to each submitted photo. A
+                # single catalog-wide root assignment would map every
+                # submitted photo to that root's taxon; the removal loop
+                # matches attached rows by ``taxon_id``, so any submitted
+                # photo whose only same-name tag is a hierarchy leaf
+                # under a different taxon (a legitimate homonym —
+                # duplicate repair deliberately preserves these rows)
+                # would keep its old leaf attached while the new species
+                # is added on top, leaving a stale duplicate. The
+                # per-photo query naturally covers both attached shapes:
+                # its ``ORDER BY parent_id IS NULL`` puts an attached
+                # root first (fast common case) and otherwise picks the
+                # attached hierarchy leaf on the photo's own taxon.
                 #
-                # Scope the fallback to keywords actually attached to one of
-                # the submitted photos. Multiple same-name hierarchy leaves
-                # can exist in the catalog under different parents pointing
-                # at unrelated taxa (e.g. a legacy homonym nested elsewhere);
-                # an unscoped ``LIMIT 1`` could pick one of those unattached
-                # rows, and because the removal loop below matches attached
-                # rows by ``taxon_id``, the actual old hierarchy tag on the
-                # submitted photos would never be removed while the new
-                # species is still added — leaving a duplicate.
-                #
-                # Resolve per-photo: a batch can span two hierarchy leaves
-                # under different parent taxa (an ambiguous alias). Picking
-                # one "best" taxon for the whole batch would leave every
-                # photo on the other taxon with its old leaf still attached
-                # alongside the new species; each photo needs its own row
-                # so the removal loop matches its own taxon.
+                # Filter to species-rank (or NULL-rank) taxonomy-typed
+                # rows and accept ``is_species = 1`` rows too — for the
+                # same taxonomy-typed vs. legacy-species reason as the
+                # root lookup.
+                old_kid_row = None
                 candidate_rows = []
                 for chunk in _chunked(photo_ids):
                     placeholders_ids = ",".join("?" for _ in chunk)
