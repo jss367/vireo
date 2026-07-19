@@ -1460,3 +1460,75 @@ class _FakeWin32Sys:
     branch in ``config._replace_with_windows_retry`` exercises on POSIX CI."""
 
     platform = "win32"
+
+
+# --------------------------------------------------------------------------
+# remote_targets: local_archive_root
+# --------------------------------------------------------------------------
+
+def _base_target(**over):
+    t = {"host": "nas", "user": "julius", "remote_path": "/volume1/Photos",
+         "mount_path": "/Volumes/Photos"}
+    t.update(over)
+    return t
+
+
+def test_remote_target_local_archive_root_passthrough(tmp_path, monkeypatch):
+    """A valid absolute local_archive_root outside mount_path survives the
+    save -> get_remote_targets() round trip verbatim."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    archive_root = str(tmp_path / "archive")
+    cfg.save({"remote_targets": [_base_target(
+        local_archive_root=archive_root,
+    )]})
+
+    targets = cfg.get_remote_targets()
+    assert len(targets) == 1
+    assert targets[0]["local_archive_root"] == archive_root
+
+
+def test_remote_target_local_archive_root_defaults_empty(tmp_path, monkeypatch):
+    """A saved target with no local_archive_root key coerces to ""."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    cfg.save({"remote_targets": [_base_target()]})
+
+    targets = cfg.get_remote_targets()
+    assert len(targets) == 1
+    assert targets[0]["local_archive_root"] == ""
+
+
+def test_remote_target_local_archive_root_rejects_relative(tmp_path, monkeypatch):
+    """A relative local_archive_root is blanked to "" but the rest of the
+    target (host/user/remote_path/mount_path) is still valid — invalid
+    values are blanked rather than dropping the whole target."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    cfg.save({"remote_targets": [_base_target(local_archive_root="Photos")]})
+
+    targets = cfg.get_remote_targets()
+    assert len(targets) == 1
+    assert targets[0]["local_archive_root"] == ""
+    assert targets[0]["host"] == "nas"
+    assert targets[0]["mount_path"] == "/Volumes/Photos"
+
+
+def test_remote_target_local_archive_root_rejects_inside_mount(tmp_path, monkeypatch):
+    """local_archive_root pointed inside mount_path is blanked — mount_path
+    is the destination view of the NAS, so archiving into it would "move"
+    files onto themselves."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    mount = str(tmp_path / "mount")
+    sub = str(tmp_path / "mount" / "sub")
+    coerced = cfg._coerce_remote_target(_base_target(
+        mount_path=mount, local_archive_root=sub,
+    ))
+    assert coerced is not None
+    assert coerced["local_archive_root"] == ""
+    assert coerced["mount_path"] == mount

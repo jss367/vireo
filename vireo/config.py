@@ -46,8 +46,10 @@ DEFAULTS = {
     # `remote_path` is the NAS-side filesystem path used for the rsync-over-SSH
     # transfer; `mount_path` is the local path (e.g. an SMB mount) where Vireo
     # can read those same files afterward, and is what the catalog points at
-    # once a move completes. Custom settings UI (like external_editors), so
-    # it's excluded from SCHEMA.
+    # once a move completes. `local_archive_root` (optional) is the local
+    # directory that mirrors `remote_path` for chained import→process→move
+    # runs — see `_coerce_remote_target`. Custom settings UI (like
+    # external_editors), so it's excluded from SCHEMA.
     "remote_targets": [],
     "darktable_bin": "",
     # Legacy single-editor field. Kept for one-cycle migration: if
@@ -702,6 +704,27 @@ def _coerce_remote_target(entry):
         # Stable-ish id derived from the connection tuple so the UI can key
         # rows even for legacy entries saved before ids existed.
         tid = f"{user}@{host}:{remote_path}"
+    mount_path = (entry.get("mount_path") or "").strip()
+    # Local directory that mirrors remote_path for chained import→process→
+    # move runs. Empty = target never offers the chained move. Must be an
+    # absolute local path and must not live inside mount_path (the mount is
+    # the *destination* view of the NAS; the archive root is the local
+    # staging side — pointing it at the mount would "move" files onto
+    # themselves). Invalid values are blanked rather than dropping the
+    # whole target.
+    local_archive_root = (entry.get("local_archive_root") or "").strip()
+    if local_archive_root:
+        if not os.path.isabs(local_archive_root):
+            local_archive_root = ""
+        elif mount_path:
+            try:
+                if os.path.commonpath([
+                    os.path.realpath(local_archive_root),
+                    os.path.realpath(mount_path),
+                ]) == os.path.realpath(mount_path):
+                    local_archive_root = ""
+            except ValueError:
+                pass  # different drives (Windows) — cannot be inside
     return {
         "id": tid,
         "name": name,
@@ -710,8 +733,9 @@ def _coerce_remote_target(entry):
         "port": port,
         "ssh_key": (entry.get("ssh_key") or "").strip(),
         "remote_path": remote_path,
-        "mount_path": (entry.get("mount_path") or "").strip(),
+        "mount_path": mount_path,
         "bwlimit_kbps": max(0, bwlimit),
+        "local_archive_root": local_archive_root,
     }
 
 
