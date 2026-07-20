@@ -459,7 +459,13 @@
   function sortPhotos(items) {
     const result = items.slice();
     const sort = state.view.sort;
-    if (sort === "relevance" && pageState().visual) result.sort((a, b) => (b._similarity || visualScore(b, pageState().visual.prompt)) - (a._similarity || visualScore(a, pageState().visual.prompt)));
+    const page = pageState();
+    // Only rank by visualScore when the visual clause is actually being applied by
+    // getFilteredPhotos(). Otherwise the "metadata filters shown only" error badge
+    // (unsupported / missing index) or the paused-filters state would still let the
+    // disabled prompt influence result order.
+    const visualForSort = !page.muted && visualIsActive(page.visual) ? page.visual : null;
+    if (sort === "relevance" && visualForSort) result.sort((a, b) => (b._similarity || visualScore(b, visualForSort.prompt)) - (a._similarity || visualScore(a, visualForSort.prompt)));
     else if (sort === "date_asc") result.sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
     else if (sort === "name_asc") result.sort((a, b) => a.filename.localeCompare(b.filename));
     else if (sort === "rating_desc") result.sort((a, b) => b.rating - a.rating || b.quality - a.quality);
