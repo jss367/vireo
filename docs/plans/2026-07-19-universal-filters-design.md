@@ -82,7 +82,7 @@ expression, rendered as a locked chip:
 | Browse | workspace folders (status ok/partial) — the implicit baseline |
 | Map | has GPS or a location keyword (today's `get_geolocated_photos` predicate) |
 | Review | photos with predictions whose effective review status is `pending` — i.e. `COALESCE(prediction_review.status, 'pending') = 'pending'`, so the many predictions that have no `prediction_review` row (the default-pending storage model — see the `COALESCE(pr_rev.status, 'pending')` predicates already used across `db.py`) are included, not dropped |
-| Duplicates | photos whose `file_hash` groups ≥2; a matching member reveals its whole group |
+| Duplicates | photos whose `file_hash` groups ≥2; a matching member reveals its whole group. Groups come from the library-wide `find_duplicate_groups` (which intentionally spans workspaces — `db.py:4933` groups the whole `photos` table with no `workspace_folders` join, and `/api/duplicates/apply` resolves by `file_hash` across the catalog). The user expression runs through `/api/photos/query` in the current workspace's scope only to pick which *members* match; the Duplicates page then re-hydrates each matching member's full group from the library-wide grouper so cross-workspace duplicate sets stay complete and resolvable. Never derive groups from workspace-scoped query results — that would silently hide half of a duplicate pair when its other copy lives in a different workspace. |
 
 "Open results in…" hands the user expression to another page; the destination
 adds its own scope chip.

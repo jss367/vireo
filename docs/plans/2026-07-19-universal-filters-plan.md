@@ -27,17 +27,32 @@ unless noted.
 3. **New ops**: `in`/`not_in` (enum multi-select); generalize `between`
    beyond timestamp; `recent {n, unit}` for date fields. Validation rejects
    unknown fields/ops/value shapes with 400s.
-4. **Field registry**: a module-level `FILTER_FIELDS` dict (label, category,
+4. **Widen the `flag` rule leaf to preserve NULL-as-unflagged.** Today the
+   collection engine's `flag` leaf emits `p.flag = ?` (`db.py:17809-17811`),
+   while Browse's inline filter uses `COALESCE(p.flag, 'none') = ?`
+   (`db.py:7086-7088`). Once Browse switches to the rule engine (Phase 2),
+   the naive equality would silently drop every row with a legacy `NULL`
+   flag from the Unflagged chip — catalogs from older ingests and any code
+   path that leaves `flag` as `NULL` (undo, imports before the flag column
+   was populated) all fall into this bucket. Change the leaf to emit
+   `COALESCE(p.flag, 'none') = ?` for `equals`/`is` and the corresponding
+   `COALESCE(p.flag, 'none') != ?` for `is not`, and extend `in`/`not_in` on
+   `flag` the same way so a multi-select including "Unflagged" (`'none'`)
+   still catches `NULL`. Add a regression test that inserts a row with
+   `flag IS NULL` and asserts the Unflagged chip / `flag in ['none', …]`
+   rule both return it.
+5. **Field registry**: a module-level `FILTER_FIELDS` dict (label, category,
    type, ops, enum values, suggest flag, SQL binding) consumed by both the
    query builder and `GET /api/filters/fields`.
-5. **Endpoints**: `POST /api/photos/query` (rules + sort + paging → list +
+6. **Endpoints**: `POST /api/photos/query` (rules + sort + paging → list +
    total, workspace-scoped exactly like `get_photos`); `GET
    /api/filters/fields`; `GET /api/filters/values` (distinct values + counts
    for suggest fields; expression-minus-edited-rule semantics — drop the
    clause from its group, never substitute true).
-6. **Tests** (`vireo/tests/test_db.py`, `test_photos_api.py`): each new
+7. **Tests** (`vireo/tests/test_db.py`, `test_photos_api.py`): each new
    field/op; any/none group nesting; values endpoint counts under sibling
-   filters; migration backfill idempotence; validation failures.
+   filters; migration backfill idempotence; validation failures; NULL-flag
+   Unflagged regression (see step 4).
 
 Nothing user-visible changes in this phase.
 
@@ -67,7 +82,18 @@ Nothing user-visible changes in this phase.
    rule-tree candidate ids → `/api/photos/search` internals
    (app.py 25807: active model, `get_photos_with_embedding`, text encode,
    cosine, threshold by strength broad/balanced/strict) → ordered ids +
-   similarity.
+   similarity. **Candidate ids must not be handed to
+   `get_photos_with_embedding` inline.** Today that helper builds an
+   unchunked `IN (?, ?, …)` clause (`db.py:15019-15024`), which blows past
+   `SQLITE_MAX_VARIABLE_NUMBER` (999 on legacy builds) for any broad rule
+   tree over a large catalog and errors before cosine scoring runs. Route
+   the candidate scope through the same temp-table staging path
+   `_scope_clause` already uses (`db.py:5724-5735`) — either by teaching
+   `get_photos_with_embedding` to accept a scope handle instead of a raw
+   list, or by chunking the list into ≤900-id batches and unioning the
+   results — so a broad visual search over the full library never fails on
+   the variable cap. Tests must exercise this with a candidate set larger
+   than 999 ids.
 2. Error states surfaced in the response (`no_model`,
    `model_no_text_search`, `no_embeddings`) → error chip + "metadata filters
    shown only" badge; metadata rules still apply.
@@ -87,6 +113,14 @@ Nothing user-visible changes in this phase.
    the picker only here (registry `pages` attribute).
 3. Duplicates: filter selects matching members; groups render complete with
    "Matches filter" badges (prototype behavior), via `file_hash` grouping.
+   Duplicate groups are sourced from the library-wide `find_duplicate_groups`
+   (`db.py:4933` — intentionally spans workspaces, no `workspace_folders`
+   join), never re-derived from the workspace-scoped `/api/photos/query`
+   result set. The query result set is used only to decide which members
+   match the filter; the full cross-workspace group is then re-hydrated so
+   scan-visible duplicates that live in another workspace remain resolvable
+   through `/api/duplicates/apply` (`db.py:4922`, resolves by `file_hash`
+   library-wide).
 4. "Open results in…" handoff: serialize expression, navigate, destination
    adds its scope chip.
 
