@@ -18910,15 +18910,17 @@ class Database:
         Matching rows get ``is_species=1``, ``type='taxonomy'``, and (if the
         local taxa table is populated and the lookup resolves to a
         species-rank taxon) a ``taxon_id`` link by iNaturalist id.
-        ``taxon_id`` is left NULL when only a higher-rank (genus/family)
-        match exists — binding to a non-species-rank taxon would satisfy the
-        marking pass but make the row invisible to every rank-filtered
-        reader that restricts to ``t.rank = 'species' OR t.rank IS NULL``.
-        A ``type='taxonomy'`` row whose ``taxon_id`` was bound by the old
-        species-agnostic lookup to a non-species-rank taxon (genus/family)
-        is rebound to the species-rank taxon whenever ``taxonomy.lookup``
-        resolves to one; otherwise the new ``rank = 'species'`` filters
-        would silently drop every photo carrying the accepted keyword.
+        ``taxon_id`` is left NULL when the row had no prior link and only
+        a higher-rank (genus/family) match exists — binding an unlinked
+        row to a non-species-rank taxon would auto-promote it in a way the
+        classifier callers never asked for. A ``type='taxonomy'`` row
+        whose ``taxon_id`` was bound by the old species-agnostic lookup
+        to a non-species-rank taxon (genus/family) is rebound to the
+        species-rank taxon whenever ``taxonomy.lookup`` resolves to one;
+        when no species-rank replacement exists, the higher-rank link is
+        preserved so ``get_life_list_candidates`` can keep surfacing the
+        row's ``taxon_rank`` / ``scientific_name`` / ``taxonomic_class``
+        metadata for genus/family/class Life List filters.
 
         Uses the local taxonomy only (no network requests).
 
@@ -18991,23 +18993,18 @@ class Database:
                 and lookup_local_id != kw["taxon_id"]
             ):
                 rebind_taxon_id = lookup_local_id
-            # When the existing binding is non-species-rank and no
-            # species-rank replacement is available, clear ``taxon_id`` to
-            # NULL. Leaving the higher-rank link in place would satisfy
-            # ``mark_species_keywords`` but make the row invisible to
-            # every rank-filtered reader (Life List, Compare,
-            # highlight/preference eligibility) that restricts to
-            # ``t.rank = 'species' OR t.rank IS NULL``; NULLing it lets
-            # the accepted keyword stay visible via the ``rank IS NULL``
-            # fallback until a species-rank taxon becomes available,
-            # mirroring ``add_keyword``'s reuse-path clearing (see
-            # ``test_add_species_clears_higher_rank_taxon_when_no_species_match``).
-            should_clear_taxon = (
-                kw["taxon_id"] is not None
-                and kw["taxon_rank"] is not None
-                and kw["taxon_rank"] != "species"
-                and rebind_taxon_id is None
-            )
+            # Preserve an existing higher-rank ``taxon_id`` when no
+            # species-rank replacement is available. Earlier revisions
+            # cleared the link to keep the row visible under the old
+            # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
+            # Life List, Compare, and highlight/preference eligibility.
+            # Those readers now accept linked higher-rank identifications
+            # (see :meth:`get_life_list_candidates` and
+            # :meth:`get_life_list_locations`), so clearing on startup
+            # would strip the row's ``taxon_rank`` / ``scientific_name`` /
+            # ``taxonomic_class`` metadata and silently break the new
+            # genus / family / class Life List filters after the first
+            # restart.
             # Skip no-op updates so the "updated" count reflects real
             # changes. A matched row is fully consistent when type is
             # 'taxonomy', is_species is 1, and (taxon_id is already set to
@@ -19021,7 +19018,6 @@ class Database:
                 or is_species_fix
                 or is_taxon_link
                 or is_rebind
-                or should_clear_taxon
             ):
                 continue
             if is_rebind:
@@ -19029,12 +19025,6 @@ class Database:
                     "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
                     "taxon_id = ? WHERE id = ?",
                     (rebind_taxon_id, kw["id"]),
-                )
-            elif should_clear_taxon:
-                self.conn.execute(
-                    "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
-                    "taxon_id = NULL WHERE id = ?",
-                    (kw["id"],),
                 )
             else:
                 self.conn.execute(

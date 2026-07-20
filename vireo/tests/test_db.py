@@ -19460,19 +19460,16 @@ def test_mark_species_keywords_keeps_species_taxon_when_only_higher_rank_availab
     assert row["taxon_id"] == species_taxon
 
 
-def test_mark_species_keywords_clears_higher_rank_taxon_when_no_species_match(tmp_path):
-    """A fully typed taxonomy row already bound by the old species-agnostic
-    lookup to a higher-rank taxon (genus/family) must have its stale
-    non-species ``taxon_id`` cleared to NULL on the next
+def test_mark_species_keywords_preserves_higher_rank_taxon_when_no_species_match(tmp_path):
+    """A fully typed taxonomy row already linked to a higher-rank taxon
+    (genus/family/class) must retain that link on the next
     ``mark_species_keywords`` pass when no species-rank replacement is
-    available. Leaving the higher-rank link in place would satisfy the
-    marking pass but make the row invisible to every rank-filtered reader
-    (Life List, Compare, Explorer, highlight/preference eligibility) that
-    restricts to ``t.rank = 'species' OR t.rank IS NULL`` — clearing the
-    binding keeps the accepted keyword visible via the ``rank IS NULL``
-    fallback until a species-rank taxon becomes available. Mirrors
-    ``add_keyword``'s reuse-path clearing (see
-    ``test_add_species_clears_higher_rank_taxon_when_no_species_match``).
+    available. ``get_life_list_candidates`` and ``get_life_list_locations``
+    now surface linked higher-rank identifications so their
+    ``taxon_rank`` / ``scientific_name`` / ``taxonomic_class`` metadata
+    powers the new genus / family / class Life List filters; clearing
+    the ``taxon_id`` on startup would strip that metadata and silently
+    break those filters after the first restart.
     """
     from db import Database
 
@@ -19489,10 +19486,10 @@ def test_mark_species_keywords_clears_higher_rank_taxon_when_no_species_match(tm
         "SELECT id FROM taxa WHERE rank = 'family'"
     ).fetchone()["id"]
 
-    # Legacy row: fully typed taxonomy species but bound to the
-    # non-species-rank family taxon by the old species-agnostic lookup.
-    # add_keyword auto-promotes/clears on insert, so bypass it with
-    # direct SQL to simulate the upgraded catalog.
+    # Fully typed taxonomy row linked to a valid higher-rank taxon (a
+    # ``Corvidae`` family observation the user has accepted). add_keyword
+    # is species-preferring on insert, so bypass it with direct SQL to
+    # simulate the upgraded catalog.
     cur = db.conn.execute(
         "INSERT INTO keywords (name, type, is_species, taxon_id) "
         "VALUES ('Corvidae', 'taxonomy', 1, ?)",
@@ -19512,14 +19509,14 @@ def test_mark_species_keywords_clears_higher_rank_taxon_when_no_species_match(tm
             return self.lookup(name) is not None
 
     updated = db.mark_species_keywords(FakeTaxonomy())
-    assert updated == 1
+    assert updated == 0
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
         (kid,),
     ).fetchone()
     assert row["type"] == "taxonomy"
     assert row["is_species"] == 1
-    assert row["taxon_id"] is None
+    assert row["taxon_id"] == family_taxon
 
 
 def test_repair_duplicate_photo_species_preserves_highlight_eligibility(tmp_path):

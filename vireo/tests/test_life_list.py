@@ -777,6 +777,54 @@ def test_higher_rank_photo_can_be_life_list_representative(life_app):
     assert accipiter_entry["is_current_photo"] is True
 
 
+def test_higher_rank_taxonomy_link_survives_mark_species_pass(life_app):
+    """A linked higher-rank taxonomy identification (genus/family/class)
+    must keep its ``taxon_id`` across the startup ``mark_species_keywords``
+    pass, so ``get_life_list_candidates`` continues to surface the entry's
+    ``taxon_rank`` / ``scientific_name`` / ``taxonomic_class`` metadata
+    used by the new Life List rank and class filters.
+
+    Regression test for the startup marking path: previously the pass
+    cleared ``taxon_id`` on any ``type='taxonomy'`` row whose current
+    binding pointed at a non-species-rank taxon when the taxonomy lookup
+    lacked a species-rank replacement — so an ``Accipiter`` genus entry
+    would render correctly on the first request but lose its rank/class
+    metadata on the next restart.
+    """
+    app, db, ids = life_app
+    seed = _seed_higher_rank_accipiter(db, ids["folder"])
+
+    class FakeTaxonomy:
+        # Only the Accipiter genus is known; no species-rank alternative
+        # exists (matches the concrete failure scenario in the review).
+        def lookup(self, name):
+            if name.lower() == "accipiter":
+                return {"taxon_id": seed["accipiter"]}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    # The pass makes no changes because the row is already fully typed
+    # and its higher-rank binding is preserved.
+    assert db.mark_species_keywords(FakeTaxonomy()) == 0
+    row = db.conn.execute(
+        "SELECT taxon_id, type, is_species FROM keywords WHERE id = ?",
+        (seed["keyword"],),
+    ).fetchone()
+    assert row["taxon_id"] == seed["accipiter"]
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+
+    entry = _entry(_get_life_list(app), "Accipiter")
+    assert entry["taxon_rank"] == "genus"
+    assert entry["taxonomic_class"] == {
+        "id": seed["aves"],
+        "name": "Aves",
+        "common_name": "Birds",
+    }
+
+
 def test_locations_from_location_keywords(life_app):
     app, _, _ = life_app
     data = _get_life_list(app)
