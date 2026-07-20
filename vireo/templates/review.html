@@ -950,6 +950,19 @@ async function switchCollection(val) {
   renderAll();
 }
 
+// Bumped by every loadPredictions() invocation; responses whose epoch is
+// no longer current are dropped. The bootstrap kicks a pre-init unfiltered
+// fetch, and VireoFilter.init().then() may kick a post-init filtered
+// fetch \u2014 without this token, if the unfiltered fetch resolved LAST
+// (large libraries), it would overwrite allPredictions / the grid / the
+// filter-bar total with unfiltered rows while the filter chips remained
+// active.
+// Must be initialized BEFORE the bootstrap call to loadPredictions()
+// below \u2014 `var` hoists the declaration but not the `= 0` initializer,
+// so if declared later the first ++ increments `undefined` to `NaN` and
+// every subsequent epoch check (NaN !== 0) drops the response silently.
+var _loadPredictionsEpoch = 0;
+
 /* ---------- Bootstrap ---------- */
 applyReviewQueryParams();
 loadPredictions();
@@ -996,15 +1009,6 @@ function renderFingerprintFilterPill() {
     renderAll();
   });
 }
-
-// Bumped by every loadPredictions() invocation; responses whose epoch is
-// no longer current are dropped. The bootstrap kicks a pre-init unfiltered
-// fetch, and VireoFilter.init().then() may kick a post-init filtered
-// fetch — without this token, if the unfiltered fetch resolved LAST
-// (large libraries), it would overwrite allPredictions / the grid / the
-// filter-bar total with unfiltered rows while the filter chips remained
-// active.
-var _loadPredictionsEpoch = 0;
 
 async function loadPredictions() {
   var myEpoch = ++_loadPredictionsEpoch;
