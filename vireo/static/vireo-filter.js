@@ -1051,20 +1051,34 @@
     getUserRules() { return userRules(); },
     addRule(field, op, value) {
       mutate(() => {
-        // Same-field root rule is replaced (sidebar keyword clicks toggle).
-        const idx = state.root.rules.findIndex((n) => !isGroup(n) && n.field === field);
         const rule = makeRule(field, op, value);
-        if (idx >= 0 && JSON.stringify(state.root.rules[idx]) === JSON.stringify(rule)) {
-          state.root.rules.splice(idx, 1);
-        } else if (idx >= 0) state.root.rules[idx] = rule;
-        else state.root.rules.unshift(rule);
+        const existing = state.root.rules.filter((n) => !isGroup(n) && n.field === field);
+        // Toggle off when the sole existing rule of this field is
+        // identical (sidebar keyword clicks re-toggle to clear).
+        if (existing.length === 1 && JSON.stringify(existing[0]) === JSON.stringify(rule)) {
+          state.root.rules = state.root.rules.filter((n) => n !== existing[0]);
+          return;
+        }
+        // Otherwise replace ALL same-field root leaves. Legacy deep
+        // links can install more than one rule per field (e.g.
+        // ?date_from=…&date_to=… → two `timestamp` rules), and
+        // replacing only the first would leave the stale bound behind
+        // — a calendar day pick would then compose "day X" with the
+        // leftover ">= date_from" and silently show wrong results.
+        state.root.rules = state.root.rules.filter((n) => isGroup(n) || n.field !== field);
+        state.root.rules.unshift(rule);
       });
     },
     quickSearch(text) { applyQuickSearch(text); },
     removeField(field) {
-      const idx = state.root.rules.findIndex((n) => !isGroup(n) && n.field === field);
-      if (idx < 0) return;
-      mutate(() => { state.root.rules.splice(idx, 1); });
+      // Remove ALL matching root leaves — legacy `?date_from=…&date_to=…`
+      // and other multi-rule param combinations can install more than
+      // one leaf per field.
+      const hasMatch = state.root.rules.some((n) => !isGroup(n) && n.field === field);
+      if (!hasMatch) return;
+      mutate(() => {
+        state.root.rules = state.root.rules.filter((n) => isGroup(n) || n.field !== field);
+      });
     },
     hasFilters() { return hasUserFilters(); },
     // Wipe restored/current filters without firing onChange. Used when the

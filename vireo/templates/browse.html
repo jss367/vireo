@@ -2924,18 +2924,29 @@ async function bootstrapBrowse() {
       },
     }).then(function() {
       VireoFilter.setResultTotal(totalPhotos);
-      // Plain collection deep-link (?collection_id=... with no
-      // ?dashboard_scope=1) must show exactly that collection. A saved
-      // workspace filter restored from ui_state makes hasFilters() true,
-      // and the resetAndLoad() below would then clear activeCollectionId
-      // via the resetAndLoad path (see line ~3901 \u2014 non-dashboard scopes),
-      // silently switching from the requested collection to the saved
-      // filter. Drop the persisted state so the deep link is honored.
+      // Collection deep links must open showing exactly that collection \u2014
+      // whether plain (?collection_id=..., historical endpoint behavior) or
+      // dashboard-scoped (?dashboard_scope=1&collection_id=..., composable).
+      // A restored persisted Browse filter overrides both: for plain links
+      // the resetAndLoad below clears activeCollectionId (see line ~3901
+      // \u2014 non-dashboard scopes); for dashboard links it silently
+      // intersects the drill-down collection with unrelated saved
+      // rules. If the URL itself didn't supply any legacy filter params,
+      // treat the collection link as URL-scoped and drop the persisted
+      // state so the link is honored.
       var urlParams = new URLSearchParams(window.location.search);
-      var plainCollectionLink = !!urlParams.get('collection_id') &&
-        urlParams.get('dashboard_scope') !== '1';
-      if (plainCollectionLink && VireoFilter.hasFilters()) {
+      var LEGACY_FILTER_PARAMS = ['rating_min', 'flag', 'color_label',
+        'date_from', 'date_to', 'location_status', 'missing_gps', 'keyword'];
+      var hasExplicitFilterParams = LEGACY_FILTER_PARAMS.some(function(p) {
+        return urlParams.has(p);
+      });
+      var collectionLink = !!urlParams.get('collection_id');
+      if (collectionLink && !hasExplicitFilterParams && VireoFilter.hasFilters()) {
         VireoFilter.clearAll(true);
+        // Plain collection: /api/browse/init already painted the collection
+        // and there are no filters left to apply, so skip the reload
+        // entirely. Dashboard-scoped: same story \u2014 the init call included
+        // collection_id, so the just-painted grid already matches.
         return;
       }
       if (VireoFilter.hasFilters()) {
@@ -3059,14 +3070,26 @@ function filterByFolder(folderId) {
   } else {
     activeFolderId = folderId;
   }
+  // If the current keyword highlight came from a sidebar click,
+  // filterByKeyword also installed a VireoFilter 'keyword' rule — that
+  // rule is now the sidebar's stored state, not activeKeyword. Clearing
+  // just activeKeyword drops the highlight but leaves the rule in place,
+  // so the folder reload silently applies folder ∩ keyword. Drop the
+  // rule before the reload; VireoFilter.removeField fires onChange,
+  // which runs the reload path (including timelineMode + summary), so
+  // skip the plain reloadBrowseResults() branch when we take that route.
+  var hadSidebarKeyword = activeKeyword !== null;
   activeKeyword = null;
   activeCollectionId = null;
-  if (timelineMode) loadCalendarData();
-  reloadBrowseResults();
-  // Update active state
   document.querySelectorAll('#folderTree .tree-item').forEach(function(el) {
     el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
   });
+  if (hadSidebarKeyword && window.VireoFilter && VireoFilter.isReady()) {
+    VireoFilter.removeField('keyword');
+    return;
+  }
+  if (timelineMode) loadCalendarData();
+  reloadBrowseResults();
 }
 
 /* ---------- Keyword Tree ---------- */
