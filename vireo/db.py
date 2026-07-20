@@ -13117,15 +13117,20 @@ class Database:
         return dict(row) if row else None
 
     def get_photo_life_list_species(self, photo_id):
-        """Return this photo's lifelist-eligible species names in the active
-        workspace, ordered by name.
+        """Return this photo's lifelist-eligible identification names in the
+        active workspace, ordered by name.
 
         Same eligibility rule as :meth:`get_life_list_candidates`: an accepted
-        species keyword (``is_species = 1`` or ``type = 'taxonomy'``) on a
-        non-rejected photo in a workspace-visible folder. Returns ``[]`` when
-        the photo carries no such species (or is rejected / outside the
-        workspace), which is exactly when no "Add to Life List" affordance
-        should appear.
+        identification keyword (``is_species = 1`` or ``type = 'taxonomy'``)
+        on a non-rejected photo in a workspace-visible folder. Returns ``[]``
+        when the photo carries no such identification (or is rejected /
+        outside the workspace), which is exactly when no "Set Representative"
+        affordance should appear. Linked higher-rank taxonomy identifications
+        (genus, family, class, …) are included for the same reason they are
+        in :meth:`get_life_list_candidates` — so a photo tagged only with a
+        higher-rank identification exposes the shared representative row and
+        can complete ``POST /api/photo-preferences`` for the entry it
+        actually appears under on the Life List.
 
         Linked-taxon hierarchy leaves are canonicalized to the same-taxon
         root keyword's stored spelling — mirroring
@@ -13159,7 +13164,6 @@ class Database:
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
-               LEFT JOIN taxa t ON t.id = k.taxon_id
                JOIN photos p ON p.id = pk.photo_id
                 AND COALESCE(p.flag, 'none') != 'rejected'
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
@@ -13167,7 +13171,6 @@ class Database:
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
                WHERE pk.photo_id = ?
-                 AND (t.rank = 'species' OR t.rank IS NULL)
                ORDER BY CASE WHEN k.parent_id IS NULL THEN 1 ELSE 0 END,
                         k.id""",
             (ws, photo_id),

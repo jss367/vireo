@@ -674,8 +674,7 @@ def test_taxonomic_rank_and_class_attached(life_app):
     assert cardinal["taxonomic_class"] is None
 
 
-def test_higher_rank_taxonomy_identification_is_listed(life_app):
-    app, db, ids = life_app
+def _seed_higher_rank_accipiter(db, folder_id):
     aves = db.conn.execute(
         "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
         ("Aves", "Birds", "class"),
@@ -690,7 +689,7 @@ def test_higher_rank_taxonomy_identification_is_listed(life_app):
         (accipiter, keyword_id),
     )
     photo_id = db.add_photo(
-        folder_id=ids["folder"],
+        folder_id=folder_id,
         filename="accipiter.jpg",
         extension=".jpg",
         file_size=1000,
@@ -698,20 +697,67 @@ def test_higher_rank_taxonomy_identification_is_listed(life_app):
         timestamp="2024-06-01T12:00:00",
     )
     db.tag_photo(photo_id, keyword_id)
+    db.conn.commit()
+    return {"aves": aves, "accipiter": accipiter, "photo": photo_id,
+            "keyword": keyword_id}
+
+
+def test_higher_rank_taxonomy_identification_is_listed(life_app):
+    app, db, ids = life_app
+    seed = _seed_higher_rank_accipiter(db, ids["folder"])
     # Tag the same photo with an existing location keyword so the entry
     # must surface its location chip / CSV value like species-rank rows do.
     location_id = db.add_keyword("Backyard", kw_type="location")
-    db.tag_photo(photo_id, location_id)
+    db.tag_photo(seed["photo"], location_id)
     db.conn.commit()
 
     entry = _entry(_get_life_list(app), "Accipiter")
     assert entry["taxon_rank"] == "genus"
     assert entry["taxonomic_class"] == {
-        "id": aves,
+        "id": seed["aves"],
         "name": "Aves",
         "common_name": "Birds",
     }
     assert entry["locations"] == ["Backyard"]
+
+
+def test_higher_rank_photo_can_be_life_list_representative(life_app):
+    """A photo tagged only with a linked higher-rank taxonomy identification
+    (genus/family/class) must expose the Life List representative row and
+    accept ``POST /api/photo-preferences`` for the entry it renders under.
+
+    Regression test for the eligibility guards in
+    :func:`get_photo_life_list_species` and
+    :func:`_photo_can_be_life_list_preference` that previously filtered to
+    ``t.rank = 'species' OR t.rank IS NULL`` — which hid the shared Set
+    Representative row on the higher-rank Life List entry and 400'd a
+    representative POST for the entry the user could actually see.
+    """
+    app, db, ids = life_app
+    seed = _seed_higher_rank_accipiter(db, ids["folder"])
+    client = app.test_client()
+
+    # The shared Set-Representative row (browse context menu / lightbox
+    # panel) reads the photo's life_list block, which comes from
+    # ``get_photo_life_list_species``. Without the broadened eligibility,
+    # this list would be empty and the affordance would not render.
+    detail = client.get(f"/api/photos/{seed['photo']}").get_json()
+    assert [entry["species"] for entry in detail["life_list"]] == ["Accipiter"]
+
+    # POST is gated by ``_photo_can_be_life_list_preference``. Without the
+    # broadened guard this returned 400 for the entry the user could see.
+    resp = client.post("/api/photo-preferences", json={
+        "purpose": "life_list",
+        "species": "Accipiter",
+        "photo_id": seed["photo"],
+    })
+    assert resp.status_code == 200
+
+    entry = _entry(_get_life_list(app), "Accipiter")
+    assert entry["best"]["id"] == seed["photo"]
+    assert entry["best"]["is_life_list_photo"] is True
+    assert entry["best"]["is_species_representative"] is True
+    assert entry["has_preferred_photo"] is True
 
 
 def test_locations_from_location_keywords(life_app):
