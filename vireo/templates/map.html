@@ -554,6 +554,13 @@ async function loadPhotos() {
     if (window.VireoFilter && VireoFilter.setResultTotal) {
       VireoFilter.setResultTotal(data.total_filtered);
     }
+    // Surface the visual clause's status so the filter bar can warn on
+    // fallback (no model / no embeddings / encoding failed). Without
+    // this, choosing "Visually similar…" on a map without a usable
+    // visual index would silently show every metadata-matching photo.
+    if (window.VireoFilter && VireoFilter.setVisualInfo) {
+      VireoFilter.setVisualInfo(data.visual || null);
+    }
     markers.clearLayers();
     photoMarkers = {};
     activePhotoId = null;

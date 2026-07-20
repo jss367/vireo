@@ -234,6 +234,125 @@ def test_bulk_decide_delete_files_offers_retry_after_batch_failure(
     assert trashed_in_first | trashed_in_retry == set(loser_ids)
 
 
+def test_bulk_decide_scopes_action_to_visible_groups_under_filter(
+    live_server, page
+):
+    """When the filter bar hides some groups in a bucket, clicking
+    "Keep <folder> for all N" must only touch the groups the user
+    can see. Before this fix the button POSTed the raw bucket's
+    ``file_hashes`` — with delete enabled, that would trash duplicate
+    groups the active filter had removed from view.
+    """
+    folder_a, folder_b = "/tmp/dupbulkfilterA", "/tmp/dupbulkfilterB"
+    import os
+    os.makedirs(folder_a, exist_ok=True)
+    os.makedirs(folder_b, exist_ok=True)
+    db = live_server["db"]
+    a_fid = db.add_folder(folder_a)
+    b_fid = db.add_folder(folder_b)
+
+    # Three groups in a bucket; two named ``hawk*`` (visible under a
+    # ``hawk`` filter), one named ``robin*`` (hidden). Filename is the
+    # dimension used by the vf-search input so the filter is applied
+    # deterministically through the same code path a user drives.
+    proposals = []
+    file_hashes = []
+    hidden_hashes = []
+    visible_hashes = []
+    for i, name in enumerate(["hawk_a.jpg", "hawk_b.jpg", "robin_c.jpg"]):
+        h = f"BUCKF{i}"
+        for folder in (folder_a, folder_b):
+            with open(os.path.join(folder, name), "wb") as fh:
+                fh.write(b"x")
+        p_a = db.add_photo(folder_id=a_fid, filename=name, extension=".jpg",
+                           file_size=1000, file_mtime=100.0, file_hash=h)
+        p_b = db.add_photo(folder_id=b_fid, filename=name, extension=".jpg",
+                           file_size=1000, file_mtime=100.0, file_hash=h)
+        db.conn.execute("UPDATE photos SET flag='none' WHERE file_hash=?", (h,))
+        proposals.append({
+            "file_hash": h,
+            "status": "unresolved",
+            "winner": {"id": p_a, "filename": name,
+                       "path": f"{folder_a}/{name}", "file_size": 1000},
+            "losers": [{"id": p_b, "filename": name,
+                        "path": f"{folder_b}/{name}", "file_size": 1000,
+                        "reason": "shorter path"}],
+        })
+        file_hashes.append(h)
+        if name.startswith("robin"):
+            hidden_hashes.append(h)
+        else:
+            visible_hashes.append(h)
+    db.conn.commit()
+
+    result = {
+        "group_count": 3, "loser_count": 3,
+        "proposals": proposals,
+        "buckets": [{
+            "folders": sorted([folder_a, folder_b]),
+            "group_count": 3, "file_hashes": file_hashes,
+            "total_size": 3000,
+            "example_filenames": [p["winner"]["filename"] for p in proposals[:3]],
+        }],
+    }
+    db.conn.execute(
+        """INSERT INTO job_history
+              (id, type, status, started_at, finished_at, duration, result)
+           VALUES (?, 'duplicate-scan', 'completed', ?, ?, 1.0, ?)""",
+        ("duplicate-scan-filter-test",
+         "2026-07-20T19:00:00", "2026-07-20T19:00:01", json.dumps(result)),
+    )
+    db.conn.commit()
+
+    # Intercept bulk-resolve so we can inspect exactly which hashes the
+    # button sent, then reply with what would have happened for those.
+    captured = {}
+
+    def handle_resolve(route):
+        req = route.request
+        body = req.post_data_json
+        captured["hashes"] = list(body.get("file_hashes", []))
+        captured["keep_folder"] = body.get("keep_folder")
+        resolved_payload = [
+            {"file_hash": h,
+             "loser_ids": [
+                 p["losers"][0]["id"] for p in proposals if p["file_hash"] == h
+             ]}
+            for h in captured["hashes"]
+        ]
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "ok": True, "resolved": resolved_payload, "skipped": [],
+            }),
+        )
+
+    page.route("**/api/duplicates/bulk-resolve", handle_resolve)
+    page.on("dialog", lambda d: d.accept())
+    page.goto(f"{live_server['url']}/duplicates")
+    page.wait_for_selector(".bucket-card", timeout=15000)
+
+    # Filter to "hawk" — the two hawk_* groups stay visible, the
+    # robin group is hidden from both the per-group section and the
+    # bucket card's group count.
+    search = page.locator(".vf-search input")
+    search.fill("hawk")
+    search.press("Enter")
+    from playwright.sync_api import expect
+    expect(page.locator(".bucket-card")).to_contain_text("2 duplicate groups")
+
+    page.locator(".bucket-card .keep-btn:not(.reveal-btn)").first.click()
+
+    # The POST carries only the two visible hashes — never the hidden
+    # robin hash. Without this the bulk action would reject (and with
+    # delete enabled, trash) a duplicate group the filter had hidden.
+    expect(page.locator(".bucket-card")).to_have_count(0)
+    assert sorted(captured["hashes"]) == sorted(visible_hashes)
+    for h in hidden_hashes:
+        assert h not in captured["hashes"]
+
+
 def test_bulk_decide_retry_preserves_hashes_that_bulk_resolve_skipped(
     live_server, page
 ):

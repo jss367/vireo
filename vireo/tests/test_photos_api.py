@@ -10228,3 +10228,52 @@ def test_api_predictions_accepts_rules(app_and_db):
     assert len(preds) == 1
     assert preds[0]["photo_id"] == photos["bird3.jpg"]
     assert client.get('/api/predictions?rules=notjson').status_code == 400
+
+
+def test_api_photos_geo_surfaces_visual_status(app_and_db, monkeypatch):
+    """Map endpoint must return the visual clause status so the filter
+    bar can warn on fallback. Without this, choosing "Visually similar…"
+    on a map with no active model / no embeddings would silently return
+    every metadata-matching plottable photo while the visual chip
+    remained on-screen.
+    """
+    import json as _json
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    db.conn.execute(
+        "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id IN (?, ?, ?)",
+        (photos["bird1.jpg"], photos["bird2.jpg"], photos["bird3.jpg"]))
+    db.conn.commit()
+    client = app.test_client()
+
+    visual = _json.dumps({"prompt": "a bird", "strength": "balanced"})
+
+    # Healthy visual clause: response reports status ok and ranks by
+    # similarity within the plottable set.
+    _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+    resp = client.get(f'/api/photos/geo?visual={visual}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["visual"]["status"] == "ok"
+    assert data["visual"]["matched"] == 2
+    assert data["total_filtered"] == 2
+    assert {p["id"] for p in data["photos"]} == {
+        photos["bird1.jpg"], photos["bird2.jpg"]
+    }
+
+    # No active model: fallback to metadata-only, but status is surfaced
+    # so the visual chip can warn. Without this the response would look
+    # identical to a healthy clause with a broader match.
+    _stub_clip(monkeypatch, model_name=None)
+    resp = client.get(f'/api/photos/geo?visual={visual}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["visual"]["status"] == "no_model"
+    assert data["total_filtered"] == 3  # all plottable photos, unchanged
+
+    # No visual clause: no ``visual`` key in the response (the filter
+    # bar's visual note should be hidden, not stale).
+    resp = client.get('/api/photos/geo')
+    assert resp.status_code == 200
+    assert "visual" not in resp.get_json()

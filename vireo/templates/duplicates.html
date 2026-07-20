@@ -518,6 +518,42 @@
     });
   }
 
+  // Return a filter-restricted view of a bucket. When ``_filterMatchedIds``
+  // is active, keep only file_hashes whose proposal matches the filter,
+  // and recompute group_count/total_size/example_filenames from that
+  // subset. Returns ``null`` when no groups survive the filter. Callers
+  // that render the Bulk-decide card AND ``bulkResolveByFolder`` MUST
+  // both go through this — otherwise clicking "Keep X for all" would
+  // send the raw ``bucket.file_hashes`` to
+  // ``/api/duplicates/bulk-resolve``, rejecting (and with delete enabled,
+  // trashing) duplicate groups the active filter had removed from view.
+  function visibleBucket(bucket) {
+    if (!bucket) return null;
+    if (!_filterMatchedIds) return bucket;
+    var proposals = (_lastScanResult && _lastScanResult.proposals) || [];
+    var proposalsByHash = {};
+    proposals.forEach(function(p) { proposalsByHash[p.file_hash] = p; });
+    var keptHashes = (bucket.file_hashes || []).filter(function(h) {
+      var p = proposalsByHash[h];
+      return p && groupMatchesFilter(p);
+    });
+    if (keptHashes.length === 0) return null;
+    if (keptHashes.length === (bucket.file_hashes || []).length) return bucket;
+    var keptProposals = keptHashes.map(function(h) { return proposalsByHash[h]; });
+    var newTotalSize = keptProposals.reduce(function(n, p) {
+      return n + ((p.losers || []).length * ((p.winner || {}).file_size || 0));
+    }, 0);
+    var newExamples = keptProposals.slice(0, 3).map(function(p) {
+      return (p.winner || {}).filename || '';
+    });
+    return Object.assign({}, bucket, {
+      file_hashes: keptHashes,
+      group_count: keptHashes.length,
+      total_size: newTotalSize,
+      example_filenames: newExamples,
+    });
+  }
+
   function renderResults(result) {
     hideProgress();
     document.getElementById('scanBtn').disabled = false;
@@ -611,10 +647,13 @@
     // shift later indexes, so subsequent button clicks would resolve the
     // wrong bucket — and with delete enabled, potentially trash the wrong
     // files. Skip 1-group buckets inline instead — the per-group UI handles
-    // them more expressively (per-photo cards, ratings, etc.).
+    // them more expressively (per-photo cards, ratings, etc.). Under an
+    // active filter, each bucket is passed through ``visibleBucket()`` so
+    // the card and its Keep-for-all action reflect only matching groups.
     var allBuckets = result.buckets || [];
-    var hasVisibleBuckets = allBuckets.some(function(b) {
-      return b.group_count >= 2;
+    var visibleBuckets = allBuckets.map(visibleBucket);
+    var hasVisibleBuckets = visibleBuckets.some(function(b) {
+      return b && b.group_count >= 2;
     });
     if (hasVisibleBuckets) {
       html += '<div class="section-header"><div>' +
@@ -622,8 +661,8 @@
         '<div class="section-sub">' +
         'The same dedup question repeats across multiple groups. Decide ' +
         'once per bucket to clear them all at once.</div></div></div>';
-      allBuckets.forEach(function(bucket, bi) {
-        if (bucket.group_count < 2) return;
+      visibleBuckets.forEach(function(bucket, bi) {
+        if (!bucket || bucket.group_count < 2) return;
         html += renderBucket(bucket, bi);
       });
     }
@@ -804,11 +843,16 @@
   }
 
   function bulkResolveByFolderIdx(bi, fi) {
-    var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+    // ``visibleBucket`` restricts to filter-matching groups so the button
+    // acts only on what the user sees. Without it, a bucket with one
+    // matching and one hidden group would still submit both file_hashes,
+    // rejecting (and with delete enabled, trashing) the hidden group.
+    var bucket = visibleBucket((_lastScanResult && _lastScanResult.buckets || [])[bi]);
     if (!bucket) return;
     // After a partial prune a bucket can drop to ``group_count < 2`` and be
     // filtered out of the next render. A button left in the DOM from a stale
-    // render must not be allowed to act on it.
+    // render must not be allowed to act on it. Same guard covers a bucket
+    // shrunk below the threshold by the active filter.
     if (!bucket.file_hashes || bucket.file_hashes.length < 2) return;
     var folder = (bucket.folders || [])[fi];
     if (folder == null) return;
@@ -992,7 +1036,11 @@
   async function bulkResolveByFolder(bi, keepFolder) {
     var card = document.querySelector('.bucket-card[data-bi="' + bi + '"]');
     if (!card) return;
-    var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+    // Same filter-restricted view used at render + click time so the
+    // confirmation count and the POSTed file_hashes describe only the
+    // visible groups. Skipping this step would let a filter-driven "N
+    // shown" bucket resolve every group behind the filter as well.
+    var bucket = visibleBucket((_lastScanResult && _lastScanResult.buckets || [])[bi]);
     if (!bucket) return;
 
     var deleteToggle = card.querySelector('input[data-delete-toggle]');

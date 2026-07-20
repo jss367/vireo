@@ -3992,26 +3992,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         return info, ordered_ids, sims_by_pid
 
     def _apply_visual_to_rules(db, rules, visual, collection_id=None, folder_id=None):
-        """For GET consumers (summary/calendar/values): when the visual
-        clause is healthy, restrict the rules to the matched ids (inlined
-        photo_ids — no bound-parameter cap) so counts describe the same
-        photos the visually-filtered grid shows. Unhealthy → rules
-        unchanged, matching the grid's metadata-only fallback.
+        """For GET consumers (summary/calendar/values/geo/predictions):
+        when the visual clause is healthy, restrict the rules to the
+        matched ids (inlined photo_ids — no bound-parameter cap) so
+        counts describe the same photos the visually-filtered grid
+        shows. Unhealthy → rules unchanged, matching the grid's
+        metadata-only fallback.
+
+        Returns ``(rules, visual_info)``. ``visual_info`` is ``None`` when
+        no visual clause was requested; otherwise it is the
+        ``_resolve_visual`` status dict — ``{status: "ok", matched, …}``
+        on a successful clause, or an unhealthy state (``no_model`` /
+        ``model_no_text_search`` / ``no_embeddings`` / ``encoding_failed``)
+        when the clause fell back to metadata-only. Endpoints whose UI
+        renders the visual chip (Map, Browse, Review) must surface this
+        so the chip does not silently broaden results.
         """
         if visual is None:
-            return rules
+            return rules, None
         base_rules = rules if rules is not None else []
-        _info, ordered_ids, _sims = _resolve_visual(
+        info, ordered_ids, _sims = _resolve_visual(
             db, base_rules, visual,
             collection_id=collection_id, folder_id=folder_id,
         )
         if ordered_ids is None:
-            return rules
+            return rules, info
         rules_list = (
             [] if rules is None
             else ([rules] if isinstance(rules, dict) else list(rules))
         )
-        return rules_list + [{"field": "photo_ids", "value": ordered_ids}]
+        return rules_list + [{"field": "photo_ids", "value": ordered_ids}], info
 
     def _request_location_status_filter():
         value = (request.args.get("location_status") or "").strip().lower()
@@ -5785,7 +5795,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         rules = _inject_active_visual_model(rules)
         try:
             visual = _request_visual_arg()
-            rules = _apply_visual_to_rules(
+            rules, _visual_info = _apply_visual_to_rules(
                 db, rules, visual,
                 collection_id=collection_id, folder_id=folder_id,
             )
@@ -5857,7 +5867,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             location_status = _request_location_status_filter()
             rules = _request_rules_arg()
             visual = _request_visual_arg()
-            rules = _apply_visual_to_rules(
+            rules, _visual_info = _apply_visual_to_rules(
                 db, rules, visual,
                 collection_id=collection_id, folder_id=folder_id,
             )
@@ -5894,7 +5904,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             location_status = _request_location_status_filter()
             rules = _request_rules_arg()
             visual = _request_visual_arg()
-            rules = _apply_visual_to_rules(
+            rules, _visual_info = _apply_visual_to_rules(
                 db, rules, visual,
                 collection_id=collection_id, folder_id=folder_id,
             )
@@ -6225,7 +6235,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()
-            rules = _apply_visual_to_rules(db, rules, visual, folder_id=folder_id)
+            rules, visual_info = _apply_visual_to_rules(
+                db, rules, visual, folder_id=folder_id,
+            )
         except ValueError as e:
             return json_error(str(e), 400)
 
@@ -6251,7 +6263,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_dicts = [dict(p) for p in photos]
         _attach_edit_recipes(db, photo_dicts)
 
-        return jsonify({
+        response = {
             "photos": photo_dicts,
             "total_filtered": len(photos),
             "total_photos": total_photos,
@@ -6261,7 +6273,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # names because assigned locations are included in these totals.
             "total_with_gps": total_geolocated,
             "total_without_gps": total_without_coordinates,
-        })
+        }
+        # Surface the visual clause's status so the filter bar's visual
+        # chip can warn on fallback — without this the chip advertises a
+        # visual search that silently returned metadata-only matches.
+        if visual_info is not None:
+            response["visual"] = visual_info
+        return jsonify(response)
 
     @app.route("/api/species")
     def api_species():
@@ -12698,7 +12716,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()
-            rules = _apply_visual_to_rules(db, rules, visual)
+            rules, _visual_info = _apply_visual_to_rules(db, rules, visual)
         except ValueError as e:
             return json_error(str(e), 400)
         try:
