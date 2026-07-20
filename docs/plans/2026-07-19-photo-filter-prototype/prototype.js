@@ -618,7 +618,10 @@
     function summarizeNode(node) {
       if (node.kind !== "group") return ruleLabel(node);
       if (!node.children.length) return "";
-      const joiner = node.match === "any" ? " OR " : " AND ";
+      // "none" means NONE of the children match (¬A ∧ ¬B), which is equivalent
+      // to NOT (A OR B) — so join siblings with OR before wrapping in NOT,
+      // otherwise NOT (A AND B) reads as "not both", which is much broader.
+      const joiner = node.match === "all" ? " AND " : " OR ";
       const body = node.children.map(summarizeNode).filter(Boolean).join(joiner);
       return node.match === "none" ? `NOT (${body})` : (node === page.root ? body : `(${body})`);
     }
@@ -628,9 +631,15 @@
   }
 
   function escapeHtml(value) {
-    const div = document.createElement("div");
-    div.textContent = String(value == null ? "" : value);
-    return div.innerHTML;
+    // textContent → innerHTML only escapes &, <, >; quotes stay literal and would
+    // break the double-quoted attributes in chip, rule, and suggestion templates
+    // if a user-supplied value ever contained one.
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function render() {
@@ -1086,7 +1095,11 @@
   function openSaveModal() {
     closeMenus();
     $("collectionName").value = `Filtered ${CONTEXTS[state.context].title} photos`;
-    $("savePreview").innerHTML = `<strong>${getFilteredPhotos().length} matching photos</strong><br>${escapeHtml(expressionSummary())}`;
+    // Preview the count that will actually be saved: confirmSave stores the
+    // Collection with muted:false, so when the user is paused we must show the
+    // filtered count (not getFilteredPhotos()'s "everything in scope").
+    const count = pageState().muted ? applyUserFilters(pageState()).length : getFilteredPhotos().length;
+    $("savePreview").innerHTML = `<strong>${count} matching photos</strong><br>${escapeHtml(expressionSummary())}`;
     openModal("saveModal");
     setTimeout(() => $("collectionName").select(), 0);
   }
@@ -1167,10 +1180,12 @@
     $("muteFilters").addEventListener("click", toggleMute);
 
     $("advancedToggle").addEventListener("change", (event) => {
-      mutate(() => {
-        pageState().advanced = event.target.checked;
-        if (!event.target.checked) pageState().root.children = allLeaves(pageState().root).map(clone);
-      });
+      // The toggle controls whether "＋ Group" is offered; it does NOT rewrite
+      // the tree. Flattening a grouped expression on toggle-off silently changed
+      // (A OR B) AND C into A AND B AND C and turned Match-none groups into
+      // positive filters, so the result set moved when the user only wanted to
+      // hide advanced controls.
+      mutate(() => { pageState().advanced = event.target.checked; });
     });
     $("addGroupButton").addEventListener("click", () => mutate(() => pageState().root.children.push({ kind: "group", match: "any", children: [makeRule("flag", "eq", "flagged"), makeRule("rating", "eq", 5)] })));
     $("addFilterButton").addEventListener("click", () => {
