@@ -1073,12 +1073,17 @@
     removeField(field) {
       // Remove ALL matching root leaves — legacy `?date_from=…&date_to=…`
       // and other multi-rule param combinations can install more than
-      // one leaf per field.
+      // one leaf per field. Returns true when a rule was actually
+      // removed (and onChange fired) so callers that were relying on the
+      // reload — e.g. filterByFolder handing off after dropping a
+      // sidebar-installed keyword rule — can fall back to their own
+      // reload when this is a no-op.
       const hasMatch = state.root.rules.some((n) => !isGroup(n) && n.field === field);
-      if (!hasMatch) return;
+      if (!hasMatch) return false;
       mutate(() => {
         state.root.rules = state.root.rules.filter((n) => isGroup(n) || n.field !== field);
       });
+      return true;
     },
     hasFilters() { return hasUserFilters(); },
     // Wipe restored/current filters without firing onChange. Used when the

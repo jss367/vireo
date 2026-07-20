@@ -18704,13 +18704,24 @@ class Database:
 
     def _append_folder_restriction(self, folder_id, where, params):
         """AND a folder-subtree restriction onto built rule clauses, matching
-        get_photos' folder_id semantics (the folder and its descendants)."""
+        get_photos' folder_id semantics (the folder and its descendants).
+
+        Wraps the existing WHERE body in parentheses before ANDing so a
+        top-level ``any`` rule tree (``WHERE (A) OR (B)``) doesn't have the
+        folder restriction bind only to the last OR branch — AND binds
+        tighter than OR in SQL, and without wrapping photos outside the
+        selected folder would leak through the earlier branches.
+        """
         if folder_id is None:
             return where, params
         subtree = self.get_folder_subtree_ids(folder_id)
         placeholders = ",".join("?" for _ in subtree)
         clause = f"p.folder_id IN ({placeholders})"
-        where = f"{where} AND {clause}" if where else f"WHERE {clause}"
+        if where:
+            body = where[len("WHERE "):]
+            where = f"WHERE ({body}) AND {clause}"
+        else:
+            where = f"WHERE {clause}"
         return where, list(params) + list(subtree)
 
     def _append_collection_restriction(self, collection_id, where, params):
@@ -18719,7 +18730,9 @@ class Database:
         Lets /api/photos/query serve Browse's dashboard-scoped collection
         view (collection as a restriction on the filtered grid) without the
         rule tree needing to reference collections. Raises ValueError for a
-        collection missing from the active workspace.
+        collection missing from the active workspace. Wraps the existing
+        WHERE body in parentheses before ANDing for the same OR-precedence
+        reason as ``_append_folder_restriction``.
         """
         if collection_id is None:
             return where, params
@@ -18732,7 +18745,11 @@ class Database:
             f"{c_join} {c_where}"
         )
         clause = f"p.id IN ({sub})"
-        where = f"{where} AND {clause}" if where else f"WHERE {clause}"
+        if where:
+            body = where[len("WHERE "):]
+            where = f"WHERE ({body}) AND {clause}"
+        else:
+            where = f"WHERE {clause}"
         return where, list(params) + list(c_params)
 
     def query_photos(self, rules, sort="date", page=1, per_page=50,

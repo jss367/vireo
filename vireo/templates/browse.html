@@ -3077,7 +3077,11 @@ function filterByFolder(folderId) {
   // so the folder reload silently applies folder ∩ keyword. Drop the
   // rule before the reload; VireoFilter.removeField fires onChange,
   // which runs the reload path (including timelineMode + summary), so
-  // skip the plain reloadBrowseResults() branch when we take that route.
+  // skip the plain reloadBrowseResults() branch only when removeField
+  // actually removed something. If the user already dropped the rule
+  // via the filter chip, activeKeyword lingers but there's no keyword
+  // rule left to remove — removeField returns false and we still need
+  // to run our own reload for the folder change.
   var hadSidebarKeyword = activeKeyword !== null;
   activeKeyword = null;
   activeCollectionId = null;
@@ -3085,8 +3089,7 @@ function filterByFolder(folderId) {
     el.classList.toggle('active', parseInt(el.dataset.folderId) === activeFolderId);
   });
   if (hadSidebarKeyword && window.VireoFilter && VireoFilter.isReady()) {
-    VireoFilter.removeField('keyword');
-    return;
+    if (VireoFilter.removeField('keyword')) return;
   }
   if (timelineMode) loadCalendarData();
   reloadBrowseResults();
@@ -4266,6 +4269,14 @@ function renderCalendar() {
 }
 
 function selectCalendarDay(dateStr, count) {
+  // /api/photos/calendar can resolve before VireoFilter.init() has
+  // loaded /api/filters/fields, so a click that lands in that window
+  // would reach addRule -> makeRule with state.fields still null and
+  // throw \u2014 silently swallowing the day pick and leaving the calendar
+  // in a half-selected state (chip up, no filter applied). Bail out
+  // until the filter registry is ready; the click will succeed on the
+  // next attempt once the field payload lands.
+  if (!window.VireoFilter || !VireoFilter.isReady()) return;
   selectedDay = dateStr;
   var dateObj = new Date(dateStr + 'T12:00:00');
   var formatted = dateObj.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
