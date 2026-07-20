@@ -4780,13 +4780,24 @@ class Database:
         # has fewer separators than its child's, and parent_id order can't
         # be trusted for the legacy path-only rows.
         depth_by_id = {}
+        # Collect the raw stored paths of the folders about to be deleted so we
+        # can invalidate stale ``last_move_source_folder_path`` provenance on
+        # photos moved out earlier. Without this, a new folder that later ends
+        # up at the same path (e.g. a removable card re-mounted at the same
+        # spot after the earlier scan was cleared) would compare equal to the
+        # stored provenance and silently bypass the same-stem developed-render
+        # collision guard in ``move_photos``.
+        deleted_folder_paths = []
         for chunk in _chunks(delete_ids):
             placeholders = ",".join("?" for _ in chunk)
             for row in self.conn.execute(
                 f"SELECT id, path FROM folders WHERE id IN ({placeholders})",
                 chunk,
             ).fetchall():
-                path = _path_for_subtree_match(row["path"] or "")
+                stored_path = row["path"] or ""
+                if stored_path:
+                    deleted_folder_paths.append(stored_path)
+                path = _path_for_subtree_match(stored_path)
                 depth_by_id[row["id"]] = path.count("/")
         ordered_delete_ids = sorted(
             delete_ids, key=lambda fid: depth_by_id.get(fid, 0), reverse=True
@@ -4843,6 +4854,19 @@ class Database:
                 )
                 self.conn.execute(
                     f"DELETE FROM folders WHERE id IN ({placeholders})",
+                    chunk,
+                )
+            # Clear stale move provenance that would otherwise let a new
+            # unrelated folder appearing at one of these deleted paths bypass
+            # the same-stem developed-render collision guard in
+            # ``move_photos``. Run after the folder DELETEs (nothing left in
+            # this transaction can re-populate it) and inside the same outer
+            # transaction so a rollback restores both together.
+            for chunk in _chunks(deleted_folder_paths):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"UPDATE photos SET last_move_source_folder_path = NULL "
+                    f"WHERE last_move_source_folder_path IN ({placeholders})",
                     chunk,
                 )
             self.conn.commit()

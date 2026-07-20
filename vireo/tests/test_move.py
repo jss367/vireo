@@ -1231,6 +1231,85 @@ def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
     assert db.get_photo(incoming_pid)["folder_id"] == original_fid
 
 
+def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
+    """When a source folder is deleted after some of its photos were moved
+    out, any destination-photo rows that still reference the deleted path
+    via ``last_move_source_folder_path`` must have that provenance cleared.
+    Otherwise a new unrelated folder later appearing at the same path — for
+    example a removable card re-mounted at ``/Volumes/CARD`` after the old
+    scan was dropped — would compare equal to the stale reference and slip
+    a same-stem developed-render collision past the guard in
+    ``move_photos``.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    reusable_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    reusable_path.mkdir()
+    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_file = reusable_path / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    # The destination row records the source path as provenance.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(reusable_path)
+    )
+
+    # Drop the original source folder — the on-disk path is still there
+    # (imagine the card being re-inserted with different content later),
+    # but the earlier scan is gone from the catalog.
+    db.delete_folder(original_fid)
+
+    # Provenance must be cleared so a new folder at the reused path can't
+    # inherit the earlier claim.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] is None
+    )
+
+    # A brand-new folder appears at the same path with an unrelated photo
+    # that happens to share the stem.
+    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
+    db.add_workspace_folder(ws_id, replacement_fid)
+    incoming_file = reusable_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=replacement_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The new folder shares the deleted folder's path, but that stale
+    # provenance was invalidated on delete, so the collision guard sees an
+    # unknown origin for the existing stem and rejects rather than merging
+    # unrelated content into one destination folder+stem.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+
+
 def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
     """Regression: ``os.makedirs(destination, exist_ok=True)`` raises
     ``FileExistsError`` when the path exists as a regular file, so a
