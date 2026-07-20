@@ -3112,7 +3112,7 @@ function renderResults() {
     html += missingTimestampBadge(enc);
     html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
     html += '</span>';
-    html += renderGroupRejectButton('encounter', ei, null, encPhotoIds, photoMap);
+    html += renderGroupRejectButton('encounter', ei, null, visibleEncounterPhotoIds(enc), photoMap);
     html += '</div>';
     html += '<div class="encounter-body" id="encBody' + ei + '"' + (isCollapsed ? ' style="display:none;"' : '') + '>';
 
@@ -3283,6 +3283,25 @@ function isBurstConfirmed(enc, burst) {
   var ovr = burst && burst.species_override;
   if (ovr) return !!ovr.confirmed;
   return !!(enc && enc.species_confirmed);
+}
+
+// Photo IDs the user currently sees inside this encounter's body. When
+// "Hide confirmed" is off, this is every photo in the encounter. When on,
+// photos belonging to confirmed bursts (or a confirmed no-burst encounter)
+// are excluded so encounter-level actions only touch what's on screen.
+function visibleEncounterPhotoIds(enc) {
+  var ids = (enc && enc.photo_ids) || [];
+  if (!hideConfirmed) return ids.slice();
+  if (enc.bursts && enc.bursts.length > 0) {
+    var hidden = new Set();
+    enc.bursts.forEach(function(burst) {
+      if (isBurstConfirmed(enc, burst)) {
+        (burst.photo_ids || burst || []).forEach(function(pid) { hidden.add(pid); });
+      }
+    });
+    return ids.filter(function(pid) { return !hidden.has(pid); });
+  }
+  return enc.species_confirmed ? [] : ids.slice();
 }
 
 function toggleHideConfirmed() {
@@ -3725,7 +3744,10 @@ function groupFlagTarget(encIdx, burstIdx) {
   var enc = pipelineResults.encounters[encIdx];
   if (!enc) return null;
   if (burstIdx == null) {
-    return {key: 'encounter:' + encIdx, noun: 'encounter', photoIds: enc.photo_ids || []};
+    // Match the button's rendered scope: when "Hide confirmed" is on we
+    // exclude confirmed bursts so users can't accidentally flag photos
+    // they can't see.
+    return {key: 'encounter:' + encIdx, noun: 'encounter', photoIds: visibleEncounterPhotoIds(enc)};
   }
   var burst = enc.bursts && enc.bursts[burstIdx];
   if (!burst) return null;
