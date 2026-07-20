@@ -303,8 +303,18 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         primary = raws[0]
         companion = jpegs[0]
 
-        # Transfer metadata from companion to primary if primary lacks it
-        transfer_cols = "timestamp, rating, flag, latitude, longitude, exif_data, focal_length, width, height"
+        # Transfer metadata from companion to primary if primary lacks it.
+        # Includes the promoted EXIF summary columns
+        # (``EXIF_SUMMARY_COLUMNS``) so a RAW row that got merged with its
+        # JPEG companion doesn't lose ``camera_make``/``camera_model``/
+        # ``lens``/``aperture``/``shutter_speed``/``iso`` when the JPEG row
+        # is deleted — otherwise the new universal filters miss the paired
+        # photo even though ExifTool extracted those values.
+        transfer_cols = (
+            "timestamp, rating, flag, latitude, longitude, exif_data, "
+            "focal_length, width, height, "
+            + ", ".join(EXIF_SUMMARY_COLUMNS)
+        )
         primary_full = db.conn.execute(
             f"SELECT {transfer_cols} FROM photos WHERE id = ?",
             (primary["id"],),
@@ -341,6 +351,15 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         if primary_full["focal_length"] is None and companion_full["focal_length"] is not None:
             updates.append("focal_length = ?")
             params.append(companion_full["focal_length"])
+        # Fill any promoted EXIF summary column the RAW row is missing but
+        # its JPEG companion has. Only writes when the primary is NULL — a
+        # non-NULL primary already reflects a rescan (which clears absent
+        # columns to NULL via ``EXIF_SUMMARY_COLUMNS``), so overwriting it
+        # would trample fresh metadata.
+        for column in EXIF_SUMMARY_COLUMNS:
+            if primary_full[column] is None and companion_full[column] is not None:
+                updates.append(f"{column} = ?")
+                params.append(companion_full[column])
         if not primary_full["width"] and companion_full["width"]:
             updates.extend(["width = ?", "height = ?"])
             params.extend([companion_full["width"], companion_full["height"]])

@@ -9684,3 +9684,29 @@ def test_api_filter_values_rejects_bad_input(app_and_db):
     assert client.get(
         '/api/filters/values?field=camera_model&rules=[{"field":"nope","op":"is","value":1}]'
     ).status_code == 400
+
+
+def test_api_filter_values_clamps_limit(app_and_db):
+    """Zero/negative/oversized ``limit`` params must not produce unbounded
+    queries (SQLite treats a negative ``LIMIT`` as "no limit")."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    # Populate enough distinct camera_model values that a working limit clamp
+    # is observable — a limit of 0/-1 without the clamp would return them all.
+    for i, filename in enumerate(sorted(photos)):
+        db.conn.execute(
+            "UPDATE photos SET camera_model=? WHERE id=?",
+            (f"Model{i}", photos[filename]),
+        )
+    db.conn.commit()
+    client = app.test_client()
+    # Negative and zero clamp up to 1 — always at least one result.
+    for bad_limit in ("-5", "0"):
+        resp = client.get(f'/api/filters/values?field=camera_model&limit={bad_limit}')
+        assert resp.status_code == 200, bad_limit
+        assert len(resp.get_json()["values"]) == 1, bad_limit
+    # Absurdly large values clamp down to the server-side ceiling so a huge
+    # library can't stream every distinct value out through one request.
+    resp = client.get('/api/filters/values?field=camera_model&limit=999999')
+    assert resp.status_code == 200
+    assert len(resp.get_json()["values"]) <= 500

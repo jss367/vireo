@@ -5402,7 +5402,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except ValueError:
                 return json_error("rules must be valid JSON", 400)
         q = request.args.get("q") or None
-        limit = request.args.get("limit", 20, type=int)
+        # Clamp ``limit`` to a positive bounded range. Werkzeug's ``type=int``
+        # cheerfully parses ``?limit=0``/``?limit=-5`` (SQLite treats a
+        # negative ``LIMIT`` as "no limit" and returns everything), and
+        # ``?limit=999999`` on a large library would load an unbounded
+        # suggestions list. Fallback to the 20-default when parsing fails.
+        limit_raw = request.args.get("limit", 20, type=int)
+        if limit_raw is None:
+            limit_raw = 20
+        limit = max(1, min(limit_raw, 500))
         try:
             values = db.get_filter_field_values(field, rules=rules, q=q, limit=limit)
         except ValueError as exc:

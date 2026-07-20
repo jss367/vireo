@@ -1753,6 +1753,77 @@ def test_pair_raw_jpeg_transfers_gps_and_metadata(tmp_path):
     assert meta["EXIF"]["Make"] == "Nikon"
 
 
+def test_pair_raw_jpeg_transfers_promoted_exif_summary_columns(tmp_path):
+    """Pairing transfers ``camera_make``/``camera_model``/``lens``/``aperture``/
+    ``shutter_speed``/``iso`` from the JPEG companion so the RAW row still
+    populates the universal-filter fields after the JPEG row is deleted."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+                          file_size=20000000, file_mtime=1.0)
+
+    db.conn.execute(
+        "UPDATE photos SET camera_make=?, camera_model=?, lens=?, "
+        "aperture=?, shutter_speed=?, iso=? WHERE id=?",
+        ("Canon", "R5", "RF 100-500mm", 5.6, 0.002, 800, jpeg_id),
+    )
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute(
+        "SELECT filename, camera_make, camera_model, lens, aperture, "
+        "shutter_speed, iso FROM photos"
+    ).fetchone()
+    assert photo["filename"] == "IMG.cr3"
+    assert photo["camera_make"] == "Canon"
+    assert photo["camera_model"] == "R5"
+    assert photo["lens"] == "RF 100-500mm"
+    assert photo["aperture"] == 5.6
+    assert photo["shutter_speed"] == 0.002
+    assert photo["iso"] == 800
+
+
+def test_pair_raw_jpeg_preserves_primary_exif_summary_columns(tmp_path):
+    """A RAW with its own EXIF summary values (e.g. from its own ExifTool
+    extract) must not be overwritten by a JPEG companion's values."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+                          file_size=20000000, file_mtime=1.0)
+
+    db.conn.execute(
+        "UPDATE photos SET camera_make=?, camera_model=?, iso=? WHERE id=?",
+        ("Sony", "A1", 200, raw_id),
+    )
+    db.conn.execute(
+        "UPDATE photos SET camera_make=?, camera_model=?, iso=? WHERE id=?",
+        ("Canon", "R5", 800, jpeg_id),
+    )
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute(
+        "SELECT camera_make, camera_model, iso FROM photos"
+    ).fetchone()
+    assert photo["camera_make"] == "Sony"
+    assert photo["camera_model"] == "A1"
+    assert photo["iso"] == 200
+
+
 def test_pair_raw_jpeg_keeps_primary_gps_when_present(tmp_path):
     """If RAW already has GPS, companion GPS is not overwritten."""
     from db import Database
