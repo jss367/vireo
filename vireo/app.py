@@ -3876,6 +3876,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         raw = request.args.get(name, "")
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
+    def _request_rules_arg():
+        """Parse the optional ``rules`` query param (a JSON universal-filter
+        rule tree). Returns None when absent; raises ValueError on invalid
+        JSON so callers surface a 400. The active visual model is injected
+        exactly as /api/photos/query does, keeping every rules-accepting
+        endpoint's notion of "has a visual index" consistent.
+        """
+        raw = request.args.get("rules")
+        if not raw:
+            return None
+        try:
+            rules = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError("rules must be valid JSON") from exc
+        return _inject_active_visual_model(rules)
+
     def _request_location_status_filter():
         value = (request.args.get("location_status") or "").strip().lower()
         if not value:
@@ -5509,6 +5525,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("sort must be a string", 400)
         per_page = min(per_page, _MAX_PER_PAGE)
         rules = _inject_active_visual_model(rules)
+        if payload.get("ids_only"):
+            # Select-all and other bulk flows need the complete matching id
+            # set; it must resolve exactly the photos the filtered grid
+            # shows, so it shares this endpoint rather than a legacy path.
+            try:
+                ids = db.query_photo_ids(rules, sort=sort)
+            except ValueError as exc:
+                return json_error(str(exc), 400)
+            return jsonify({"ids": ids, "total": len(ids)})
         try:
             photos = db.query_photos(rules, sort=sort, page=page, per_page=per_page)
             total = db.count_photos_for_rules(rules)
@@ -5628,15 +5653,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             flag = _request_flag_filter()
             location_status = _request_location_status_filter()
+            rules = _request_rules_arg()
         except ValueError as e:
             return json_error(str(e), 400)
-        data = db.get_calendar_data(
-            year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            color_label=color_label, flag=flag,
-            location_status=location_status,
-        )
+        try:
+            data = db.get_calendar_data(
+                year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
+                color_label=color_label, flag=flag,
+                location_status=location_status,
+                rules=rules,
+            )
+        except ValueError as e:
+            return json_error(str(e), 400)
         return jsonify(data)
 
     @app.route("/api/browse/summary")
@@ -5654,10 +5684,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             flag = _request_flag_filter()
             location_status = _request_location_status_filter()
+            rules = _request_rules_arg()
         except ValueError as e:
             return json_error(str(e), 400)
-        return jsonify(
-            db.get_browse_summary(
+        try:
+            summary = db.get_browse_summary(
                 folder_id=folder_id,
                 rating_min=rating_min,
                 date_from=date_from,
@@ -5669,8 +5700,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 color_label=color_label,
                 flag=flag,
                 location_status=location_status,
+                rules=rules,
             )
-        )
+        except ValueError as e:
+            return json_error(str(e), 400)
+        return jsonify(summary)
 
     @app.route("/api/photos/<int:photo_id>")
     def api_photo_detail(photo_id):
@@ -26798,8 +26832,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"results": [], "total_matches": 0, "model_used": model_name,
                             "reason": "model_no_text_search"})
 
+        try:
+            scope_rules = _request_rules_arg()
+        except ValueError as e:
+            return json_error(str(e), 400)
+
         candidate_photo_ids = None
-        if collection_id is not None:
+        if scope_rules is not None:
+            try:
+                candidate_photo_ids = db.query_photo_ids(scope_rules)
+            except ValueError as e:
+                return json_error(str(e), 400)
+        elif collection_id is not None:
             candidate_photo_ids = db.get_collection_photo_ids(collection_id)
         elif any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
             candidate_photo_ids = db.get_photo_ids(

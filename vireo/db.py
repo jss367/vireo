@@ -7160,6 +7160,7 @@ class Database:
         color_label=None,
         flag=None,
         location_status=None,
+        rules=None,
     ):
         """Return daily photo counts for a given year, scoped to active workspace."""
         ws = self._ws_id()
@@ -7167,6 +7168,15 @@ class Database:
                       "substr(p.timestamp, 1, 4) = ?"]
         join_params = []
         where_params = [ws, str(year)]
+        if rules is not None:
+            r_folder_join, r_join_clause, r_where, r_params = (
+                self._build_query_from_rules(rules)
+            )
+            conditions.append(
+                "p.id IN (SELECT DISTINCT p.id FROM photos p "
+                f"{r_folder_join} {r_join_clause} {r_where})"
+            )
+            where_params.extend(r_params)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -7516,8 +7526,15 @@ class Database:
         color_label=None,
         flag=None,
         location_status=None,
+        rules=None,
     ):
-        """Return summary stats for the browse panel, scoped to active workspace and filters."""
+        """Return summary stats for the browse panel, scoped to active workspace and filters.
+
+        ``rules`` (a universal-filter rule tree) restricts every aggregate to
+        the matching photo set, exactly like the collection_id subquery path —
+        the summary panel must describe the same photos the filtered grid
+        shows. Raises ValueError on malformed rules.
+        """
         ws = self._ws_id()
 
         # Build shared filter conditions
@@ -7559,6 +7576,17 @@ class Database:
                 )
                 conditions.append(f"p.id IN ({coll_subquery})")
                 where_params.extend(coll_params)
+
+        if rules is not None:
+            r_folder_join, r_join_clause, r_where, r_params = (
+                self._build_query_from_rules(rules)
+            )
+            rules_subquery = (
+                f"SELECT DISTINCT p.id FROM photos p "
+                f"{r_folder_join} {r_join_clause} {r_where}"
+            )
+            conditions.append(f"p.id IN ({rules_subquery})")
+            where_params.extend(r_params)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -18673,6 +18701,31 @@ class Database:
     # match both photos. ``display_expr`` is what the picker shows; using
     # ``MIN(col)`` picks a stable representative spelling within each
     # case-insensitive bucket instead of always lower-casing the label.
+    def query_photo_ids(self, rules, sort="date"):
+        """Return every photo id matching a universal-filter rule tree, in
+        display order — the rules analog of ``get_photo_ids`` (select-all,
+        visual-search candidate scope). Raises ValueError on malformed rules.
+        """
+        folder_join, join_clause, where, params = self._build_query_from_rules(rules)
+        order = {
+            "date": _PHOTO_DATE_ASC_ORDER,
+            "date_desc": _PHOTO_DATE_DESC_ORDER,
+            "name": "p.filename ASC, p.id ASC",
+            "name_desc": "p.filename DESC, p.id ASC",
+            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
+            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
+            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
+            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
+        }.get(sort, _PHOTO_DATE_ASC_ORDER)
+        query = f"""
+            SELECT DISTINCT p.id FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+            ORDER BY {order}
+        """
+        return [row["id"] for row in self.conn.execute(query, params).fetchall()]
+
     _SUGGEST_VALUE_EXPRS = {
         "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)"),
         "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)"),
