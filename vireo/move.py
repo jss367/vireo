@@ -1992,21 +1992,28 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     # let a new unrelated folder that lands on the same rowid compare equal
     # to a stale reference and bypass the collision guard below.
     destination_stem_origins = {}
+    destination_stem_exact = {}
     for row in db.conn.execute(
         "SELECT filename, last_move_source_folder_path "
         "FROM photos WHERE folder_id = ?",
         (dest_folder_id,),
     ):
-        stem = _stem_key(os.path.splitext(row["filename"])[0])
+        exact_stem = os.path.splitext(row["filename"])[0]
+        stem = _stem_key(exact_stem)
         origin = row["last_move_source_folder_path"]
         known_origin = destination_stem_origins.get(
             stem, no_destination_stem,
         )
         if known_origin is no_destination_stem:
             destination_stem_origins[stem] = origin
-        elif known_origin != origin:
+            destination_stem_exact[stem] = exact_stem
+        elif known_origin != origin or \
+                destination_stem_exact[stem] != exact_stem:
             # Conflicting or partly unknown provenance cannot prove that a
-            # new same-stem photo shares the existing developed render.
+            # new same-stem photo shares the existing developed render. On a
+            # folding render volume, case-only stems from the same source are
+            # distinct source renders too, so exact spelling is part of the
+            # proof even though the destination lookup key is folded.
             destination_stem_origins[stem] = None
 
     photos_map = db.get_photos_by_ids(photo_ids)
@@ -2047,11 +2054,13 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             # folders can hold distinct renders with the same filename. Do not
             # merge the latter into one destination and silently make one row
             # display/export the other's edit.
+            stem_key = _stem_key(stem)
             existing_origin = destination_stem_origins.get(
-                _stem_key(stem), no_destination_stem,
+                stem_key, no_destination_stem,
             )
             if existing_origin is not no_destination_stem \
-                    and existing_origin != src_dir:
+                    and (existing_origin != src_dir or
+                         destination_stem_exact.get(stem_key) != stem):
                 log.warning(
                     "Move skipped for %s: developed render stem collides at "
                     "destination", photo["filename"],
@@ -2165,7 +2174,8 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             # still rejected. Using the path (not folders.id) survives a
             # later delete/re-create of the source folder that would reuse
             # the same rowid.
-            destination_stem_origins[_stem_key(stem)] = src_dir
+            destination_stem_origins[stem_key] = src_dir
+            destination_stem_exact[stem_key] = stem
 
             # Rebase this photo's developed-output file(s) for the new folder
             # BEFORE removing originals. Both develop-job layouts need to
@@ -2227,7 +2237,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                         stale_ids,
                     )
                     db.conn.commit()
-                destination_stem_origins[_stem_key(stem)] = None
+                destination_stem_origins[stem_key] = None
             if developed_dir:
                 relocate_developed_file(
                     developed_dir, src_dir, destination, stem,

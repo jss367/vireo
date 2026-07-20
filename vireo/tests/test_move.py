@@ -2352,6 +2352,58 @@ def test_move_photos_folds_stems_for_configured_developed_volume(
     assert file_b.exists()
 
 
+def test_move_photos_rejects_same_source_case_only_stem_collision(
+    tmp_path, monkeypatch,
+):
+    """Same-source provenance only permits an exact shared render stem."""
+    import move as move_module
+    from move import move_photos
+
+    monkeypatch.setattr(
+        move_module, "_is_case_insensitive_path", lambda _: True,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    source = tmp_path / "case-sensitive-source"
+    destination = tmp_path / "case-folding-destination"
+    source.mkdir()
+    fid = db.add_folder(str(source), name="source")
+    files = {
+        "IMG.CR3": b"raw-upper",
+        "IMG.JPG": b"jpeg-upper",
+        "img.NEF": b"raw-lower",
+    }
+    pids = {}
+    for index, (filename, content) in enumerate(files.items(), start=1):
+        path = source / filename
+        path.write_bytes(content)
+        pids[filename] = db.add_photo(
+            folder_id=fid, filename=filename,
+            extension=os.path.splitext(filename)[1].lower(),
+            file_size=len(content), file_mtime=float(index),
+        )
+
+    first = move_photos(db, [pids["IMG.CR3"]], str(destination))
+    assert first["moved"] == 1
+    # The exact-stem IMG.JPG sibling keeps the source provenance alive.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (pids["IMG.CR3"],),
+        ).fetchone()["last_move_source_folder_path"] == str(source)
+    )
+
+    result = move_photos(db, [pids["img.NEF"]], str(destination))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert (source / "img.NEF").exists()
+    assert db.get_photo(pids["img.NEF"])["folder_id"] == fid
+
+
 def test_move_photos_allows_case_folded_stem_on_case_sensitive_destination(
     tmp_path, monkeypatch,
 ):
