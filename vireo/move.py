@@ -1905,6 +1905,24 @@ def _has_untracked_destination_developed(
     return False
 
 
+def _blocked_destination_developed_path(destination, developed_dir):
+    """Return a non-directory entry that would block render relocation."""
+    try:
+        from .export import developed_folder_key
+    except ImportError:
+        from export import developed_folder_key
+
+    targets = [os.path.join(destination, "developed")]
+    if developed_dir:
+        targets.append(
+            os.path.join(developed_dir, developed_folder_key(destination))
+        )
+    for target in targets:
+        if os.path.lexists(target) and not os.path.isdir(target):
+            return target
+    return None
+
+
 def move_photos(db, photo_ids, destination, progress_cb=None,
                 developed_dir="", developed_listing_cache=None):
     """Move individual photos to a destination directory.
@@ -1950,6 +1968,22 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             "destination_folder_id": None,
         }
     os.makedirs(destination, exist_ok=True)
+    blocked_developed = _blocked_destination_developed_path(
+        destination, developed_dir,
+    )
+    if blocked_developed:
+        conflict_msg = (
+            "developed output path is not a directory: "
+            f"{blocked_developed}"
+        )
+        log.warning("Move refused: %s", conflict_msg)
+        return {
+            "moved": 0,
+            "errors": [
+                f"{pid}: {conflict_msg}" for pid in photo_ids
+            ] or [conflict_msg],
+            "destination_folder_id": None,
+        }
     total = len(photo_ids)
     moved = 0
     errors = []

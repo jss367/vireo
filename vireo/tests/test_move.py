@@ -424,6 +424,40 @@ def test_move_photos_rejects_stale_default_developed_render_at_destination(
     assert db.get_photo(pid)["folder_id"] == fid_src
 
 
+def test_move_photos_rejects_blocked_default_developed_path(tmp_path):
+    """A file at the target render directory must fail before catalog update."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    fid_src = db.add_folder(str(src), name="src")
+    db.add_folder(str(dst), name="dst")
+
+    source_file = src / "bird.cr3"
+    source_file.write_bytes(b"raw")
+    pid = db.add_photo(
+        folder_id=fid_src, filename=source_file.name, extension=".cr3",
+        file_size=3, file_mtime=1.0,
+    )
+    blocked = dst / "developed"
+    blocked.write_bytes(b"not-a-directory")
+
+    result = move_photos(db, [pid], str(dst))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed output path is not a directory" in result["errors"][0]
+    assert source_file.exists()
+    assert not (dst / source_file.name).exists()
+    assert blocked.read_bytes() == b"not-a-directory"
+    assert db.get_photo(pid)["folder_id"] == fid_src
+
+
 def test_move_photos_rejects_case_folded_stale_developed_render(
     tmp_path, monkeypatch,
 ):
