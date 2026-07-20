@@ -204,6 +204,128 @@ def test_pipeline_labels_get_more_opens_download_modal(live_server, page):
     expect(page.locator("#pipelineTaxonCheckboxes")).to_contain_text("Birds")
 
 
+def test_pipeline_save_process_as_new_uses_in_page_dialog(live_server, page):
+    """Desktop webviews can suppress window.prompt(), so process management
+    must use a visible in-page dialog and persist through the API."""
+    url = live_server["url"]
+    db = live_server["db"]
+    page.goto(f"{url}/pipeline")
+
+    page.locator("#btnProcessSaveNew").click()
+    modal = page.locator("#processEditorModal")
+    expect(modal).to_have_class(re.compile(r"\bopen\b"))
+    expect(modal.get_by_role("heading", name="Save process as new")).to_be_visible()
+
+    page.locator("#processEditorName").fill("Bird review")
+    page.locator("#processEditorSubmitBtn").click()
+
+    expect(modal).not_to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#strategySelect")).to_have_value(
+        str(next(p["id"] for p in db.get_saved_processes()
+                 if p["name"] == "Bird review"))
+    )
+    expect(page.locator("#processEditorStatus")).to_have_text("Saved “Bird review”.")
+
+
+def test_pipeline_rename_process_uses_in_page_dialog(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    process_id = db.create_saved_process("Old process name")
+    page.goto(f"{url}/pipeline")
+    page.locator("#strategySelect").select_option(str(process_id))
+
+    page.locator("#btnProcessRename").click()
+    modal = page.locator("#processEditorModal")
+    expect(modal).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#processEditorName")).to_have_value("Old process name")
+
+    page.locator("#processEditorName").fill("Renamed process")
+    page.locator("#processEditorSubmitBtn").click()
+
+    expect(modal).not_to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#strategySelect option:checked")).to_have_text(
+        "Renamed process"
+    )
+    assert db.get_saved_process(process_id)["name"] == "Renamed process"
+
+
+def test_pipeline_delete_process_uses_in_page_confirmation(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    process_id = db.create_saved_process("Disposable process")
+    page.goto(f"{url}/pipeline")
+    page.locator("#strategySelect").select_option(str(process_id))
+
+    page.locator("#btnProcessDelete").click()
+    modal = page.locator("#processEditorModal")
+    expect(modal).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#processEditorModalDescription")).to_contain_text(
+        "Delete “Disposable process”?"
+    )
+    page.locator("#processEditorSubmitBtn").click()
+
+    expect(modal).not_to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#strategySelect")).to_have_value("__custom__")
+    assert db.get_saved_process(process_id) is None
+
+
+def test_pipeline_delete_dialog_keeps_original_process_target(live_server, page):
+    """Changing the page selection behind the open modal must not change
+    which process the confirmation deletes."""
+    url = live_server["url"]
+    db = live_server["db"]
+    original_id = db.create_saved_process("Delete this process")
+    other_id = db.create_saved_process("Keep this process")
+    page.goto(f"{url}/pipeline")
+    page.locator("#strategySelect").select_option(str(original_id))
+
+    page.locator("#btnProcessDelete").click()
+    expect(page.locator("#processEditorModalDescription")).to_contain_text(
+        "Delete “Delete this process”?"
+    )
+
+    # Model keyboard/assistive-technology focus escaping the modal and
+    # changing the underlying picker while its confirmation remains open.
+    page.evaluate(
+        """(processId) => {
+          const select = document.getElementById('strategySelect');
+          select.value = String(processId);
+          onProcessSelect();
+        }""",
+        other_id,
+    )
+    page.locator("#processEditorSubmitBtn").click()
+
+    expect(page.locator("#processEditorModal")).not_to_have_class(
+        re.compile(r"\bopen\b")
+    )
+    assert db.get_saved_process(original_id) is None
+    assert db.get_saved_process(other_id)["name"] == "Keep this process"
+
+
+def test_pipeline_process_dialog_validates_name_and_closes_with_escape(
+    live_server, page
+):
+    url = live_server["url"]
+    page.goto(f"{url}/pipeline")
+    save_new = page.locator("#btnProcessSaveNew")
+    save_new.click()
+
+    page.locator("#processEditorSubmitBtn").click()
+    expect(page.locator("#processEditorError")).to_have_text(
+        "Enter a process name."
+    )
+    expect(page.locator("#processEditorModal")).to_have_class(
+        re.compile(r"\bopen\b")
+    )
+
+    page.keyboard.press("Escape")
+    expect(page.locator("#processEditorModal")).not_to_have_class(
+        re.compile(r"\bopen\b")
+    )
+    expect(save_new).to_be_focused()
+
+
 def test_pipeline_toggling_classify_off_keeps_group_available(live_server, page):
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
