@@ -25,7 +25,7 @@ from image_loader import (
     safe_scan_walk,
 )
 from keyword_normalization import keyword_match_key
-from metadata import exif_summary_columns, extract_metadata
+from metadata import EXIF_SUMMARY_COLUMNS, exif_summary_columns, extract_metadata
 from PIL import Image
 from render_source import exif_orientation as _exif_orientation_from_data
 from render_source import is_undersized
@@ -2089,10 +2089,15 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             if file_meta:
                 # Promoted EXIF summary columns (universal filter fields).
                 # Written whenever ExifTool ran, independent of whether the
-                # full JSON blob is stored below.
-                for column, value in exif_summary_columns(file_meta).items():
+                # full JSON blob is stored below. Absent columns are cleared
+                # to NULL rather than skipped so a rescan of a file whose
+                # metadata lost a field (e.g. sidecar edited, replaced with a
+                # different camera's file) doesn't leave stale values that
+                # /api/photos/query and /api/filters/values keep matching.
+                cols = exif_summary_columns(file_meta)
+                for column in EXIF_SUMMARY_COLUMNS:
                     updates.append(f"{column}=?")
-                    update_params.append(value)
+                    update_params.append(cols.get(column))
             if file_meta and extract_full_metadata:
                 updates.append("exif_data=?")
                 update_params.append(json.dumps(file_meta))

@@ -995,6 +995,70 @@ def test_scan_populates_exif_data(tmp_path):
     assert "File" in meta
 
 
+def test_rescan_clears_absent_exif_summary_columns(tmp_path, monkeypatch):
+    """Promoted EXIF columns (camera_make / camera_model / lens / aperture /
+    shutter_speed / iso) are derived from the current file metadata, so a
+    rescan whose metadata omits a field must clear that column to NULL.
+    Otherwise a replaced or edited file leaves stale values that
+    /api/photos/query and /api/filters/values keep matching."""
+    import scanner
+    from db import Database
+    from scanner import scan
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    photo = root / "test.jpg"
+    Image.new("RGB", (100, 100), color="red").save(str(photo))
+
+    def make_extract(payload):
+        def fake(paths, restricted_tags=None, progress_callback=None,
+                checkpoint=None):
+            return {p: payload for p in paths}
+        return fake
+
+    # First scan: file reports full EXIF summary.
+    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+        "EXIF": {
+            "Make": "Sony", "Model": "ILCE-1", "LensModel": "FE 200-600",
+            "FNumber": 6.3, "ExposureTime": 0.001, "ISO": 800,
+        },
+        "Composite": {},
+    }))
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(root), db)
+    row = db.conn.execute(
+        "SELECT camera_make, camera_model, lens, aperture, shutter_speed, iso "
+        "FROM photos LIMIT 1"
+    ).fetchone()
+    assert row["camera_make"] == "Sony"
+    assert row["camera_model"] == "ILCE-1"
+    assert row["lens"] == "FE 200-600"
+    assert row["aperture"] == pytest.approx(6.3)
+    assert row["iso"] == 800
+
+    # Bump mtime so the incremental scan re-examines the file, then rescan
+    # with metadata that omits every promoted field. All promoted columns
+    # must go to NULL — not stay at their prior values.
+    future = time.time() + 3600
+    os.utime(str(photo), (future, future))
+    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+        "EXIF": {},
+        "Composite": {},
+        "File": {"ImageWidth": 100, "ImageHeight": 100},
+    }))
+    scan(str(root), db)
+    row = db.conn.execute(
+        "SELECT camera_make, camera_model, lens, aperture, shutter_speed, iso "
+        "FROM photos LIMIT 1"
+    ).fetchone()
+    assert row["camera_make"] is None
+    assert row["camera_model"] is None
+    assert row["lens"] is None
+    assert row["aperture"] is None
+    assert row["shutter_speed"] is None
+    assert row["iso"] is None
+
+
 def test_scan_pairs_raw_and_jpeg(tmp_path):
     """When a folder has IMG.cr3 and IMG.jpg, they become one photo with companion_path."""
     from db import Database

@@ -398,6 +398,20 @@ def extract_summary_fields(grouped_meta):
     }
 
 
+# Promoted EXIF summary columns in the ``photos`` table — the canonical
+# list the scanner uses to clear absent fields on rescan (a metadata write
+# that omits a column should reset it to NULL, not leave the stale value
+# behind). Kept next to ``exif_summary_columns`` so the two stay in lockstep.
+EXIF_SUMMARY_COLUMNS = (
+    "camera_make",
+    "camera_model",
+    "lens",
+    "aperture",
+    "shutter_speed",
+    "iso",
+)
+
+
 def exif_summary_columns(grouped_meta):
     """Map grouped metadata to the photos-table EXIF summary columns.
 
