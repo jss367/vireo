@@ -1695,11 +1695,23 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
         # but ``os.makedirs(exist_ok=True)`` in ``move_photos`` would then
         # raise ``FileExistsError`` for that same lexists-true entry and
         # crash the background job instead of surfacing a normal collision.
-        if os.path.lexists(candidate) and not os.path.isdir(candidate):
-            raise ValueError(
-                f"date destination already exists and is not a directory: "
-                f"{candidate}"
-            )
+        #
+        # Walk every intermediate ancestor between ``destination`` and the
+        # rendered candidate too. A nested template like ``%Y/%m`` renders
+        # ``2026/07``; if ``destination/2026`` is already a regular file (or
+        # a dangling symlink), the final candidate does not lexist yet and
+        # only the leaf check misses it, but ``os.makedirs`` in the worker
+        # would then raise ``NotADirectoryError``/``FileExistsError`` and
+        # abort the background job with an opaque exception instead of
+        # returning a structured preflight error.
+        parts = relative.split("/")
+        for depth in range(1, len(parts) + 1):
+            ancestor = os.path.join(destination, *parts[:depth])
+            if os.path.lexists(ancestor) and not os.path.isdir(ancestor):
+                raise ValueError(
+                    f"date destination already exists and is not a directory: "
+                    f"{ancestor}"
+                )
         plans.append({
             "relative_path": relative,
             "destination": candidate,

@@ -733,6 +733,75 @@ def test_plan_folder_date_moves_rejects_destination_occupied_by_file(tmp_path):
         plan_folder_date_moves(db, fid, str(archive), "%Y-%m-%d")
 
 
+def test_plan_folder_date_moves_rejects_ancestor_occupied_by_file(tmp_path):
+    """A nested template must reject a plan whose intermediate ancestor is a
+    regular file.
+
+    For template ``%Y/%m`` rendering ``2026/07``, the leaf-only check misses
+    a case where ``<destination>/2026`` is already a regular file — the leaf
+    ``<destination>/2026/07`` does not lexist yet. ``move_photos`` would then
+    call ``os.makedirs(<destination>/2026/07, exist_ok=True)`` and raise
+    ``NotADirectoryError`` inside the background job. Preflight must walk
+    each ancestor and surface a structured error instead.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    # ``<archive>/2026`` is a regular file, blocking any ``2026/*`` child.
+    (archive / "2026").write_bytes(b"blocked")
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(archive), "%Y/%m")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Broken symlinks are unusual on Windows and require admin.",
+)
+def test_plan_folder_date_moves_rejects_dangling_symlink_ancestor(tmp_path):
+    """A dangling-symlink intermediate ancestor must fail preflight.
+
+    For template ``%Y/%m`` rendering ``2026/07`` where ``<destination>/2026``
+    is a dangling symlink, the leaf check accepts the plan because
+    ``<destination>/2026/07`` does not lexist. ``os.makedirs(..., exist_ok=True)``
+    would then raise ``FileExistsError``/``NotADirectoryError`` inside the
+    worker — this is especially plausible for mounted-drive symlinks whose
+    target is disconnected.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    # Point the symlink at a sibling *inside* the destination root so the
+    # traversal safety check doesn't fire first — the intermediate ancestor
+    # is the scenario we're guarding against.
+    os.symlink(str(archive / "target"), str(archive / "2026"))
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(archive), "%Y/%m")
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="Broken symlinks are unusual on Windows and require admin.",
