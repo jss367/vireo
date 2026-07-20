@@ -19245,18 +19245,18 @@ def test_add_species_leaves_taxon_null_when_only_higher_rank_matches(tmp_path):
     assert row["taxon_id"] is None
 
 
-def test_add_species_clears_higher_rank_taxon_when_no_species_match(tmp_path):
-    """A pre-existing keyword row bound to a higher-rank taxon
-    (e.g. a legacy row stamped with the genus/family taxon before
-    ``prefer_species`` existed) must have that stale non-species
-    ``taxon_id`` cleared to NULL when the next species accept cannot
-    find a species-rank match. Without the clear the reuse branch
-    leaves the higher-rank binding in place while the taxonomy
-    promotion below still stamps ``is_species = 1``/``type =
-    'taxonomy'``, so every rank-filtered reader (Life List,
-    Compare, Explorer, highlight/preference eligibility) that
-    restricts to ``t.rank = 'species' OR t.rank IS NULL`` silently
-    hides the just-accepted keyword.
+def test_add_species_preserves_higher_rank_taxon_when_no_species_match(tmp_path):
+    """A pre-existing keyword row bound to a valid higher-rank taxon
+    (e.g. a ``Corvidae`` family observation) must keep that
+    ``taxon_id`` when the next species-typed accept cannot find a
+    species-rank match. ``get_life_list_candidates`` and
+    ``get_life_list_locations`` now surface linked higher-rank
+    identifications so their ``taxon_rank`` / ``scientific_name`` /
+    ``taxonomic_class`` metadata powers the new genus / family /
+    class Life List filters; clearing the ``taxon_id`` here would
+    strip that metadata on the next normal keyword edit and silently
+    break those filters — mirroring the preservation guarantee that
+    :meth:`mark_species_keywords` gives on startup.
     """
     from db import Database
 
@@ -19273,21 +19273,18 @@ def test_add_species_clears_higher_rank_taxon_when_no_species_match(tmp_path):
         "SELECT id FROM taxa WHERE rank = 'family'"
     ).fetchone()["id"]
 
-    # Legacy row: correctly typed taxonomy species but bound to the
-    # non-species-rank family taxon by the old species-agnostic lookup.
-    kid = db.add_keyword("Corvidae", is_species=True)
-    db.conn.execute(
-        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
-        (family_taxon, kid),
+    # Fully typed taxonomy row linked to a valid higher-rank taxon.
+    # ``add_keyword`` is species-preferring on insert, so bypass it
+    # with direct SQL to simulate the upgraded catalog.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Corvidae', 'taxonomy', 1, ?)",
+        (family_taxon,),
     )
+    kid = cur.lastrowid
     db.conn.commit()
-    pre = db.conn.execute(
-        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
-    ).fetchone()
-    assert pre["taxon_id"] == family_taxon
 
-    # Accepting again with is_species=True should clear the stale
-    # higher-rank binding rather than leaving it in place.
+    # Re-adding as a taxonomy keyword must NOT clear the family link.
     same = db.add_keyword("Corvidae", is_species=True)
     assert same == kid
     row = db.conn.execute(
@@ -19296,7 +19293,19 @@ def test_add_species_clears_higher_rank_taxon_when_no_species_match(tmp_path):
     ).fetchone()
     assert row["is_species"] == 1
     assert row["type"] == "taxonomy"
-    assert row["taxon_id"] is None
+    assert row["taxon_id"] == family_taxon
+
+    # The same guarantee must hold for the kw_type='taxonomy' variant
+    # taken by other callers.
+    same_typed = db.add_keyword("Corvidae", kw_type="taxonomy")
+    assert same_typed == kid
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["is_species"] == 1
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == family_taxon
 
 
 def test_mark_species_keywords_rebinds_higher_rank_taxonomy_link(tmp_path):

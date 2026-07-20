@@ -9747,28 +9747,18 @@ class Database:
                         ")",
                         (taxon_id, existing["id"], taxon_id),
                     )
-                else:
-                    # No species-rank taxon available. Clear a stale
-                    # non-species taxon_id (e.g. a legacy row bound to
-                    # the genus/family from the old species-agnostic
-                    # lookup) so the row falls under the readers'
-                    # ``t.rank IS NULL`` branch until a genuine
-                    # species-rank match becomes available. Without
-                    # this the is_species/taxonomy promotion below
-                    # still succeeds, but every downstream
-                    # ``t.rank = 'species' OR t.rank IS NULL`` filter
-                    # (Life List, Compare, Explorer, highlight /
-                    # preference eligibility) silently hides the
-                    # just-accepted keyword.
-                    self.conn.execute(
-                        "UPDATE keywords SET taxon_id = NULL "
-                        "WHERE id = ? AND type IN ('general', 'taxonomy') "
-                        "AND taxon_id IS NOT NULL "
-                        "AND COALESCE("
-                        "  (SELECT rank FROM taxa WHERE id = keywords.taxon_id), ''"
-                        ") != 'species'",
-                        (existing["id"],),
-                    )
+                # Preserve an existing higher-rank ``taxon_id`` when no
+                # species-rank replacement is available. Earlier revisions
+                # cleared the link so the row would fall under the old
+                # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
+                # Life List, Compare, and highlight/preference eligibility.
+                # Those readers now accept linked higher-rank identifications
+                # (see :meth:`get_life_list_candidates` and
+                # :meth:`get_life_list_locations`), so clearing here would
+                # strip the row's ``taxon_rank`` / ``scientific_name`` /
+                # ``taxonomic_class`` metadata and silently break the new
+                # genus / family / class Life List filters — mirroring the
+                # startup preservation in :meth:`mark_species_keywords`.
             if kw_type is None and not is_species and existing["type"] == "general":
                 taxon_id = self._lookup_taxon_id_for_keyword(
                     name, prefer_species=True,
