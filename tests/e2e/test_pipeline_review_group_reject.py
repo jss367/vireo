@@ -518,6 +518,21 @@ def test_burst_modal_apply_blocked_while_bulk_reject_pending(live_server, page):
     assert apply_requests == []
     assert _flags(db, photo_ids) == ["none"] * 4
 
+    # The native Photo > Pick command must use the page's batchSetFlag helper
+    # rather than bypassing the modal through /api/batch/flag. The pending
+    # reject stays put and no database write lands while the bulk lock is held.
+    page.evaluate("() => nativeMenuSetFlag('flagged')")
+    expect(
+        page.get_by_text(
+            "A bulk reject for the selected photos is still finishing",
+            exact=False,
+        )
+    ).to_be_visible()
+    expect(page.locator("#grmCount")).to_have_text(
+        "0 picks, 1 rejects, 1 unsorted"
+    )
+    assert _flags(db, photo_ids) == ["none"] * 4
+
     held["route"].continue_()
 
     expect(page.locator("#undoMsg")).to_have_text("Rejected 2 photos in burst")

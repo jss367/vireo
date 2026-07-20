@@ -3950,6 +3950,41 @@ function toggleBurstRejected(event, encIdx, burstIdx) {
   setPipelineReviewGroupFlag(target, allRejected ? 'none' : 'rejected');
 }
 
+// Native Photo menu commands prefer a page-level batchSetFlag helper. In the
+// burst modal, route those commands through the modal's pending zones (the
+// same behavior as its P/X/Space shortcuts) rather than writing directly to
+// /api/batch/flag behind the modal's Apply workflow.
+function batchSetFlag(flag) {
+  if (flag !== 'flagged' && flag !== 'rejected' && flag !== 'none') {
+    return Promise.resolve(false);
+  }
+  var overlay = document.getElementById('grmOverlay');
+  if (overlay && overlay.classList.contains('open') && grmState) {
+    var ids = _grmActionTargetIds();
+    var overlapsBulkFlagWrite = ids.some(function(pid) {
+      return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+    });
+    if (overlapsBulkFlagWrite) {
+      showToast('A bulk reject for the selected photos is still finishing — try again in a moment', 'error');
+      return Promise.resolve(false);
+    }
+    if (flag === 'flagged') grmMovePick();
+    else if (flag === 'rejected') grmMoveReject();
+    else grmMoveCandidate();
+    return Promise.resolve(true);
+  }
+
+  var activeIds = typeof nativeMenuActivePhotoIds === 'function'
+    ? nativeMenuActivePhotoIds()
+    : [];
+  if (!activeIds.length) return Promise.resolve(false);
+  return Promise.all(activeIds.map(function(pid) {
+    return setPipelineReviewFlag(pid, flag);
+  })).then(function(results) {
+    return results.every(function(result) { return result !== false; });
+  });
+}
+
 function setPipelineReviewFlag(photoId, flag) {
   if (flag !== 'flagged' && flag !== 'rejected' && flag !== 'none') return Promise.resolve();
   photoId = parseInt(photoId, 10);
