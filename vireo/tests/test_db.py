@@ -20469,3 +20469,104 @@ def test_get_filter_field_values_counts_respect_rules(tmp_path):
     # Non-suggest fields are rejected.
     with pytest.raises(ValueError):
         db.get_filter_field_values("rating")
+
+
+def test_get_filter_field_values_folder_counts_over_subtree(tmp_path):
+    """Folder suggestions must aggregate over subtrees so counts match the
+    ``folder under=<path>`` operator the rule engine implements. A parent
+    folder with no direct photos but matching descendants must still be
+    suggested with its subtree count; a folder mixing direct and nested
+    photos must not undercount."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    root = db.add_folder('/photos', name='photos')
+    year = db.add_folder('/photos/2024', name='2024', parent_id=root)
+    month = db.add_folder('/photos/2024/01', name='01', parent_id=year)
+    other = db.add_folder('/vacation', name='vacation')
+    # /photos itself has NO direct photos; only descendants.
+    db.add_photo(folder_id=year, filename='y1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=month, filename='m1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=month, filename='m2.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=other, filename='v1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values("folder")}
+    # Parent with only descendants is still suggestable with subtree count.
+    assert values.get('/photos') == 3
+    # /photos/2024: 1 direct + 2 in /01 subtree.
+    assert values.get('/photos/2024') == 3
+    # /photos/2024/01: 2 direct.
+    assert values.get('/photos/2024/01') == 2
+    # Separate subtree counts independently.
+    assert values.get('/vacation') == 1
+    # Cross-check: each suggestion's count matches what a `folder under`
+    # rule would return.
+    for path, count in values.items():
+        rule_count = db.count_photos_for_rules(
+            [{"field": "folder", "op": "under", "value": path}])
+        assert rule_count == count, f"mismatch for {path!r}: rule={rule_count} suggest={count}"
+
+    # Typeahead narrows to matching folder paths.
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values("folder", q="2024")}
+    assert set(values) == {'/photos/2024', '/photos/2024/01'}
+
+    # Sibling rules constrain the counts (facet semantics preserved).
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values(
+        "folder",
+        rules=[{"field": "filename", "op": "starts_with", "value": "m"}],
+    )}
+    # Only m1.jpg / m2.jpg match; they live under /photos/2024/01.
+    assert values.get('/photos') == 2
+    assert values.get('/photos/2024') == 2
+    assert values.get('/photos/2024/01') == 2
+    assert '/vacation' not in values
+
+
+def test_get_filter_field_values_species_canonicalizes_hierarchy_leaf(tmp_path):
+    """Species typeahead resolves hierarchy leaves through ``taxon_id`` to
+    the same-taxon top-level root's name, so suggestions match the values
+    ``get_species_keywords_for_photos`` shows in Browse, Compare, and
+    life-list views. Otherwise a user editing a Species rule would see the
+    raw leaf spelling (``Desert Verdin``) that never appears elsewhere."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    # Photo p_leaf: tagged only with a hierarchy leaf linked to Verdin taxon.
+    p_leaf = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    # Photo p_root: tagged with the top-level root directly (auto-links).
+    p_root = db.add_photo(folder_id=fid, filename='root.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    root_kid = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(p_leaf, leaf)
+    db.tag_photo(p_root, root_kid)
+    db.conn.commit()
+
+    # Suggestions canonicalize the leaf to the root spelling; both photos
+    # count under the single canonical name.
+    assert db.get_filter_field_values("species") == [
+        {"value": "Verdin", "count": 2}]
+    # The raw leaf spelling is never suggested — the canonical root wins.
+    assert db.get_filter_field_values("species", q="Desert") == []
+    # Typeahead on the root name returns the canonical suggestion.
+    assert db.get_filter_field_values("species", q="Verd") == [
+        {"value": "Verdin", "count": 2}]
+    # Cross-check: the suggested value works with the `species is` rule
+    # that the UI would fire off — both photos are matched (rule engine
+    # already canonicalizes through taxon).
+    assert db.count_photos_for_rules(
+        [{"field": "species", "op": "is", "value": "Verdin"}]) == 2

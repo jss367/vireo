@@ -18405,7 +18405,6 @@ class Database:
         "camera_model": "p.camera_model",
         "lens": "p.lens",
         "extension": "LOWER(p.extension)",
-        "folder": "f.path",
     }
 
     def get_filter_field_values(self, field, rules=None, q=None, limit=20):
@@ -18420,6 +18419,11 @@ class Database:
         folder_join, join_clause, where, params = self._build_query_from_rules(
             rules if rules is not None else []
         )
+        limit = max(1, min(int(limit or 20), 50))
+        if field == "folder":
+            return self._folder_filter_values(
+                folder_join, join_clause, where, params, q=q, limit=limit
+            )
         conditions = []
         extra_joins = ""
         extra_params = []
@@ -18431,10 +18435,32 @@ class Database:
                 " JOIN keywords kv ON kv.id = pkv.keyword_id"
             )
             if field == "species":
-                extra_joins += " LEFT JOIN taxa tv ON tv.id = kv.taxon_id"
+                # Canonicalize hierarchy leaves (e.g. ``Desert Verdin``) to
+                # the same-taxon top-level root (``Verdin``) that
+                # ``get_species_keywords_for_photos`` — and therefore Browse,
+                # life-list, and species_representative lookups — report.
+                # Otherwise the typeahead would suggest the raw leaf spelling
+                # for a photo whose species is displayed as ``Verdin`` in
+                # every other view. Deterministic root pick (MIN(id)) mirrors
+                # the ``setdefault`` in ``get_species_keywords_for_photos``.
+                extra_joins += (
+                    " LEFT JOIN taxa tv ON tv.id = kv.taxon_id"
+                    " LEFT JOIN keywords root_kv"
+                    " ON kv.taxon_id IS NOT NULL"
+                    " AND root_kv.taxon_id = kv.taxon_id"
+                    " AND root_kv.parent_id IS NULL"
+                    " AND (root_kv.is_species = 1 OR root_kv.type = 'taxonomy')"
+                    " AND root_kv.id = ("
+                    "SELECT MIN(id) FROM keywords"
+                    " WHERE taxon_id = kv.taxon_id"
+                    " AND parent_id IS NULL"
+                    " AND (is_species = 1 OR type = 'taxonomy'))"
+                )
                 conditions.append("(kv.is_species = 1 OR kv.type = 'taxonomy')")
                 conditions.append("(tv.rank = 'species' OR tv.rank IS NULL)")
-            value_expr = "kv.name"
+                value_expr = "COALESCE(root_kv.name, kv.name)"
+            else:
+                value_expr = "kv.name"
         else:
             raise ValueError(f"field {field!r} does not support value suggestions")
         conditions.append(f"{value_expr} IS NOT NULL")
@@ -18443,7 +18469,6 @@ class Database:
             extra_params.append(f"%{_escape_like(str(q))}%")
         joined = " AND ".join(conditions)
         where_full = f"{where} AND {joined}" if where else f"WHERE {joined}"
-        limit = max(1, min(int(limit or 20), 50))
         query = f"""
             SELECT {value_expr} AS value, COUNT(DISTINCT p.id) AS count
             FROM photos p
@@ -18451,11 +18476,63 @@ class Database:
             {join_clause}
             {extra_joins}
             {where_full}
-            GROUP BY {value_expr}
+            GROUP BY value
             ORDER BY count DESC, value ASC
             LIMIT ?
         """
         rows = self.conn.execute(query, [*params, *extra_params, limit]).fetchall()
+        return [{"value": row["value"], "count": row["count"]} for row in rows]
+
+    def _folder_filter_values(self, folder_join, join_clause, where, params, q, limit):
+        """Folder suggestions with subtree-aware counts.
+
+        The ``folder`` field's engine operators are ``under``/``not_under``,
+        which match a folder and every descendant. A count grouped by each
+        photo's immediate ``f.path`` therefore misreports what selecting a
+        suggested folder would return — a parent with no direct photos but
+        matching descendants would be omitted entirely, and any folder with
+        both direct and nested photos would undercount. Aggregate over each
+        workspace folder's subtree so the facet answers "how many photos
+        would ``folder under=<path>`` return" (design requirement: counts
+        never lie about the rule they preview).
+        """
+        q_condition = ""
+        q_params = []
+        if q:
+            q_condition = " AND ff.path LIKE ? ESCAPE '\\'"
+            q_params.append(f"%{_escape_like(str(q))}%")
+        # Inner select: photos matching sibling rules with their folder
+        # path. Reused verbatim so every rule-engine feature (workspace
+        # scope, status filter, sibling predicates) applies unchanged.
+        inner = f"""
+            SELECT DISTINCT p.id AS pid, f.path AS ppath
+            FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+        """
+        # Path normalization matches ``_build_query_from_rules`` for the
+        # ``folder``/``under`` op so a Windows library's backslash paths
+        # aggregate the same way here as they filter there.
+        norm_photo = "REPLACE(matched.ppath, '\\', '/')"
+        norm_folder = "REPLACE(ff.path, '\\', '/')"
+        query = f"""
+            SELECT ff.path AS value, COUNT(DISTINCT matched.pid) AS count
+            FROM folders ff
+            JOIN workspace_folders ff_wf
+              ON ff_wf.folder_id = ff.id AND ff_wf.workspace_id = ?
+            JOIN ({inner}) matched ON (
+                {norm_photo} = {norm_folder}
+                OR {norm_photo} LIKE {norm_folder} || '/%' ESCAPE '\\'
+            )
+            WHERE ff.path IS NOT NULL{q_condition}
+            GROUP BY ff.path
+            ORDER BY count DESC, value ASC
+            LIMIT ?
+        """
+        rows = self.conn.execute(
+            query, [self._ws_id(), *params, *q_params, limit]
+        ).fetchall()
         return [{"value": row["value"], "count": row["count"]} for row in rows]
 
     def collection_photo_ids(self, collection_id):
