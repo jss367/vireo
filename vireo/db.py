@@ -15116,6 +15116,18 @@ class Database:
         per ``(detection_id, classifier_model)`` so stale rows from prior
         label sets don't contaminate ``/api/predictions`` or
         ``/api/predictions/compare`` after re-classification.
+
+        Row-level scoping for prediction-field rules: the workspace/rules
+        subquery below is applied at the photo level (``p.id IN (...)``),
+        which correctly limits *which photos* surface but returns every
+        current prediction for those photos. When the rules tree references
+        Review-only fields (``prediction_confidence``, ``prediction_status``,
+        ``classifier_model``, ``taxonomy_*``), a photo with a sibling
+        prediction that matches would still return low-confidence /
+        already-accepted rows that don't satisfy the visible filter — the
+        Review grid and Accept All would then act on rows the filter chip
+        excluded. ``_filter_prediction_rows_by_rules`` re-evaluates those
+        leaves against each returned row so the grid matches the chip.
         """
         ws = self._ws_id()
         base_conditions = ["wf.workspace_id = ?"]
@@ -15187,7 +15199,167 @@ class Database:
             rows.sort(
                 key=lambda r: (r["confidence"] is None, -(r["confidence"] or 0))
             )
+        if rules is not None:
+            rows = self._filter_prediction_rows_by_rules(rows, rules)
         return rows
+
+    _PREDICTION_ROW_FIELDS = frozenset({
+        "prediction_confidence",
+        "prediction_status",
+        "classifier_model",
+        "taxonomy_class",
+        "taxonomy_order",
+        "taxonomy_family",
+        "taxonomy_genus",
+        "species",
+        "needs_review",
+    })
+
+    def _filter_prediction_rows_by_rules(self, rows, rules):
+        """Drop returned prediction rows that don't satisfy prediction-field
+        rules at the row level.
+
+        The SQL rules subquery limits the set of *photos* whose predictions
+        surface, but leaves like ``prediction_confidence >= 0.8`` return
+        every current prediction for a photo that has any matching one.
+        This walks the rule tree per row: prediction-field leaves are
+        evaluated against the row's own values; every other leaf is treated
+        as satisfied (the photo already matched via the SQL subquery). AND
+        (``all``) trees therefore narrow correctly; OR (``any``) and NOT
+        (``none``) trees are unchanged from the SQL behavior since the
+        non-prediction operands still short-circuit True and the prediction
+        operand is only true when the row itself matches.
+        """
+        if not rows:
+            return rows
+        # Normalize to the same shape ``_build_query_from_rules`` accepts so
+        # both list and grouped-tree inputs go through the same walker.
+        if isinstance(rules, list):
+            root = {"mode": "all", "rules": rules}
+        elif isinstance(rules, dict) and "rules" in rules:
+            root = rules
+        else:
+            return rows
+
+        def _touches_prediction(node):
+            if not isinstance(node, dict):
+                return False
+            if "rules" in node and "field" not in node:
+                return any(_touches_prediction(c) for c in node.get("rules") or [])
+            return node.get("field") in self._PREDICTION_ROW_FIELDS
+
+        if not _touches_prediction(root):
+            return rows
+
+        def _truthy(value):
+            return value is True or value == 1 or value == "1" or value == "true"
+
+        def _num_match(row_val, op, want):
+            if row_val is None:
+                return False
+            try:
+                a = float(row_val)
+            except (TypeError, ValueError):
+                return False
+            if op == "between":
+                if not isinstance(want, list) or len(want) != 2:
+                    return False
+                try:
+                    lo, hi = float(want[0]), float(want[1])
+                except (TypeError, ValueError):
+                    return False
+                return lo <= a <= hi
+            try:
+                b = float(want)
+            except (TypeError, ValueError):
+                return False
+            if op == ">=":
+                return a >= b
+            if op == "<=":
+                return a <= b
+            if op == ">":
+                return a > b
+            if op == "<":
+                return a < b
+            if op in ("equals", "is"):
+                return a == b
+            if op == "is not":
+                return a != b
+            return False
+
+        def _text_match(row_val, op, want):
+            a = "" if row_val is None else str(row_val)
+            b = "" if want is None else str(want)
+            if op == "contains":
+                return b.lower() in a.lower()
+            if op == "not_contains":
+                return b.lower() not in a.lower()
+            if op == "starts_with":
+                return a.lower().startswith(b.lower())
+            if op == "ends_with":
+                return a.lower().endswith(b.lower())
+            if op in ("equals", "is"):
+                return a.lower() == b.lower()
+            if op == "is not":
+                return a.lower() != b.lower()
+            return False
+
+        def _enum_match(row_val, op, want):
+            a = "" if row_val is None else str(row_val)
+            if op in ("in", "not_in"):
+                values = [str(v) for v in (want or [])]
+                inside = a in values
+                return inside if op == "in" else not inside
+            if op in ("equals", "is"):
+                return a == str(want)
+            if op == "is not":
+                return a != str(want)
+            return False
+
+        def _leaf_row_match(rule, row):
+            field = rule.get("field")
+            op = rule.get("op", "")
+            value = rule.get("value")
+            if field == "prediction_confidence":
+                return _num_match(row["confidence"], op, value)
+            if field == "prediction_status":
+                return _enum_match(row["status"], op, value)
+            if field == "classifier_model":
+                return _text_match(row["classifier_model"], op, value)
+            if field == "species":
+                return _text_match(row["species"], op, value)
+            if field in (
+                "taxonomy_class",
+                "taxonomy_order",
+                "taxonomy_family",
+                "taxonomy_genus",
+            ):
+                col = row[field] if field in row.keys() else None
+                if op == "contains":
+                    return _text_match(col, "contains", value)
+                return _text_match(col, op, value)
+            if field == "needs_review":
+                is_pending = str(row["status"] or "pending") == "pending"
+                return is_pending if _truthy(value) else not is_pending
+            # Non-prediction leaf — the photo already matched via the SQL
+            # subquery, so treat as satisfied here.
+            return True
+
+        def _eval(node, row):
+            if "rules" in node and "field" not in node:
+                mode = node.get("mode", "all")
+                children = node.get("rules") or []
+                if not children:
+                    # Empty group: match SQL (all=True, any=False, none=True).
+                    return mode != "any"
+                if mode == "any":
+                    return any(_eval(c, row) for c in children)
+                if mode == "none":
+                    return not any(_eval(c, row) for c in children)
+                return all(_eval(c, row) for c in children)
+            return _leaf_row_match(node, row)
+
+        return [r for r in rows if _eval(root, r)]
 
     def update_prediction_status(self, prediction_id, status, _commit=True):
         """Update per-workspace review status for a prediction.

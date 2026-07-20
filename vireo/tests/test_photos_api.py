@@ -10230,6 +10230,47 @@ def test_api_predictions_accepts_rules(app_and_db):
     assert client.get('/api/predictions?rules=notjson').status_code == 400
 
 
+def test_api_predictions_filters_prediction_rows_by_confidence(app_and_db):
+    """A prediction_confidence rule filters at the row level, not the photo
+    level. With two predictions on the same photo (0.95 and 0.10), asking
+    for ``prediction_confidence >= 0.8`` must return only the high-confidence
+    row — not both because the photo has *some* matching prediction. The
+    review grid and ``Accept All`` would otherwise operate on rows the
+    filter chip excludes.
+    """
+    import json as _json
+    app, db = app_and_db
+    from labels_fingerprint import TOL_SENTINEL
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    det_ids = db.save_detections(photos["bird1.jpg"], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.4, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="test-detector")
+    db.add_prediction(detection_id=det_ids[0], species="Cardinal",
+                      confidence=0.95, model="M1",
+                      labels_fingerprint=TOL_SENTINEL)
+    db.add_prediction(detection_id=det_ids[1], species="Sparrow",
+                      confidence=0.10, model="M1",
+                      labels_fingerprint=TOL_SENTINEL)
+
+    client = app.test_client()
+    resp = client.get('/api/predictions')
+    assert resp.status_code == 200
+    assert len(resp.get_json()['predictions']) == 2
+
+    rules = _json.dumps([
+        {"field": "prediction_confidence", "op": ">=", "value": 0.8},
+    ])
+    resp = client.get(f'/api/predictions?rules={rules}')
+    assert resp.status_code == 200
+    preds = resp.get_json()['predictions']
+    assert len(preds) == 1
+    assert preds[0]["species"] == "Cardinal"
+    assert preds[0]["confidence"] >= 0.8
+
+
 def test_api_photos_geo_surfaces_visual_status(app_and_db, monkeypatch):
     """Map endpoint must return the visual clause status so the filter
     bar can warn on fallback. Without this, choosing "Visually similar…"
