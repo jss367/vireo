@@ -2304,6 +2304,111 @@ def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
     assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
 
 
+def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_path):
+    """When ``check_folder_health`` flips a folder to ``'missing'`` because
+    its on-disk path is gone, the folder row is preserved so a later rescan
+    can bring it back — but its stored path is now free for reuse by an
+    unrelated mount. ``add_folder``'s ``INSERT OR IGNORE`` maps a fresh scan
+    of the same path back onto the surviving folder row, so photos from a
+    different card land under the same ``folder_id`` and ``src_dir``. Any
+    destination photo still carrying that path in
+    ``last_move_source_folder_path`` would then compare equal to the new
+    card's ``src_dir`` in ``move_photos`` and slip past the same-stem
+    developed-render collision guard, letting two unrelated destination rows
+    share the developed-output lookup by folder+stem. The health check must
+    invalidate that provenance on the ``ok`` → ``missing`` transition.
+    """
+    import shutil
+
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    reusable_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    reusable_path.mkdir()
+    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_file = reusable_path / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    # A same-stem sibling stays behind so ``move_photos`` does not expire
+    # provenance immediately on drain — the sibling-drain path is covered
+    # by its own test. This one exercises the health-check cascade.
+    sibling_file = reusable_path / "IMG.NEF"
+    sibling_file.write_bytes(b"sibling-raw")
+    db.add_photo(
+        folder_id=original_fid, filename=sibling_file.name,
+        extension=".nef", file_size=sibling_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(reusable_path)
+    )
+
+    # The card is ejected — the on-disk directory disappears. The next
+    # health-check cycle notices and flips the folder to ``'missing'``.
+    # The folder row and its remaining photo rows survive in case the
+    # same card returns.
+    shutil.rmtree(reusable_path)
+    changed = db.check_folder_health()
+    assert changed >= 1
+    assert db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (original_fid,),
+    ).fetchone()["status"] == "missing"
+
+    # Provenance pointing at the freed path must have been cleared by the
+    # health check — otherwise a different card mounted at the same path
+    # later would inherit the earlier scan's claim on the destination
+    # developed render.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] is None
+    )
+
+    # A different card is mounted at the same path and rescanned. INSERT
+    # OR IGNORE in ``add_folder`` reuses the surviving folder row for that
+    # path, so the new card's photos land under the same ``folder_id`` as
+    # the old scan. Without the provenance clear above, ``move_photos``
+    # would see the destination stem's stored origin (``/CARD``) equal to
+    # this incoming photo's ``src_dir`` (also ``/CARD``) and merge two
+    # unrelated developed renders under one destination folder+stem.
+    reusable_path.mkdir()
+    incoming_file = reusable_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=original_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # With provenance cleared, the destination stem is now unknown-origin,
+    # so the collision guard rejects the incoming photo instead of
+    # silently letting it share the earlier scan's render.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == original_fid
+
+
 def test_move_photos_rejects_case_folded_stem_collision(tmp_path, monkeypatch):
     """On case-insensitive destinations (Windows, default macOS APFS), two
     unrelated source folders can contain ``IMG.CR3`` and ``img.NEF`` and

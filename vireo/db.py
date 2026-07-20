@@ -3240,6 +3240,7 @@ class Database:
         """
         rows = self.conn.execute("SELECT id, path, status FROM folders").fetchall()
         changed = 0
+        newly_missing_paths = []
         for row in rows:
             exists = os.path.exists(row["path"])
             if not exists:
@@ -3254,6 +3255,28 @@ class Database:
                     (new_status, row["id"]),
                 )
                 changed += 1
+                if new_status == "missing":
+                    stored_path = row["path"] or ""
+                    if stored_path:
+                        newly_missing_paths.append(stored_path)
+        # A folder going missing frees its stored path to be reused by an
+        # unrelated mount without a corresponding row-delete: the folder row
+        # stays put in case the same content comes back, but a different
+        # removable card mounted at the same path can later be rescanned
+        # into it. Any destination photo whose ``last_move_source_folder_path``
+        # still equals that path would then compare equal to the new card's
+        # ``src_dir`` in ``move_photos`` and slip past the same-stem developed-
+        # render collision guard, letting an unrelated photo share the moved
+        # photo's rendered output (developed lookup is only by destination
+        # folder + stem). Clear provenance in the same transaction as the
+        # status flip so a rollback restores both together.
+        for chunk in _chunks(newly_missing_paths):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"UPDATE photos SET last_move_source_folder_path = NULL "
+                f"WHERE last_move_source_folder_path IN ({placeholders})",
+                chunk,
+            )
         if changed:
             self.conn.commit()
         return changed
