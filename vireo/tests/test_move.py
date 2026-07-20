@@ -1289,13 +1289,17 @@ def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
     parent_disk.mkdir()
     child_disk = parent_disk / "2026"
     child_disk.mkdir()
+    alias_disk = tmp_path / "alias"
+    alias_disk.mkdir()
     (parent_disk / "root.jpg").write_bytes(b"root")
     (child_disk / "child.jpg").write_bytes(b"child")
+    (alias_disk / "alias.jpg").write_bytes(b"alias")
 
     # Insert the folder rows directly so we can control the exact case that
     # gets stored — add_folder normalizes through the filesystem.
     parent_fid = db.add_folder(str(parent_disk), name="photos")
     child_fid = db.add_folder(str(child_disk), name="2026")
+    alias_fid = db.add_folder(str(alias_disk), name="alias")
     db.conn.execute(
         "UPDATE folders SET path = ? WHERE id = ?",
         ("C:\\Photos", parent_fid),
@@ -1303,6 +1307,10 @@ def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
     db.conn.execute(
         "UPDATE folders SET path = ? WHERE id = ?",
         ("c:\\photos\\2026", child_fid),
+    )
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        ("c:\\PHOTOS", alias_fid),
     )
     db.conn.commit()
 
@@ -1314,6 +1322,10 @@ def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
         folder_id=child_fid, filename="child.jpg", extension=".jpg",
         file_size=5, file_mtime=2.0, timestamp="2026-07-13T09:30:00",
     )
+    db.add_photo(
+        folder_id=alias_fid, filename="alias.jpg", extension=".jpg",
+        file_size=5, file_mtime=3.0, timestamp="2026-07-14T09:30:00",
+    )
 
     # The destination itself is host-OS absolute so os.path.isabs and the
     # traversal check pass under the test runner; only the descendants
@@ -1324,8 +1336,8 @@ def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
     )
 
     planned_ids = {pid for group in plan for pid in group["photo_ids"]}
-    assert len(planned_ids) == 2, (
-        "differently-cased descendant should be included in the plan"
+    assert len(planned_ids) == 3, (
+        "differently-cased descendant and exact alias should be included"
     )
 
 

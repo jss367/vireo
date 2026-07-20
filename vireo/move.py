@@ -1606,8 +1606,14 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
         root = folder["path"].replace("\\", "/").rstrip("/").lower()
         prefix = root + "/"
         path_expr = "LOWER_UNICODE(REPLACE(f.path, '\\', '/'))"
-        descendant_predicate = f"substr({path_expr}, 1, ?) = ?"
-        descendant_params = (len(prefix), prefix)
+        # Include both true descendants and a separate catalog row that is
+        # an exact case/separator alias of the selected folder. The latter is
+        # not covered by ``f.id = ?`` and has no trailing slash for the prefix
+        # predicate, but Windows resolves both rows to the same directory.
+        descendant_predicate = (
+            f"({path_expr} = ? OR substr({path_expr}, 1, ?) = ?)"
+        )
+        descendant_params = (root, len(prefix), prefix)
     else:
         # Always route POSIX descendant matching through the alias-aware
         # containment helper. A raw lexical SQL prefix misses two real-world
