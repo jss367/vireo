@@ -471,3 +471,89 @@ def test_list_predictions_gates_representative_on_current_eligibility(app_and_db
     assert by_photo[rejected_pid]['is_species_representative'] is False
     # Photo whose species keyword was untagged no longer counts either.
     assert by_photo[photos[2]['id']]['is_species_representative'] is False
+
+
+def test_get_predictions_species_rule_keeps_disagreement_rows(app_and_db):
+    """A photo confirmed as species X with a pending prediction of species Y
+    must surface under a ``species is X`` filter — that disagreement row is
+    exactly what a reviewer filters for. The row-level pass must not
+    re-check the prediction's proposed species against the keyword filter
+    and hide it (species is a photo-keyword field, not a per-row field)."""
+    _, db = app_and_db
+    photos = db.get_photos()
+    # Confirmed species keyword on p1.
+    robin_id = db.add_keyword('Robin', is_species=True)
+    db.tag_photo(photos[0]['id'], robin_id)
+    # Pending prediction proposes Sparrow — the reviewer wants to see it.
+    det = _make_detection(db, photos[0]['id'])
+    db.add_prediction(detection_id=det, species='Sparrow', confidence=0.9,
+                      model='test-model', category='new')
+
+    rules = [{'field': 'species', 'op': 'is', 'value': 'Robin'}]
+    preds = db.get_predictions(rules=rules)
+
+    assert [p['species'] for p in preds] == ['Sparrow'], (
+        'row-level pass hid the disagreement prediction the filter selected'
+    )
+
+
+def test_get_predictions_none_group_mixes_metadata_and_prediction(app_and_db):
+    """``none`` group over metadata + prediction leaves must not drop rows
+    the SQL subquery already validated. Concretely,
+    ``none(rating >= 5, prediction_confidence >= 0.8)`` selects photos with
+    rating<5 whose predictions are all under 0.8; every returned row is
+    valid. Treating ``rating >= 5`` as True per-row would make the ``none``
+    False and drop all rows — the very rows the filter was designed to
+    show."""
+    _, db = app_and_db
+    photos = db.get_photos()
+    # Fixture: photos[0] has rating 3; give it two low-confidence preds.
+    low_photo = photos[0]['id']
+    det = _make_detection(db, low_photo)
+    db.add_prediction(detection_id=det, species='A', confidence=0.10,
+                      model='test-model', category='new')
+    db.add_prediction(detection_id=det, species='B', confidence=0.05,
+                      model='test-model', category='new')
+
+    rules = {
+        'mode': 'none',
+        'rules': [
+            {'field': 'rating', 'op': '>=', 'value': 5},
+            {'field': 'prediction_confidence', 'op': '>=', 'value': 0.8},
+        ],
+    }
+    preds = db.get_predictions(rules=rules)
+
+    returned = sorted(p['species'] for p in preds if p['photo_id'] == low_photo)
+    assert returned == ['A', 'B'], (
+        'row-level pass dropped valid low-confidence rows because it '
+        'shortcut the metadata leaf inside a `none` group'
+    )
+
+
+def test_get_predictions_all_group_still_narrows_by_prediction_confidence(app_and_db):
+    """The row-level narrowing must still fire for pure ``all`` trees —
+    e.g. ``all(rating >= 3, prediction_confidence >= 0.8)`` must hide the
+    low-confidence sibling row on a rating-3 photo that also has one
+    high-confidence prediction."""
+    _, db = app_and_db
+    photos = db.get_photos()
+    # p1 already has rating 3 in the fixture.
+    photo_id = photos[0]['id']
+    det = _make_detection(db, photo_id)
+    db.add_prediction(detection_id=det, species='High', confidence=0.95,
+                      model='test-model', category='new')
+    db.add_prediction(detection_id=det, species='Low', confidence=0.10,
+                      model='test-model', category='new')
+
+    rules = [
+        {'field': 'rating', 'op': '>=', 'value': 3},
+        {'field': 'prediction_confidence', 'op': '>=', 'value': 0.8},
+    ]
+    preds = db.get_predictions(rules=rules)
+
+    returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
+    assert returned == ['High'], (
+        'row-level narrowing regressed for pure `all` trees; the low-'
+        'confidence sibling row was not filtered out'
+    )

@@ -15127,7 +15127,9 @@ class Database:
         already-accepted rows that don't satisfy the visible filter — the
         Review grid and Accept All would then act on rows the filter chip
         excluded. ``_filter_prediction_rows_by_rules`` re-evaluates those
-        leaves against each returned row so the grid matches the chip.
+        leaves against each returned row so the grid matches the chip. It
+        applies only when the tree can be resolved safely per row — see
+        that method's docstring for when it falls back to the SQL result.
         """
         ws = self._ws_id()
         base_conditions = ["wf.workspace_id = ?"]
@@ -15203,6 +15205,15 @@ class Database:
             rows = self._filter_prediction_rows_by_rules(rows, rules)
         return rows
 
+    # Row-level filterable fields: those the row's own values can prove.
+    # ``species`` is intentionally excluded — the SQL ``species`` leaf
+    # (``_build_query_from_rules``) matches confirmed photo keywords via
+    # ``photo_keywords → keywords → taxa``, whereas ``pr.species`` on the
+    # returned row holds the model's *proposed* species. Re-checking the
+    # proposed species against a keyword filter would silently hide the
+    # exact disagreement/refinement rows users would filter for
+    # (e.g. a photo tagged ``Robin`` with a pending ``Sparrow`` prediction
+    # would be selected by SQL and then dropped here).
     _PREDICTION_ROW_FIELDS = frozenset({
         "prediction_confidence",
         "prediction_status",
@@ -15211,7 +15222,6 @@ class Database:
         "taxonomy_order",
         "taxonomy_family",
         "taxonomy_genus",
-        "species",
         "needs_review",
     })
 
@@ -15224,11 +15234,21 @@ class Database:
         every current prediction for a photo that has any matching one.
         This walks the rule tree per row: prediction-field leaves are
         evaluated against the row's own values; every other leaf is treated
-        as satisfied (the photo already matched via the SQL subquery). AND
-        (``all``) trees therefore narrow correctly; OR (``any``) and NOT
-        (``none``) trees are unchanged from the SQL behavior since the
-        non-prediction operands still short-circuit True and the prediction
-        operand is only true when the row itself matches.
+        as satisfied (the photo already matched via the SQL subquery).
+
+        The shortcut is only correct inside pure ``all`` intersections —
+        SQL ensured every non-prediction leaf was True at the photo level.
+        Inside an ``any`` or ``none`` group the shortcut would incorrectly
+        contribute True for a leaf that may have been False for this photo
+        (e.g. ``(rating >= 5 OR prediction_confidence >= 0.8)`` — a
+        rating-3 photo with one 0.95 and one 0.10 prediction: SQL keeps
+        both rows because of the 0.95, but the 0.10 row must not be shown
+        and shortcutting ``rating >= 5`` to True would let it through).
+        When any ``any``/``none`` group in the tree carries a non-prediction
+        leaf whose per-row truth we can't determine, skip the row-level
+        pass and return the SQL-scoped rows unchanged — the resulting grid
+        is at worst photo-scoped, but never hides rows the filter should
+        allow.
         """
         if not rows:
             return rows
@@ -15249,6 +15269,28 @@ class Database:
             return node.get("field") in self._PREDICTION_ROW_FIELDS
 
         if not _touches_prediction(root):
+            return rows
+
+        def _row_filter_safe(node, inside_alt=False):
+            """True iff the row-level True-shortcut is safe under ``node``.
+
+            ``inside_alt`` propagates whether any ancestor group is ``any``
+            or ``none`` — inside such a group we can't safely treat a
+            non-prediction leaf as True because we don't know its per-row
+            (per-photo) truth. Everywhere else the SQL subquery already
+            proved the leaf holds for this photo.
+            """
+            if not isinstance(node, dict):
+                return True
+            if "rules" in node and "field" not in node:
+                mode = node.get("mode", "all")
+                child_alt = inside_alt or mode in ("any", "none")
+                return all(_row_filter_safe(c, child_alt)
+                           for c in node.get("rules") or [])
+            return not (inside_alt
+                        and node.get("field") not in self._PREDICTION_ROW_FIELDS)
+
+        if not _row_filter_safe(root):
             return rows
 
         def _truthy(value):
@@ -15326,8 +15368,6 @@ class Database:
                 return _enum_match(row["status"], op, value)
             if field == "classifier_model":
                 return _text_match(row["classifier_model"], op, value)
-            if field == "species":
-                return _text_match(row["species"], op, value)
             if field in (
                 "taxonomy_class",
                 "taxonomy_order",
