@@ -919,8 +919,8 @@ def sync_folder(
             if progress:
                 progress(done, total, rel)
         workspace_ids = affected_workspace_ids(db, root_folder_id)
-        _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])
         _restore_catalog(db, root_folder_id)
+        _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])
         for workspace_id in workspace_ids:
             db.invalidate_new_images_cache_for_workspace(workspace_id)
         return {
@@ -958,8 +958,8 @@ def discard_folder(db, root_folder_id: int, vireo_dir: str, *, acknowledge_publi
         if root is None:
             raise LocalWorkspaceError("Local folder mapping is missing its root")
         workspace_ids = affected_workspace_ids(db, root_folder_id)
-        _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])
         _restore_catalog(db, root_folder_id)
+        _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])
         for workspace_id in workspace_ids:
             db.invalidate_new_images_cache_for_workspace(workspace_id)
         return {"ok": True, "root_folder_id": root_folder_id, "discarded": True}

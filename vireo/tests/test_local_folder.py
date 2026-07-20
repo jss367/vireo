@@ -166,7 +166,9 @@ def test_custom_local_destination_refuses_session_metadata_directory(tmp_path):
         db.close()
 
 
-def test_custom_local_cleanup_failure_preserves_session(tmp_path, monkeypatch):
+def test_custom_local_cleanup_failure_preserves_copy_after_catalog_restore(
+    tmp_path, monkeypatch
+):
     from services import local_folder as service
 
     db, vireo_dir, source, first, _second, folder_id = _shared_environment(tmp_path)
@@ -186,10 +188,50 @@ def test_custom_local_cleanup_failure_preserves_session(tmp_path, monkeypatch):
             discard_folder(db, folder_id, str(vireo_dir))
 
         assert local_root.is_dir()
-        assert Path(db.get_folder(folder_id)["path"]) == local_root
-        assert folder_status(db, folder_id, str(vireo_dir))["state"] == "active"
-        assert workspace_status(db, first, str(vireo_dir))["state"] == "active"
+        assert Path(db.get_folder(folder_id)["path"]) == source
+        assert folder_status(db, folder_id, str(vireo_dir))["state"] == "remote"
+        assert workspace_status(db, first, str(vireo_dir))["state"] == "remote"
         assert source.is_dir()
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("operation", ["discard", "sync"])
+def test_catalog_restore_failure_keeps_local_copy_and_session(
+    tmp_path, monkeypatch, operation
+):
+    from services import local_folder as service
+
+    db, vireo_dir, source, first, _second, folder_id = _shared_environment(tmp_path)
+    local_parent = tmp_path / "fast-storage"
+    local_root = local_parent / "photos"
+    stage_folder(db, folder_id, str(vireo_dir), local_base=str(local_parent))
+    (local_root / "bird.jpg").write_bytes(b"edited locally")
+
+    def refuse_catalog_restore(_db, _root_folder_id):
+        raise OSError("catalog is busy")
+
+    monkeypatch.setattr(service, "_restore_catalog", refuse_catalog_restore)
+    try:
+        with pytest.raises(OSError, match="catalog is busy"):
+            if operation == "sync":
+                sync_folder(db, folder_id, str(vireo_dir))
+            else:
+                discard_folder(db, folder_id, str(vireo_dir))
+
+        assert local_root.is_dir()
+        assert (local_root / "bird.jpg").read_bytes() == b"edited locally"
+        assert Path(db.get_folder(folder_id)["path"]) == local_root
+        expected_state = "recovery" if operation == "sync" else "active"
+        assert folder_status(db, folder_id, str(vireo_dir))["state"] == expected_state
+        workspace = workspace_status(db, first, str(vireo_dir))
+        assert workspace["state"] == "active"
+        assert workspace["folders"][0]["state"] == expected_state
+        assert service.folder_state(db, folder_id)["state"] == (
+            "syncing" if operation == "sync" else "active"
+        )
+        expected_source = b"edited locally" if operation == "sync" else b"original"
+        assert (source / "bird.jpg").read_bytes() == expected_source
     finally:
         db.close()
 
