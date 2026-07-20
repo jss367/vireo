@@ -252,6 +252,12 @@
 
   function mutate(fn, options) {
     const opts = options || {};
+    // Any state mutation re-renders the rule tree, so a pending debounced
+    // value-input timer would fire against detached DOM (overwriting a fast
+    // typeahead selection with the pre-click text, or throwing when the rule
+    // was removed). Cancel it here so nothing survives across a mutate.
+    clearTimeout(clipTimer);
+    clipTimer = null;
     if (!opts.noSnapshot) snapshot();
     fn();
     persist();
@@ -1339,6 +1345,10 @@
     if (!action || path == null) return;
     mutate(() => {
       const node = getRuleAtPath(path);
+      // The rule at this path may have been removed or replaced between the
+      // event being queued and the handler running (e.g. a debounced fire
+      // after the rule was deleted). Bail before dereferencing undefined.
+      if (!node || node.kind !== "rule") return;
       if (action === "field") {
         node.field = event.target.value;
         const def = FIELD_DEFS[node.field];
