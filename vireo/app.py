@@ -12716,7 +12716,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()
-            rules, _visual_info = _apply_visual_to_rules(db, rules, visual)
+            rules, visual_info = _apply_visual_to_rules(db, rules, visual)
         except ValueError as e:
             return json_error(str(e), 400)
         try:
@@ -12784,7 +12784,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             key = (d.get("detection_id"), d.get("model"))
             d["alternatives"] = alts_by_key.get(key, [])
             results.append(d)
-        return jsonify(results)
+        # Surface the visual clause's status so the Review filter bar's
+        # visual chip can warn on fallback. Without this the chip would
+        # advertise a visual search while Accept All / bulk operations ran
+        # over the broadened metadata-only prediction set. Response is a
+        # dict envelope so the field can travel alongside the list;
+        # callers unwrap ``data.predictions``.
+        response = {"predictions": results}
+        if visual_info is not None:
+            response["visual"] = visual_info
+        return jsonify(response)
 
     @app.route("/api/predictions/compare")
     def api_predictions_compare():

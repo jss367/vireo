@@ -29,7 +29,7 @@ def test_list_predictions(app_and_db):
 
     resp = client.get('/api/predictions')
     assert resp.status_code == 200
-    data = resp.get_json()
+    data = resp.get_json()['predictions']
     assert isinstance(data, list)
     assert len(data) == 2
 
@@ -47,7 +47,7 @@ def test_list_predictions_includes_photo_edit_recipe(app_and_db):
 
     resp = client.get('/api/predictions')
     assert resp.status_code == 200
-    data = resp.get_json()
+    data = resp.get_json()['predictions']
     by_photo = {p["photo_id"]: p for p in data}
     assert by_photo[photos[0]["id"]]["edit_recipe"] == {"version": 1, "rotation": 90}
     assert by_photo[photos[1]["id"]]["edit_recipe"] is None
@@ -67,14 +67,14 @@ def test_list_predictions_filter_by_status(app_and_db):
 
     resp = client.get('/api/predictions?status=pending')
     assert resp.status_code == 200
-    data = resp.get_json()
+    data = resp.get_json()['predictions']
     assert len(data) == 1
     assert data[0]['species'] == 'Northern Cardinal'
     assert data[0]['status'] == 'pending'
 
     # Verify rejected filter also works
     resp = client.get('/api/predictions?status=rejected')
-    data = resp.get_json()
+    data = resp.get_json()['predictions']
     assert len(data) == 1
     assert data[0]['species'] == 'House Sparrow'
 
@@ -297,7 +297,7 @@ def test_predictions_for_collection(app_and_db):
 
     resp = client.get(f'/api/predictions?collection_id={coll_id}')
     assert resp.status_code == 200
-    data = resp.get_json()
+    data = resp.get_json()['predictions']
 
     # Only the prediction for the first photo should be returned
     assert len(data) == 1
@@ -329,7 +329,7 @@ def test_predictions_include_alternatives(app_and_db):
 
     client = app.test_client()
     resp = client.get('/api/predictions')
-    data = resp.get_json()
+    data = resp.get_json()['predictions']
 
     # Should return only pending predictions at top level
     pending = [p for p in data if p['status'] == 'pending']
@@ -418,7 +418,7 @@ def test_list_predictions_gates_representative_on_current_eligibility(app_and_db
     client = app.test_client()
     resp = client.get('/api/predictions')
     assert resp.status_code == 200
-    by_photo = {p['photo_id']: p for p in resp.get_json()}
+    by_photo = {p['photo_id']: p for p in resp.get_json()['predictions']}
 
     # Eligible representative still lights up on the review card.
     assert by_photo[live_pid]['is_species_representative'] is True

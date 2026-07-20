@@ -1011,11 +1011,19 @@ async function loadPredictions() {
       if (visual) params.set('visual', JSON.stringify(visual));
     }
     var qs = params.toString();
-    allPredictions = await safeFetch('/api/predictions' + (qs ? '?' + qs : ''), {}, { toast: false });
+    var predData = await safeFetch('/api/predictions' + (qs ? '?' + qs : ''), {}, { toast: false });
+    allPredictions = predData.predictions || [];
     if (window.VireoFilter && VireoFilter.setResultTotal) {
       var uniquePhotos = {};
       allPredictions.forEach(function(p) { uniquePhotos[p.photo_id] = true; });
       VireoFilter.setResultTotal(Object.keys(uniquePhotos).length);
+    }
+    // Surface the visual clause's status so the filter bar can warn on
+    // fallback (no model / no embeddings / encoding failed). Without
+    // this a visual chip stays on-screen while Accept All / bulk actions
+    // operate on the broadened metadata-only result set.
+    if (window.VireoFilter && VireoFilter.setVisualInfo) {
+      VireoFilter.setVisualInfo(predData.visual || null);
     }
 
     // Re-apply collection filter if active

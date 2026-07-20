@@ -3139,7 +3139,7 @@ def test_api_predictions_include_bounding_box(app_and_db):
 
     client = app.test_client()
     resp = client.get("/api/predictions")
-    data = resp.get_json()
+    data = resp.get_json()["predictions"]
     assert len(data) == 1
     assert data[0]["box_x"] == 0.1
     assert data[0]["box_y"] == 0.2
@@ -3162,7 +3162,7 @@ def test_api_predictions_multiple_detections(app_and_db):
 
     client = app.test_client()
     resp = client.get("/api/predictions")
-    data = resp.get_json()
+    data = resp.get_json()["predictions"]
     assert len(data) == 2
     species = {d["species"] for d in data}
     assert species == {"Elk", "Magpie"}

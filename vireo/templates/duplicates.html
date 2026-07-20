@@ -487,6 +487,7 @@
   async function refreshFilterMatches() {
     var hasFilters = window.VireoFilter && VireoFilter.hasFilters && VireoFilter.hasFilters()
       && !VireoFilter.isMuted();
+    var visualInfo = null;
     if (!hasFilters) {
       _filterMatchedIds = null;
     } else {
@@ -500,12 +501,21 @@
           body: JSON.stringify(body),
         }, { toast: false });
         _filterMatchedIds = new Set(data.ids || []);
+        visualInfo = data.visual || null;
       } catch (e) {
         _filterMatchedIds = null;
       }
     }
     if (window.VireoFilter && VireoFilter.setResultTotal) {
       VireoFilter.setResultTotal(_filterMatchedIds ? _filterMatchedIds.size : null);
+    }
+    // Surface the visual clause's status so the filter bar's visual chip
+    // can warn on fallback. Without this, a Duplicates filter with an
+    // unresolvable visual clause (no model / no embeddings / encoding
+    // failed) would show the chip while groups + bulk actions ran on the
+    // broadened metadata-only match set.
+    if (window.VireoFilter && VireoFilter.setVisualInfo) {
+      VireoFilter.setVisualInfo(visualInfo);
     }
     if (_lastScanResult) renderResults(_lastScanResult);
   }
@@ -1595,6 +1605,11 @@
   function clearResults() {
     _proposals = [];
     _currentJobId = null;
+    // Drop the cached scan snapshot too. Otherwise a later filter-bar
+    // change (or pause/resume) would call ``refreshFilterMatches`` and
+    // re-render the stale results the user just cleared, resurrecting the
+    // duplicate groups and their bulk/apply actions.
+    _lastScanResult = null;
     document.getElementById('results').innerHTML = '';
     document.getElementById('summary').style.display = 'none';
     document.getElementById('applyBar').style.display = 'none';
