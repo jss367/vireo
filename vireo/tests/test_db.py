@@ -20364,6 +20364,12 @@ def test_universal_filter_workflow_fields(tmp_path):
                    "model": "clip-vit"}]) == 1
     assert count([{"field": "has_visual_index", "op": "is", "value": 1,
                    "model": "other-model"}]) == 0
+    # An unsupported op on a boolean field must raise, not silently return
+    # a truthy predicate — the API layer catches ValueError → 400 so
+    # malformed requests surface as validation errors instead of a 200
+    # with unfiltered rows.
+    with pytest.raises(ValueError):
+        count([{"field": "has_visual_index", "op": "contains", "value": 1}])
     assert count([{"field": "in_burst", "op": "is", "value": 1}]) == 1
     assert count([{"field": "burst_id", "op": "is", "value": "B42"}]) == 1
     assert count([{"field": "duplicate_group", "op": "is", "value": "abc123"}]) == 1

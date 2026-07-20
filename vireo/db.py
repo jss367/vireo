@@ -18286,6 +18286,14 @@ class Database:
                 # embeddings for the active model). Saved smart
                 # collections without a ``model`` keep matching any row —
                 # a portable "some embedding exists" check.
+                # Reject bad ops here rather than silently returning a
+                # boolean predicate — the registry advertises only ``is``
+                # for boolean fields, so a rule like
+                # ``{"field":"has_visual_index","op":"contains","value":1}``
+                # is a malformed request and should surface as 400 via the
+                # API's ValueError handler, not a 200 with unfiltered rows.
+                if op not in ("equals", "is", "is not"):
+                    raise ValueError(f"unsupported boolean rule op: {op!r}")
                 model = rule.get("model")
                 if model:
                     has = ("EXISTS (SELECT 1 FROM photo_embeddings pe "
@@ -18295,7 +18303,8 @@ class Database:
                     has = ("EXISTS (SELECT 1 FROM photo_embeddings pe "
                            "WHERE pe.photo_id = p.id)")
                     params = []
-                return (has if _truthy(value) else f"NOT {has}"), params
+                affirmative = _truthy(value) if op in ("equals", "is") else not _truthy(value)
+                return (has if affirmative else f"NOT {has}"), params
             if field == "species":
                 # Confirmed species ride photo_keywords→keywords(→taxa);
                 # a photo with several species matches when ANY matches

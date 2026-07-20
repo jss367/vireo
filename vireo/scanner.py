@@ -310,9 +310,12 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         # ``lens``/``aperture``/``shutter_speed``/``iso`` when the JPEG row
         # is deleted — otherwise the new universal filters miss the paired
         # photo even though ExifTool extracted those values.
+        # ``focal_length`` is part of ``EXIF_SUMMARY_COLUMNS`` — do not name it
+        # again here or the loop below would append a second ``focal_length=?``
+        # assignment and SQLite would reject the UPDATE for duplicate columns.
         transfer_cols = (
             "timestamp, rating, flag, latitude, longitude, exif_data, "
-            "focal_length, width, height, "
+            "width, height, "
             + ", ".join(EXIF_SUMMARY_COLUMNS)
         )
         primary_full = db.conn.execute(
@@ -348,14 +351,15 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         if not primary_full["exif_data"] and companion_full["exif_data"]:
             updates.append("exif_data = ?")
             params.append(companion_full["exif_data"])
-        if primary_full["focal_length"] is None and companion_full["focal_length"] is not None:
-            updates.append("focal_length = ?")
-            params.append(companion_full["focal_length"])
         # Fill any promoted EXIF summary column the RAW row is missing but
-        # its JPEG companion has. Only writes when the primary is NULL — a
-        # non-NULL primary already reflects a rescan (which clears absent
-        # columns to NULL via ``EXIF_SUMMARY_COLUMNS``), so overwriting it
-        # would trample fresh metadata.
+        # its JPEG companion has. ``EXIF_SUMMARY_COLUMNS`` already contains
+        # ``focal_length`` alongside the camera/exposure fields, so a single
+        # loop covers all promoted columns — a separate ``focal_length``
+        # transfer would fire twice and SQLite would reject the UPDATE for
+        # assigning the same column twice. Only writes when the primary is
+        # NULL — a non-NULL primary already reflects a rescan (which clears
+        # absent columns to NULL via ``EXIF_SUMMARY_COLUMNS``), so
+        # overwriting it would trample fresh metadata.
         for column in EXIF_SUMMARY_COLUMNS:
             if primary_full[column] is None and companion_full[column] is not None:
                 updates.append(f"{column} = ?")
