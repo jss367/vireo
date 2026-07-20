@@ -92,14 +92,17 @@ def _remove_tree(path: Path) -> None:
         st = os.lstat(path)
     except FileNotFoundError:
         return
-    if stat.S_ISLNK(st.st_mode):
-        with suppress(FileNotFoundError):
+    try:
+        if stat.S_ISLNK(st.st_mode):
             os.unlink(path)
-    elif stat.S_ISDIR(st.st_mode):
-        shutil.rmtree(path, ignore_errors=True)
-    else:
-        with suppress(FileNotFoundError):
+        elif stat.S_ISDIR(st.st_mode):
+            shutil.rmtree(path)
+        else:
             os.unlink(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise LocalWorkspaceError(f"Could not remove local data at {path}: {exc}") from exc
 
 
 def _remove_folder_dir(
@@ -343,6 +346,34 @@ def _catalog_records(db, root_folder_id: int, local_base: Path) -> tuple[list[di
         raise LocalWorkspaceError(
             "Managed local storage overlaps the source folder; move Vireo's data directory to local storage first"
         )
+    catalog_source_paths = {
+        row["path"]
+        for row in db.conn.execute("SELECT path FROM folders").fetchall()
+        if row["path"]
+    }
+    catalog_source_paths.update(
+        row["source_path"]
+        for row in db.conn.execute(
+            "SELECT source_path FROM local_folder_mappings"
+        ).fetchall()
+        if row["source_path"]
+    )
+    catalog_source_paths.update(
+        row["source_path"]
+        for row in db.conn.execute(
+            "SELECT source_path FROM local_workspace_folders"
+        ).fetchall()
+        if row["source_path"]
+    )
+    for catalog_source in catalog_source_paths:
+        if catalog_source == source_path:
+            continue
+        if _physical_is_within(str(local_root), catalog_source) or _physical_is_within(
+            catalog_source, str(local_root)
+        ):
+            raise LocalWorkspaceError(
+                f"Local destination overlaps a folder Vireo already manages: {catalog_source}"
+            )
     for existing in db.conn.execute(
         "SELECT root_folder_id, local_path FROM local_folder_mappings WHERE is_root=1"
     ).fetchall():
@@ -869,8 +900,8 @@ def sync_folder(
             if progress:
                 progress(done, total, rel)
         workspace_ids = affected_workspace_ids(db, root_folder_id)
-        _restore_catalog(db, root_folder_id)
         _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])
+        _restore_catalog(db, root_folder_id)
         for workspace_id in workspace_ids:
             db.invalidate_new_images_cache_for_workspace(workspace_id)
         return {
@@ -908,8 +939,8 @@ def discard_folder(db, root_folder_id: int, vireo_dir: str, *, acknowledge_publi
         if root is None:
             raise LocalWorkspaceError("Local folder mapping is missing its root")
         workspace_ids = affected_workspace_ids(db, root_folder_id)
-        _restore_catalog(db, root_folder_id)
         _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])
+        _restore_catalog(db, root_folder_id)
         for workspace_id in workspace_ids:
             db.invalidate_new_images_cache_for_workspace(workspace_id)
         return {"ok": True, "root_folder_id": root_folder_id, "discarded": True}

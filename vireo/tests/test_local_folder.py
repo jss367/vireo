@@ -100,7 +100,50 @@ def test_custom_local_destination_refuses_existing_folder(tmp_path):
                 db, folder_id, str(vireo_dir), local_base=str(local_parent)
             )
         assert (existing / "keep.txt").read_text() == "do not overwrite"
-        assert db.get_folder(folder_id)["path"].endswith("/nas/photos")
+        assert Path(db.get_folder(folder_id)["path"]) == _source
+    finally:
+        db.close()
+
+
+def test_custom_local_destination_refuses_other_catalog_source(tmp_path):
+    db, vireo_dir, _source, _first, _second, folder_id = _shared_environment(tmp_path)
+    other_source = tmp_path / "nas" / "other-source"
+    other_source.mkdir()
+    db.add_folder(str(other_source), name="other-source", link_to_workspace=False)
+    try:
+        with pytest.raises(LocalWorkspaceError, match="already manages"):
+            stage_folder(
+                db, folder_id, str(vireo_dir), local_base=str(other_source)
+            )
+        assert not (other_source / "photos").exists()
+    finally:
+        db.close()
+
+
+def test_custom_local_cleanup_failure_preserves_session(tmp_path, monkeypatch):
+    from services import local_folder as service
+
+    db, vireo_dir, source, first, _second, folder_id = _shared_environment(tmp_path)
+    local_parent = tmp_path / "fast-storage"
+    local_root = local_parent / "photos"
+    stage_folder(db, folder_id, str(vireo_dir), local_base=str(local_parent))
+    real_rmtree = service.shutil.rmtree
+
+    def refuse_custom_cleanup(path, *args, **kwargs):
+        if Path(path) == local_root:
+            raise PermissionError("destination is busy")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(service.shutil, "rmtree", refuse_custom_cleanup)
+    try:
+        with pytest.raises(LocalWorkspaceError, match="Could not remove local data"):
+            discard_folder(db, folder_id, str(vireo_dir))
+
+        assert local_root.is_dir()
+        assert Path(db.get_folder(folder_id)["path"]) == local_root
+        assert folder_status(db, folder_id, str(vireo_dir))["state"] == "active"
+        assert workspace_status(db, first, str(vireo_dir))["state"] == "active"
+        assert source.is_dir()
     finally:
         db.close()
 
@@ -301,7 +344,7 @@ def test_folder_stage_endpoint_accepts_destination_and_uses_folder_name_in_job(t
             vireo_dir / "local-folders" / str(folder_id) / "files"
         )
         assert item["local_folder_name"] == "104NCZ_8"
-        assert item["default_local_path"].endswith("/104NCZ_8")
+        assert Path(item["default_local_path"]).name == "104NCZ_8"
 
         response = client.post(
             "/api/workspaces/active/local-folders/stage",

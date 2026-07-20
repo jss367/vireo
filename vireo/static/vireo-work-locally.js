@@ -281,7 +281,7 @@
           folder_ids: pendingStageItems.map(function(item) { return item.requested_folder_id; }),
           destination_bases: destinationBases
         })
-      });
+      }, {toast: false});
       var modal = document.getElementById('stageLocalFoldersModal');
       if (modal) modal.classList.remove('open');
       pendingStageItems = [];
