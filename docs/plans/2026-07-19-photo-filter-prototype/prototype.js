@@ -491,7 +491,7 @@
     if (path === "root" || path === "") return pageState().root;
     const parts = String(path).split(".").map(Number);
     let node = pageState().root;
-    parts.forEach((index) => { node = node.children[index]; });
+    parts.forEach((index) => { node = node && node.children ? node.children[index] : undefined; });
     return node;
   }
 
@@ -1345,10 +1345,15 @@
     if (!action || path == null) return;
     mutate(() => {
       const node = getRuleAtPath(path);
-      // The rule at this path may have been removed or replaced between the
+      // The node at this path may have been removed or replaced between the
       // event being queued and the handler running (e.g. a debounced fire
-      // after the rule was deleted). Bail before dereferencing undefined.
-      if (!node || node.kind !== "rule") return;
+      // after the rule was deleted). Bail before dereferencing undefined —
+      // but group nodes are valid targets for the "match" action.
+      if (!node) return;
+      if (node.kind === "group") {
+        if (action === "match") node.match = event.target.value;
+        return;
+      }
       if (action === "field") {
         node.field = event.target.value;
         const def = FIELD_DEFS[node.field];

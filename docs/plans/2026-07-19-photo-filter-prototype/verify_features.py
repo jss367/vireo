@@ -181,6 +181,23 @@ with sync_playwright() as p:
         "Pause" in page.inner_text("#muteFilters"),
     )
 
+    # ---- Advanced group Match select still edits the group ----
+    page.click('[data-preset="advanced"]')
+    page.wait_for_timeout(400)
+    ensure_popover(page)
+    page.select_option('#ruleTree [data-action="match"]', "none")
+    page.wait_for_timeout(500)
+    stored_match = page.evaluate(
+        "JSON.parse(localStorage.getItem('vireo-photo-filter-prototype-v1'))"
+        ".pages.browse.root.children[0].match"
+    )
+    check("group match select edits the group", stored_match == "none",
+          f"stored match={stored_match}")
+    ensure_popover(page, open_it=False)
+    # Restore the facets preset the narrow-viewport checks below expect.
+    page.click('[data-preset="facets"]')
+    page.wait_for_timeout(400)
+
     # ---- narrow viewport smoke ----
     page.set_viewport_size({"width": 760, "height": 900})
     page.wait_for_timeout(400)
