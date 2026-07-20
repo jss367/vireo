@@ -64,12 +64,19 @@ def test_dashboard_collection_drill_down_is_explicitly_composable(live_server, p
     page.locator("#scopeCollection").select_option(str(collection_id))
     page.locator("#scopePanel").get_by_role("button", name="Apply").click()
     expect(page.locator("#photoCount")).to_have_text("2")
-    page.locator("#monthChart .month-bar", has_text="2024-06").click()
+    with page.expect_response(re.compile(r"/api/browse/init\?")) as initial_response:
+        page.locator("#monthChart .month-bar", has_text="2024-06").click()
 
     query = parse_qs(urlparse(page.url).query)
     assert query["dashboard_scope"] == ["1"]
     assert query["collection_id"] == [str(collection_id)]
     assert query["date_from"] == ["2024-06-01"]
+    assert query["date_to"] == ["2024-06-30"]
+    initial_query = parse_qs(urlparse(initial_response.value.url).query)
+    assert initial_query["collection_id"] == [str(collection_id)]
+    assert initial_query["date_from"] == ["2024-06-01"]
+    assert initial_query["date_to"] == ["2024-06-30"]
+    expect(page.locator(".grid-card")).to_have_count(1)
     expect(page.locator(".grid-card-name")).to_have_text("robin1.jpg")
 
     page.goto(f"{live_server['url']}/browse?collection_id={collection_id}")

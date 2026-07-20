@@ -2842,10 +2842,17 @@ async function bootstrapBrowse() {
       dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
     }
     // Legacy filter deep-link params (rating_min/flag/keyword/dates/…) are
-    // compiled into an initial rule tree by VireoFilter.init below.
+    // compiled into an initial rule tree by VireoFilter.init below. Forward
+    // the capture-date bounds to the bootstrap endpoint as well so Dashboard
+    // drill-downs do not briefly paint the entire collection while the filter
+    // registry is still loading.
     var initParams = new URLSearchParams();
     initParams.set('sort', document.getElementById('sortSelect').value);
     if (activeFolderId) initParams.set('folder_id', activeFolderId);
+    ['date_from', 'date_to'].forEach(function(name) {
+      var value = pageParams.get(name);
+      if (value) initParams.set(name, value);
+    });
     // Collection-only deep links keep their historical endpoint behavior,
     // while Dashboard links opt into composable filters via dashboard_scope.
     // The combined init endpoint still needs the collection id for first paint
