@@ -702,6 +702,10 @@ input[type="range"]::-moz-range-thumb {
   color: rgba(180, 180, 180, 0.85);
   font-style: italic;
 }
+.algo-trace .trace-component-uncertain {
+  color: rgba(90, 170, 220, 0.95);
+  font-style: italic;
+}
 .algo-trace .trace-empty {
   font-size: 11px; color: var(--text-dim); font-style: italic; padding: 4px;
 }
@@ -2612,6 +2616,9 @@ function renderAlgorithmTrace() {
     if (typeof thr.species_hard_cut_margin === 'number') {
       thrParts.push('species_margin=' + thr.species_hard_cut_margin.toFixed(2));
     }
+    if (typeof thr.weak_detection_confidence === 'number') {
+      thrParts.push('weak_detection=' + thr.weak_detection_confidence.toFixed(2));
+    }
     if (typeof thr.hard_cut_time === 'number') thrParts.push('hard_cut_time=' + thr.hard_cut_time + 's');
     if (thrParts.length) {
       html += '<div class="trace-thresholds">cut if: ' + thrParts.join(' · ') + '</div>';
@@ -2624,7 +2631,10 @@ function renderAlgorithmTrace() {
     else rowCls += ' kept';
     var dt = (t.dt_seconds === null || t.dt_seconds === undefined) ? '∞' : t.dt_seconds.toFixed(1) + 's';
     var score = (typeof t.score === 'number') ? t.score.toFixed(3) : '-';
-    var decision = t.decision || '?';
+    var decisionLabels = {
+      kept_weak_detection: 'kept · weak detection rescued'
+    };
+    var decision = decisionLabels[t.decision] || t.decision || '?';
     html += '<div class="' + rowCls + '">';
     html += '<span>pair ' + (i + 1) + ' · ' + dt + '</span>';
     html += '<span>S=' + score + '</span>';
@@ -2671,6 +2681,14 @@ function renderAlgorithmTrace() {
             // don't go re-embed photos that legitimately have no subject.
             parts.push('<span class="trace-component-absent">' + escapeHtml(k)
               + '=neutral (no subject on both, w=' + w + ')</span>');
+          } else if (c.uncertain_a || c.uncertain_b) {
+            var uncertainWho;
+            if (c.uncertain_a && c.uncertain_b) uncertainWho = 'both';
+            else if (c.uncertain_a) uncertainWho = nameA;
+            else uncertainWho = nameB;
+            parts.push('<span class="trace-component-uncertain">'
+              + escapeHtml(k) + '=context-rescued weak detection on '
+              + escapeHtml(uncertainWho) + ' (w=' + w + ')</span>');
           } else {
             var who;
             if (c.missing_a && c.missing_b) who = 'both';

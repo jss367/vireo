@@ -125,6 +125,11 @@ DEFAULTS = {
         # below the workspace `detector_confidence` cutoff. Set to 1.01 to
         # disable the override.
         "miss_classifier_override_conf": 0.8,
+        # Contextual weak-detection rescue. The normal detector threshold
+        # remains authoritative everywhere else; boxes in this lower band are
+        # considered only when a short run is bracketed by strong detections.
+        "weak_detection_rescue_enabled": True,
+        "weak_detection_confidence": 0.12,
         # Eye-focus detection
         "eye_detect_enabled": False,
         "eye_classifier_conf_gate": 0.50,

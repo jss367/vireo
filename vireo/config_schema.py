@@ -524,6 +524,24 @@ SCHEMA = {
             "no_subject. Set to 1.01 to disable."
         ),
     },
+    "pipeline.weak_detection_rescue_enabled": {
+        "type": "bool",
+        "category": "Pipeline", "scope": "both",
+        "label": "Rescue weak detections in sequences",
+        "desc": (
+            "Classify and group weak animal detections only when strong "
+            "detections bracket the same short photo sequence."
+        ),
+    },
+    "pipeline.weak_detection_confidence": {
+        "type": "float", "min": 0.0, "max": 1.0, "step": 0.01,
+        "category": "Pipeline", "scope": "both",
+        "label": "Weak-detection confidence",
+        "desc": (
+            "Lower confidence floor used only for contextually rescued "
+            "frames; the normal detector threshold is unchanged."
+        ),
+    },
     "pipeline.eye_detect_enabled": {
         "type": "bool",
         "category": "Pipeline", "scope": "both",
