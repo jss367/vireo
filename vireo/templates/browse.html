@@ -4120,11 +4120,28 @@ async function loadCalendarData() {
   if (activeCollectionId && dashboardCollectionScope) {
     params.set('collection_id', activeCollectionId);
   }
-  var rules = getBrowseRules();
+  // Strip any root-level `timestamp` rule from the calendar's own request.
+  // selectCalendarDay adds/replaces exactly such a rule, and the filter
+  // bar's onChange calls loadCalendarData() synchronously — feeding the
+  // just-selected day back into the heatmap zeros out every other day and
+  // makes it impossible to click through to another one. The heatmap is a
+  // date picker: it should always show all days matching the non-date
+  // filters (the visible grid still applies the date rule).
+  var rules = getBrowseRulesWithoutTimestamp();
   if (rules) params.set('rules', JSON.stringify(rules));
 
   calendarData = await safeFetch('/api/photos/calendar?' + params.toString());
   renderCalendar();
+}
+
+function getBrowseRulesWithoutTimestamp() {
+  var rules = getBrowseRules();
+  if (!rules || !rules.rules) return rules;
+  var kept = rules.rules.filter(function(r) {
+    return !(r && !Array.isArray(r.rules) && r.field === 'timestamp');
+  });
+  if (!kept.length) return null;
+  return { mode: rules.mode || 'all', rules: kept };
 }
 
 function renderCalendar() {
@@ -8298,6 +8315,38 @@ document.addEventListener('contextmenu', function(e) {
         el.style.outline = '';
         el.style.outlineOffset = '';
       }, 2000);
+    }
+
+    // bootstrapBrowse (which owns VireoFilter.init) short-circuits when
+    // ?photo_id=... is present, so without this the filter bar renders but
+    // has no event handlers: quick-search does nothing, chips can't be
+    // added, and the total stays at "–". Initialize here so the bar is
+    // live once the deep-link has finished loading. Drop any persisted
+    // workspace filter — the explicit ?photo_id link should not be
+    // silently overridden by whatever the user had saved on Browse.
+    if (window.VireoFilter && !VireoFilter.isReady()) {
+      VireoFilter.init({
+        page: 'browse',
+        root: document.getElementById('vireoFilterBar'),
+        scopeLabel: 'Workspace · All available photos',
+        onChange: function(info) {
+          if (timelineMode) loadCalendarData();
+          if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
+          var preserveAnchor = info && info.reason === 'quickSearchCleared';
+          resetAndLoad(preserveAnchor ? { preserveAnchor: true } : undefined);
+          loadSummary();
+        },
+        getScope: function() {
+          return {
+            folder_id: activeFolderId,
+            collection_id: (activeCollectionId && dashboardCollectionScope)
+              ? activeCollectionId : null,
+          };
+        },
+      }).then(function() {
+        VireoFilter.setResultTotal(totalPhotos);
+        if (VireoFilter.hasFilters()) VireoFilter.clearAll(true);
+      }).catch(function() {});
     }
   } catch(e) { /* ignore deep-link errors silently */ }
   loading = false;
