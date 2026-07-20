@@ -1263,7 +1263,9 @@
     });
     $("confirmSave").addEventListener("click", () => {
       const name = $("collectionName").value.trim() || "Untitled Collection";
-      state.savedCollections.push({ name, page: clone(pageState()), summary: expressionSummary(), includeScope: $("includeScope").checked, context: state.context });
+      const savedPage = clone(pageState());
+      savedPage.muted = false;
+      state.savedCollections.push({ name, page: savedPage, summary: expressionSummary(), includeScope: $("includeScope").checked, context: state.context });
       state.checklist.save = true;
       persist();
       closeModals();

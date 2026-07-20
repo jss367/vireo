@@ -149,6 +149,38 @@ with sync_playwright() as p:
     page.wait_for_timeout(300)
     check("button click resumes", int(page.inner_text("#resultCount")) == resumed)
 
+    # ---- Saving while paused drops the paused flag ----
+    page.click("#muteFilters")  # pause again
+    page.wait_for_timeout(300)
+    check("paused before save", int(page.inner_text("#resultCount")) == 54)
+    page.click("#moreActions")
+    page.click("#saveCollection")
+    page.wait_for_timeout(200)
+    page.fill("#collectionName", "Paused-save test")
+    page.click("#confirmSave")
+    page.wait_for_timeout(300)
+    # Clear filters (also drops paused state) so reopening the saved
+    # collection is a distinct action, not a no-op.
+    page.click("#clearAll")
+    page.wait_for_timeout(300)
+    saved_button = page.locator('[data-preset^="saved:"]', has_text="Paused-save test").first
+    saved_button.click()
+    page.wait_for_timeout(400)
+    reopened_count = int(page.inner_text("#resultCount"))
+    check(
+        "reopened collection is not paused",
+        reopened_count == resumed,
+        f"{reopened_count} vs {resumed} (all=54 would mean paused)",
+    )
+    check(
+        "reopen restores filter chips",
+        page.locator(".filter-chip").count() > 0,
+    )
+    check(
+        "reopen shows Pause (not Resume) button",
+        "Pause" in page.inner_text("#muteFilters"),
+    )
+
     # ---- narrow viewport smoke ----
     page.set_viewport_size({"width": 760, "height": 900})
     page.wait_for_timeout(400)
