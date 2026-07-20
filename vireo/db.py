@@ -3705,6 +3705,22 @@ class Database:
         self.conn.execute(
             "DELETE FROM folders WHERE id = ?", (source_folder_id,)
         )
+        # Clear stale move provenance keyed on the merged source folder's
+        # path. Mirrors ``delete_folder``: once the folder row is gone,
+        # any destination photo whose ``last_move_source_folder_path``
+        # still points at ``old_path`` would silently match a new
+        # unrelated folder that later appears at that same path — the
+        # same-stem developed-render collision guard in ``move_photos``
+        # compares the stored origin to a candidate move's ``src_dir``
+        # by string equality and would let two unrelated destination rows
+        # share developed-output lookup by folder+stem. Runs inside the
+        # merge's transaction so a rollback restores both together.
+        if old_path:
+            self.conn.execute(
+                "UPDATE photos SET last_move_source_folder_path = NULL "
+                "WHERE last_move_source_folder_path = ?",
+                (old_path,),
+            )
 
         # Ensure target folder is marked ok and recompute its photo count
         self.conn.execute(

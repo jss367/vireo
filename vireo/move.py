@@ -1692,6 +1692,28 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
             f"date destination already exists and is not a directory: "
             f"{destination}"
         )
+    # When ``destination`` does not lexist yet, walk its own ancestors
+    # upward until one lexists. The check above and the intermediate-
+    # ancestor loop below only cover ``destination`` itself and paths
+    # *inside* it; without this walk a request like
+    # ``destination='/archive/root'`` where ``/archive`` is a plain file
+    # (or dangling symlink) passes preflight and ``os.makedirs`` in the
+    # worker then raises ``NotADirectoryError``/``FileExistsError``
+    # instead of returning the structured date-destination error this
+    # guard is meant to provide.
+    if not os.path.lexists(destination):
+        ancestor = os.path.dirname(destination)
+        previous = None
+        while ancestor and ancestor != previous:
+            if os.path.lexists(ancestor):
+                if not os.path.isdir(ancestor):
+                    raise ValueError(
+                        f"date destination already exists and is not a "
+                        f"directory: {ancestor}"
+                    )
+                break
+            previous = ancestor
+            ancestor = os.path.dirname(ancestor)
     plans = []
     for relative in sorted(groups):
         candidate = os.path.join(destination, *relative.split("/"))

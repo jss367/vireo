@@ -765,6 +765,70 @@ def test_plan_folder_date_moves_rejects_destination_root_regular_file(tmp_path):
         plan_folder_date_moves(db, fid, str(archive), "%Y/%m")
 
 
+def test_plan_folder_date_moves_rejects_parent_of_missing_destination_root(tmp_path):
+    """When the requested destination root does not exist yet and one of its
+    parents is already a regular file, preflight must reject the plan.
+
+    The destination check at the top of ``plan_folder_date_moves`` only fires
+    when ``destination`` itself lexists, and the intermediate-ancestor walk
+    only visits paths *inside* ``destination``. Without walking
+    ``destination``'s own parents, a request like
+    ``destination='/archive/root'`` where ``/archive`` is a plain file would
+    pass preflight, and ``move_photos`` would then call
+    ``os.makedirs('/archive/root/2026/07', exist_ok=True)`` and raise
+    ``NotADirectoryError`` inside the background job — losing the structured
+    date-destination error this guard is meant to provide.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    # ``archive`` is a regular file — a nested destination root under it
+    # ('/archive/root') doesn't lexist, but the parent is blocking.
+    archive = tmp_path / "archive"
+    archive.write_bytes(b"blocked")
+    blocked_destination = archive / "root"
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(blocked_destination), "%Y/%m")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Broken symlinks are unusual on Windows and require admin.",
+)
+def test_plan_folder_date_moves_rejects_dangling_symlink_parent_of_root(tmp_path):
+    """A dangling-symlink parent of a not-yet-existing destination root must
+    fail preflight for the same reason a plain-file parent does.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive_parent = tmp_path / "archive"
+    os.symlink(str(tmp_path / "disconnected-volume"), str(archive_parent))
+    blocked_destination = archive_parent / "root"
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(blocked_destination), "%Y/%m")
+
+
 def test_plan_folder_date_moves_rejects_ancestor_occupied_by_file(tmp_path):
     """A nested template must reject a plan whose intermediate ancestor is a
     regular file.
@@ -1316,6 +1380,112 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
     # provenance was invalidated on delete, so the collision guard sees an
     # unknown origin for the existing stem and rejects rather than merging
     # unrelated content into one destination folder+stem.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+
+
+def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing(tmp_path):
+    """When a missing source folder is relocated onto a path already tracked
+    by another folder, ``_merge_into_existing`` deletes the source folder
+    row and frees its old path. Any destination photo still carrying that
+    old path in ``last_move_source_folder_path`` must have that provenance
+    cleared. Otherwise, a new unrelated folder scanned at that freed path
+    later would compare equal to the stale reference in ``move_photos`` and
+    slip a same-stem developed-render collision past the guard — the same
+    class of bug fixed for ``delete_folder``, applied to the merge path.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    reusable_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    reusable_path.mkdir()
+    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_file = reusable_path / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    # Same-stem sibling that stays behind so the source stem is not drained
+    # by the move — otherwise ``move_photos`` would clear provenance
+    # immediately (covered by the drain test) and the merge cleanup under
+    # test would have nothing to clear.
+    sibling_file = reusable_path / "IMG.NEF"
+    sibling_file.write_bytes(b"sibling-raw")
+    db.add_photo(
+        folder_id=original_fid, filename=sibling_file.name,
+        extension=".nef", file_size=sibling_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(reusable_path)
+    )
+
+    # Simulate the missing-folder-merge flow: the original card folder goes
+    # missing, then the user relocates that missing entry onto a path that
+    # another folder already tracks (e.g. a replacement archive folder).
+    target_path = tmp_path / "REPLACEMENT"
+    target_path.mkdir()
+    target_fid = db.add_folder(str(target_path), name="REPLACEMENT")
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?",
+        (original_fid,),
+    )
+    db.conn.commit()
+    # Delete the on-disk source directory so relocate_folder's
+    # revalidation doesn't refresh the source instead of merging.
+    sibling_file.unlink()
+    reusable_path.rmdir()
+
+    db.relocate_folder(original_fid, str(target_path))
+
+    # The original source folder row must be gone (merged into target).
+    assert db.conn.execute(
+        "SELECT id FROM folders WHERE id = ?", (original_fid,)
+    ).fetchone() is None
+    # Provenance must be cleared so a new folder at the freed path can't
+    # inherit the stale claim.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] is None
+    )
+
+    # A brand-new unrelated folder now appears at the freed path with a
+    # same-stem photo but a different extension.
+    reusable_path.mkdir()
+    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
+    db.add_workspace_folder(ws_id, replacement_fid)
+    incoming_file = reusable_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=replacement_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The collision guard now sees an unknown origin for the existing stem
+    # (provenance was cleared by the merge) and rejects rather than
+    # merging unrelated content into one destination folder+stem.
     assert result["moved"] == 0
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
