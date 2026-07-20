@@ -995,6 +995,143 @@ def test_scan_populates_exif_data(tmp_path):
     assert "File" in meta
 
 
+def test_rescan_clears_absent_exif_summary_columns(tmp_path, monkeypatch):
+    """Promoted EXIF columns (camera_make / camera_model / lens /
+    focal_length / aperture / shutter_speed / iso) are derived from the
+    current file metadata, so a rescan whose metadata omits a field must
+    clear that column to NULL. Otherwise a replaced or edited file leaves
+    stale values that /api/photos/query and /api/filters/values keep
+    matching. focal_length is included because it's exposed as a
+    filter/typeahead field just like the other camera-exposure columns."""
+    import scanner
+    from db import Database
+    from scanner import scan
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    photo = root / "test.jpg"
+    Image.new("RGB", (100, 100), color="red").save(str(photo))
+
+    def make_extract(payload):
+        def fake(paths, restricted_tags=None, progress_callback=None,
+                checkpoint=None):
+            return {p: payload for p in paths}
+        return fake
+
+    # First scan: file reports full EXIF summary.
+    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+        "EXIF": {
+            "Make": "Sony", "Model": "ILCE-1", "LensModel": "FE 200-600",
+            "FocalLength": 450.0,
+            "FNumber": 6.3, "ExposureTime": 0.001, "ISO": 800,
+        },
+        "Composite": {},
+    }))
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(root), db)
+    row = db.conn.execute(
+        "SELECT camera_make, camera_model, lens, focal_length, aperture, "
+        "shutter_speed, iso FROM photos LIMIT 1"
+    ).fetchone()
+    assert row["camera_make"] == "Sony"
+    assert row["camera_model"] == "ILCE-1"
+    assert row["lens"] == "FE 200-600"
+    assert row["focal_length"] == pytest.approx(450.0)
+    assert row["aperture"] == pytest.approx(6.3)
+    assert row["iso"] == 800
+
+    # Bump mtime so the incremental scan re-examines the file, then rescan
+    # with metadata that omits every promoted field. All promoted columns
+    # must go to NULL — not stay at their prior values.
+    future = time.time() + 3600
+    os.utime(str(photo), (future, future))
+    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+        "EXIF": {},
+        "Composite": {},
+        "File": {"ImageWidth": 100, "ImageHeight": 100},
+    }))
+    scan(str(root), db)
+    row = db.conn.execute(
+        "SELECT camera_make, camera_model, lens, focal_length, aperture, "
+        "shutter_speed, iso FROM photos LIMIT 1"
+    ).fetchone()
+    assert row["camera_make"] is None
+    assert row["camera_model"] is None
+    assert row["lens"] is None
+    assert row["focal_length"] is None
+    assert row["aperture"] is None
+    assert row["shutter_speed"] is None
+    assert row["iso"] is None
+
+
+def test_incremental_rescan_populates_phase1_summary_for_partial_marker(tmp_path, monkeypatch):
+    """Rows scanned before Phase 1 with only the ``exif_data='{}'`` marker
+    (extract_full_metadata=False path) get promoted-column values on the
+    next incremental scan. The DB migration clears '{}' to NULL, and the
+    scanner's pre-pass then re-flags the row as ``metadata_missing`` via
+    ``summary_needs_extract`` — otherwise the row's timestamp is populated
+    and the standard skip triggers, leaving camera_make etc. permanently
+    NULL on upgraded libraries."""
+    import scanner
+    from db import Database
+    from scanner import scan
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    photo = root / "test.jpg"
+    Image.new("RGB", (100, 100), color="red").save(str(photo))
+
+    def make_extract(payload):
+        def fake(paths, restricted_tags=None, progress_callback=None,
+                checkpoint=None):
+            return {p: payload for p in paths}
+        return fake
+
+    # Seed the row as if a pre-Phase-1 scan with extract_full_metadata=False
+    # had run: exif_data='{}', promoted cols NULL, timestamp populated.
+    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+        "EXIF": {
+            "DateTimeOriginal": "2024:01:15 10:30:00",
+            "Make": "Sony", "Model": "ILCE-1",
+        },
+        "Composite": {},
+    }))
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(root), db)
+    # Simulate the pre-Phase-1 storage shape: keep the timestamp, clear
+    # the promoted cols, and put the '{}' marker back on exif_data.
+    db.conn.execute(
+        "UPDATE photos SET exif_data='{}', camera_make=NULL, camera_model=NULL, "
+        "lens=NULL, aperture=NULL, shutter_speed=NULL, iso=NULL")
+    # Reset the migration marker and re-open so the migration reruns and
+    # clears the '{}' marker to NULL (Phase-1 backfill behavior).
+    db.conn.execute("DELETE FROM db_meta WHERE key='exif_summary_backfill_v1'")
+    db.conn.commit()
+    db.close()
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT exif_data, camera_make FROM photos LIMIT 1").fetchone()
+    assert row["exif_data"] is None  # cleared by migration
+    assert row["camera_make"] is None
+
+    # Incremental scan with the file unchanged (same mtime, same content).
+    # Without the summary_needs_extract trigger, the pre-pass would skip
+    # this row because timestamp is populated. With it, the row is re-
+    # extracted and camera_make gets filled from the re-run metadata.
+    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+        "EXIF": {
+            "DateTimeOriginal": "2024:01:15 10:30:00",
+            "Make": "Sony", "Model": "ILCE-1",
+        },
+        "Composite": {},
+    }))
+    scan(str(root), db)
+    row = db.conn.execute(
+        "SELECT camera_make, camera_model FROM photos LIMIT 1").fetchone()
+    assert row["camera_make"] == "Sony"
+    assert row["camera_model"] == "ILCE-1"
+
+
 def test_scan_pairs_raw_and_jpeg(tmp_path):
     """When a folder has IMG.cr3 and IMG.jpg, they become one photo with companion_path."""
     from db import Database
@@ -1614,6 +1751,77 @@ def test_pair_raw_jpeg_transfers_gps_and_metadata(tmp_path):
     assert photo["focal_length"] == 400.0
     meta = json.loads(photo["exif_data"])
     assert meta["EXIF"]["Make"] == "Nikon"
+
+
+def test_pair_raw_jpeg_transfers_promoted_exif_summary_columns(tmp_path):
+    """Pairing transfers ``camera_make``/``camera_model``/``lens``/``aperture``/
+    ``shutter_speed``/``iso`` from the JPEG companion so the RAW row still
+    populates the universal-filter fields after the JPEG row is deleted."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+                          file_size=20000000, file_mtime=1.0)
+
+    db.conn.execute(
+        "UPDATE photos SET camera_make=?, camera_model=?, lens=?, "
+        "aperture=?, shutter_speed=?, iso=? WHERE id=?",
+        ("Canon", "R5", "RF 100-500mm", 5.6, 0.002, 800, jpeg_id),
+    )
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute(
+        "SELECT filename, camera_make, camera_model, lens, aperture, "
+        "shutter_speed, iso FROM photos"
+    ).fetchone()
+    assert photo["filename"] == "IMG.cr3"
+    assert photo["camera_make"] == "Canon"
+    assert photo["camera_model"] == "R5"
+    assert photo["lens"] == "RF 100-500mm"
+    assert photo["aperture"] == 5.6
+    assert photo["shutter_speed"] == 0.002
+    assert photo["iso"] == 800
+
+
+def test_pair_raw_jpeg_preserves_primary_exif_summary_columns(tmp_path):
+    """A RAW with its own EXIF summary values (e.g. from its own ExifTool
+    extract) must not be overwritten by a JPEG companion's values."""
+    from db import Database
+    from scanner import _pair_raw_jpeg_companions
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder(str(tmp_path), name="photos")
+
+    jpeg_id = db.add_photo(folder_id=fid, filename="IMG.jpg", extension=".jpg",
+                           file_size=1000, file_mtime=1.0)
+    raw_id = db.add_photo(folder_id=fid, filename="IMG.cr3", extension=".cr3",
+                          file_size=20000000, file_mtime=1.0)
+
+    db.conn.execute(
+        "UPDATE photos SET camera_make=?, camera_model=?, iso=? WHERE id=?",
+        ("Sony", "A1", 200, raw_id),
+    )
+    db.conn.execute(
+        "UPDATE photos SET camera_make=?, camera_model=?, iso=? WHERE id=?",
+        ("Canon", "R5", 800, jpeg_id),
+    )
+    db.conn.commit()
+
+    _pair_raw_jpeg_companions(db)
+
+    photo = db.conn.execute(
+        "SELECT camera_make, camera_model, iso FROM photos"
+    ).fetchone()
+    assert photo["camera_make"] == "Sony"
+    assert photo["camera_model"] == "A1"
+    assert photo["iso"] == 200
 
 
 def test_pair_raw_jpeg_keeps_primary_gps_when_present(tmp_path):
@@ -2296,10 +2504,15 @@ def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch)
     db, root, image_path, pid = _setup_scanned_photo(tmp_path)
 
     # Simulate small-dims on a non-RAW extension; timestamp populated so
-    # the NULL-timestamp branch doesn't fire either.
+    # the NULL-timestamp branch doesn't fire either. camera_make stays
+    # non-NULL so the Phase-1 ``summary_needs_extract`` trigger — which
+    # re-extracts rows whose promoted EXIF cols are all NULL alongside a
+    # NULL ``exif_data`` (the pre-Phase-1 upgrade shape) — doesn't fire
+    # here; this test is about the RAW-only dim heuristic in isolation.
     db.conn.execute(
         "UPDATE photos SET extension='.jpg', width=160, height=120, "
-        "timestamp='2020-01-01T12:00:00', exif_data=NULL WHERE id=?", (pid,)
+        "timestamp='2020-01-01T12:00:00', exif_data=NULL, "
+        "camera_make='Sony' WHERE id=?", (pid,)
     )
     db.conn.commit()
 

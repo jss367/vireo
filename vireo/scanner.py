@@ -25,7 +25,7 @@ from image_loader import (
     safe_scan_walk,
 )
 from keyword_normalization import keyword_match_key
-from metadata import extract_metadata
+from metadata import EXIF_SUMMARY_COLUMNS, exif_summary_columns, extract_metadata
 from PIL import Image
 from render_source import exif_orientation as _exif_orientation_from_data
 from render_source import is_undersized
@@ -303,8 +303,21 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         primary = raws[0]
         companion = jpegs[0]
 
-        # Transfer metadata from companion to primary if primary lacks it
-        transfer_cols = "timestamp, rating, flag, latitude, longitude, exif_data, focal_length, width, height"
+        # Transfer metadata from companion to primary if primary lacks it.
+        # Includes the promoted EXIF summary columns
+        # (``EXIF_SUMMARY_COLUMNS``) so a RAW row that got merged with its
+        # JPEG companion doesn't lose ``camera_make``/``camera_model``/
+        # ``lens``/``aperture``/``shutter_speed``/``iso`` when the JPEG row
+        # is deleted — otherwise the new universal filters miss the paired
+        # photo even though ExifTool extracted those values.
+        # ``focal_length`` is part of ``EXIF_SUMMARY_COLUMNS`` — do not name it
+        # again here or the loop below would append a second ``focal_length=?``
+        # assignment and SQLite would reject the UPDATE for duplicate columns.
+        transfer_cols = (
+            "timestamp, rating, flag, latitude, longitude, exif_data, "
+            "width, height, "
+            + ", ".join(EXIF_SUMMARY_COLUMNS)
+        )
         primary_full = db.conn.execute(
             f"SELECT {transfer_cols} FROM photos WHERE id = ?",
             (primary["id"],),
@@ -338,9 +351,19 @@ def _pair_raw_jpeg_companions(db, vireo_dir=None, thumb_cache_dir=None):
         if not primary_full["exif_data"] and companion_full["exif_data"]:
             updates.append("exif_data = ?")
             params.append(companion_full["exif_data"])
-        if primary_full["focal_length"] is None and companion_full["focal_length"] is not None:
-            updates.append("focal_length = ?")
-            params.append(companion_full["focal_length"])
+        # Fill any promoted EXIF summary column the RAW row is missing but
+        # its JPEG companion has. ``EXIF_SUMMARY_COLUMNS`` already contains
+        # ``focal_length`` alongside the camera/exposure fields, so a single
+        # loop covers all promoted columns — a separate ``focal_length``
+        # transfer would fire twice and SQLite would reject the UPDATE for
+        # assigning the same column twice. Only writes when the primary is
+        # NULL — a non-NULL primary already reflects a rescan (which clears
+        # absent columns to NULL via ``EXIF_SUMMARY_COLUMNS``), so
+        # overwriting it would trample fresh metadata.
+        for column in EXIF_SUMMARY_COLUMNS:
+            if primary_full[column] is None and companion_full[column] is not None:
+                updates.append(f"{column} = ?")
+                params.append(companion_full[column])
         if not primary_full["width"] and companion_full["width"]:
             updates.extend(["width = ?", "height = ?"])
             params.extend([companion_full["width"], companion_full["height"]])
@@ -1584,6 +1607,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     existing_photos = {}
     existing_file_hashes = {}
     exif_extracted = set()  # photo IDs where ExifTool has already run
+    summary_needs_extract = set()  # rows needing Phase-1 EXIF summary re-extraction
     if incremental:
         all_photos = db.get_photos(per_page=999999)
         for p in all_photos:
@@ -1604,6 +1628,24 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # is non-NULL). Photos with NULL exif_data need re-extraction.
         for row in db.conn.execute("SELECT id FROM photos WHERE exif_data IS NOT NULL"):
             exif_extracted.add(row["id"])
+        # Rows whose Phase-1 promoted EXIF columns (camera_make etc.) were
+        # never populated need one re-extraction so those universal filter
+        # fields work. The DB migration clears the ``'{}'`` marker to NULL
+        # for photos scanned before Phase 1 shipped, and this query picks
+        # them up on the next incremental pass. Without this trigger the
+        # standard ``metadata_missing`` check would still skip these rows
+        # (their timestamp is populated, so none of the existing reasons —
+        # repair mode, missing timestamp, suspect dims — fire). After
+        # re-extraction the scanner writes the promoted columns and
+        # rewrites ``exif_data`` (JSON or ``'{}'`` marker), so the row no
+        # longer matches this query — no perpetual retry.
+        for row in db.conn.execute(
+            "SELECT id FROM photos WHERE exif_data IS NULL "
+            "AND camera_make IS NULL AND camera_model IS NULL "
+            "AND lens IS NULL AND aperture IS NULL "
+            "AND shutter_speed IS NULL AND iso IS NULL"
+        ):
+            summary_needs_extract.add(row["id"])
 
     # Build folder cache: path -> folder_id
     folder_cache = {}
@@ -1779,7 +1821,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                             or existing["timestamp"] is None
                             or dims_suspect
                         )
-                    )
+                    ) or existing["id"] in summary_needs_extract
                     existing_file_hash = existing_file_hashes.get(existing["id"])
                     empty_hash_needs_repair = (
                         existing["file_size"] == 0
@@ -1992,10 +2034,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             # Timestamp from ExifTool
             timestamp = _extract_timestamp(exif_group)
 
-            # Focal length
-            focal_length = exif_group.get("FocalLength")
-            if focal_length is not None:
-                focal_length = float(focal_length)
+            # Focal length is written via the EXIF summary columns loop
+            # below (see ``EXIF_SUMMARY_COLUMNS``) so a rescan that loses
+            # the tag clears the column instead of leaving a stale value.
 
             # Burst ID (ImageUniqueID)
             burst_id = exif_group.get("ImageUniqueID")
@@ -2053,9 +2094,6 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             if phash is not None:
                 updates.append("phash=?")
                 update_params.append(phash)
-            if focal_length is not None:
-                updates.append("focal_length=?")
-                update_params.append(focal_length)
             if burst_id is not None:
                 updates.append("burst_id=?")
                 update_params.append(burst_id)
@@ -2086,6 +2124,18 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 # placeholder would be worse than leaving it as-is; the
                 # duplicates page already flags empty-byte groups for
                 # manual review.
+            if file_meta:
+                # Promoted EXIF summary columns (universal filter fields).
+                # Written whenever ExifTool ran, independent of whether the
+                # full JSON blob is stored below. Absent columns are cleared
+                # to NULL rather than skipped so a rescan of a file whose
+                # metadata lost a field (e.g. sidecar edited, replaced with a
+                # different camera's file) doesn't leave stale values that
+                # /api/photos/query and /api/filters/values keep matching.
+                cols = exif_summary_columns(file_meta)
+                for column in EXIF_SUMMARY_COLUMNS:
+                    updates.append(f"{column}=?")
+                    update_params.append(cols.get(column))
             if file_meta and extract_full_metadata:
                 updates.append("exif_data=?")
                 update_params.append(json.dumps(file_meta))

@@ -39,6 +39,7 @@ from db import (
     commit_with_retry,
     text_search_match,
 )
+from filter_fields import SUGGEST_FIELDS, fields_for_api
 from flask import (
     Flask,
     Response,
@@ -5422,6 +5423,156 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "per_page": per_page,
             }
         )
+
+    def _inject_active_visual_model(rules):
+        """Fill in the active visual model on ``has_visual_index`` leaves
+        that don't name one.
+
+        ``/api/filters/fields`` advertises ``Has visual index`` as a plain
+        boolean field, so the UI-emitted rule has no ``model`` key. The
+        rule engine's fallback then matches any ``photo_embeddings`` row,
+        so a photo with only stale embeddings from a previously-active
+        model satisfies ``has_visual_index is true`` even though visual
+        search (which only loads embeddings for the active model — see
+        ``api_photo_text_search``) can't use it. Inject the current active
+        model here so the filter and visual search agree on what "has an
+        index" means; smart-collection storage paths keep the rule
+        verbatim so a saved collection stays portable across model
+        switches.
+
+        When no active model is configured (fresh library, or every
+        installed model was removed while cached embeddings remain), the
+        UI-emitted rule must fail closed instead of falling through to
+        "any embedding row" — otherwise ``/api/photos/query`` would
+        report photos as visually indexed while ``/api/photos/search``
+        returns ``no_model``. Inject a sentinel model name that can never
+        match a stored ``photo_embeddings.model`` value, so
+        ``has_visual_index is true`` matches nothing and
+        ``has_visual_index is false`` matches everything — both correct
+        for "there is no usable visual index right now".
+        """
+        try:
+            from models import get_active_model
+            active = get_active_model()
+        except Exception:
+            active = None
+        model_name = active.get("name") if active else None
+        injected_model = model_name or "__no_active_visual_model__"
+
+        def _walk(node):
+            if isinstance(node, dict):
+                if "rules" in node and "field" not in node:
+                    inner = node.get("rules")
+                    # Malformed group (e.g. ``{"mode":"all","rules":null}``):
+                    # leave it untouched so ``Database._validate_node`` can
+                    # raise a ``ValueError`` that the route turns into a 400.
+                    # Iterating ``None`` here would raise ``TypeError`` and
+                    # bypass the 400 handler.
+                    if not isinstance(inner, list):
+                        return node
+                    return {**node, "rules": [_walk(r) for r in inner]}
+                if node.get("field") == "has_visual_index" and "model" not in node:
+                    return {**node, "model": injected_model}
+                return node
+            if isinstance(node, list):
+                return [_walk(r) for r in node]
+            return node
+
+        return _walk(rules)
+
+    @app.route("/api/photos/query", methods=["POST"])
+    def api_photos_query():
+        """Universal-filter photo query: a smart-collection rule tree plus
+        sort and paging. Response shape matches /api/photos so pages can
+        switch fetch paths without re-plumbing their renderers.
+
+        Design: docs/plans/2026-07-19-universal-filters-design.md.
+        """
+        db = _get_db()
+        payload = request.get_json(silent=True)
+        if payload is None or not isinstance(payload, dict):
+            return json_error("request body must be a JSON object", 400)
+        rules = payload.get("rules")
+        if rules is None:
+            rules = []
+        page = payload.get("page", 1)
+        per_page = payload.get("per_page", 50)
+        sort = payload.get("sort", "date")
+        if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+            return json_error("page must be a positive integer", 400)
+        if not isinstance(per_page, int) or isinstance(per_page, bool) or per_page < 1:
+            return json_error("per_page must be a positive integer", 400)
+        # sort feeds an unhashable-unsafe ``sort_map.get(sort, ...)`` in
+        # ``query_photos``; a JSON array/object here would raise TypeError
+        # (not ValueError) and bypass the 400 handler below.
+        if not isinstance(sort, str):
+            return json_error("sort must be a string", 400)
+        per_page = min(per_page, _MAX_PER_PAGE)
+        rules = _inject_active_visual_model(rules)
+        try:
+            photos = db.query_photos(rules, sort=sort, page=page, per_page=per_page)
+            total = db.count_photos_for_rules(rules)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+
+        photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
+        _attach_species(db, photo_dicts)
+        _attach_species_representatives(db, photo_dicts)
+        _attach_detections(db, photo_dicts)
+        _attach_edit_recipes(db, photo_dicts)
+
+        return jsonify(
+            {
+                "photos": photo_dicts,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+            }
+        )
+
+    @app.route("/api/filters/fields")
+    def api_filter_fields():
+        """The filter field registry: one source of truth for the UI picker
+        (labels, categories, types, operators, enum values, suggest flags).
+        """
+        return jsonify({"fields": fields_for_api()})
+
+    @app.route("/api/filters/values")
+    def api_filter_values():
+        """Typeahead values with live counts for a suggest-capable field.
+
+        ``rules`` (JSON, optional) is the active expression minus the rule
+        being edited, so counts answer "how many results would I get" under
+        the user's other selections — never a global COUNT(*).
+        """
+        db = _get_db()
+        field = request.args.get("field", "")
+        if field not in SUGGEST_FIELDS:
+            return json_error(f"field {field!r} does not support value suggestions", 400)
+        raw_rules = request.args.get("rules")
+        rules = []
+        if raw_rules:
+            try:
+                rules = json.loads(raw_rules)
+            except ValueError:
+                return json_error("rules must be valid JSON", 400)
+        q = request.args.get("q") or None
+        # Clamp ``limit`` to a positive bounded range. Werkzeug's ``type=int``
+        # cheerfully parses ``?limit=0``/``?limit=-5`` (SQLite treats a
+        # negative ``LIMIT`` as "no limit" and returns everything), and
+        # ``?limit=999999`` on a large library would load an unbounded
+        # suggestions list. Fallback to the 20-default when parsing fails.
+        limit_raw = request.args.get("limit", 20, type=int)
+        if limit_raw is None:
+            limit_raw = 20
+        limit = max(1, min(limit_raw, 500))
+        rules = _inject_active_visual_model(rules)
+        try:
+            values = db.get_filter_field_values(field, rules=rules, q=q, limit=limit)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        return jsonify({"field": field, "values": values})
 
     @app.route("/api/photos/ids")
     def api_photo_ids():

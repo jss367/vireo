@@ -396,3 +396,78 @@ def extract_summary_fields(grouped_meta):
         "iso": exif.get("ISO"),
         "datetime_original": exif.get("DateTimeOriginal"),
     }
+
+
+# Promoted EXIF summary columns in the ``photos`` table — the canonical
+# list the scanner uses to clear absent fields on rescan (a metadata write
+# that omits a column should reset it to NULL, not leave the stale value
+# behind). Kept next to ``exif_summary_columns`` so the two stay in lockstep.
+EXIF_SUMMARY_COLUMNS = (
+    "camera_make",
+    "camera_model",
+    "lens",
+    "focal_length",
+    "aperture",
+    "shutter_speed",
+    "iso",
+)
+
+
+def exif_summary_columns(grouped_meta):
+    """Map grouped metadata to the photos-table EXIF summary columns.
+
+    Returns {column: value} with only present, type-valid entries — safe to
+    splice into an UPDATE. String fields are stripped; numeric fields are
+    coerced (ExifTool runs with -n so values are usually numeric already,
+    but sidecar-sourced or vendor-quirk values can be strings or lists).
+
+    The full set of managed columns is ``EXIF_SUMMARY_COLUMNS``. Absent
+    entries in the returned dict mean "no value in the current metadata";
+    on a rescan, callers should clear those columns rather than leave
+    stale prior values in place.
+    """
+    summary = extract_summary_fields(grouped_meta)
+    columns = {}
+
+    def _text(value):
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            value = str(value)
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value or None
+
+    def _number(value):
+        if isinstance(value, list) and value:
+            value = value[0]
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int | float):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                return None
+        return None
+
+    for column, key in (
+        ("camera_make", "camera_make"),
+        ("camera_model", "camera_model"),
+        ("lens", "lens"),
+    ):
+        value = _text(summary.get(key))
+        if value is not None:
+            columns[column] = value
+    for column, key in (
+        ("focal_length", "focal_length"),
+        ("aperture", "f_number"),
+        ("shutter_speed", "exposure_time"),
+    ):
+        value = _number(summary.get(key))
+        if value is not None:
+            columns[column] = value
+    iso = _number(summary.get("iso"))
+    if iso is not None:
+        columns["iso"] = int(iso)
+    return columns
