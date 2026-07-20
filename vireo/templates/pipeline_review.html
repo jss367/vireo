@@ -3944,6 +3944,15 @@ function setPipelineReviewFlag(photoId, flag) {
     notifyReadOnlyScopedView();
     return Promise.resolve();
   }
+  // A group action snapshots live flags before writing its batch. Allowing a
+  // per-photo pick/reject for one of those same IDs before the batch finishes
+  // would let the batch overwrite the newer choice, while its Undo would
+  // restore the older snapshot. Honor the group lock here as well as in the
+  // bulk path so every overlapping flag write is serialized.
+  if (pipelineReviewGroupFlagInFlightPhotoIds.has(photoId)) {
+    showToast('A bulk reject for this photo is still finishing — try again in a moment', 'error');
+    return Promise.resolve();
+  }
 
   return safeFetch('/api/photos/' + photoId + '/flag', {
     method: 'POST',
