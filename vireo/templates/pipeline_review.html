@@ -3821,32 +3821,69 @@ function setPipelineReviewGroupFlag(target, flag) {
   var ids = Array.from(new Set((target.photoIds || []).map(function(pid) {
     return parseInt(pid, 10);
   }).filter(function(pid) { return !!pid && !!findPhotoInResults(pid); })));
-  var changedIds = ids.filter(function(pid) {
-    return normalizedPipelineReviewFlag(findPhotoInResults(pid).flag) !== flag;
-  });
-  if (!changedIds.length) return Promise.resolve();
+  if (!ids.length) return Promise.resolve();
 
-  var previousFlags = {};
-  changedIds.forEach(function(pid) {
-    previousFlags[pid] = normalizedPipelineReviewFlag(findPhotoInResults(pid).flag);
-  });
   pipelineReviewGroupFlagInFlight[target.key] = true;
-  return safeFetch('/api/batch/flag', {
+  // pipelineResults.photos[].flag is a cache written when the pipeline ran;
+  // GET /api/pipeline/results serves it as-is without refreshing from the DB
+  // (unlike the GRM, which fetches /api/pipeline/group/state on open). If the
+  // user picked a photo in Browse after the cache was written, the cache can
+  // still read 'rejected' for it. Deriving changedIds and previousFlags from
+  // the stale cache would post flag: 'none' for that live pick on "Clear
+  // rejects", and Undo would restore the cached 'rejected' rather than the
+  // pick. Read live DB flags first and drive the decision off those.
+  return safeFetch('/api/pipeline/group/state', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({photo_ids: changedIds, flag: flag}),
-  }).then(function() {
-    changedIds.forEach(function(pid) {
-      updatePipelineReviewPhotoFlag(findPhotoInResults(pid), flag);
+    body: JSON.stringify({photo_ids: ids, species: ''}),
+  }, {toast: false}).then(function(data) {
+    var live = (data && data.photos) || {};
+    var liveFlagFor = function(pid) {
+      return normalizedPipelineReviewFlag(live[pid] && live[pid].flag);
+    };
+    // Sync the review cache to the live snapshot so subsequent button
+    // labels and card badges reflect truth, not the cache's opening value.
+    ids.forEach(function(pid) {
+      var liveFlag = liveFlagFor(pid);
+      var photo = findPhotoInResults(pid);
+      if (photo && normalizedPipelineReviewFlag(photo.flag) !== liveFlag) {
+        updatePipelineReviewPhotoFlag(photo, liveFlag);
+      }
     });
-    renderResults();
-    refreshLatestScopeSnapshotIfCurrent();
-    var count = changedIds.length;
-    var message = flag === 'rejected'
-      ? 'Rejected ' + count + ' photo' + (count === 1 ? '' : 's') + ' in ' + target.noun
-      : 'Cleared rejects from ' + count + ' photo' + (count === 1 ? '' : 's') + ' in ' + target.noun;
-    showUndo(message, function() {
-      restorePipelineReviewFlags(previousFlags, target.noun);
+    // "Reject" applies the reject flag to anything not already rejected —
+    // including live picks — because the user explicitly asked to reject the
+    // group. "Clear rejects" only touches photos that are actually rejected;
+    // it must never overwrite a live pick or an unflagged photo to 'none'.
+    var changedIds = ids.filter(function(pid) {
+      var liveFlag = liveFlagFor(pid);
+      if (flag === 'none') return liveFlag === 'rejected';
+      return liveFlag !== flag;
+    });
+    if (!changedIds.length) {
+      renderResults();
+      return;
+    }
+    var previousFlags = {};
+    changedIds.forEach(function(pid) {
+      previousFlags[pid] = liveFlagFor(pid);
+    });
+    return safeFetch('/api/batch/flag', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: changedIds, flag: flag}),
+    }).then(function() {
+      changedIds.forEach(function(pid) {
+        updatePipelineReviewPhotoFlag(findPhotoInResults(pid), flag);
+      });
+      renderResults();
+      refreshLatestScopeSnapshotIfCurrent();
+      var count = changedIds.length;
+      var message = flag === 'rejected'
+        ? 'Rejected ' + count + ' photo' + (count === 1 ? '' : 's') + ' in ' + target.noun
+        : 'Cleared rejects from ' + count + ' photo' + (count === 1 ? '' : 's') + ' in ' + target.noun;
+      showUndo(message, function() {
+        restorePipelineReviewFlags(previousFlags, target.noun);
+      });
     });
   }).finally(function() {
     delete pipelineReviewGroupFlagInFlight[target.key];

@@ -312,6 +312,55 @@ def test_burst_reject_respects_active_label_filter(live_server, page):
     assert _flags(db, photo_ids) == ["none", "none", "rejected", "rejected"]
 
 
+def test_clear_rejects_reads_live_db_flags(live_server, page):
+    """`Clear rejects` must not overwrite a photo the user picked live in
+    Browse (another tab) just because the client cache still shows it as
+    rejected. Regression: the bulk action derived changedIds and
+    previousFlags from pipelineResults.photos[].flag — a client-side cache
+    that page-init refreshes on load but that goes stale the moment a
+    parallel session mutates flags — so a subsequent "Clear rejects" click
+    silently cleared the live pick and Undo restored the stale 'rejected'
+    rather than the pick."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:4]
+    _write_grouped_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    burst_buttons = page.get_by_test_id("reject-burst")
+    expect(burst_buttons).to_have_count(2)
+
+    # Reject the first burst: both photos become 'rejected' in the DB and in
+    # the in-page pipelineResults cache. The button flips to "Clear rejects".
+    burst_buttons.first.click()
+    expect(burst_buttons.first).to_have_attribute("aria-label", "Clear rejects")
+    assert _flags(db, photo_ids) == ["rejected", "rejected", "none", "none"]
+
+    # Simulate a live pick made in another Browse tab: the DB updates but the
+    # already-rendered pipelineResults cache does not. The bulk button still
+    # reads "Clear rejects" even though the first photo is now a pick.
+    db.update_photo_flag(photo_ids[0], "flagged")
+    expect(burst_buttons.first).to_have_attribute("aria-label", "Clear rejects")
+
+    burst_buttons.first.click()
+
+    # Only the truly-rejected photo in the burst is cleared. The live pick
+    # is preserved; the second burst is untouched.
+    expect(page.locator("#undoMsg")).to_have_text(
+        "Cleared rejects from 1 photo in burst"
+    )
+    assert _flags(db, photo_ids) == ["flagged", "none", "none", "none"]
+
+    page.locator("#undoToast .undo-toast-btn").click()
+
+    expect(
+        page.get_by_text("Restored previous flags for burst", exact=True)
+    ).to_be_visible()
+    # Undo restores what was actually in the DB when the bulk action ran —
+    # the second photo goes back to 'rejected', and the live pick stays a
+    # pick rather than being clobbered by a stale cached value.
+    assert _flags(db, photo_ids) == ["flagged", "rejected", "none", "none"]
+
+
 def test_encounter_reject_respects_active_label_filter(live_server, page):
     """Same guarantee as the burst-level test, but for the encounter-level
     Reject/Clear button: hidden KEEP frames stay untouched when the Review
