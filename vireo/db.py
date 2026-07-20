@@ -17792,7 +17792,12 @@ class Database:
             if op == "is not":
                 prefix = f"{column} IS NULL OR " if allow_null else ""
                 return f"({prefix}{column} != ?)", [value]
-            return "0", []
+            # Reject the op instead of silently emitting a constant-false
+            # predicate — /api/photos/query catches ValueError and returns
+            # 400, so a malformed rule like ``{"field":"file_size","op":
+            # "contains","value":1}`` surfaces as a validation error instead
+            # of a 200 with an empty result set.
+            raise ValueError(f"unsupported numeric rule op: {op!r}")
 
         def _text_condition(column, op, value, case_sensitive=False):
             """Text-field predicate. Returns (cond, params) or None for an
@@ -18547,10 +18552,21 @@ class Database:
                 # for a photo whose species is displayed as ``Verdin`` in
                 # every other view. Deterministic root pick (MIN(id)) mirrors
                 # the ``setdefault`` in ``get_species_keywords_for_photos``.
+                #
+                # BUT: only rewrite hierarchy leaves. When ``kv`` is itself
+                # a top-level root (``parent_id IS NULL``),
+                # ``get_species_keywords_for_photos`` deliberately keeps the
+                # attached root's stored spelling (see its ``is_root`` guard)
+                # so curation lookups keyed on that name still resolve. If a
+                # taxon has multiple species roots and a photo is tagged
+                # with the non-MIN(id) root, rewriting to MIN(id) here would
+                # drop the species name Browse shows and make the typeahead
+                # return nothing for that root.
                 extra_joins += (
                     " LEFT JOIN taxa tv ON tv.id = kv.taxon_id"
                     " LEFT JOIN keywords root_kv"
                     " ON kv.taxon_id IS NOT NULL"
+                    " AND kv.parent_id IS NOT NULL"
                     " AND root_kv.taxon_id = kv.taxon_id"
                     " AND root_kv.parent_id IS NULL"
                     " AND (root_kv.is_species = 1 OR root_kv.type = 'taxonomy')"
@@ -18562,7 +18578,10 @@ class Database:
                 )
                 conditions.append("(kv.is_species = 1 OR kv.type = 'taxonomy')")
                 conditions.append("(tv.rank = 'species' OR tv.rank IS NULL)")
-                display_expr = "COALESCE(root_kv.name, kv.name)"
+                display_expr = (
+                    "CASE WHEN kv.parent_id IS NULL THEN kv.name"
+                    " ELSE COALESCE(root_kv.name, kv.name) END"
+                )
                 group_expr = display_expr
             else:
                 display_expr = "kv.name"

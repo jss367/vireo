@@ -9655,6 +9655,22 @@ def test_api_photos_query_validation(app_and_db, monkeypatch):
     }).status_code == 400
     assert client.post('/api/photos/query', data="not json",
                        content_type="text/plain").status_code == 400
+    # Unsupported operators on numeric fields must land as 400 (validation
+    # error), not 200 with an empty result set — otherwise a malformed
+    # rule like ``file_size contains 1`` looks like a query that legitimately
+    # matched nothing. Covers all fields routed through _numeric_condition:
+    # file_size/width/height/focal_length/aperture/shutter_speed/iso,
+    # gps_lat/gps_lng, rating/quality_score/sharpness/subject_sharpness/
+    # noise_estimate, keyword_count, and prediction_confidence.
+    for field in (
+        "file_size", "width", "height", "focal_length", "aperture",
+        "shutter_speed", "iso", "gps_lat", "gps_lng", "rating",
+        "quality_score", "sharpness", "noise_estimate", "keyword_count",
+        "prediction_confidence",
+    ):
+        assert client.post('/api/photos/query', json={
+            "rules": [{"field": field, "op": "contains", "value": 1}],
+        }).status_code == 400, f"{field} contains 1 must 400"
 
 
 def test_api_photos_query_has_visual_index_injects_active_model(app_and_db, monkeypatch):

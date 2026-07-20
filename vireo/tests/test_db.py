@@ -20723,6 +20723,59 @@ def test_get_filter_field_values_species_canonicalizes_hierarchy_leaf(tmp_path):
         [{"field": "species", "op": "is", "value": "Verdin"}]) == 2
 
 
+def test_get_filter_field_values_species_preserves_attached_root_spelling(tmp_path):
+    """When a taxon has multiple top-level species roots and a photo is
+    tagged with the non-MIN(id) root, ``get_species_keywords_for_photos``
+    intentionally keeps the attached root's stored spelling (its
+    ``is_root`` guard). The typeahead must agree — if it always rewrites
+    to the MIN(id) root, the species name Browse shows would disappear
+    from suggestions and a typeahead query for that displayed root would
+    return nothing."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    taxa = _seed_taxa(db, [(9999, "Corvus brachyrhynchos", "American Crow")])
+    # Two top-level roots for the same taxon: one earlier, one later.
+    root_early = db.add_keyword("American Crow", is_species=True)
+    root_late = db.add_keyword("crow (american)", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id=? WHERE id=?",
+        (taxa["American Crow"], root_late),
+    )
+    # Photo tagged with the LATE (non-MIN-id) root only.
+    p_late = db.add_photo(folder_id=fid, filename='late.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.tag_photo(p_late, root_late)
+    # Photo tagged with a hierarchy leaf under the same taxon — still
+    # canonicalizes to the MIN(id) root (existing behavior).
+    p_leaf = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Corvids")
+    leaf = db.add_keyword("Northeastern Crow", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["American Crow"], leaf))
+    db.tag_photo(p_leaf, leaf)
+    db.conn.commit()
+
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values("species")}
+    # The attached late-root spelling must survive as its own suggestion —
+    # matches what ``get_species_keywords_for_photos`` reports for p_late
+    # (Browse shows ``crow (american)``, so the typeahead must offer it).
+    assert values.get("crow (american)") == 1
+    # The hierarchy-leaf photo still canonicalizes to the MIN(id) root
+    # (``American Crow``), matching the leaf-only test above.
+    assert values.get("American Crow") == 1
+    assert "Northeastern Crow" not in values
+    # Typeahead on the attached root spelling finds the photo instead of
+    # returning nothing.
+    late_hits = db.get_filter_field_values("species", q="crow (")
+    assert {v["value"] for v in late_hits} == {"crow (american)"}
+
+
 def test_get_filter_field_values_folder_escapes_like_metacharacters(tmp_path):
     """Folder suggestion counts must not treat stored folder paths as LIKE
     patterns. A folder such as ``/photos/my_dir`` uses ``_`` — a single-char
