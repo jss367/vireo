@@ -20322,6 +20322,34 @@ def test_universal_filter_species_contains_escapes_like_metacharacters(tmp_path)
     assert count([{"field": "species", "op": "contains", "value": "Heron"}]) == 1
 
 
+def test_universal_filter_keyword_contains_escapes_like_metacharacters(tmp_path):
+    """``keyword contains`` must treat ``%``/``_`` in the value as literal
+    characters, matching the species/filename/camera text rules. Otherwise a
+    request like ``{"field":"keyword","op":"contains","value":"%"}`` matches
+    every keyworded photo — the exact wildcard-bypass hole the registry now
+    advertises to clients through ``/api/filters/fields``."""
+    db, fid = _filter_db(tmp_path)
+    tagged = db.add_photo(folder_id=fid, filename='tagged.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    untagged = db.add_photo(folder_id=fid, filename='untagged.jpg', extension='.jpg',
+                            file_size=100, file_mtime=1.0)
+    k = db.add_keyword('Red-tailed hawk')
+    db.tag_photo(tagged, k)
+
+    count = db.count_photos_for_rules
+    # A bare ``%``/``_`` used to match every keyworded photo; after the fix
+    # they only match keywords literally containing the metacharacter.
+    assert count([{"field": "keyword", "op": "contains", "value": "%"}]) == 0
+    assert count([{"field": "keyword", "op": "contains", "value": "_"}]) == 0
+    # ``not_contains`` with a bare wildcard used to exclude every keyworded
+    # photo; escaped, it leaves them included and excludes only the
+    # untagged photo (no keyword row exists to match).
+    assert count([{"field": "keyword", "op": "not_contains", "value": "%"}]) == 2
+    # Sanity: literal substrings still match normally.
+    assert count([{"field": "keyword", "op": "contains", "value": "hawk"}]) == 1
+    assert count([{"field": "keyword", "op": "contains", "value": "sparrow"}]) == 0
+
+
 def test_universal_filter_species_matches_root_via_taxon_of_hierarchy_leaf(tmp_path):
     """Species rules resolve through taxon identity — a photo tagged only
     with a hierarchy leaf whose linked taxon has a same-taxon top-level root

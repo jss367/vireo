@@ -17949,9 +17949,16 @@ class Database:
                 return _numeric_condition(column, op, value, allow_null=True)
             if field == "keyword":
                 if op == "contains":
-                    return _keyword_exists("k.name LIKE ?", [f"%{value}%"])
+                    # Escape LIKE metacharacters so ``%``/``_`` in the value
+                    # stay literal — otherwise ``keyword contains "%"`` would
+                    # match every keyworded photo, breaking parity with the
+                    # escaped filename/camera/species text rules and the
+                    # escaped folder/keyword typeahead paths.
+                    like = f"%{_escape_like(str(value or ''))}%"
+                    return _keyword_exists("k.name LIKE ? ESCAPE '\\'", [like])
                 if op == "not_contains":
-                    return _keyword_not_exists("k.name LIKE ?", [f"%{value}%"])
+                    like = f"%{_escape_like(str(value or ''))}%"
+                    return _keyword_not_exists("k.name LIKE ? ESCAPE '\\'", [like])
                 if op in ("equals", "is"):
                     return _keyword_exists("k.name = ?", [value])
                 if op == "is not":
