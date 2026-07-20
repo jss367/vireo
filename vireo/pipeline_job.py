@@ -4722,6 +4722,45 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # detector_confidence" — the user's remediation differs
                 # (download weights vs lower the threshold).
                 detector_confidence = effective_cfg.get("detector_confidence", 0.2)
+                weak_rescue_enabled = pipeline_cfg.get(
+                    "weak_detection_rescue_enabled", True,
+                )
+                weak_detection_confidence = pipeline_cfg.get(
+                    "weak_detection_confidence", 0.12,
+                )
+
+                # Recompute the same contextual-weak set that classify_stage
+                # and load_photo_features use, so a bracketed weak frame that
+                # got classified above also gets SAM masks + quality features
+                # here. Without this, scoring.hard_reject_reasons drops the
+                # rescued frame with `no_subject_mask` on a first-time pipeline
+                # run (predictions land, but the mask worklist skipped it) —
+                # partially undoing the rescue.
+                contextual_weak_ids: set = set()
+                if (
+                    weak_rescue_enabled
+                    and weak_detection_confidence < detector_confidence
+                    and photos
+                ):
+                    from weak_detections import contextual_weak_runs
+                    raw_mdv6_dets = thread_db.get_detections_for_photos(
+                        [p["id"] for p in photos],
+                        min_conf=weak_detection_confidence,
+                        detector_model="megadetector-v6",
+                    )
+                    weak_runs = contextual_weak_runs(
+                        photos,
+                        raw_mdv6_dets,
+                        detector_confidence=detector_confidence,
+                        weak_confidence=weak_detection_confidence,
+                        max_gap=pipeline_cfg.get("burst_time_gap", 3.0),
+                    )
+                    contextual_weak_ids = {
+                        photo_id
+                        for run in weak_runs
+                        for photo_id in run["photo_ids"]
+                    }
+
                 photo_det_map = {}
                 photos_with_detections = 0
                 photos_subthreshold_only = 0
@@ -4733,12 +4772,28 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # legacy `mask_path IS NULL` prefilter gone, sub-threshold-
                     # only photos would otherwise enter SAM extraction on
                     # variant cache misses.
-                    dets = [
-                        d for d in thread_db.get_detections(
-                            p["id"], min_conf=detector_confidence,
-                        )
-                        if d["detector_model"] != "full-image"
-                    ]
+                    #
+                    # Contextual weak-rescue photos get the lower floor plus
+                    # the same MDv6/animal constraints that classify_stage and
+                    # load_photo_features apply, so mask extraction picks up
+                    # the same bracketed frame those two stages already opted
+                    # in to.
+                    if p["id"] in contextual_weak_ids:
+                        dets = [
+                            d for d in thread_db.get_detections(
+                                p["id"],
+                                min_conf=weak_detection_confidence,
+                                detector_model="megadetector-v6",
+                            )
+                            if d["category"] == "animal"
+                        ]
+                    else:
+                        dets = [
+                            d for d in thread_db.get_detections(
+                                p["id"], min_conf=detector_confidence,
+                            )
+                            if d["detector_model"] != "full-image"
+                        ]
                     if dets:
                         photos_with_detections += 1
                         primary = dets[0]  # already ordered by confidence DESC

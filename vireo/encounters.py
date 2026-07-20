@@ -50,6 +50,12 @@ DEFAULTS = {
     # Informational threshold included in grouping traces. Eligibility is
     # resolved before segmentation by pipeline.load_photo_features.
     "weak_detection_confidence": 0.12,
+    # Included in the grouping fingerprint so toggling weak-detection rescue
+    # in workspace settings invalidates cached results. load_photo_features
+    # gates rescue on this flag — flipping it re-labels the bracketed frames
+    # subject_uncertain vs subject_absent, which changes encounter membership
+    # and burst scoring. Not consumed by encounter segmentation directly.
+    "weak_detection_rescue_enabled": True,
 }
 
 

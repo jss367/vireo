@@ -3036,6 +3036,24 @@ def test_compute_group_fingerprint_ignores_unrelated_pipeline_keys():
     assert unrelated == base
 
 
+def test_compute_group_fingerprint_changes_with_weak_rescue_toggle():
+    """Toggling ``pipeline.weak_detection_rescue_enabled`` must bump the
+    fingerprint. The flag flips load_photo_features between treating
+    bracketed weak frames as ``subject_uncertain`` vs ``subject_absent``,
+    which changes encounter membership and burst scoring. If the fingerprint
+    ignored it, a workspace with cached results could toggle rescue on/off
+    without any upstream stage having new work and the Process page would
+    still report the grouping cache as fresh."""
+    from pipeline import compute_group_fingerprint
+    on = compute_group_fingerprint(
+        {"pipeline": {"weak_detection_rescue_enabled": True}},
+    )
+    off = compute_group_fingerprint(
+        {"pipeline": {"weak_detection_rescue_enabled": False}},
+    )
+    assert on != off
+
+
 def test_serialize_results_counts_missing_timestamps():
     """Each serialized encounter reports how many of its photos lack a timestamp."""
     from pipeline import serialize_results
