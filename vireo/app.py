@@ -20783,8 +20783,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # prefix, as the earlier guard did, would still accept the default
         # ``%Y/%Y-%m-%d`` template against a ``.../2026`` mount even though
         # the first render already lands on it.
+        #
+        # Normalize the template with ``os.path.normpath`` before splitting
+        # so ``.`` components collapse the same way the import path does
+        # when it joins the render under ``destination`` — otherwise a
+        # template like ``./NAS/%Y`` would raw-split to
+        # ``[".", "NAS", "%Y"]`` and the leading ``.`` would misalign with
+        # the mount's ``["NAS"]``, letting the guard miss even though the
+        # rendered ``./NAS/2026`` lands directly on the mount. ``..`` is
+        # already rejected upstream by ``_is_unsafe_path``, so normpath
+        # can only collapse ``.``/empties here.
+        normalized_template = os.path.normpath(folder_template or ".")
         template_components = [
-            c for c in (folder_template or "").split("/") if c
+            c for c in normalized_template.split(os.sep)
+            if c and c != "."
         ]
         # normcase both sides so the prefix compare behaves the same way
         # _path_equal_or_descends does on Windows; POSIX normcase is a

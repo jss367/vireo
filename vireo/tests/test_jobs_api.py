@@ -4090,6 +4090,67 @@ def test_after_process_move_rejects_strftime_template_landing_under_mount(
     assert resp.status_code == 200, resp.get_json()
 
 
+def test_after_process_move_rejects_dot_prefixed_template_landing_under_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """The mount-check guard splits the template's components; without
+    normalization, a leading ``.`` stays as its own component and misaligns
+    with the mount's leaf. But the import path normalizes ``./NAS/%Y``
+    under ``destination`` into ``destination/NAS/2026`` — landing on the
+    mount and letting the chained move duplicate under remote_path. The
+    guard must normalize dot components the same way the import does."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "NAS"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # Leading ``./`` in the template renders to the same import path as
+    # "NAS/%Y" (which the earlier test already rejects). Must reject too.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "./NAS/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+    assert "NAS" in err
+
+    # Interior ``/./`` components should collapse too — the render lands on
+    # the mount just the same.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "NAS/./%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+
+    # After the leading dot is dropped, the template's mount-depth component
+    # is a literal that doesn't match the mount leaf — stays legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "./shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
 def test_after_process_move_non_string_target_id(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
