@@ -3702,6 +3702,15 @@ function findEncounterForPhoto(photoId) {
 
 var inspectPhotoId = null;
 var pipelineReviewGroupFlagInFlight = {};
+// Photo IDs that any in-flight bulk reject/clear is currently mutating. We
+// check for overlap in setPipelineReviewGroupFlag so an encounter-level
+// action and one of its burst-level actions can't run concurrently: each
+// snapshots previousFlags from its own /api/pipeline/group/state read, so
+// two overlapping writes would let the later Undo restore shared photos to
+// the pre-first-action state, silently rolling back part of the earlier
+// action. Non-overlapping bulk actions (different bursts, different
+// encounters) still proceed in parallel.
+var pipelineReviewGroupFlagInFlightPhotoIds = new Set();
 // Photo IDs each rendered bulk-reject button actually represents, keyed by the
 // same 'encounter:ei' / 'burst:ei:bi' strings that group flag targets use.
 // renderResults() rebuilds this every render so hide-confirmed AND the label /
@@ -3823,7 +3832,21 @@ function setPipelineReviewGroupFlag(target, flag) {
   }).filter(function(pid) { return !!pid && !!findPhotoInResults(pid); })));
   if (!ids.length) return Promise.resolve();
 
+  // Block bulk actions whose photos overlap an in-flight bulk action — e.g.,
+  // clicking Reject burst while the parent encounter's Reject is still
+  // running. Both requests would snapshot previousFlags from the pre-first
+  // DB read, and the later Undo could restore the shared photos to 'none',
+  // silently reverting part of the earlier action.
+  var overlaps = ids.some(function(pid) {
+    return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+  });
+  if (overlaps) {
+    showToast('Another bulk reject is still finishing — try again in a moment', 'error');
+    return Promise.resolve();
+  }
+
   pipelineReviewGroupFlagInFlight[target.key] = true;
+  ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.add(pid); });
   // pipelineResults.photos[].flag is a cache written when the pipeline ran;
   // GET /api/pipeline/results serves it as-is without refreshing from the DB
   // (unlike the GRM, which fetches /api/pipeline/group/state on open). If the
@@ -3887,6 +3910,7 @@ function setPipelineReviewGroupFlag(target, flag) {
     });
   }).finally(function() {
     delete pipelineReviewGroupFlagInFlight[target.key];
+    ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.delete(pid); });
   });
 }
 

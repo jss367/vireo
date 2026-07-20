@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 
 from playwright.sync_api import expect
 
@@ -359,6 +360,63 @@ def test_clear_rejects_reads_live_db_flags(live_server, page):
     # the second photo goes back to 'rejected', and the live pick stays a
     # pick rather than being clobbered by a stale cached value.
     assert _flags(db, photo_ids) == ["flagged", "rejected", "none", "none"]
+
+
+def test_burst_reject_blocked_while_encounter_reject_pending(live_server, page):
+    """When an encounter reject is still writing, clicking a burst reject
+    inside it must be blocked — otherwise both requests snapshot
+    previousFlags from the pre-first-action DB read, and the burst's later
+    Undo could restore the shared photos to 'none', silently rolling back
+    part of the encounter reject."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:4]
+    _write_grouped_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    burst_buttons = page.get_by_test_id("reject-burst")
+    expect(burst_buttons).to_have_count(2)
+    encounter_button = page.get_by_test_id("reject-encounter")
+
+    # Hold the encounter's /api/pipeline/group/state request in flight so
+    # its bulk action keeps the lock while we try to fire a burst-level
+    # bulk action. Only hold the first call — post-release runs and the
+    # test cleanup issue further live reads that must pass through.
+    held = {}
+
+    def handle_group_state(route):
+        if "route" not in held:
+            held["route"] = route
+            return
+        route.continue_()
+
+    page.route("**/api/pipeline/group/state", handle_group_state)
+
+    encounter_button.click()
+
+    deadline = time.time() + 5
+    while "route" not in held and time.time() < deadline:
+        page.wait_for_timeout(50)
+    assert "route" in held, "expected the encounter group-state read to be held"
+
+    # Clicking a burst reject inside the still-writing encounter must be
+    # blocked with a user-visible toast, not silently kick off a second
+    # bulk action.
+    burst_buttons.first.click()
+    expect(
+        page.get_by_text(
+            "Another bulk reject is still finishing", exact=False
+        )
+    ).to_be_visible()
+    # The blocked burst click must not have altered any DB flags: the
+    # encounter's write is still gated on the held read.
+    assert _flags(db, photo_ids) == ["none"] * 4
+
+    # Release the encounter read so its bulk write can proceed against the
+    # real endpoint (the batch-flag call is not intercepted).
+    held["route"].continue_()
+
+    expect(page.locator("#undoMsg")).to_have_text("Rejected 4 photos in encounter")
+    assert _flags(db, photo_ids) == ["rejected"] * 4
 
 
 def test_encounter_reject_respects_active_label_filter(live_server, page):
