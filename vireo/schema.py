@@ -380,19 +380,21 @@ def _merge_legacy_detector_alias(conn):
 
     # Realign mask prompts stored under a loser box to the survivor's exact
     # coordinates so find_stale_masks and count_extract_stale keep matching
-    # after the alias merge. Runs before predictions are moved because
-    # photo_masks and detections are not FK-linked; ordering is only for
-    # locality with the group-building code above.
+    # after the alias merge. Constrain to MegaDetector-family masks (already
+    # canonicalized by the rename above): another detector's mask can
+    # coincidentally share the loser's prompt coordinates, and rewriting it
+    # would break equality against its own detection row.
     for photo_id, loser_coords, survivor_coords in mask_prompt_remaps:
         conn.execute(
             """
             UPDATE photo_masks
                SET prompt_x = ?, prompt_y = ?, prompt_w = ?, prompt_h = ?
              WHERE photo_id = ?
+               AND detector_model = ?
                AND prompt_x = ? AND prompt_y = ?
                AND prompt_w = ? AND prompt_h = ?
             """,
-            (*survivor_coords, photo_id, *loser_coords),
+            (*survivor_coords, photo_id, _CANONICAL_DETECTOR_MODEL, *loser_coords),
         )
 
     # Copy loser predictions onto their survivor detection. The identity UNIQUE

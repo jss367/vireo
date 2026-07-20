@@ -590,6 +590,121 @@ def test_legacy_merge_realigns_masks_to_existing_survivor_row_coords(tmp_path):
         assert migrated_db.find_stale_masks() == []
 
 
+def test_legacy_merge_prompt_remap_leaves_other_detector_masks_alone(tmp_path):
+    """The prompt remap must only touch MegaDetector-family masks.
+
+    ``find_stale_masks`` requires both ``detector_model`` and ``prompt_xywh``
+    equality with the photo's primary detection. If another model's mask
+    happens to share the loser MegaDetector box's exact coordinates, blindly
+    rewriting its prompt would leave the mask no longer matching any row for
+    its own detector, so a valid cache entry would be flagged stale and
+    deleted/re-extracted.
+    """
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+
+    canonical_coords = (0.10002, 0.2, 0.3, 0.4)
+    legacy_coords = (0.10001, 0.2, 0.3, 0.4)
+
+    with Database(db_path, initialize_schema=False) as db:
+        folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+        photo_id = db.add_photo(
+            folder_id,
+            "bird.jpg",
+            ".jpg",
+            1,
+            1.0,
+            timestamp="2026-01-01T00:00:00",
+            width=100,
+            height=100,
+        )
+        db.conn.executemany(
+            """
+            INSERT INTO detections (
+              id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                # MegaDetector alias pair to drive the merge — the canonical
+                # row at ``canonical_coords`` survives and the legacy row at
+                # ``legacy_coords`` becomes the loser.
+                (100, photo_id, "megadetector-v6",
+                 *canonical_coords, 0.8, "animal", "2026-04-26T00:00:00"),
+                (101, photo_id, "MegaDetector",
+                 *legacy_coords, 0.85, "animal", "2026-04-23T00:00:00"),
+                # An unrelated detector's box that coincidentally sits at
+                # the same coordinates as the loser MegaDetector row.
+                # Its higher confidence makes it the photo's primary
+                # detection, so find_stale_masks compares against it.
+                (200, photo_id, "grounding-dino",
+                 *legacy_coords, 0.95, "animal", "2026-04-24T00:00:00"),
+            ],
+        )
+        db.conn.executemany(
+            """
+            INSERT INTO photo_masks (
+              photo_id, variant, path, created_at, detector_model,
+              prompt_x, prompt_y, prompt_w, prompt_h
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                # Legacy MegaDetector mask — must be realigned to the
+                # canonical survivor's coordinates.
+                (photo_id, "sam2-small", "/masks/bird-mega.png", 1,
+                 "MegaDetector", *legacy_coords),
+                # Non-MegaDetector mask that already matches its own
+                # primary detection at ``legacy_coords``. The migration
+                # must not touch this row.
+                (photo_id, "sam2-large", "/masks/bird-dino.png", 1,
+                 "grounding-dino", *legacy_coords),
+            ],
+        )
+        db.conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA user_version = 7")
+
+    schema.ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        masks = {
+            row["variant"]: row
+            for row in conn.execute(
+                """
+                SELECT variant, detector_model,
+                       prompt_x, prompt_y, prompt_w, prompt_h
+                FROM photo_masks WHERE photo_id = ?
+                """,
+                (photo_id,),
+            )
+        }
+        mega = masks["sam2-small"]
+        assert mega["detector_model"] == "megadetector-v6"
+        assert (
+            mega["prompt_x"], mega["prompt_y"],
+            mega["prompt_w"], mega["prompt_h"],
+        ) == pytest.approx(canonical_coords)
+
+        dino = masks["sam2-large"]
+        assert dino["detector_model"] == "grounding-dino"
+        assert (
+            dino["prompt_x"], dino["prompt_y"],
+            dino["prompt_w"], dino["prompt_h"],
+        ) == pytest.approx(legacy_coords)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    with Database(db_path, initialize_schema=False) as migrated_db:
+        # The grounding-dino mask matches its own primary detection and
+        # must not be flagged stale by the alias merge. The MegaDetector
+        # mask remains stale because the primary detection is dino, which
+        # is a normal (unrelated) staleness — not caused by the merge.
+        stale = migrated_db.find_stale_masks()
+        stale_variants = {row["variant"] for row in stale}
+        assert "sam2-large" not in stale_variants
+
+
 def test_legacy_megadetector_zero_box_run_is_normalized_without_detections(tmp_path):
     """A legacy empty-scene run has no detection row to drive the main merge."""
     db_path = str(tmp_path / "vireo.db")
