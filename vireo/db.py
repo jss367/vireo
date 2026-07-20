@@ -17790,6 +17790,23 @@ class Database:
         def _falsey(value):
             return value is False or value == 0 or value == "0" or value == "false"
 
+        # Lazily read the workspace-effective detector_confidence floor —
+        # cfg.load() reads a JSON file, so only pay for it when a prediction
+        # rule actually references it. Cached across every _prediction_exists
+        # call in the same query so a rule tree with multiple prediction
+        # predicates doesn't reread the config per predicate.
+        _conf_cache = {}
+
+        def _min_detector_conf():
+            if "value" not in _conf_cache:
+                import config as cfg
+                _conf_cache["value"] = float(
+                    self.get_effective_config(cfg.load()).get(
+                        "detector_confidence", 0.2
+                    )
+                )
+            return _conf_cache["value"]
+
         def _boolean_predicate(has_sql, op, value, params=None):
             """Boolean-typed leaf builder used by every ``BOOLEAN_OPS`` field.
 
@@ -17905,11 +17922,27 @@ class Database:
                 "ON prv.prediction_id = pred.id AND prv.workspace_id = ?"
                 if review_join else ""
             )
-            params = ([self._ws_id()] if review_join else []) + list(predicate_params)
+            # Gate by the workspace-effective detector_confidence floor.
+            # /api/photos/query's response goes through
+            # get_detections_for_photos() (which applies this threshold),
+            # and the dashboard prediction counters + query_move_rule_matches
+            # apply it too. Without gating here, a below-threshold hidden
+            # detection whose accepted/high-confidence prediction is stale
+            # from a previous run would still satisfy prediction_status,
+            # prediction_confidence, classifier_model, and taxonomy_* rules,
+            # so the universal filter would include a photo the Browse view
+            # shows with no visible detection context.
+            conf_filter = " AND det.detector_confidence >= ?"
+            params = (
+                ([self._ws_id()] if review_join else [])
+                + [_min_detector_conf()]
+                + list(predicate_params)
+            )
             return (
                 "EXISTS (SELECT 1 FROM detections det "
                 "JOIN predictions pred ON pred.detection_id = det.id"
-                f"{review} WHERE det.photo_id = p.id AND {predicate}{fingerprint_pin})",
+                f"{review} WHERE det.photo_id = p.id{conf_filter} "
+                f"AND {predicate}{fingerprint_pin})",
                 params,
             )
 
@@ -18176,10 +18209,8 @@ class Database:
                 if op in ("equals", "is"):
                     return _prediction_exists(f"{col} = ?", [value])
                 if op == "is not":
-                    return (
-                        "NOT " + _prediction_exists(f"{col} = ?", [value])[0],
-                        [value],
-                    )
+                    exists, params = _prediction_exists(f"{col} = ?", [value])
+                    return "NOT " + exists, params
                 if op == "contains":
                     return _prediction_exists(f"{col} LIKE ?", [f"%{value}%"])
             if field == "prediction_confidence":
@@ -18189,10 +18220,10 @@ class Database:
                 if op in ("equals", "is"):
                     return _prediction_exists("pred.classifier_model = ?", [value])
                 if op == "is not":
-                    return (
-                        "NOT " + _prediction_exists("pred.classifier_model = ?", [value])[0],
-                        [value],
+                    exists, params = _prediction_exists(
+                        "pred.classifier_model = ?", [value],
                     )
+                    return "NOT " + exists, params
                 if op == "contains":
                     # Escape LIKE metacharacters so a value like ``%`` or ``_``
                     # stays literal — matches the other advertised text

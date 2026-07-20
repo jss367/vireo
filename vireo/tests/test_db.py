@@ -20645,6 +20645,62 @@ def test_universal_filter_prediction_rules_pin_current_fingerprint(tmp_path):
                    "value": 0.5}]) == 1
 
 
+def test_universal_filter_prediction_rules_gate_by_detector_confidence(tmp_path, monkeypatch):
+    """Universal-filter rules that consult ``predictions`` (prediction_status,
+    prediction_confidence, classifier_model, taxonomy_*) must apply the
+    workspace-effective ``detector_confidence`` floor so a prediction on a
+    below-threshold hidden detection can't satisfy a rule that Browse would
+    show no detection context for. Mirrors get_detections_for_photos() and
+    the dashboard prediction counters, which both filter by the threshold.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({"detector_confidence": 0.5})
+
+    db, fid = _filter_db(tmp_path)
+    # Photo A: above-threshold detection carrying a current prediction —
+    # should match every advertised prediction rule.
+    a = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+    det_a = db.save_detections(a, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Robin', 0.85, '2026-01-01')",
+        (det_a,),
+    )
+    # Photo B: ONLY a below-threshold detection with an otherwise-matching
+    # prediction — Browse hides the detection at threshold=0.5, so the
+    # prediction filters must hide the photo too.
+    b = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+    det_b = db.save_detections(b, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Robin', 0.85, '2026-01-01')",
+        (det_b,),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # prediction_confidence, classifier_model, and prediction_status all
+    # route through the shared _prediction_exists helper — one gate covers
+    # them all. Photo A qualifies; Photo B is hidden by the threshold.
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.8}]) == 1
+    assert count([{"field": "classifier_model", "op": "is",
+                   "value": "bioclip-2"}]) == 1
+    assert count([{"field": "prediction_status", "op": "is",
+                   "value": "pending"}]) == 1
+
+
 def test_universal_filter_classifier_model_contains_escapes_like_metacharacters(tmp_path):
     """``classifier_model contains`` must treat ``%`` / ``_`` in the value as
     literal characters, matching the other advertised text contains rules.
