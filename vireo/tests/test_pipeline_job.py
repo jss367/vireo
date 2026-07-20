@@ -8204,6 +8204,65 @@ def _stub_extract_masks_heavy_ops(monkeypatch):
     return state
 
 
+def test_extract_masks_stage_includes_bracketed_weak_detection(
+    tmp_path, monkeypatch,
+):
+    """A context-rescued weak box must enter the SAM mask worklist.
+
+    Classification already lowers its crop floor for a bracketed weak frame;
+    mask extraction must use the same contextual set or a first-time full
+    pipeline run later rejects that frame for having no subject mask.
+    """
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+
+    photo_ids = []
+    for index, confidence in enumerate((0.9, 0.18, 0.9)):
+        filename = f"bird{index}.jpg"
+        photo_id = db.add_photo(
+            folder_id, filename, ".jpg", 1000, 1_000_000.0 + index,
+            timestamp=f"2026-07-18T08:36:3{index}",
+        )
+        _drop_jpeg(folder_path, filename)
+        db.write_detection_batch(
+            photo_id,
+            "megadetector-v6",
+            [{
+                "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                "confidence": confidence,
+                "category": "animal",
+            }],
+        )
+        photo_ids.append(photo_id)
+
+    collection_id = db.add_collection(
+        "Weak mask bridge",
+        json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+    state = _stub_extract_masks_heavy_ops(monkeypatch)
+
+    params = PipelineParams(
+        collection_id=collection_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    run_pipeline_job(_make_job(), runner, db_path, ws_id, params)
+
+    assert state["proxy_calls"] == 3
+
+
 def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
     tmp_path, monkeypatch,
 ):
