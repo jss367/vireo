@@ -20243,6 +20243,51 @@ def test_universal_filter_species_any_match(tmp_path):
     assert count([{"field": "species", "op": "contains", "value": "wetlands"}]) == 0
 
 
+def test_universal_filter_species_matches_root_via_taxon_of_hierarchy_leaf(tmp_path):
+    """Species rules resolve through taxon identity — a photo tagged only
+    with a hierarchy leaf whose linked taxon has a same-taxon top-level root
+    still matches the root's name. Mirrors how
+    ``get_species_keywords_for_photos`` canonicalizes to the root spelling,
+    so the universal filter agrees with the species names shown in Browse,
+    Compare, and life-list views."""
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    pid = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    other = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    # A photo tagged only with a hierarchy leaf whose taxon links to the
+    # top-level root "Verdin". Leaf spelling ("Auriparus flaviceps") is
+    # distinct from root ("Verdin"), so a raw ``k.name`` predicate cannot
+    # rescue the match — canonicalization through ``taxon_id`` is required.
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Auriparus flaviceps", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.add_keyword("Verdin", is_species=True)  # auto-links taxon_id
+    db.conn.commit()
+    db.tag_photo(pid, leaf)
+
+    # Sanity check: the canonical species surfaced elsewhere is "Verdin".
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+
+    count = db.count_photos_for_rules
+    # `is`/`equals` on the root name matches the taxon-linked leaf.
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 1
+    assert count([{"field": "species", "op": "equals", "value": "Verdin"}]) == 1
+    # `contains` also follows the root-name canonicalization: the leaf name
+    # does not contain "erdi", but the root name does.
+    assert count([{"field": "species", "op": "contains", "value": "erdi"}]) == 1
+    # A non-matching species stays non-matching.
+    assert count([{"field": "species", "op": "is", "value": "Nope"}]) == 0
+    # `is not` / `not_contains` correctly exclude the taxon-matched photo
+    # and include the untagged one (2 photos - 1 match = 1).
+    assert count([{"field": "species", "op": "is not", "value": "Verdin"}]) == 1
+    assert count([{"field": "species", "op": "not_contains", "value": "erdi"}]) == 1
+    _ = other  # keep the second photo alive for the negative assertions.
+
+
 def test_universal_filter_workflow_fields(tmp_path):
     db, fid = _filter_db(tmp_path)
     edited = db.add_photo(folder_id=fid, filename='edited.jpg', extension='.jpg',

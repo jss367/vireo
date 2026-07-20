@@ -18202,11 +18202,20 @@ class Database:
             if field == "species":
                 # Confirmed species ride photo_keywords→keywords(→taxa);
                 # a photo with several species matches when ANY matches
-                # (multi-species model). Predicate mirrors
-                # get_species_keywords_for_photos. Both spellings of a
-                # taxon (root + hierarchy leaf) are keyword rows, so name
-                # matching covers either association.
-                def _species_exists(name_pred, name_params):
+                # (multi-species model). Match either the attached keyword's
+                # own name OR a same-taxon top-level root's name so a photo
+                # tagged only with a hierarchy leaf (``Desert Verdin``)
+                # still matches the canonical species (``Verdin``) that
+                # ``get_species_keywords_for_photos`` — and therefore Browse,
+                # life list, and species_representative lookups — report for
+                # it. Mirrors the eligibility pattern in
+                # ``get_species_representative_lists``.
+                def _species_exists(name_op):
+                    # ``name_op`` is a SQL fragment with ``{name_col}`` for
+                    # the column reference — e.g. ``{name_col} = ?`` or
+                    # ``{name_col} LIKE ?``.
+                    keyword_pred = name_op.format(name_col="k.name")
+                    root_pred = name_op.format(name_col="root.name")
                     return (
                         "EXISTS (SELECT 1 FROM photo_keywords pk "
                         "JOIN keywords k ON k.id = pk.keyword_id "
@@ -18214,19 +18223,24 @@ class Database:
                         "WHERE pk.photo_id = p.id "
                         "AND (k.is_species = 1 OR k.type = 'taxonomy') "
                         "AND (t.rank = 'species' OR t.rank IS NULL) "
-                        f"AND {name_pred})",
-                        list(name_params),
+                        f"AND ({keyword_pred} OR ("
+                        "k.taxon_id IS NOT NULL AND EXISTS ("
+                        "SELECT 1 FROM keywords root "
+                        "WHERE root.parent_id IS NULL "
+                        "AND (root.is_species = 1 OR root.type = 'taxonomy') "
+                        "AND root.taxon_id = k.taxon_id "
+                        f"AND {root_pred}))))"
                     )
                 if op == "contains":
-                    return _species_exists("k.name LIKE ?", [f"%{value}%"])
+                    like = f"%{value}%"
+                    return _species_exists("{name_col} LIKE ?"), [like, like]
                 if op == "not_contains":
-                    cond, params = _species_exists("k.name LIKE ?", [f"%{value}%"])
-                    return "NOT " + cond, params
+                    like = f"%{value}%"
+                    return "NOT " + _species_exists("{name_col} LIKE ?"), [like, like]
                 if op in ("equals", "is"):
-                    return _species_exists("k.name = ?", [value])
+                    return _species_exists("{name_col} = ?"), [value, value]
                 if op == "is not":
-                    cond, params = _species_exists("k.name = ?", [value])
-                    return "NOT " + cond, params
+                    return "NOT " + _species_exists("{name_col} = ?"), [value, value]
             raise ValueError(f"unsupported collection rule field/op: {field}/{op}")
 
         def _build_node(node):
