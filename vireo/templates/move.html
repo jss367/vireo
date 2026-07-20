@@ -999,6 +999,13 @@ function populateFolderSelects() {
       sel.appendChild(opt);
     });
   });
+
+  var requestedFolderId = new URLSearchParams(window.location.search).get('folder_id');
+  if (requestedFolderId) {
+    var quickSelect = document.getElementById('quickFolderSelect');
+    quickSelect.value = requestedFolderId;
+    if (quickSelect.value === requestedFolderId) onQuickFolderChange();
+  }
 }
 
 /* ---------- Quick Move ---------- */
