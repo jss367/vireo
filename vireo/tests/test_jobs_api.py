@@ -3957,6 +3957,58 @@ def test_after_process_move_rejects_destination_under_mount(app_and_db, tmp_path
         wait_for_job_via_client(client, mid)
 
 
+def test_after_process_move_rejects_template_landing_under_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """The destination-vs-mount guard only inspects the base destination, but
+    ``run_import_job`` joins the rendered ``folder_template`` underneath it.
+    A template whose static prefix (everything before the first strftime
+    directive) is already at or inside the target's NAS mount lands every
+    render on the NAS — the chained move then treats "<mount leaf>/…" as
+    an archive-relative subpath and re-copies it under remote_path. Reject
+    up front; a sibling-in-root template stays legal."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "NAS"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "NAS/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+    assert "NAS" in err
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    for mid in process_job["result"].get("move_job_ids", []):
+        wait_for_job_via_client(client, mid)
+
+
 def test_after_process_move_non_string_target_id(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()

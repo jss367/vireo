@@ -20767,6 +20767,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f"({mount}) — the import would land directly on the NAS and "
                 "the chained move would duplicate it under the remote path; "
                 "pick a local archive folder outside the mount")
+        # The rendered template can still push the actual import folder onto
+        # the mount even when ``destination`` itself is safely outside — e.g.
+        # destination=/Users/me/Photos + folder_template="NAS/%Y" with a
+        # mount at /Users/me/Photos/NAS. strftime tokens make the full render
+        # unknowable at request time, but every path component up to the
+        # first ``%``-bearing component is a fixed lower bound: every render
+        # lands at ``destination/<static-prefix>/…``. If that certain prefix
+        # is already at or under the mount, every render will be too — the
+        # import would land directly on the NAS the same way a mount-side
+        # destination would. Reject up front.
+        static_parts = []
+        for component in (folder_template or "").split("/"):
+            if "%" in component:
+                break
+            static_parts.append(component)
+        template_static = "/".join(static_parts).strip("/")
+        if template_static:
+            static_dest = os.path.normpath(
+                os.path.join(destination, template_static))
+            if _path_equal_or_descends(static_dest, mount):
+                return None, json_error(
+                    "folder_template would land the import inside the "
+                    f"target's NAS mount ({mount}) — every render of "
+                    f"\"{folder_template}\" starts with "
+                    f"\"{template_static}\", so the import folders would "
+                    "land directly on the NAS and the chained move would "
+                    "duplicate them under the remote path; pick a template "
+                    "that stays outside the mount")
         dest_is_root = _path_equal_or_descends(root, destination)
         # Root-level import with a folder template that resolves to "." lands
         # photos on the local_archive_root itself. The chained move
