@@ -18072,17 +18072,20 @@ class Database:
             if field == "has_subject":
                 subject_types = sorted(self.get_subject_types())
                 if not subject_types:
-                    if op in ("equals", "is") and _truthy(value):
-                        return "0", []
-                    return None, []
+                    # No subject types configured → no photo can have a
+                    # subject. Route through ``_boolean_predicate`` so a
+                    # malformed rule like
+                    # ``{"field":"has_subject","op":"contains","value":1}``
+                    # raises ValueError (→ 400) in this configuration too,
+                    # instead of silently dropping the rule via
+                    # ``return None, []``.
+                    return _boolean_predicate("0", op, value)
                 placeholders = ",".join("?" * len(subject_types))
                 type_clause = f"k.type IN ({placeholders})"
                 if "taxonomy" in subject_types:
                     type_clause = f"({type_clause} OR k.is_species = 1)"
-                if op in ("equals", "is") and _falsey(value):
-                    return _keyword_not_exists(type_clause, subject_types)
-                if op in ("equals", "is") and _truthy(value):
-                    return _keyword_exists(type_clause, subject_types)
+                exists, params = _keyword_exists(type_clause, subject_types)
+                return _boolean_predicate(exists, op, value, params)
             if field == "wildlife_excluded":
                 excluded = "p.wildlife_excluded = 1"
                 if op in ("equals", "is"):

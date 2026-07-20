@@ -1402,6 +1402,60 @@ def test_has_subject_rule_ignores_legacy_is_species_when_taxonomy_excluded(tmp_p
     )
 
 
+def test_has_subject_rule_rejects_invalid_op_when_subject_types_empty(tmp_path, monkeypatch):
+    """When subject_types is empty, a malformed has_subject rule (e.g.
+    ``op='contains'``) must still surface as a ValueError so the API
+    layer returns 400 — not silently drop the rule with ``None, []``.
+    Mirrors the operator guard the other advertised boolean fields get
+    via ``_boolean_predicate``.
+    """
+    import pytest
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": []})
+
+    with pytest.raises(ValueError):
+        db._build_query_from_rules(
+            [{"field": "has_subject", "op": "contains", "value": 1}]
+        )
+
+
+def test_has_subject_rule_empty_subject_types_value_zero_matches_all(tmp_path, monkeypatch):
+    """When subject_types is empty, ``has_subject is false`` should match
+    every photo (nothing counts as identifying, so nothing has a subject).
+    Prior implementation returned ``None, []`` here — semantically the
+    same for a lone rule, but the new fail-closed guard routes through
+    ``_boolean_predicate`` so we assert the affirmative-matches-all
+    branch too.
+    """
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": []})
+
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                 file_size=200, file_mtime=2.0)
+
+    cid = db.add_collection(
+        "Missing Subject (empty types)",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
+    )
+    photos = db.get_collection_photos(cid, per_page=999)
+    assert len(photos) == 2
+
+
 def test_add_keyword_is_species(tmp_path):
     """add_keyword with is_species=True marks the keyword."""
     from db import Database
