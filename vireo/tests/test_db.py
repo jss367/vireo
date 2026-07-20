@@ -20369,6 +20369,63 @@ def test_universal_filter_workflow_fields(tmp_path):
     assert count([{"field": "duplicate_group", "op": "is", "value": "abc123"}]) == 1
 
 
+def test_universal_filter_prediction_rules_pin_current_fingerprint(tmp_path):
+    """Universal-filter rules that consult ``predictions`` (prediction_status,
+    prediction_confidence, classifier_model, taxonomy_*) must only match the
+    most recent ``labels_fingerprint`` per (detection, classifier_model) —
+    matching how the dashboard and review UI decide which prediction row is
+    "current". Without pinning, an older accepted row keeps the photo in
+    ``prediction_status is accepted`` after a rerun classifier writes a new
+    fingerprint with a different (still-pending) verdict.
+    """
+    db, fid = _filter_db(tmp_path)
+    ws_id = db._ws_id()
+    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    det = db.save_detections(photo, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    # Stale-fingerprint prediction accepted under an old label set.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Robin', 0.9, '2026-01-01')",
+        (det,),
+    )
+    stale_pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=? AND labels_fingerprint='fp-old'",
+        (det,),
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status, reviewed_at) "
+        "VALUES (?, ?, 'accepted', '2026-01-02')",
+        (stale_pred, ws_id),
+    )
+    # Current-fingerprint prediction — still pending.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Finch', 0.55, '2026-04-24')",
+        (det,),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # Accept lives only on the stale fingerprint → filter must exclude it.
+    assert count([{"field": "prediction_status", "op": "is",
+                   "value": "accepted"}]) == 0
+    # Current fingerprint is pending → visible.
+    assert count([{"field": "prediction_status", "op": "is",
+                   "value": "pending"}]) == 1
+    # Confidence + classifier_model + taxonomy filters read pred.* so all
+    # ride the same pin: the stale 0.9 must not satisfy a >=0.8 rule.
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.8}]) == 0
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.5}]) == 1
+
+
 def test_universal_filter_validation_errors(tmp_path):
     import pytest
     db, _ = _filter_db(tmp_path)

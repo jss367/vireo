@@ -17850,6 +17850,23 @@ class Database:
             )
 
         def _prediction_exists(predicate, predicate_params, review_join=False):
+            # Pin to the most recent labels_fingerprint per
+            # (detection_id, classifier_model), matching how the dashboard
+            # (get_top_prediction_for_photo, prediction_status queries)
+            # decides which prediction row is "current". Without this pin,
+            # a rerun classifier with a new fingerprint leaves an older
+            # accepted row around and universal-filter rules
+            # (prediction_status is accepted, prediction_confidence >= X,
+            # classifier_model is Y, taxonomy_* is Z) still match the
+            # stale prediction — disagreeing with the review UI that only
+            # shows the current fingerprint.
+            fingerprint_pin = (
+                " AND pred.labels_fingerprint = ("
+                "SELECT pr2.labels_fingerprint FROM predictions pr2 "
+                "WHERE pr2.detection_id = pred.detection_id "
+                "AND pr2.classifier_model = pred.classifier_model "
+                "ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1)"
+            )
             review = (
                 " LEFT JOIN prediction_review prv "
                 "ON prv.prediction_id = pred.id AND prv.workspace_id = ?"
@@ -17859,7 +17876,7 @@ class Database:
             return (
                 "EXISTS (SELECT 1 FROM detections det "
                 "JOIN predictions pred ON pred.detection_id = det.id"
-                f"{review} WHERE det.photo_id = p.id AND {predicate})",
+                f"{review} WHERE det.photo_id = p.id AND {predicate}{fingerprint_pin})",
                 params,
             )
 
