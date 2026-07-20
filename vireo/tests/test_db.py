@@ -1409,8 +1409,8 @@ def test_has_subject_rule_rejects_invalid_op_when_subject_types_empty(tmp_path, 
     Mirrors the operator guard the other advertised boolean fields get
     via ``_boolean_predicate``.
     """
-    import pytest
     import config as cfg
+    import pytest
     monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
     from db import Database
     db = Database(str(tmp_path / "test.db"))
