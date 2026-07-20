@@ -3802,6 +3802,13 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 grouping_window = user_cfg.get("grouping_window_seconds", 5)
                 similarity_threshold = user_cfg.get("similarity_threshold", 0.85)
                 detector_confidence = user_cfg.get("detector_confidence", 0.2)
+                pipeline_cfg = user_cfg.get("pipeline", {})
+                weak_rescue_enabled = pipeline_cfg.get(
+                    "weak_detection_rescue_enabled", True,
+                )
+                weak_detection_confidence = pipeline_cfg.get(
+                    "weak_detection_confidence", 0.12,
+                )
 
                 tax = loaded_models["tax"]
                 # Fingerprint for the FIRST model is preloaded by model_loader_stage.
@@ -3816,6 +3823,43 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 folders = detect_state["folders"]
                 cached_detections = detect_state["detections"]
                 total = len(photos)
+
+                # A low-confidence box is not globally promoted. Only select
+                # weak runs bracketed by ordinary detections in one tightly
+                # timed sequence. This gives the classifier a chance to
+                # validate threshold-cliff frames without making every weak
+                # MegaDetector result eligible throughout the library.
+                contextual_weak_ids = set()
+                if (
+                    weak_rescue_enabled
+                    and weak_detection_confidence < detector_confidence
+                    and photos
+                ):
+                    from weak_detections import contextual_weak_runs
+
+                    raw_mdv6_detections = thread_db.get_detections_for_photos(
+                        [p["id"] for p in photos],
+                        min_conf=weak_detection_confidence,
+                        detector_model="megadetector-v6",
+                    )
+                    weak_runs = contextual_weak_runs(
+                        photos,
+                        raw_mdv6_detections,
+                        detector_confidence=detector_confidence,
+                        weak_confidence=weak_detection_confidence,
+                        max_gap=pipeline_cfg.get("burst_time_gap", 3.0),
+                    )
+                    contextual_weak_ids = {
+                        photo_id
+                        for run in weak_runs
+                        for photo_id in run["photo_ids"]
+                    }
+                    if contextual_weak_ids:
+                        log.info(
+                            "Classification: rescuing %d weak-detection "
+                            "photo(s) across %d bracketed sequence(s)",
+                            len(contextual_weak_ids), len(weak_runs),
+                        )
 
                 total_predictions_stored = 0
                 total_full_image_fallbacks = 0
@@ -4124,6 +4168,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             # classifiers still get one attempt and future reruns
                             # can hit classifier_runs for that attempt.
                             full_image_fallback = False
+                            is_contextual_weak = (
+                                photo["id"] in contextual_weak_ids
+                            )
+                            detection_floor = (
+                                weak_detection_confidence
+                                if is_contextual_weak
+                                else detector_confidence
+                            )
                             if photo["id"] in cached_detections:
                                 # cached_detections from _detect_batch can include
                                 # full-image rows when an earlier pass synthesized
@@ -4139,7 +4191,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     and d.get(
                                         "confidence",
                                         d.get("detector_confidence", 0),
-                                    ) >= detector_confidence
+                                    ) >= detection_floor
                                 ]
                             else:
                                 photo_dets = [
@@ -4153,11 +4205,38 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         "category": d["category"],
                                     }
                                     for d in thread_db.get_detections(
-                                        photo["id"], min_conf=detector_confidence,
+                                        photo["id"], min_conf=detection_floor,
                                     )
                                     if d["detector_model"] != "full-image"
                                     and d["category"] == "animal"
                                 ]
+                            if is_contextual_weak and not photo_dets:
+                                # detect_state intentionally caches only rows
+                                # passing the ordinary workspace threshold on
+                                # reuse runs. Recover the raw weak row from the
+                                # database for this explicitly selected bridge.
+                                photo_dets = [
+                                    {
+                                        "id": d["id"],
+                                        "box_x": d["box_x"],
+                                        "box_y": d["box_y"],
+                                        "box_w": d["box_w"],
+                                        "box_h": d["box_h"],
+                                        "confidence": d["detector_confidence"],
+                                        "category": d["category"],
+                                    }
+                                    for d in thread_db.get_detections(
+                                        photo["id"],
+                                        min_conf=weak_detection_confidence,
+                                        detector_model="megadetector-v6",
+                                    )
+                                    if d["category"] == "animal"
+                                ]
+                            if is_contextual_weak and photo_dets:
+                                # One best weak crop is enough to validate the
+                                # bridge. Classifying every low-confidence box
+                                # would multiply work and false-positive risk.
+                                photo_dets = photo_dets[:1]
                             detections_to_classify = photo_dets
                             if not detections_to_classify:
                                 # Distinguish "no eligible detection at the
@@ -4500,6 +4579,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         parts.append(f"{skipped_existing} cached")
                     if full_image_fallbacks:
                         parts.append(f"{full_image_fallbacks} full-image fallback")
+                    if contextual_weak_ids:
+                        parts.append(
+                            f"{len(contextual_weak_ids)} weak detections rescued"
+                        )
                     if failed:
                         parts.append(f"{failed} failed")
                     runner.update_step(
@@ -4545,6 +4628,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     "failed": total_failed,
                     "already_classified": total_skipped_existing,
                     "full_image_fallbacks": total_full_image_fallbacks,
+                    "weak_detection_rescues": len(contextual_weak_ids),
                     "model_count": len(resolved_specs_local),
                     "models_succeeded": models_succeeded,
                     "models_skipped": len(skipped_model_names),

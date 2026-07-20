@@ -204,6 +204,123 @@ def test_load_photo_features_subject_absent_from_current_detections(tmp_path):
     )
 
 
+def test_load_photo_features_rescues_bracketed_weak_grackle_run(
+    tmp_path, monkeypatch,
+):
+    """Strong matching-species anchors turn only the intervening weak boxes
+    into the explicit uncertain state, preserving one encounter without
+    lowering the workspace detector threshold.
+    """
+    import config as cfg
+    from db import Database
+    from pipeline import load_photo_features, run_grouping
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    base = datetime(2026, 7, 18, 8, 36, 35, 990000)
+    confidences = [0.229, 0.185, 0.156, 0.149, 0.172, 0.193, 0.186, 0.798]
+    photo_ids = []
+    detection_ids = []
+    for index, confidence in enumerate(confidences):
+        # The final anchor is 2.12 seconds after the preceding weak frame,
+        # matching DSC_4384 -> DSC_4385.
+        offset = index * 0.05 if index < 7 else 2.42
+        photo_id = db.add_photo(
+            folder_id, f"DSC_{4378 + index}.NEF", ".nef", 100, 1.0,
+            timestamp=(base + timedelta(seconds=offset)).isoformat(),
+            width=8280, height=5520,
+        )
+        detection_id = db.write_detection_batch(
+            photo_id,
+            "megadetector-v6",
+            [{
+                "box": {"x": 0.05, "y": 0.0, "w": 0.87, "h": 0.96},
+                "confidence": confidence,
+                "category": "animal",
+            }],
+        )[0]
+        photo_ids.append(photo_id)
+        detection_ids.append(detection_id)
+
+    db.add_prediction(
+        detection_ids[0], "Great-tailed Grackle", 0.7846, "inat21",
+        category="match",
+    )
+    db.add_prediction(
+        detection_ids[-1], "Great-tailed Grackle", 0.9026, "inat21",
+        category="match",
+    )
+
+    photos = load_photo_features(db)
+    by_id = {photo["id"]: photo for photo in photos}
+    for photo_id in photo_ids[1:-1]:
+        photo = by_id[photo_id]
+        assert photo["subject_uncertain"] is True
+        assert photo["subject_present"] is False
+        assert photo["subject_absent"] is False
+        assert 0.12 <= photo["detection_conf"] < 0.20
+        assert photo["weak_detection_context"]["species"] == (
+            "Great-tailed Grackle"
+        )
+
+    encounters = run_grouping(
+        photos,
+        config=cfg.DEFAULTS["pipeline"],
+        emit_trace=True,
+    )
+    assert len(encounters) == 1
+    assert encounters[0]["photo_count"] == 8
+    assert encounters[0]["species"] == ("Great-tailed Grackle", 0.8436)
+    assert any(
+        row["decision"] == "kept_weak_detection"
+        for row in encounters[0]["trace"]
+    )
+
+
+def test_load_photo_features_does_not_rescue_conflicting_species_anchors(
+    tmp_path, monkeypatch,
+):
+    """A weak run between different species keeps the ordinary absent state."""
+    import config as cfg
+    from db import Database
+    from pipeline import load_photo_features
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+    ids = []
+    detection_ids = []
+    for index, confidence in enumerate((0.9, 0.18, 0.9)):
+        photo_id = db.add_photo(
+            folder_id, f"photo{index}.jpg", ".jpg", 100, 1.0,
+            timestamp=f"2026-07-18T08:36:3{index}",
+        )
+        detection_id = db.write_detection_batch(
+            photo_id,
+            "megadetector-v6",
+            [{
+                "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                "confidence": confidence,
+                "category": "animal",
+            }],
+        )[0]
+        ids.append(photo_id)
+        detection_ids.append(detection_id)
+    db.add_prediction(detection_ids[0], "Grackle", 0.9, "inat21")
+    db.add_prediction(detection_ids[2], "Cowbird", 0.9, "inat21")
+
+    middle = {p["id"]: p for p in load_photo_features(db)}[ids[1]]
+    assert middle["subject_uncertain"] is False
+    assert middle["subject_absent"] is True
+    assert middle["detection_conf"] is None
+    assert middle["species_top5"] == []
+
+
 def test_load_photo_features_subject_absent_false_when_detector_never_ran(tmp_path):
     """A photo with no detector_runs row hasn't had the detector run yet
     (e.g. first-time regroup with skip_classify=True, or newly imported

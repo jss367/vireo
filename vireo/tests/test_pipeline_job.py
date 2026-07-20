@@ -3404,6 +3404,81 @@ def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
     )
 
 
+def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold(
+    tmp_path, monkeypatch,
+):
+    """A weak box between two strong, tightly timed frames gets one targeted
+    classifier attempt even though the workspace threshold remains 0.20.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+
+    photo_ids = []
+    for index, confidence in enumerate((0.9, 0.18, 0.9)):
+        filename = f"bird{index}.jpg"
+        photo_id = db.add_photo(
+            folder_id, filename, ".jpg", 12345, 1_000_000.0 + index,
+            timestamp=f"2026-07-18T08:36:3{index}",
+        )
+        _drop_jpeg(folder_path, filename)
+        db.write_detection_batch(
+            photo_id,
+            "megadetector-v6",
+            [{
+                "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                "confidence": confidence,
+                "category": "animal",
+            }],
+        )
+        photo_ids.append(photo_id)
+
+    collection_id = db.add_collection(
+        "Weak bridge",
+        json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    captured = []
+
+    def capturing_prepare_image(photo, folders, detection, vireo_dir=None):
+        captured.append((photo["filename"], detection["confidence"]))
+        return None, "", ""
+
+    monkeypatch.setattr(classify_job, "_prepare_image", capturing_prepare_image)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=collection_id,
+        model_ids=[model_id],
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    with contextlib.suppress(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert ("bird1.jpg", 0.18) in captured
+    assert [name for name, _ in captured].count("bird1.jpg") == 1
+
+
 def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
     """On reclassify, prior-run detection rows must be deleted after model 1
     re-runs MegaDetector so that subsequent non-reclassify runs don't reuse
