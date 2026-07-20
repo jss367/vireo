@@ -26853,7 +26853,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         candidate_photo_ids = None
         if scope_rules is not None:
             try:
-                candidate_photo_ids = db.query_photo_ids(scope_rules)
+                candidate_photo_ids = db.query_photo_ids(
+                    scope_rules,
+                    collection_id=collection_id,
+                    folder_id=folder_id,
+                )
             except ValueError as e:
                 return json_error(str(e), 400)
         elif collection_id is not None:

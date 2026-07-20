@@ -2896,10 +2896,17 @@ async function bootstrapBrowse() {
         if (timelineMode) loadCalendarData();
         if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
         resetAndLoad({ preserveAnchor: true });
+        // Summary panel (photo count, classified, top species) is a separate
+        // endpoint from the grid; without this the filter changes the grid
+        // but leaves the summary showing pre-filter numbers.
+        loadSummary();
       },
     }).then(function() {
       VireoFilter.setResultTotal(totalPhotos);
-      if (VireoFilter.hasFilters()) resetAndLoad();
+      if (VireoFilter.hasFilters()) {
+        resetAndLoad();
+        loadSummary();
+      }
     }).catch(function() {});
   } catch(e) {
     document.getElementById('loadingState').textContent = 'Error loading.';

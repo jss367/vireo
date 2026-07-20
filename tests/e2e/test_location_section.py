@@ -163,10 +163,14 @@ def test_browse_coordinate_filter_deep_link(live_server, page):
         )
 
     page.goto(f"{live_server['url']}/browse?location_status=none")
-    # The legacy deep-link param compiles to a "Has GPS is No" filter rule.
+    # ?location_status=none historically means "no EXIF coords AND no assigned
+    # map location", so the legacy deep-link compiles to two rules — Has GPS is
+    # No AND Has named location is No — not Has GPS alone, which would still
+    # include photos with an assigned location.
     page.wait_for_function(
         "document.querySelector('.vf-chips') && "
-        "document.querySelector('.vf-chips').textContent.includes('Has GPS is No')",
+        "document.querySelector('.vf-chips').textContent.includes('Has GPS is No') && "
+        "document.querySelector('.vf-chips').textContent.includes('Has named location is No')",
         timeout=15000,
     )
     page.locator(".grid-card").first.wait_for(state="visible")
