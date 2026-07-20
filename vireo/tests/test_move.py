@@ -735,6 +735,43 @@ def test_plan_folder_date_moves_rejects_destination_occupied_by_file(tmp_path):
 
 @pytest.mark.skipif(
     sys.platform == "win32",
+    reason="Broken symlinks are unusual on Windows and require admin.",
+)
+def test_plan_folder_date_moves_rejects_dangling_symlink_destination(tmp_path):
+    """A rendered date destination that is a dangling symlink must be
+    rejected in preflight.
+
+    ``os.path.exists`` follows the link and reports False for a dangling
+    symlink, so the older check accepted it and the background job later
+    crashed with ``FileExistsError`` inside ``move_photos``' ``makedirs``.
+    Use ``os.path.lexists`` so preflight fails cleanly instead.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    # Point the symlink at a would-be sibling *inside* the destination
+    # root so the traversal safety check doesn't fire first — the
+    # scenario we're guarding against is a preflight-accepted dangling
+    # link that then trips makedirs's FileExistsError in the worker.
+    os.symlink(str(archive / "target"), str(archive / "2026-07-12"))
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(archive), "%Y-%m-%d")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
     reason="Windows doesn't allow '\\' in folder names, so folding '\\' to '/' "
     "in the descendants query is the correct Windows behavior; the leak only "
     "affects POSIX where a literal backslash IS a legal filename character.",
@@ -1077,14 +1114,15 @@ def test_relocate_stem_files_cleans_up_partial_copy_on_failure(
 
     old_dir = tmp_path / "old"
     old_dir.mkdir()
-    (old_dir / "img.jpg").write_bytes(b"payload")
+    (old_dir / "img.jpg").write_bytes(b"payload-full-content")
     new_dir = tmp_path / "new"
 
-    real_copy2 = shutil.copy2
-
     def failing_copy2(src, dst, *a, **kw):
-        # Create a partial file at the destination and then blow up.
-        real_copy2(src, dst, *a, **kw)
+        # Simulate a real full-disk / flaky-mount failure: only part of
+        # the source bytes make it to the destination before the error.
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "wb") as fh:
+            fh.write(b"partial")
         raise OSError("no space left on device")
 
     monkeypatch.setattr("export.shutil.copy2", failing_copy2)
@@ -1098,7 +1136,51 @@ def test_relocate_stem_files_cleans_up_partial_copy_on_failure(
     # _iter_developed_outputs doesn't pick it up.
     assert not (new_dir / "img.jpg").exists()
     # The source render stayed in place.
-    assert (old_dir / "img.jpg").read_bytes() == b"payload"
+    assert (old_dir / "img.jpg").read_bytes() == b"payload-full-content"
+
+
+def test_relocate_stem_files_keeps_complete_copy_when_unlink_fails(
+    tmp_path, monkeypatch,
+):
+    """Regression: on cross-filesystem moves, ``shutil.move`` copies the
+    file and then unlinks the source. If only the unlink fails (locked
+    source, read-only source dir), the destination is already complete
+    and must be preserved — otherwise exports miss the render even
+    though we did write it successfully.
+    """
+    import shutil
+
+    from export import _relocate_stem_files
+
+    old_dir = tmp_path / "old"
+    old_dir.mkdir()
+    (old_dir / "img.jpg").write_bytes(b"payload")
+    new_dir = tmp_path / "new"
+
+    real_move = shutil.move
+
+    def move_then_fail_unlink(src, dst, *a, **kw):
+        # shutil.move's cross-device path does copy2(src, dst) and then
+        # os.unlink(src). Simulate: copy succeeds, unlink fails.
+        result = shutil.copy2(src, dst)
+        raise OSError("permission denied removing source")
+        return result  # noqa: unreachable — mirrors real shutil.move return
+
+    monkeypatch.setattr("export.shutil.move", move_then_fail_unlink)
+
+    listing_cache = {}
+    relocated = _relocate_stem_files(
+        str(old_dir), str(new_dir), "img", listing_cache=listing_cache,
+        preserve_source=False,
+    )
+    assert relocated == 1
+    # The complete destination copy stays in place so
+    # _iter_developed_outputs still finds the render at the new key.
+    assert (new_dir / "img.jpg").read_bytes() == b"payload"
+    # The listing cache records the successful destination so later
+    # same-stem calls can reuse it.
+    assert any(v == str(new_dir / "img.jpg")
+               for v in listing_cache.values())
 
 
 def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):

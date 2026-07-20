@@ -714,14 +714,33 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None,
             # to exports and full-resolution instead of the intact source
             # render (or a clean fallback to the RAW). Delete the partial
             # so lookup falls back correctly.
+            #
+            # But shutil.move's cross-device path also raises when only the
+            # trailing source unlink failed (locked source, read-only source
+            # dir) — in that case ``dst_file`` is a complete, valid copy we
+            # must keep, or exports miss the render even though we did write
+            # it successfully. Compare sizes to distinguish a complete copy
+            # from a truncated write before cleaning up.
             if os.path.lexists(dst_file):
+                keep_dst = False
                 try:
-                    os.remove(dst_file)
-                except OSError as cleanup_exc:
-                    log.warning(
-                        "Failed to remove partial developed file %s: %s",
-                        dst_file, cleanup_exc,
-                    )
+                    if os.path.isfile(src_file) and os.path.getsize(src_file) \
+                            == os.path.getsize(dst_file):
+                        keep_dst = True
+                except OSError:
+                    keep_dst = False
+                if keep_dst:
+                    if listing_cache is not None:
+                        listing_cache.setdefault(relocation_key, dst_file)
+                    relocated += 1
+                else:
+                    try:
+                        os.remove(dst_file)
+                    except OSError as cleanup_exc:
+                        log.warning(
+                            "Failed to remove partial developed file %s: %s",
+                            dst_file, cleanup_exc,
+                        )
     if relocated:
         try:
             if not os.listdir(old_subdir):

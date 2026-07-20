@@ -1690,7 +1690,12 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
             raise ValueError(
                 f"folder template produced an unsafe path: {relative!r}"
             )
-        if os.path.exists(candidate) and not os.path.isdir(candidate):
+        # ``lexists`` (not ``exists``) is needed so a dangling symlink still
+        # trips this guard: ``exists`` follows the link and reports False,
+        # but ``os.makedirs(exist_ok=True)`` in ``move_photos`` would then
+        # raise ``FileExistsError`` for that same lexists-true entry and
+        # crash the background job instead of surfacing a normal collision.
+        if os.path.lexists(candidate) and not os.path.isdir(candidate):
             raise ValueError(
                 f"date destination already exists and is not a directory: "
                 f"{candidate}"
