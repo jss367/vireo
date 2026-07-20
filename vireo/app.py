@@ -32,6 +32,7 @@ from urllib.parse import quote, urlsplit
 
 import places
 from db import (
+    _LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE,
     KEYWORD_TYPES,
     Database,
     IncompatibleDatabaseError,
@@ -9950,9 +9951,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # `get_photo_life_list_species` — both admit linked higher-rank
         # taxonomy identifications so a photo tagged only with a genus /
         # family / class entry can save the life-list representative for
-        # the entry it actually renders under.
+        # the entry it actually renders under. Ancestor suppression is
+        # applied via the shared clause so the write is denied for an
+        # ancestor keyword (``Aves``) when the same photo carries a
+        # descendant identification (``American Robin``); saving
+        # ``Aves`` there would render as ``is_current_photo`` false on
+        # the next read (see :meth:`get_species_representative_lists`)
+        # and leave a curation row nothing else considers eligible.
         row = db.conn.execute(
-            """SELECT 1
+            f"""SELECT 1
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
@@ -9977,6 +9984,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                          )
                      )
                  )
+                 {_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                LIMIT 1""",
             (ws, photo_id, species, species),
         ).fetchone()

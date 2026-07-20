@@ -262,6 +262,57 @@ def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
         yield values[idx:idx + size]
 
 
+# Life-list ancestor suppression. Broadening the identification-keyword
+# rank guard admits linked genus/family/class rows, but Lightroom catalog
+# imports copy every ``includeParents`` ancestor onto the photo as a flat
+# keyword (see ``vireo/catalog.py``) and the classifier already treats
+# ancestor tags as "broader labels for the same taxon" rather than
+# separate identifications (see ``_can_auto_accept_detection_prediction``
+# in ``vireo/classify_job.py``). Without a hierarchy filter, a normal
+# species-tagged robin would also inflate ``Turdus`` / ``Turdidae`` /
+# ``Aves`` Life List buckets on those catalogs.
+#
+# Suppress a linked higher-rank taxonomy keyword on a photo whenever the
+# same photo carries another linked taxonomy keyword whose taxon is a
+# strict descendant of it. Species-rank keywords are never suppressed;
+# unlinked keywords (``taxon_id IS NULL``) can't be checked for ancestry
+# and pass through unchanged. The clause references outer aliases
+# ``pk`` (photo_keywords) and ``k`` (keywords); callers don't need to
+# join ``taxa`` themselves because the rank/ancestry checks resolve
+# ``k.taxon_id`` via inner subqueries.
+_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE = """
+    AND NOT (
+        k.taxon_id IS NOT NULL
+        AND EXISTS (
+            SELECT 1 FROM taxa t_sup_rank
+            WHERE t_sup_rank.id = k.taxon_id
+              AND t_sup_rank.rank IS NOT NULL
+              AND t_sup_rank.rank != 'species'
+        )
+        AND EXISTS (
+            SELECT 1 FROM photo_keywords pk_sup
+            JOIN keywords k_sup ON k_sup.id = pk_sup.keyword_id
+             AND (k_sup.is_species = 1 OR k_sup.type = 'taxonomy')
+             AND k_sup.taxon_id IS NOT NULL
+            WHERE pk_sup.photo_id = pk.photo_id
+              AND k_sup.id != k.id
+              AND k.taxon_id IN (
+                  WITH RECURSIVE anc(id) AS (
+                      SELECT parent_id FROM taxa
+                       WHERE id = k_sup.taxon_id
+                         AND parent_id IS NOT NULL
+                      UNION ALL
+                      SELECT t_anc.parent_id
+                      FROM taxa t_anc JOIN anc a ON t_anc.id = a.id
+                       WHERE t_anc.parent_id IS NOT NULL
+                  )
+                  SELECT id FROM anc
+              )
+        )
+    )
+"""
+
+
 # Canonical set of keyword type values stored in keywords.type.
 # - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
 # - individual: a named person, pet, or otherwise tracked individual
@@ -12857,6 +12908,15 @@ class Database:
         Explorer continues to count only species-rank taxa through
         :meth:`get_life_list_taxon_ids`.
 
+        A linked higher-rank taxonomy keyword is suppressed when the same
+        photo carries another linked taxonomy keyword whose taxon is a
+        strict descendant of it, so a species-tagged robin also carrying
+        Lightroom-imported ``includeParents`` ancestors (``Turdus`` /
+        ``Turdidae`` / ``Aves``) or classifier-added broader labels does
+        not inflate every ancestor rank's Life List bucket. See
+        :data:`_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE` for the shared
+        SQL fragment.
+
         Unlike :meth:`get_highlights_candidates`, photos without a
         ``quality_score`` are included — a species the user confirmed but
         never ran through the pipeline still belongs on the life list. The
@@ -12918,6 +12978,7 @@ class Database:
                LEFT JOIN taxa t ON t.id = k.taxon_id
                WHERE COALESCE(p.flag, 'none') != 'rejected'
                  {species_filter}
+                 {_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                ORDER BY k.name, p.timestamp""",
             params,
         ).fetchall()
@@ -13122,6 +13183,13 @@ class Database:
         can complete ``POST /api/photo-preferences`` for the entry it
         actually appears under on the Life List.
 
+        Ancestor suppression mirrors :meth:`get_life_list_candidates`: a
+        linked higher-rank taxonomy keyword on the photo is hidden when
+        the photo also carries another linked taxonomy keyword whose
+        taxon is a strict descendant of it, so the shared Set
+        Representative row surfaces only under the specific
+        identification the photo actually resolves to.
+
         Linked-taxon hierarchy leaves are canonicalized to the same-taxon
         root keyword's stored spelling — mirroring
         :meth:`get_species_keywords_for_photos` — so ``api_photo_detail`` can
@@ -13150,7 +13218,7 @@ class Database:
         """
         ws = self._ws_id()
         rows = self.conn.execute(
-            """SELECT k.name, k.parent_id, k.taxon_id
+            f"""SELECT k.name, k.parent_id, k.taxon_id
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
@@ -13161,6 +13229,7 @@ class Database:
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
                WHERE pk.photo_id = ?
+                 {_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                ORDER BY CASE WHEN k.parent_id IS NULL THEN 1 ELSE 0 END,
                         k.id""",
             (ws, photo_id),
@@ -13216,6 +13285,12 @@ class Database:
         taxon-linked root fallback so a hierarchy leaf surviving repair
         (``verdin`` vs canonical root ``Verdin``) still contributes its
         location keywords to the requested bucket.
+
+        Ancestor suppression also mirrors :meth:`get_life_list_candidates`:
+        a linked higher-rank taxonomy keyword's locations are dropped
+        when the same photo carries another linked taxonomy keyword whose
+        taxon is a strict descendant of it, so ``Aves`` doesn't inherit
+        every location where a robin was tagged.
         """
         ws = self._ws_id()
         species_filter = ""
@@ -13252,6 +13327,8 @@ class Database:
                JOIN photo_keywords plk ON plk.photo_id = p.id
                JOIN keywords lk ON lk.id = plk.keyword_id
                 AND lk.type = 'location'
+               WHERE 1=1
+                 {_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                ORDER BY k.name, lk.name""",
             tuple(params),
         ).fetchall()
@@ -13312,8 +13389,13 @@ class Database:
             # eligible-only reader that ``GET /api/photos/<id>`` uses to
             # decide ``is_current_photo``, so the shared Set Representative
             # affordance would keep offering the write even after it had
-            # already succeeded.
-            eligibility_filter = """
+            # already succeeded. The shared ancestor-suppression clause is
+            # appended so an ancestor keyword (``Aves``) does not survive
+            # eligibility when the same photo also carries a descendant
+            # identification (``American Robin``) — otherwise the class
+            # bucket the Life List query already hides would still show a
+            # current representative here.
+            eligibility_filter = f"""
                  AND COALESCE(p.flag, 'none') != 'rejected'
                  AND f.status IN ('ok', 'partial')
                  AND EXISTS (
@@ -13336,6 +13418,7 @@ class Database:
                                )
                            )
                        )
+                       {_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                  )"""
         species_filter = ""
         params = [ws]
