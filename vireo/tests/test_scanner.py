@@ -2354,16 +2354,20 @@ def test_incremental_rescan_reextracts_when_raw_dims_suspect(tmp_path, monkeypat
 def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch):
     """Incremental scan does NOT re-process a non-RAW row with suspicious
     small dimensions. The dims heuristic is RAW-specific so JPEGs, PNGs,
-    etc. that are legitimately tiny aren't re-extracted repeatedly."""
+    etc. that are legitimately tiny aren't re-extracted repeatedly.
+    ``exif_data`` is kept non-NULL so the "no payload → re-extract"
+    branch (the migration-driven re-summarize path) doesn't fire — this
+    test is specifically about the RAW-only dims heuristic."""
     import scanner
 
     db, root, image_path, pid = _setup_scanned_photo(tmp_path)
 
-    # Simulate small-dims on a non-RAW extension; timestamp populated so
-    # the NULL-timestamp branch doesn't fire either.
+    # Simulate small-dims on a non-RAW extension; timestamp populated and
+    # exif_data set to the marker written by earlier scans so the
+    # ``not in exif_extracted`` branch stays False.
     db.conn.execute(
         "UPDATE photos SET extension='.jpg', width=160, height=120, "
-        "timestamp='2020-01-01T12:00:00', exif_data=NULL WHERE id=?", (pid,)
+        "timestamp='2020-01-01T12:00:00', exif_data='{}' WHERE id=?", (pid,)
     )
     db.conn.commit()
 
@@ -2385,6 +2389,63 @@ def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch)
     assert row["height"] == 120
     # And extract_metadata was never called with this file.
     assert all(image_path not in batch for batch in called_with)
+
+
+def test_incremental_rescan_reextracts_after_exif_backfill_migration(
+    tmp_path, monkeypatch,
+):
+    """Rows whose ``exif_data='{}'`` marker was cleared to NULL by the
+    ``exif_summary_backfill_v1`` migration must be re-processed on the next
+    incremental scan even when the row still carries a stored timestamp
+    (from the earlier ``extract_full_metadata=False`` pass). Before this
+    change the pre-pass required timestamp=NULL / repair / dims_suspect, so
+    migrated rows stayed skipped and the promoted EXIF summary columns
+    (camera_make / camera_model / lens / iso / aperture / shutter_speed)
+    remained NULL until the user forced a full non-incremental scan."""
+    import scanner
+
+    db, root, image_path, pid = _setup_scanned_photo(tmp_path)
+
+    # Simulate the post-migration state: exif_data cleared, timestamp
+    # populated, promoted columns still NULL. No repair flag, non-RAW
+    # extension — the OLD pre-pass would skip this row.
+    db.conn.execute(
+        "UPDATE photos SET exif_data=NULL, "
+        "timestamp='2020-01-01T12:00:00', extension='.jpg', "
+        "width=640, height=480, "
+        "camera_make=NULL, camera_model=NULL, lens=NULL, "
+        "aperture=NULL, shutter_speed=NULL, iso=NULL WHERE id=?", (pid,)
+    )
+    db.conn.commit()
+
+    called_with = []
+    def fake_extract(paths, restricted_tags=None, progress_callback=None,
+                     checkpoint=None):
+        called_with.append(list(paths))
+        return {p: {
+            "File": {"ImageWidth": 640, "ImageHeight": 480},
+            "EXIF": {"Make": "Sony", "Model": "ILCE-1", "LensModel": "FE 200-600",
+                     "FNumber": 6.3, "ExposureTime": 0.001, "ISO": 800},
+            "Composite": {},
+        } for p in paths}
+    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
+
+    scanner.scan(root, db, incremental=True)
+
+    # The row was re-processed and the promoted columns are populated.
+    row = db.conn.execute(
+        "SELECT camera_make, camera_model, lens, aperture, iso, exif_data "
+        "FROM photos WHERE id=?", (pid,)
+    ).fetchone()
+    assert row["camera_make"] == "Sony"
+    assert row["camera_model"] == "ILCE-1"
+    assert row["lens"] == "FE 200-600"
+    assert row["aperture"] == pytest.approx(6.3)
+    assert row["iso"] == 800
+    # exif_data marker is restored so the next scan skips this row.
+    assert row["exif_data"] is not None
+    # And extract_metadata was called with this file (proof of re-extract).
+    assert any(image_path in batch for batch in called_with)
 
 
 def test_scan_restrict_files_ignores_files_not_in_list(tmp_path, monkeypatch):

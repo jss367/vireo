@@ -20603,6 +20603,114 @@ def test_get_filter_field_values_folder_escapes_like_metacharacters(tmp_path):
         )
 
 
+def test_get_filter_field_values_folder_root_with_trailing_separator(tmp_path):
+    """A workspace root stored with a trailing separator (Windows drive root
+    ``D:\\`` or POSIX ``/``) must still count its subtree correctly. The
+    rule engine's ``folder under`` op strips trailing separators via
+    ``_path_for_subtree_match``, so the facet must do the same on both
+    sides — otherwise concatenating the LIKE prefix produces ``D://%`` /
+    ``//%`` which matches nothing, and the suggested root counts 0 while
+    ``folder under=<root>`` actually returns every photo on the drive."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    # POSIX root stored with trailing '/', descendants without.
+    root = db.add_folder('/', name='root')
+    child = db.add_folder('/dcim', name='dcim', parent_id=root)
+    db.add_photo(folder_id=root, filename='at_root.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=child, filename='d1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=child, filename='d2.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values("folder")}
+    # ``/`` covers the direct photo plus both descendants.
+    assert values.get('/') == 3
+    assert values.get('/dcim') == 2
+    # Cross-check: the suggested count matches what ``folder under`` returns.
+    for path, count in values.items():
+        rule_count = db.count_photos_for_rules(
+            [{"field": "folder", "op": "under", "value": path}])
+        assert rule_count == count, (
+            f"mismatch for {path!r}: rule={rule_count} suggest={count}"
+        )
+
+
+def test_get_filter_field_values_camera_folds_case(tmp_path):
+    """Camera-field suggestions must fold by case: the corresponding rule
+    engine text ops use ``LOWER(column) = LOWER(?)`` for camera_make/
+    camera_model/lens (no ``case_toggle`` on the registry), so raw
+    value-splitting facet counts would show ``Sony A1`` and ``sony a1`` as
+    two 1-count entries while selecting either fires a case-insensitive
+    filter that returns both photos. The suggestion count must equal the
+    rule count for the value it becomes."""
+    db, fid = _filter_db(tmp_path)
+    ids = []
+    for name, model in [
+        ('a.jpg', 'Sony A1'), ('b.jpg', 'sony a1'), ('c.jpg', 'SONY A1'),
+        ('d.jpg', 'Canon R5'),
+    ]:
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        db.conn.execute("UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
+        ids.append(pid)
+    db.conn.commit()
+
+    values = db.get_filter_field_values("camera_model")
+    # One row per case-folded model, count aggregates all case variants.
+    by_lower = {v["value"].lower(): v["count"] for v in values}
+    assert by_lower == {"sony a1": 3, "canon r5": 1}
+    # Cross-check: the suggested count matches what a ``camera_model is <suggested>``
+    # rule would return for the case-insensitive engine.
+    for entry in values:
+        rule_count = db.count_photos_for_rules(
+            [{"field": "camera_model", "op": "is", "value": entry["value"]}])
+        assert rule_count == entry["count"], (
+            f"mismatch for {entry['value']!r}: rule={rule_count} "
+            f"suggest={entry['count']}"
+        )
+    # Typeahead narrowing still works case-insensitively.
+    values = db.get_filter_field_values("camera_model", q="SONY")
+    assert len(values) == 1
+    assert values[0]["value"].lower() == "sony a1"
+    assert values[0]["count"] == 3
+
+
+def test_universal_filter_species_matches_by_taxon_identity_across_leaves(tmp_path):
+    """Species rules resolve through taxon identity: a photo tagged only
+    with hierarchy leaf A whose linked taxon also has a sibling keyword B
+    (root or leaf) that matches the query value must match. Exercises the
+    taxon-id-equivalence path against a leaf-matching value where the
+    fallback would need to find a same-taxon keyword by name that is
+    *not* the top-level root."""
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    # Photo tagged with root "Verdin"; search value is the leaf spelling
+    # "Auriparus flaviceps" (also linked to the same taxon). A pure
+    # ``k.name = ?`` OR ``root.name = ?`` predicate would miss the match
+    # because the root is named "Verdin" not "Auriparus flaviceps".
+    pid = db.add_photo(folder_id=fid, filename='v.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    root_kw = db.add_keyword("Verdin", is_species=True)
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Auriparus flaviceps", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.conn.commit()
+    db.tag_photo(pid, root_kw)
+
+    count = db.count_photos_for_rules
+    # Query by the leaf name still matches the photo tagged with root,
+    # via the same taxon_id.
+    assert count([{"field": "species", "op": "is",
+                   "value": "Auriparus flaviceps"}]) == 1
+    # And by the root name (existing behavior).
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 1
+
+
 def test_exif_backfill_migration_clears_empty_marker_for_rescan(tmp_path):
     """Rows whose ``exif_data`` is the ``'{}'`` marker were scanned with
     ``extract_full_metadata=False`` before the promoted EXIF columns

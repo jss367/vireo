@@ -1316,9 +1316,13 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         db: Database instance
         progress_callback: optional callable(current, total) for progress reporting
         incremental: if True, skip files unchanged since last scan
-        repair_missing_metadata: in incremental mode, force rows whose
-            ExifTool payload is NULL through metadata extraction even when a
-            fallback timestamp was available during the original scan
+        repair_missing_metadata: retained for interface stability. Rows
+            whose ExifTool payload is NULL are now always re-extracted in
+            incremental mode (regardless of whether a fallback timestamp
+            was available during the original scan), so this flag no
+            longer changes behavior in the pre-pass and the metadata-
+            repair endpoint gets the same result whether it sets the
+            flag or not.
         extract_full_metadata: if True, store full ExifTool JSON in exif_data column
         photo_callback: optional callable(photo_id, path_str) called after each photo is committed
         skip_paths: optional set of absolute path strings to exclude from scanning
@@ -1759,27 +1763,36 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 if existing:
                     file_unchanged = existing["file_mtime"] == file_mtime
                     xmp_unchanged = existing["xmp_mtime"] == xmp_mtime
-                    # Re-process if ExifTool never ran for this photo (both
-                    # timestamp and exif_data are NULL). Photos with genuinely
-                    # missing timestamps (screenshots, exports) will have
-                    # exif_data set after one extraction attempt.
-                    # Also flag rows where a RAW file has absurdly small
-                    # dimensions (<1000px) — that's the embedded JPEG thumb
-                    # leaking through when ExifTool's File group was missing
-                    # on the original scan.
-                    dims_suspect = (
-                        existing["extension"] in RAW_EXTENSIONS
-                        and existing["width"] is not None
-                        and existing["width"] < 1000
-                    )
-                    metadata_missing = (
-                        existing["id"] not in exif_extracted
-                        and (
-                            repair_missing_metadata
-                            or existing["timestamp"] is None
-                            or dims_suspect
-                        )
-                    )
+                    # Re-process whenever ExifTool has no stored payload for
+                    # this photo (``exif_data`` IS NULL). Two ways to get
+                    # here in incremental mode:
+                    #   1. The row was never scanned (a stub with NULL
+                    #      timestamp — the original "both NULL" case that
+                    #      ``existing["timestamp"] is None`` used to gate).
+                    #   2. The ``exif_summary_backfill_v1`` migration cleared
+                    #      the original ``'{}'`` marker (from an earlier
+                    #      ``extract_full_metadata=False`` scan) back to
+                    #      NULL so the scanner backfills the promoted EXIF
+                    #      summary columns (camera_make / camera_model /
+                    #      lens / iso / aperture / shutter_speed) that
+                    #      didn't exist when the row was first scanned. The
+                    #      row still carries the earlier pass's stored
+                    #      timestamp, so the older ``timestamp IS NULL``
+                    #      gate kept those columns NULL indefinitely until a
+                    #      manual repair — the universal filter's camera
+                    #      fields and value suggestions never populated
+                    #      until the user forced a full non-incremental
+                    #      scan. Once re-extract writes ExifTool's ``'{}'``
+                    #      marker back (or the full JSON), the row rejoins
+                    #      ``exif_extracted`` and is skipped again — the
+                    #      loop converges.
+                    # Rows whose ``exif_data`` is already set stay skipped
+                    # even when they otherwise look broken (RAW dims <1000,
+                    # explicit repair request) — the existing "respect
+                    # exif_extracted guard" test locks that in, since
+                    # retrying a row ExifTool has already answered for
+                    # could loop indefinitely.
+                    metadata_missing = existing["id"] not in exif_extracted
                     existing_file_hash = existing_file_hashes.get(existing["id"])
                     empty_hash_needs_repair = (
                         existing["file_size"] == 0

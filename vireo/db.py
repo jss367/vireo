@@ -18229,20 +18229,24 @@ class Database:
             if field == "species":
                 # Confirmed species ride photo_keywords→keywords(→taxa);
                 # a photo with several species matches when ANY matches
-                # (multi-species model). Match either the attached keyword's
-                # own name OR a same-taxon top-level root's name so a photo
-                # tagged only with a hierarchy leaf (``Desert Verdin``)
-                # still matches the canonical species (``Verdin``) that
-                # ``get_species_keywords_for_photos`` — and therefore Browse,
-                # life list, and species_representative lookups — report for
-                # it. Mirrors the eligibility pattern in
-                # ``get_species_representative_lists``.
+                # (multi-species model). Match by taxon identity for
+                # linked rows so any keyword whose canonical name matches
+                # the value pulls in every photo tagged with that same
+                # taxon — a photo tagged only with a hierarchy leaf
+                # (``Desert Verdin``) still matches the canonical species
+                # (``Verdin``) that ``get_species_keywords_for_photos`` —
+                # and therefore Browse, life list, and species_representative
+                # lookups — report for it. Falls back to raw ``k.name`` for
+                # taxonomy-less legacy rows so user-created/offline species
+                # tags continue to filter.
                 def _species_exists(name_op):
                     # ``name_op`` is a SQL fragment with ``{name_col}`` for
                     # the column reference — e.g. ``{name_col} = ?`` or
-                    # ``{name_col} LIKE ?``.
-                    keyword_pred = name_op.format(name_col="k.name")
-                    root_pred = name_op.format(name_col="root.name")
+                    # ``{name_col} LIKE ?``. Named twice: once as
+                    # ``k.name`` for legacy no-taxon rows and once as
+                    # ``sib.name`` for any same-taxon sibling keyword.
+                    legacy_pred = name_op.format(name_col="k.name")
+                    sibling_pred = name_op.format(name_col="sib.name")
                     return (
                         "EXISTS (SELECT 1 FROM photo_keywords pk "
                         "JOIN keywords k ON k.id = pk.keyword_id "
@@ -18250,13 +18254,13 @@ class Database:
                         "WHERE pk.photo_id = p.id "
                         "AND (k.is_species = 1 OR k.type = 'taxonomy') "
                         "AND (t.rank = 'species' OR t.rank IS NULL) "
-                        f"AND ({keyword_pred} OR ("
-                        "k.taxon_id IS NOT NULL AND EXISTS ("
-                        "SELECT 1 FROM keywords root "
-                        "WHERE root.parent_id IS NULL "
-                        "AND (root.is_species = 1 OR root.type = 'taxonomy') "
-                        "AND root.taxon_id = k.taxon_id "
-                        f"AND {root_pred}))))"
+                        "AND ("
+                        f"(k.taxon_id IS NULL AND {legacy_pred})"
+                        " OR (k.taxon_id IS NOT NULL AND EXISTS ("
+                        "SELECT 1 FROM keywords sib "
+                        "WHERE sib.taxon_id = k.taxon_id "
+                        "AND (sib.is_species = 1 OR sib.type = 'taxonomy') "
+                        f"AND {sibling_pred}))))"
                     )
                 if op == "contains":
                     like = f"%{value}%"
@@ -18427,11 +18431,25 @@ class Database:
         """
         return self.conn.execute(query, [*params, per_page, offset]).fetchall()
 
+    # (display_expr, group_expr, filter_expr) for value suggestions:
+    #   * display_expr — column shown to the user (aliased as ``value``).
+    #   * group_expr  — SQL used for GROUP BY / ORDER BY. Must match the
+    #     rule engine's comparison semantics so counts describe the rule
+    #     the suggestion becomes: camera_make/camera_model/lens are
+    #     case-insensitive in ``_text_condition`` (no ``case_toggle`` on
+    #     the registry), so their facet folds by ``LOWER(...)`` — else
+    #     ``Sony A1`` and ``sony a1`` would split into two 1-count
+    #     suggestions while selecting either fires ``LOWER(col)=LOWER(?)``
+    #     and returns both photos. ``MIN(col)`` picks a deterministic
+    #     display spelling within each case-folded group.
+    #   * filter_expr — used for ``IS NOT NULL`` and the LIKE typeahead
+    #     narrowing. Kept as the raw column so SQLite's default
+    #     case-insensitive LIKE works and does not double-normalize.
     _SUGGEST_VALUE_EXPRS = {
-        "camera_make": "p.camera_make",
-        "camera_model": "p.camera_model",
-        "lens": "p.lens",
-        "extension": "LOWER(p.extension)",
+        "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)", "p.camera_make"),
+        "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)", "p.camera_model"),
+        "lens": ("MIN(p.lens)", "LOWER(p.lens)", "p.lens"),
+        "extension": ("LOWER(p.extension)", "LOWER(p.extension)", "LOWER(p.extension)"),
     }
 
     def get_filter_field_values(self, field, rules=None, q=None, limit=20):
@@ -18455,7 +18473,7 @@ class Database:
         extra_joins = ""
         extra_params = []
         if field in self._SUGGEST_VALUE_EXPRS:
-            value_expr = self._SUGGEST_VALUE_EXPRS[field]
+            display_expr, group_expr, filter_expr = self._SUGGEST_VALUE_EXPRS[field]
         elif field in ("keyword", "species"):
             extra_joins = (
                 " JOIN photo_keywords pkv ON pkv.photo_id = p.id"
@@ -18485,25 +18503,27 @@ class Database:
                 )
                 conditions.append("(kv.is_species = 1 OR kv.type = 'taxonomy')")
                 conditions.append("(tv.rank = 'species' OR tv.rank IS NULL)")
-                value_expr = "COALESCE(root_kv.name, kv.name)"
+                display_expr = "COALESCE(root_kv.name, kv.name)"
             else:
-                value_expr = "kv.name"
+                display_expr = "kv.name"
+            group_expr = display_expr
+            filter_expr = display_expr
         else:
             raise ValueError(f"field {field!r} does not support value suggestions")
-        conditions.append(f"{value_expr} IS NOT NULL")
+        conditions.append(f"{filter_expr} IS NOT NULL")
         if q:
-            conditions.append(f"{value_expr} LIKE ? ESCAPE '\\'")
+            conditions.append(f"{filter_expr} LIKE ? ESCAPE '\\'")
             extra_params.append(f"%{_escape_like(str(q))}%")
         joined = " AND ".join(conditions)
         where_full = f"{where} AND {joined}" if where else f"WHERE {joined}"
         query = f"""
-            SELECT {value_expr} AS value, COUNT(DISTINCT p.id) AS count
+            SELECT {display_expr} AS value, COUNT(DISTINCT p.id) AS count
             FROM photos p
             {folder_join}
             {join_clause}
             {extra_joins}
             {where_full}
-            GROUP BY value
+            GROUP BY {group_expr}
             ORDER BY count DESC, value ASC
             LIMIT ?
         """
@@ -18540,17 +18560,24 @@ class Database:
         """
         # Path normalization matches ``_build_query_from_rules`` for the
         # ``folder``/``under`` op so a Windows library's backslash paths
-        # aggregate the same way here as they filter there. ``norm_folder``
-        # is used both as an equality value and as a LIKE pattern prefix;
-        # ``norm_folder_like`` additionally escapes SQL LIKE metacharacters
-        # (``%``/``_``) so a folder like ``/pics/my_dir`` only aggregates
-        # its own subtree and does not double-count photos under a sibling
-        # ``/pics/myXdir``. The engine's ``folder under`` op escapes the
-        # same characters via ``_escape_like``. The ``\\`` escape char is
-        # safe to introduce here because path normalization above has
-        # already collapsed every literal ``\`` to ``/``.
-        norm_photo = "REPLACE(matched.ppath, '\\', '/')"
-        norm_folder = "REPLACE(ff.path, '\\', '/')"
+        # aggregate the same way here as they filter there. Both sides
+        # collapse ``\`` to ``/`` and strip trailing separators — the
+        # engine feeds its value through ``_path_for_subtree_match`` which
+        # ``rstrip("/")``s, so folder roots stored with a trailing separator
+        # (Windows drive root ``D:\`` normalizes to ``D:/``, POSIX root
+        # ``/`` normalizes to ``/``) would otherwise concat to a LIKE
+        # pattern with a doubled slash (``D://%`` / ``//%``) that never
+        # matches real descendant paths — the suggested root would count 0
+        # while ``folder under D:\`` actually returns every photo on the
+        # drive. ``norm_folder_like`` additionally escapes SQL LIKE
+        # metacharacters (``%`` / ``_``) so a folder like ``/pics/my_dir``
+        # only aggregates its own subtree and does not double-count photos
+        # under a sibling ``/pics/myXdir``; the engine's ``folder under``
+        # op escapes the same characters via ``_escape_like``. The ``\\``
+        # escape char is safe to introduce here because path normalization
+        # above has already collapsed every literal ``\`` to ``/``.
+        norm_photo = "RTRIM(REPLACE(matched.ppath, '\\', '/'), '/')"
+        norm_folder = "RTRIM(REPLACE(ff.path, '\\', '/'), '/')"
         norm_folder_like = (
             f"REPLACE(REPLACE({norm_folder}, '%', '\\%'), '_', '\\_')"
         )
