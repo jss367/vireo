@@ -18075,7 +18075,19 @@ class Database:
                 if op == ">=":
                     return "p.timestamp >= ?", [value]
                 if op == ">":
-                    return "p.timestamp > ?", [_inclusive_date_to(value)]
+                    # Only advance a bare ``YYYY-MM-DD`` to end-of-day —
+                    # ``> 2024-01-01`` means "strictly after that day".
+                    # Padding an already-precise timestamp
+                    # (``2024-01-01T12:00:00``) would spuriously exclude
+                    # sub-second photos in the same clock second
+                    # (``12:00:00.5``) that ARE strictly greater than the
+                    # requested instant.
+                    upper = (
+                        _inclusive_date_to(value)
+                        if isinstance(value, str) and len(value) == 10
+                        else value
+                    )
+                    return "p.timestamp > ?", [upper]
                 if op == "<=":
                     return "p.timestamp <= ?", [_inclusive_date_to(value)]
                 if op == "<":
@@ -18242,9 +18254,13 @@ class Database:
                        "WHERE per.photo_id = p.id)")
                 return (has if _truthy(value) else f"NOT {has}"), []
             if field == "has_visual_index":
-                # Optional rule key "model" narrows to one embedding model;
-                # Phase 3's query pipeline passes the active model so the
-                # answer matches what visual search can actually use.
+                # Optional rule key "model" narrows to one embedding model.
+                # The universal-filter API layer injects the active visual
+                # model onto UI-emitted rules missing this key so the
+                # filter agrees with visual search (which only loads
+                # embeddings for the active model). Saved smart
+                # collections without a ``model`` keep matching any row —
+                # a portable "some embedding exists" check.
                 model = rule.get("model")
                 if model:
                     has = ("EXISTS (SELECT 1 FROM photo_embeddings pe "

@@ -5325,6 +5325,44 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             }
         )
 
+    def _inject_active_visual_model(rules):
+        """Fill in the active visual model on ``has_visual_index`` leaves
+        that don't name one.
+
+        ``/api/filters/fields`` advertises ``Has visual index`` as a plain
+        boolean field, so the UI-emitted rule has no ``model`` key. The
+        rule engine's fallback then matches any ``photo_embeddings`` row,
+        so a photo with only stale embeddings from a previously-active
+        model satisfies ``has_visual_index is true`` even though visual
+        search (which only loads embeddings for the active model — see
+        ``api_photo_text_search``) can't use it. Inject the current active
+        model here so the filter and visual search agree on what "has an
+        index" means; smart-collection storage paths keep the rule
+        verbatim so a saved collection stays portable across model
+        switches.
+        """
+        try:
+            from models import get_active_model
+            active = get_active_model()
+        except Exception:
+            return rules
+        model_name = active.get("name") if active else None
+        if not model_name:
+            return rules
+
+        def _walk(node):
+            if isinstance(node, dict):
+                if "rules" in node and "field" not in node:
+                    return {**node, "rules": [_walk(r) for r in node.get("rules", [])]}
+                if node.get("field") == "has_visual_index" and "model" not in node:
+                    return {**node, "model": model_name}
+                return node
+            if isinstance(node, list):
+                return [_walk(r) for r in node]
+            return node
+
+        return _walk(rules)
+
     @app.route("/api/photos/query", methods=["POST"])
     def api_photos_query():
         """Universal-filter photo query: a smart-collection rule tree plus
@@ -5353,6 +5391,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(sort, str):
             return json_error("sort must be a string", 400)
         per_page = min(per_page, _MAX_PER_PAGE)
+        rules = _inject_active_visual_model(rules)
         try:
             photos = db.query_photos(rules, sort=sort, page=page, per_page=per_page)
             total = db.count_photos_for_rules(rules)
@@ -5411,6 +5450,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if limit_raw is None:
             limit_raw = 20
         limit = max(1, min(limit_raw, 500))
+        rules = _inject_active_visual_model(rules)
         try:
             values = db.get_filter_field_values(field, rules=rules, q=q, limit=limit)
         except ValueError as exc:

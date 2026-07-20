@@ -9638,6 +9638,106 @@ def test_api_photos_query_validation(app_and_db):
                        content_type="text/plain").status_code == 400
 
 
+def test_api_photos_query_has_visual_index_injects_active_model(app_and_db, monkeypatch):
+    """``has_visual_index`` rules emitted from the UI have no ``model`` key,
+    so the query API must inject the active visual model — otherwise
+    photos with only stale embeddings from previously-active models would
+    match, disagreeing with visual search (which loads only the active
+    model's embeddings)."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    # bird1 has a stale embedding from a former model; bird2 has one from
+    # the currently-active model. Only bird2 should satisfy the filter.
+    db.conn.execute(
+        "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+        "VALUES (?, 'old-model', '', ?)",
+        (photos["bird1.jpg"], b"\x01"),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+        "VALUES (?, 'current-model', '', ?)",
+        (photos["bird2.jpg"], b"\x02"),
+    )
+    db.conn.commit()
+
+    import models as models_mod
+    monkeypatch.setattr(
+        models_mod, "get_active_model",
+        lambda: {"name": "current-model", "id": "current-model", "downloaded": True},
+    )
+
+    client = app.test_client()
+    # No ``model`` on the rule — API layer must inject the active one.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird2.jpg"]
+
+    # Nested rule groups get the same treatment.
+    resp = client.post('/api/photos/query', json={
+        "rules": {"mode": "all", "rules": [
+            {"field": "has_visual_index", "op": "is", "value": 1},
+        ]},
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird2.jpg"]
+
+    # An explicit ``model`` in the rule wins over the injection.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "old-model"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird1.jpg"]
+
+
+def test_api_photos_query_timestamp_gt_preserves_subsecond(app_and_db):
+    """``timestamp > 2024-01-01T12:00:00`` must NOT pad the value to
+    ``.999999`` — that would spuriously exclude sub-second photos in the
+    same clock second (``12:00:00.5``) that are strictly greater than the
+    requested instant. Only bare ``YYYY-MM-DD`` values advance to end of
+    day."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    db.conn.execute(
+        "UPDATE photos SET timestamp='2024-01-01T12:00:00.500000' WHERE id=?",
+        (photos["bird1.jpg"],),
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp='2024-01-02T09:00:00' WHERE id=?",
+        (photos["bird2.jpg"],),
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp='2023-12-31T09:00:00' WHERE id=?",
+        (photos["bird3.jpg"],),
+    )
+    db.conn.commit()
+    client = app.test_client()
+
+    # Precise timestamp comparison — bird1 at 12:00:00.5 IS strictly > 12:00:00
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "timestamp", "op": ">",
+                   "value": "2024-01-01T12:00:00"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird1.jpg", "bird2.jpg"]
+
+    # Bare-date comparison — ``> 2024-01-01`` still means strictly after
+    # the whole day, so bird1 (on that day) is excluded.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "timestamp", "op": ">",
+                   "value": "2024-01-01"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird2.jpg"]
+
+
 def test_api_filter_fields_registry(app_and_db):
     app, _ = app_and_db
     client = app.test_client()
