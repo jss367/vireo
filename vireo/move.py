@@ -1885,6 +1885,19 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     errors = []
     managed_default_developed = {}
 
+    # The destination filesystem's case sensitivity governs whether two
+    # same-stem-different-extension photos collide there. On case-insensitive
+    # volumes (Windows, default macOS APFS) a keyed-by-raw-case dict would
+    # treat ``IMG`` and ``img`` as distinct entries and let two unrelated
+    # source folders' ``IMG.CR3`` + ``img.NEF`` both land in one date folder,
+    # where their ``*.jpg`` renders would collide but this guard wouldn't
+    # detect it. Probe once and fold the stem before every lookup/write into
+    # ``destination_stem_origins``.
+    dest_case_insensitive = _is_case_insensitive_path(destination)
+
+    def _stem_key(raw_stem):
+        return raw_stem.lower() if dest_case_insensitive else raw_stem
+
     # Ensure destination folder record exists (workspace link deferred until first successful move)
     dest_row = db.conn.execute("SELECT id FROM folders WHERE path = ?", (destination,)).fetchone()
     if dest_row:
@@ -1918,7 +1931,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
         "FROM photos WHERE folder_id = ?",
         (dest_folder_id,),
     ):
-        stem = os.path.splitext(row["filename"])[0]
+        stem = _stem_key(os.path.splitext(row["filename"])[0])
         origin = row["last_move_source_folder_path"]
         known_origin = destination_stem_origins.get(
             stem, no_destination_stem,
@@ -1969,7 +1982,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             # merge the latter into one destination and silently make one row
             # display/export the other's edit.
             existing_origin = destination_stem_origins.get(
-                stem, no_destination_stem,
+                _stem_key(stem), no_destination_stem,
             )
             if existing_origin is not no_destination_stem \
                     and existing_origin != src_dir:
@@ -2045,7 +2058,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             # still rejected. Using the path (not folders.id) survives a
             # later delete/re-create of the source folder that would reuse
             # the same rowid.
-            destination_stem_origins[stem] = src_dir
+            destination_stem_origins[_stem_key(stem)] = src_dir
 
             # Rebase this photo's developed-output file(s) for the new folder
             # BEFORE removing originals. Both develop-job layouts need to
@@ -2107,7 +2120,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                         stale_ids,
                     )
                     db.conn.commit()
-                destination_stem_origins[stem] = None
+                destination_stem_origins[_stem_key(stem)] = None
             if developed_dir:
                 relocate_developed_file(
                     developed_dir, src_dir, destination, stem,

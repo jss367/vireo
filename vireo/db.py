@@ -3615,6 +3615,29 @@ class Database:
                 )
                 cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
 
+        # Cascade the rebase into ``photos.last_move_source_folder_path``.
+        # ``move_folder_path`` already does this for the whole-folder move
+        # flow; ``relocate_folder`` runs when a missing folder is remapped
+        # to a new location (or a cascaded missing child is rediscovered
+        # under the new root), which frees each old path for reuse the same
+        # way. Without the rebase, a later scan of an unrelated folder at
+        # the freed path would compare equal to a stale stored provenance
+        # in ``move_photos`` and slip a same-stem developed-render collision
+        # past the guard, letting two unrelated destination rows share the
+        # developed-output lookup by folder+stem.
+        rebased_paths = [(old_path, new_path)]
+        rebased_paths.extend(
+            (c["old_path"], c["new_path"]) for c in cascaded
+        )
+        for prior_path, updated_path in rebased_paths:
+            if not prior_path or prior_path == updated_path:
+                continue
+            self.conn.execute(
+                "UPDATE photos SET last_move_source_folder_path = ? "
+                "WHERE last_move_source_folder_path = ?",
+                (updated_path, prior_path),
+            )
+
         self._relink_parents_by_path([folder_id] + [c["id"] for c in cascaded])
         self.conn.commit()
         return cascaded

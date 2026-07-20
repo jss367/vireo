@@ -1710,6 +1710,212 @@ def test_move_photos_provenance_cleared_across_date_fanout(tmp_path):
         )
 
 
+def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
+    """Renaming a missing source folder via ``Database.relocate_folder`` (the
+    "remap missing folder to a new location" flow) frees the old path for
+    reuse. Without cascading the rebase into
+    ``photos.last_move_source_folder_path``, a later unrelated folder scanned
+    at the freed path would compare equal to the stale stored origin and
+    slip past the same-stem developed-render collision guard in
+    ``move_photos``, letting two unrelated destination rows share the
+    developed-output lookup by folder+stem. The cascade must rebase the
+    stored provenance onto the new path — preserving the shared-render
+    relationship with any sibling that stays behind — and stop matching
+    against any future occupant of the freed path.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    reusable_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    reusable_path.mkdir()
+    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_file = reusable_path / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    # Same-stem sibling that stays behind so the destination row keeps its
+    # provenance after the move — otherwise ``move_photos`` correctly
+    # expires it immediately and the ``relocate_folder`` cascade has
+    # nothing to rebase.
+    sibling_file = reusable_path / "IMG.NEF"
+    sibling_file.write_bytes(b"sibling-raw")
+    db.add_photo(
+        folder_id=original_fid, filename=sibling_file.name,
+        extension=".nef", file_size=sibling_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(reusable_path)
+    )
+
+    # Mark the folder as missing (its on-disk path is gone) and remap it
+    # via ``relocate_folder`` to a fresh location. This is the flow used
+    # when a user tells the app "this folder now lives here". The old
+    # path is now free for reuse.
+    relocated_path = tmp_path / "CARD_RELOCATED"
+    reusable_path.rename(relocated_path)
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?",
+        (original_fid,),
+    )
+    db.conn.commit()
+    db.relocate_folder(original_fid, str(relocated_path))
+
+    # The provenance must have been rebased onto the new path, not left
+    # pointing at the freed one.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(relocated_path)
+    )
+
+    # A brand-new unrelated folder appears at the freed path with an
+    # unrelated photo whose stem matches.
+    reusable_path.mkdir()
+    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
+    db.add_workspace_folder(ws_id, replacement_fid)
+    incoming_file = reusable_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=replacement_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The collision guard rejects the incoming photo because its source
+    # path does not match the rebased provenance on the existing
+    # destination row.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+
+
+def test_move_photos_rejects_case_folded_stem_collision(tmp_path, monkeypatch):
+    """On case-insensitive destinations (Windows, default macOS APFS), two
+    unrelated source folders can contain ``IMG.CR3`` and ``img.NEF`` and
+    both originals land in the same date folder. Their ``*.jpg`` developed
+    renders both want a case-only variant of the same filename, so exactly
+    one wins; the second photo's row would then serve the first's render.
+    The same-stem destination collision guard in ``move_photos`` must fold
+    the stem to the destination filesystem's case sensitivity before
+    consulting the origin map, so this collision is refused up front.
+    """
+    from move import move_photos
+    import move as move_module
+
+    monkeypatch.setattr(
+        move_module, "_is_case_insensitive_path", lambda _: True,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    source_a = tmp_path / "cardA"
+    source_b = tmp_path / "cardB"
+    destination = tmp_path / "archive"
+    source_a.mkdir()
+    source_b.mkdir()
+
+    fid_a = db.add_folder(str(source_a), name="cardA")
+    fid_b = db.add_folder(str(source_b), name="cardB")
+    db.add_workspace_folder(ws_id, fid_a)
+    db.add_workspace_folder(ws_id, fid_b)
+
+    file_a = source_a / "IMG.CR3"
+    file_a.write_bytes(b"raw-a")
+    pid_a = db.add_photo(
+        folder_id=fid_a, filename=file_a.name, extension=".cr3",
+        file_size=file_a.stat().st_size, file_mtime=1.0,
+    )
+    file_b = source_b / "img.NEF"
+    file_b.write_bytes(b"raw-b")
+    pid_b = db.add_photo(
+        folder_id=fid_b, filename=file_b.name, extension=".nef",
+        file_size=file_b.stat().st_size, file_mtime=2.0,
+    )
+
+    result = move_photos(db, [pid_a, pid_b], str(destination))
+
+    # First photo moves, second is rejected because its case-folded stem
+    # collides with the existing destination stem from a different source.
+    assert result["moved"] == 1
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    # The winning photo is the one processed first.
+    assert db.get_photo(pid_a)["folder_id"] != fid_a
+    assert db.get_photo(pid_b)["folder_id"] == fid_b
+    assert file_b.read_bytes() == b"raw-b"
+
+
+def test_move_photos_allows_case_folded_stem_on_case_sensitive_destination(
+    tmp_path, monkeypatch,
+):
+    """The case-folded guard must NOT punish case-sensitive destinations,
+    where ``IMG.CR3`` and ``img.NEF`` legitimately coexist as distinct
+    files with distinct renders. Both photos should move successfully.
+    """
+    from move import move_photos
+    import move as move_module
+
+    monkeypatch.setattr(
+        move_module, "_is_case_insensitive_path", lambda _: False,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    source_a = tmp_path / "cardA"
+    source_b = tmp_path / "cardB"
+    destination = tmp_path / "archive"
+    source_a.mkdir()
+    source_b.mkdir()
+
+    fid_a = db.add_folder(str(source_a), name="cardA")
+    fid_b = db.add_folder(str(source_b), name="cardB")
+    db.add_workspace_folder(ws_id, fid_a)
+    db.add_workspace_folder(ws_id, fid_b)
+
+    file_a = source_a / "IMG.CR3"
+    file_a.write_bytes(b"raw-a")
+    pid_a = db.add_photo(
+        folder_id=fid_a, filename=file_a.name, extension=".cr3",
+        file_size=file_a.stat().st_size, file_mtime=1.0,
+    )
+    file_b = source_b / "img.NEF"
+    file_b.write_bytes(b"raw-b")
+    pid_b = db.add_photo(
+        folder_id=fid_b, filename=file_b.name, extension=".nef",
+        file_size=file_b.stat().st_size, file_mtime=2.0,
+    )
+
+    result = move_photos(db, [pid_a, pid_b], str(destination))
+
+    assert result["moved"] == 2
+    assert result["errors"] == []
+
+
 def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
     """Regression: ``os.makedirs(destination, exist_ok=True)`` raises
     ``FileExistsError`` when the path exists as a regular file, so a
