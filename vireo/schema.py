@@ -156,8 +156,8 @@ def _merge_legacy_detector_alias(conn):
     skipped that build could later accumulate a second, canonical copy of every
     box. Multi-subject Compare then rendered the two cache rows as two subjects.
 
-    Prefer an existing canonical detection for each identical box. If a box exists
-    only under the legacy key, keep its lowest-id row. Predictions, classifier-run
+    Collapse boxes on the detector cache's rounded natural key and make the normal
+    canonical content-addressed id their survivor. Predictions, classifier-run
     markers, review state, and edit-history prediction references are moved to the
     survivor before duplicate detections are deleted.
     """
@@ -204,44 +204,119 @@ def _merge_legacy_detector_alias(conn):
     conn.execute("DROP TABLE IF EXISTS temp.legacy_detection_merge")
     conn.execute("DROP TABLE IF EXISTS temp.legacy_prediction_merge")
 
-    # Build one group for every geometry touched by the legacy alias. An existing
-    # canonical row wins; otherwise retain the lowest legacy id. ``IS`` joins below
-    # intentionally make NULL coordinates/category compare equal for old fixtures.
-    conn.execute(
+    # Build groups with the same four-decimal box identity used by normal detector
+    # writes. The canonical content-addressed id is the survivor even when a box
+    # exists only under the legacy key, so a later detector rerun will UPSERT that
+    # row instead of deleting it (and cascading its predictions/reviews).
+    from detection_id import detection_id as _detection_id
+
+    rows = conn.execute(
         """
-        CREATE TEMP TABLE legacy_detector_groups AS
-        SELECT
-          COALESCE(
-            MIN(CASE WHEN detector_model = 'megadetector-v6' THEN id END),
-            MIN(id)
-          ) AS survivor_id,
-          photo_id, box_x, box_y, box_w, box_h, category,
-          MAX(detector_confidence) AS max_confidence,
-          MIN(created_at) AS first_created
+        SELECT id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+               detector_confidence, category, created_at
         FROM detections
-        WHERE detector_model IN ('MegaDetector', 'megadetector-v6')
-        GROUP BY photo_id, box_x, box_y, box_w, box_h, category
-        HAVING SUM(CASE WHEN detector_model = 'MegaDetector' THEN 1 ELSE 0 END) > 0
-        """
-    )
-    conn.execute("CREATE UNIQUE INDEX temp.idx_legacy_detector_groups_survivor ON legacy_detector_groups(survivor_id)")
+        WHERE detector_model IN (?, ?)
+        """,
+        (_LEGACY_DETECTOR_MODEL, _CANONICAL_DETECTOR_MODEL),
+    ).fetchall()
+    groups = {}
+    for row in rows:
+        coords = (row["box_x"], row["box_y"], row["box_w"], row["box_h"])
+        if row["category"] is None or any(value is None for value in coords):
+            # Defensive support for malformed historical fixtures. Real detector
+            # boxes always have a category and four coordinates; keep NULL-bearing
+            # rows distinct because they cannot have a content-addressed id.
+            key = ("raw", row["photo_id"], *coords, row["category"])
+        else:
+            qbox = tuple(f"{round(value, 4):.4f}" for value in coords)
+            key = ("quantized", row["photo_id"], *qbox, row["category"])
+        groups.setdefault(key, []).append(row)
+
     conn.execute(
         """
-        CREATE TEMP TABLE legacy_detection_merge AS
-        SELECT d.id AS old_id, g.survivor_id
-        FROM detections d
-        JOIN legacy_detector_groups g
-          ON g.photo_id = d.photo_id
-         AND g.box_x IS d.box_x
-         AND g.box_y IS d.box_y
-         AND g.box_w IS d.box_w
-         AND g.box_h IS d.box_h
-         AND g.category IS d.category
-        WHERE d.detector_model IN ('MegaDetector', 'megadetector-v6')
-          AND d.id <> g.survivor_id
+        CREATE TEMP TABLE legacy_detector_groups (
+          survivor_id INTEGER PRIMARY KEY,
+          photo_id INTEGER NOT NULL,
+          max_confidence REAL,
+          first_created TEXT
+        )
         """
     )
-    conn.execute("CREATE UNIQUE INDEX temp.idx_legacy_detection_merge_old ON legacy_detection_merge(old_id)")
+    conn.execute(
+        """
+        CREATE TEMP TABLE legacy_detection_merge (
+          old_id INTEGER PRIMARY KEY,
+          survivor_id INTEGER NOT NULL
+        )
+        """
+    )
+
+    for group_rows in groups.values():
+        if not any(
+            row["detector_model"] == _LEGACY_DETECTOR_MODEL
+            for row in group_rows
+        ):
+            continue
+        canonical_rows = [
+            row for row in group_rows
+            if row["detector_model"] == _CANONICAL_DETECTOR_MODEL
+        ]
+        source = min(canonical_rows or group_rows, key=lambda row: row["id"])
+        coords = (
+            source["box_x"], source["box_y"],
+            source["box_w"], source["box_h"],
+        )
+        if source["category"] is None or any(value is None for value in coords):
+            survivor_id = source["id"]
+        else:
+            survivor_id = _detection_id(
+                source["photo_id"], _CANONICAL_DETECTOR_MODEL,
+                coords, source["category"],
+            )
+
+        group_ids = {row["id"] for row in group_rows}
+        occupant = conn.execute(
+            "SELECT id FROM detections WHERE id = ?", (survivor_id,),
+        ).fetchone()
+        if occupant is not None and occupant["id"] not in group_ids:
+            raise RuntimeError(
+                f"canonical detection id collision while migrating {survivor_id}"
+            )
+
+        confidences = [
+            row["detector_confidence"] for row in group_rows
+            if row["detector_confidence"] is not None
+        ]
+        created_values = [
+            row["created_at"] for row in group_rows
+            if row["created_at"] is not None
+        ]
+        max_confidence = max(confidences) if confidences else None
+        first_created = min(created_values) if created_values else None
+        if occupant is None:
+            conn.execute(
+                """
+                INSERT INTO detections (
+                  id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+                  detector_confidence, category, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    survivor_id, source["photo_id"], _CANONICAL_DETECTOR_MODEL,
+                    *coords, max_confidence, source["category"], first_created,
+                ),
+            )
+        conn.execute(
+            "INSERT INTO legacy_detector_groups VALUES (?, ?, ?, ?)",
+            (survivor_id, source["photo_id"], max_confidence, first_created),
+        )
+        conn.executemany(
+            "INSERT INTO legacy_detection_merge VALUES (?, ?)",
+            [
+                (row["id"], survivor_id) for row in group_rows
+                if row["id"] != survivor_id
+            ],
+        )
 
     # Keep the strongest cached confidence and oldest creation timestamp on the
     # survivor. In the normal duplicate case these values are already identical.

@@ -4,6 +4,7 @@ import threading
 import pytest
 import schema
 from db import Database
+from detection_id import detection_id
 
 
 def test_ensure_schema_applies_registry_and_validation(tmp_path):
@@ -243,10 +244,10 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
-                (100, photo_id, "megadetector-v6", 0.1, 0.2, 0.3, 0.4, 0.8, "animal", "2026-04-26T00:00:00"),
-                (101, photo_id, "MegaDetector", 0.1, 0.2, 0.3, 0.4, 0.9, "animal", "2026-04-23T00:00:00"),
+                (100, photo_id, "megadetector-v6", 0.10002, 0.2, 0.3, 0.4, 0.8, "animal", "2026-04-26T00:00:00"),
+                (101, photo_id, "MegaDetector", 0.10001, 0.2, 0.3, 0.4, 0.9, "animal", "2026-04-23T00:00:00"),
                 # A second pre-global-cache row for the same legacy box.
-                (102, photo_id, "MegaDetector", 0.1, 0.2, 0.3, 0.4, 0.85, "animal", "2026-04-23T00:01:00"),
+                (102, photo_id, "MegaDetector", 0.10003, 0.2, 0.3, 0.4, 0.85, "animal", "2026-04-23T00:01:00"),
                 # Legacy-only geometry must survive under the canonical name.
                 (103, photo_id, "MegaDetector", 0.6, 0.2, 0.2, 0.2, 0.7, "animal", "2026-04-23T00:02:00"),
             ],
@@ -312,7 +313,7 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
             """,
             (
                 photo_id, "sam2-small", "/masks/bird.png", 1,
-                "MegaDetector", 0.1, 0.2, 0.3, 0.4,
+                "MegaDetector", 0.10002, 0.2, 0.3, 0.4,
             ),
         )
         db.conn.executemany(
@@ -370,20 +371,28 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
 
     schema.ensure_schema(db_path)
 
+    primary_detection_id = detection_id(
+        photo_id, "megadetector-v6", (0.10002, 0.2, 0.3, 0.4), "animal",
+    )
+    hawk_detection_id = detection_id(
+        photo_id, "megadetector-v6", (0.6, 0.2, 0.2, 0.2), "animal",
+    )
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         detections = conn.execute(
             """
-            SELECT id, detector_model, detector_confidence
+            SELECT id, detector_model, detector_confidence, box_x
             FROM detections WHERE photo_id = ? ORDER BY id
             """,
             (photo_id,),
         ).fetchall()
-        assert [(r["id"], r["detector_model"]) for r in detections] == [
-            (100, "megadetector-v6"),
-            (103, "megadetector-v6"),
-        ]
-        assert detections[0]["detector_confidence"] == pytest.approx(0.9)
+        assert {r["id"] for r in detections} == {
+            primary_detection_id, hawk_detection_id,
+        }
+        assert {r["detector_model"] for r in detections} == {"megadetector-v6"}
+        primary = next(r for r in detections if r["id"] == primary_detection_id)
+        assert primary["box_x"] == pytest.approx(0.10002)
+        assert primary["detector_confidence"] == pytest.approx(0.9)
 
         predictions = conn.execute(
             """
@@ -391,25 +400,24 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
             FROM predictions p
             LEFT JOIN prediction_review r
               ON r.prediction_id = p.id AND r.workspace_id = ?
-            WHERE p.detection_id IN (100, 103)
+            WHERE p.detection_id IN (?, ?)
             ORDER BY p.species
             """,
-            (workspace_id,),
+            (workspace_id, primary_detection_id, hawk_detection_id),
         ).fetchall()
         by_species = {r["species"]: r for r in predictions}
         assert set(by_species) == {"Hawk", "Robin", "Sparrow"}
-        assert by_species["Robin"]["id"] == 200
         assert by_species["Robin"]["confidence"] == pytest.approx(0.9)
         assert by_species["Robin"]["status"] == "accepted"
-        assert by_species["Sparrow"]["detection_id"] == 100
+        assert by_species["Sparrow"]["detection_id"] == primary_detection_id
         assert by_species["Sparrow"]["status"] == "accepted"
-        assert by_species["Hawk"]["id"] == 203
+        assert by_species["Hawk"]["detection_id"] == hawk_detection_id
         assert by_species["Hawk"]["status"] == "accepted"
 
         bare_history = conn.execute("SELECT old_value FROM edit_history_items WHERE id = 400").fetchone()[0]
         json_history = json.loads(conn.execute("SELECT old_value FROM edit_history_items WHERE id = 401").fetchone()[0])
         subject_history = json.loads(conn.execute("SELECT old_value FROM edit_history_items WHERE id = 402").fetchone()[0])
-        assert bare_history == "200"
+        assert bare_history == str(by_species["Robin"]["id"])
         assert json_history["prediction_id"] == by_species["Sparrow"]["id"]
         assert subject_history == {
             "prediction_ids": [
@@ -445,6 +453,33 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
 
     with Database(db_path, initialize_schema=False) as migrated_db:
         assert migrated_db.find_stale_masks() == []
+        rerun_ids = migrated_db.write_detection_batch(
+            photo_id,
+            "megadetector-v6",
+            [
+                {
+                    "box": {"x": 0.10002, "y": 0.2, "w": 0.3, "h": 0.4},
+                    "confidence": 0.9,
+                    "category": "animal",
+                },
+                {
+                    "box": {"x": 0.6, "y": 0.2, "w": 0.2, "h": 0.2},
+                    "confidence": 0.7,
+                    "category": "animal",
+                },
+            ],
+        )
+        assert set(rerun_ids) == {primary_detection_id, hawk_detection_id}
+        remaining = migrated_db.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM predictions p
+            JOIN prediction_review r ON r.prediction_id = p.id
+            WHERE p.detection_id IN (?, ?) AND r.status = 'accepted'
+            """,
+            (primary_detection_id, hawk_detection_id),
+        ).fetchone()[0]
+        assert remaining == 3
 
 
 def test_legacy_megadetector_zero_box_run_is_normalized_without_detections(tmp_path):
