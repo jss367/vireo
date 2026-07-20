@@ -18228,15 +18228,18 @@ class Database:
                 has = "EXISTS (SELECT 1 FROM inat_submissions ins WHERE ins.photo_id = p.id)"
                 return (has if _truthy(value) else f"NOT {has}"), []
             if field == "is_duplicate":
+                # Catalog-wide by file_hash to match find_duplicate_groups()
+                # and apply_duplicate_resolution — a photo whose only duplicate
+                # lives in another workspace is still a duplicate here (the
+                # Duplicates workflow will act on it), so Browse must not hide
+                # that membership behind a workspace_folders join.
                 has = (
                     "p.file_hash IS NOT NULL AND EXISTS ("
                     "SELECT 1 FROM photos p2 "
-                    "JOIN workspace_folders wf2 ON wf2.folder_id = p2.folder_id "
-                    "AND wf2.workspace_id = ? "
                     "WHERE p2.id != p.id AND p2.file_hash = p.file_hash "
                     "AND (p2.flag IS NULL OR p2.flag != 'rejected'))"
                 )
-                return (has if _truthy(value) else f"NOT ({has})"), [self._ws_id()]
+                return (has if _truthy(value) else f"NOT ({has})"), []
             if field in ("file_size", "width", "height", "focal_length",
                          "aperture", "shutter_speed", "iso"):
                 return _numeric_condition(f"p.{field}", op, value, allow_null=True)

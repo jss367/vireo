@@ -20369,6 +20369,48 @@ def test_universal_filter_workflow_fields(tmp_path):
     assert count([{"field": "duplicate_group", "op": "is", "value": "abc123"}]) == 1
 
 
+def test_is_duplicate_sees_cross_workspace_partners(tmp_path):
+    """``is_duplicate`` must match a photo whose only duplicate lives in
+    another workspace — otherwise Browse hides members that the Duplicates
+    workflow (``find_duplicate_groups``, which is catalog-wide by
+    ``file_hash``) will still act on.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+
+    active_folder = db.add_folder('/active', name='active')
+    other_folder = db.add_folder('/other', name='other')
+    db.remove_workspace_folder(active_ws, other_folder)
+    db.add_workspace_folder(other_ws, other_folder)
+
+    here = db.add_photo(folder_id=active_folder, filename='here.jpg',
+                        extension='.jpg', file_size=100, file_mtime=1.0)
+    there = db.add_photo(folder_id=other_folder, filename='there.jpg',
+                         extension='.jpg', file_size=100, file_mtime=2.0)
+    lone = db.add_photo(folder_id=active_folder, filename='lone.jpg',
+                        extension='.jpg', file_size=100, file_mtime=3.0)
+    db.conn.execute("UPDATE photos SET file_hash='shared' WHERE id IN (?, ?)",
+                    (here, there))
+    db.conn.execute("UPDATE photos SET file_hash='unique' WHERE id=?", (lone,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # ``here`` is only visible in the active workspace; ``there`` sits in the
+    # other workspace. Under the old workspace-scoped subquery, ``here`` would
+    # count as 0 duplicates. Catalog-wide, it must show as a duplicate member.
+    assert count([{"field": "is_duplicate", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "is_duplicate", "op": "is", "value": 0}]) == 1
+
+    # Rejecting the cross-workspace partner drops the pair, matching
+    # find_duplicate_groups' rejected-flag filter.
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (there,))
+    db.conn.commit()
+    assert count([{"field": "is_duplicate", "op": "is", "value": 1}]) == 0
+    assert count([{"field": "is_duplicate", "op": "is", "value": 0}]) == 2
+
+
 def test_universal_filter_prediction_rules_pin_current_fingerprint(tmp_path):
     """Universal-filter rules that consult ``predictions`` (prediction_status,
     prediction_confidence, classifier_model, taxonomy_*) must only match the
