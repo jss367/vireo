@@ -1202,6 +1202,118 @@ def test_legacy_merge_prompt_remap_skips_when_other_detection_matches(tmp_path):
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def test_legacy_merge_prompt_remap_moves_when_other_detection_is_not_primary(tmp_path):
+    """Remap the mask to the survivor coords when a retained megadetector-v6
+    row at the loser coordinates is lower-confidence than the merged survivor.
+
+    ``find_stale_masks`` picks a single primary detection per photo — the
+    highest-confidence non-full-image row, tie-broken by smallest id — and
+    only that row's coordinates keep the mask fresh. If a lower-confidence
+    retained detection happens to sit at the loser coords, the alias survivor
+    is still the primary; leaving the mask pinned to the loser coords would
+    immediately flag it stale, so the migration must move it to the survivor.
+    """
+    canonical_coords = (0.20002, 0.3, 0.4, 0.5)
+    legacy_coords = (0.20001, 0.3, 0.4, 0.5)
+
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+
+    with Database(db_path, initialize_schema=False) as db:
+        folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+        photo_id = db.add_photo(
+            folder_id,
+            "bird.jpg",
+            ".jpg",
+            1,
+            1.0,
+            timestamp="2026-01-01T00:00:00",
+            width=100,
+            height=100,
+        )
+        # A retained megadetector-v6 row co-located with the loser but at a
+        # confidence lower than the merged alias survivor. It is NOT the
+        # post-merge primary, so leaving the mask at its coords would make it
+        # stale against the true primary (the alias survivor).
+        other_detection_id = detection_id(
+            photo_id, "megadetector-v6", legacy_coords, "person",
+        )
+        db.conn.executemany(
+            """
+            INSERT INTO detections (
+              id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                # MegaDetector alias pair — survivor's max confidence is 0.9.
+                (200, photo_id, "megadetector-v6",
+                 *canonical_coords, 0.85, "animal", "2026-04-26T00:00:00"),
+                (201, photo_id, "MegaDetector",
+                 *legacy_coords, 0.9, "animal", "2026-04-23T00:00:00"),
+                # Retained non-primary detection at the loser coords.
+                (other_detection_id, photo_id, "megadetector-v6",
+                 *legacy_coords, 0.3, "person", "2026-04-24T00:00:00"),
+            ],
+        )
+        db.conn.execute(
+            """
+            INSERT INTO photo_masks (
+              photo_id, variant, path, created_at, detector_model,
+              prompt_x, prompt_y, prompt_w, prompt_h
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (photo_id, "sam2-small", "/masks/bird.png", 1,
+             "megadetector-v6", *legacy_coords),
+        )
+        db.conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA user_version = 7")
+
+    schema.ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        mask = conn.execute(
+            """
+            SELECT detector_model, prompt_x, prompt_y, prompt_w, prompt_h
+            FROM photo_masks WHERE photo_id = ?
+            """,
+            (photo_id,),
+        ).fetchone()
+        # Migrated: the mask must move to the survivor coordinates because
+        # the retained detection at the loser coords is not the primary.
+        assert mask["detector_model"] == "megadetector-v6"
+        assert (
+            mask["prompt_x"], mask["prompt_y"],
+            mask["prompt_w"], mask["prompt_h"],
+        ) == pytest.approx(canonical_coords)
+
+        # And find_stale_masks agrees: the mask is fresh against the
+        # post-merge primary (the alias survivor) at its new prompt coords.
+        stale_ids = conn.execute(
+            """
+            SELECT pm.rowid FROM photo_masks pm
+            WHERE NOT EXISTS (
+              SELECT 1 FROM detections d
+              WHERE d.id = (
+                SELECT d2.id FROM detections d2
+                WHERE d2.photo_id = pm.photo_id
+                  AND d2.detector_model != 'full-image'
+                ORDER BY d2.detector_confidence DESC, d2.id ASC
+                LIMIT 1
+              )
+                AND d.detector_model = pm.detector_model
+                AND d.box_x = pm.prompt_x AND d.box_y = pm.prompt_y
+                AND d.box_w = pm.prompt_w AND d.box_h = pm.prompt_h
+            )
+            """,
+        ).fetchall()
+        assert stale_ids == []
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def test_legacy_merge_null_species_predictions_collapse_to_one_row(tmp_path):
     """A migrated legacy/canonical pair whose classifier rows carry
     ``species IS NULL`` must produce exactly one NULL-species prediction on

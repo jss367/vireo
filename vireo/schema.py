@@ -549,27 +549,38 @@ def _merge_legacy_detector_alias(conn):
     # coincidentally share the loser's prompt coordinates, and rewriting it
     # would break equality against its own detection row.
     #
-    # Skip the remap when another retained megadetector-v6 detection on the
-    # same photo still sits at the loser's exact coordinates (for example the
-    # same box under a different category, outside this alias group). Because
-    # find_stale_masks compares only (detector_model, prompt_xywh) and ignores
-    # category, that mask remains fresh against the other detection — moving
-    # it to this group's survivor would point it at a different subject and
-    # make the cache stale.
+    # find_stale_masks picks a single "primary" detection per photo — the
+    # highest-confidence non-full-image row, tie-broken by smallest id — and
+    # only that row's coordinates keep the mask fresh. Skip the remap only
+    # when that primary IS a retained megadetector-v6 row still sitting at
+    # the loser's exact coordinates (for example the same box under a
+    # different category, outside this alias group and higher-confidence than
+    # the merged survivor). In every other case — including a retained row at
+    # the loser coords that is lower-confidence than the survivor — the
+    # primary sits elsewhere; leaving the mask at the loser coords would
+    # immediately flag it stale, so remap to the survivor coords instead.
     for photo_id, loser_coords, survivor_coords in mask_prompt_remaps:
-        other_match = conn.execute(
+        primary = conn.execute(
             """
-            SELECT 1 FROM detections d
-            WHERE d.photo_id = ?
-              AND d.detector_model = ?
-              AND d.box_x = ? AND d.box_y = ?
-              AND d.box_w = ? AND d.box_h = ?
-              AND d.id NOT IN (SELECT old_id FROM legacy_detection_merge)
+            SELECT detector_model, box_x, box_y, box_w, box_h
+            FROM detections
+            WHERE photo_id = ?
+              AND detector_model != 'full-image'
+              AND id NOT IN (SELECT old_id FROM legacy_detection_merge)
+            ORDER BY detector_confidence DESC, id ASC
             LIMIT 1
             """,
-            (photo_id, _CANONICAL_DETECTOR_MODEL, *loser_coords),
+            (photo_id,),
         ).fetchone()
-        if other_match is not None:
+        primary_matches_loser = (
+            primary is not None
+            and primary["detector_model"] == _CANONICAL_DETECTOR_MODEL
+            and (
+                primary["box_x"], primary["box_y"],
+                primary["box_w"], primary["box_h"],
+            ) == loser_coords
+        )
+        if primary_matches_loser:
             continue
         conn.execute(
             """
