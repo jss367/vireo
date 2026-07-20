@@ -1029,6 +1029,7 @@
       mutate(() => { state.root.rules.splice(idx, 1); });
     },
     hasFilters() { return hasUserFilters(); },
+    isReady() { return !!state.ready && !!state.fields; },
     isMuted() { return state.muted; },
     setScopeLabel(label) {
       state.scopeLabel = label;

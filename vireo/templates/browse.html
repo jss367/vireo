@@ -2895,7 +2895,11 @@ async function bootstrapBrowse() {
       onChange: function() {
         if (timelineMode) loadCalendarData();
         if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
-        resetAndLoad({ preserveAnchor: true });
+        // Don't preserveAnchor: a filter change usually excludes the previously
+        // selected photo, and loadUntilPhotoRendered would then keep paging
+        // through the whole matching set (potentially many /api/photos/query
+        // requests) just to prove the anchor is gone.
+        resetAndLoad();
         // Summary panel (photo count, classified, top species) is a separate
         // endpoint from the grid; without this the filter changes the grid
         // but leaves the summary showing pre-filter numbers.
@@ -3084,6 +3088,12 @@ function renderKeywordTree(keywords) {
 }
 
 function filterByKeyword(name) {
+  // The sidebar tree is rendered from the /photos init payload, so a
+  // slow /api/filters/fields (or workspace) round-trip leaves clickable
+  // keywords in the DOM before VireoFilter.init resolves. Without this
+  // guard, addRule -> makeRule dereferences state.fields (still null)
+  // and throws, leaving activeKeyword toggled but no rule/reload applied.
+  if (!VireoFilter.isReady()) return;
   if (activeKeyword === name) {
     activeKeyword = null;
   } else {
