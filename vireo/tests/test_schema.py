@@ -705,6 +705,222 @@ def test_legacy_merge_prompt_remap_leaves_other_detector_masks_alone(tmp_path):
         assert "sam2-large" not in stale_variants
 
 
+def test_legacy_merge_review_metadata_follows_winning_row(tmp_path):
+    """A conflicting prediction_review row must copy every merged column from
+    the same source row that wins the status/timestamp comparison. Otherwise a
+    newer rejected review from one row can end up alongside the older accepted
+    row's ``individual``/``group_id``/vote counts, and grouped-accept logic
+    then retags other photos with the loser row's metadata.
+    """
+    canonical_coords = (0.10002, 0.2, 0.3, 0.4)
+    legacy_coords = (0.10001, 0.2, 0.3, 0.4)
+
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+
+    with Database(db_path, initialize_schema=False) as db:
+        workspace_id = db._active_workspace_id
+        folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+        photo_id = db.add_photo(
+            folder_id,
+            "bird.jpg",
+            ".jpg",
+            1,
+            1.0,
+            timestamp="2026-01-01T00:00:00",
+            width=100,
+            height=100,
+        )
+        db.conn.executemany(
+            """
+            INSERT INTO detections (
+              id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (100, photo_id, "megadetector-v6",
+                 *canonical_coords, 0.9, "animal", "2026-04-26T00:00:00"),
+                (101, photo_id, "MegaDetector",
+                 *legacy_coords, 0.9, "animal", "2026-04-23T00:00:00"),
+            ],
+        )
+        # Two predictions with matching (classifier_model, labels_fingerprint,
+        # species) — one on the canonical detection, one on the legacy alias —
+        # collapse to a single survivor prediction during the merge.
+        db.conn.executemany(
+            """
+            INSERT INTO predictions (
+              id, detection_id, classifier_model, labels_fingerprint,
+              species, confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (200, 100, "BioCLIP-2.5", "birds", "Robin", 0.8, "match", "2026-04-26T01:00:00"),
+                (201, 101, "BioCLIP-2.5", "birds", "Robin", 0.9, "match", "2026-04-23T01:00:00"),
+            ],
+        )
+        # Both predictions carry a prediction_review row for the SAME workspace,
+        # so the merge UPSERT hits the ON CONFLICT branch. The legacy row (201)
+        # has the more recent reviewed_at, so it wins the merge.
+        db.conn.executemany(
+            """
+            INSERT INTO prediction_review (
+              prediction_id, workspace_id, status, reviewed_at,
+              individual, group_id, vote_count, total_votes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (200, workspace_id, "accepted", "2026-04-27T02:00:00",
+                 "bob", "groupB", 3, 5),
+                (201, workspace_id, "rejected", "2026-06-01T02:00:00",
+                 "alice", "groupA", 1, 2),
+            ],
+        )
+        db.conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA user_version = 7")
+
+    schema.ensure_schema(db_path)
+
+    survivor_detection_id = detection_id(
+        photo_id, "megadetector-v6", canonical_coords, "animal",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        survivor_prediction = conn.execute(
+            """
+            SELECT id FROM predictions
+            WHERE detection_id = ? AND species = 'Robin'
+            """,
+            (survivor_detection_id,),
+        ).fetchone()
+        assert survivor_prediction is not None
+        review = conn.execute(
+            """
+            SELECT status, reviewed_at, individual, group_id,
+                   vote_count, total_votes
+            FROM prediction_review
+            WHERE prediction_id = ? AND workspace_id = ?
+            """,
+            (survivor_prediction["id"], workspace_id),
+        ).fetchone()
+        # The legacy row wins on reviewed_at, so every merged field must come
+        # from it — the auxiliary metadata cannot latch onto the accepted row.
+        assert review["status"] == "rejected"
+        assert review["reviewed_at"] == "2026-06-01T02:00:00"
+        assert review["individual"] == "alice"
+        assert review["group_id"] == "groupA"
+        assert review["vote_count"] == 1
+        assert review["total_votes"] == 2
+
+
+def test_legacy_merge_review_pending_loses_to_decided_metadata(tmp_path):
+    """When one review is 'pending' and the other is decided, the decided row
+    wins the status merge; every other merged column must follow it, so a
+    pending row's NULL metadata cannot outrank a decided row's group tag.
+    """
+    canonical_coords = (0.10002, 0.2, 0.3, 0.4)
+    legacy_coords = (0.10001, 0.2, 0.3, 0.4)
+
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+
+    with Database(db_path, initialize_schema=False) as db:
+        workspace_id = db._active_workspace_id
+        folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+        photo_id = db.add_photo(
+            folder_id,
+            "bird.jpg",
+            ".jpg",
+            1,
+            1.0,
+            timestamp="2026-01-01T00:00:00",
+            width=100,
+            height=100,
+        )
+        db.conn.executemany(
+            """
+            INSERT INTO detections (
+              id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (100, photo_id, "megadetector-v6",
+                 *canonical_coords, 0.9, "animal", "2026-04-26T00:00:00"),
+                (101, photo_id, "MegaDetector",
+                 *legacy_coords, 0.9, "animal", "2026-04-23T00:00:00"),
+            ],
+        )
+        db.conn.executemany(
+            """
+            INSERT INTO predictions (
+              id, detection_id, classifier_model, labels_fingerprint,
+              species, confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (200, 100, "BioCLIP-2.5", "birds", "Robin", 0.8, "match", "2026-04-26T01:00:00"),
+                (201, 101, "BioCLIP-2.5", "birds", "Robin", 0.9, "match", "2026-04-23T01:00:00"),
+            ],
+        )
+        # Canonical (existing) is decided; legacy (excluded) is pending with a
+        # newer timestamp. The decided row must still win — and carry its own
+        # metadata even though the pending row's is NULL.
+        db.conn.executemany(
+            """
+            INSERT INTO prediction_review (
+              prediction_id, workspace_id, status, reviewed_at,
+              individual, group_id, vote_count, total_votes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (200, workspace_id, "accepted", "2026-04-27T02:00:00",
+                 "bob", "groupB", 3, 5),
+                (201, workspace_id, "pending", "2026-06-01T02:00:00",
+                 None, None, None, None),
+            ],
+        )
+        db.conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA user_version = 7")
+
+    schema.ensure_schema(db_path)
+
+    survivor_detection_id = detection_id(
+        photo_id, "megadetector-v6", canonical_coords, "animal",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        survivor_prediction = conn.execute(
+            """
+            SELECT id FROM predictions
+            WHERE detection_id = ? AND species = 'Robin'
+            """,
+            (survivor_detection_id,),
+        ).fetchone()
+        review = conn.execute(
+            """
+            SELECT status, reviewed_at, individual, group_id,
+                   vote_count, total_votes
+            FROM prediction_review
+            WHERE prediction_id = ? AND workspace_id = ?
+            """,
+            (survivor_prediction["id"], workspace_id),
+        ).fetchone()
+        # Decided beats pending regardless of timestamp; and every merged
+        # column keeps the decided row's values (not COALESCE'd from pending).
+        assert review["status"] == "accepted"
+        assert review["reviewed_at"] == "2026-04-27T02:00:00"
+        assert review["individual"] == "bob"
+        assert review["group_id"] == "groupB"
+        assert review["vote_count"] == 3
+        assert review["total_votes"] == 5
+
+
 def test_legacy_megadetector_zero_box_run_is_normalized_without_detections(tmp_path):
     """A legacy empty-scene run has no detection row to drive the main merge."""
     db_path = str(tmp_path / "vireo.db")

@@ -130,20 +130,32 @@ _LEGACY_DETECTOR_MODEL = "MegaDetector"
 _CANONICAL_DETECTOR_MODEL = "megadetector-v6"
 
 
-def _merge_review_status_sql():
-    """Return the status expression used when two prediction reviews collide."""
-    return """
+def _merge_review_winning_column_sql(column):
+    """Return the CASE expression picking ``column`` from the winning review row.
+
+    Two prediction_review rows collide when both the legacy and canonical
+    prediction rows carry a review in the same workspace. The winner is:
+      1. The non-pending row when the other is pending; otherwise
+      2. The row with the later ``reviewed_at`` (NULLs treated as oldest);
+      3. Ties keep the pre-existing row.
+    Applying the same expression to every merged column keeps status,
+    reviewed_at, individual, group_id, and the vote counts sourced from the
+    same row — otherwise a rejected status from one row could be stored
+    alongside the accepted-group metadata from the other, and grouped
+    accepts later use group_id/individual to retag other photos.
+    """
+    return f"""
         CASE
           WHEN prediction_review.status = 'pending'
                AND excluded.status <> 'pending'
-            THEN excluded.status
+            THEN excluded.{column}
           WHEN prediction_review.status <> 'pending'
                AND excluded.status = 'pending'
-            THEN prediction_review.status
+            THEN prediction_review.{column}
           WHEN COALESCE(excluded.reviewed_at, '')
                > COALESCE(prediction_review.reviewed_at, '')
-            THEN excluded.status
-          ELSE prediction_review.status
+            THEN excluded.{column}
+          ELSE prediction_review.{column}
         END
     """
 
@@ -472,18 +484,12 @@ def _merge_legacy_detector_alias(conn):
         JOIN legacy_prediction_merge pm ON pm.old_id = r.prediction_id
         WHERE 1
         ON CONFLICT(prediction_id, workspace_id) DO UPDATE SET
-          status = {_merge_review_status_sql()},
-          reviewed_at = CASE
-            WHEN prediction_review.reviewed_at IS NULL THEN excluded.reviewed_at
-            WHEN excluded.reviewed_at IS NULL THEN prediction_review.reviewed_at
-            WHEN excluded.reviewed_at > prediction_review.reviewed_at
-              THEN excluded.reviewed_at
-            ELSE prediction_review.reviewed_at
-          END,
-          individual = COALESCE(prediction_review.individual, excluded.individual),
-          group_id = COALESCE(prediction_review.group_id, excluded.group_id),
-          vote_count = COALESCE(prediction_review.vote_count, excluded.vote_count),
-          total_votes = COALESCE(prediction_review.total_votes, excluded.total_votes)
+          status = {_merge_review_winning_column_sql('status')},
+          reviewed_at = {_merge_review_winning_column_sql('reviewed_at')},
+          individual = {_merge_review_winning_column_sql('individual')},
+          group_id = {_merge_review_winning_column_sql('group_id')},
+          vote_count = {_merge_review_winning_column_sql('vote_count')},
+          total_votes = {_merge_review_winning_column_sql('total_votes')}
         """
     )
 
