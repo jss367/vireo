@@ -20570,3 +20570,34 @@ def test_get_filter_field_values_species_canonicalizes_hierarchy_leaf(tmp_path):
     # already canonicalizes through taxon).
     assert db.count_photos_for_rules(
         [{"field": "species", "op": "is", "value": "Verdin"}]) == 2
+
+
+def test_get_filter_field_values_folder_escapes_like_metacharacters(tmp_path):
+    """Folder suggestion counts must not treat stored folder paths as LIKE
+    patterns. A folder such as ``/photos/my_dir`` uses ``_`` — a single-char
+    LIKE wildcard — so an unescaped subtree join would also match photos in
+    ``/photos/myXdir`` and overcount what selecting the suggestion actually
+    filters to."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    literal = db.add_folder('/photos/my_dir', name='my_dir')
+    look_alike = db.add_folder('/photos/myXdir', name='myXdir')
+    db.add_photo(folder_id=literal, filename='a.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=look_alike, filename='b.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values("folder")}
+    # ``/photos/my_dir`` covers only its own direct photo — the ``_`` in the
+    # stored path must not act as a LIKE wildcard against ``myXdir``. Cross-
+    # check with what the ``folder under`` rule engine returns.
+    assert values.get('/photos/my_dir') == 1
+    assert values.get('/photos/myXdir') == 1
+    for path in ('/photos/my_dir', '/photos/myXdir'):
+        rule_count = db.count_photos_for_rules(
+            [{"field": "folder", "op": "under", "value": path}])
+        assert rule_count == values.get(path), (
+            f"mismatch for {path!r}: rule={rule_count} suggest={values.get(path)}"
+        )

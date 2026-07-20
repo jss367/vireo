@@ -18516,6 +18516,15 @@ class Database:
         # aggregate the same way here as they filter there.
         norm_photo = "REPLACE(matched.ppath, '\\', '/')"
         norm_folder = "REPLACE(ff.path, '\\', '/')"
+        # Subtree LIKE pattern needs its metacharacters (``_`` and ``%``)
+        # escaped, or a stored folder such as ``/photos/my_dir`` would
+        # match ``/photos/myXdir/...`` too and overcount the facet. The
+        # ``\\`` escape char is safe to introduce here because the path
+        # normalization above has already collapsed every literal ``\``
+        # to ``/``.
+        norm_folder_like = (
+            f"REPLACE(REPLACE({norm_folder}, '%', '\\%'), '_', '\\_')"
+        )
         query = f"""
             SELECT ff.path AS value, COUNT(DISTINCT matched.pid) AS count
             FROM folders ff
@@ -18523,7 +18532,7 @@ class Database:
               ON ff_wf.folder_id = ff.id AND ff_wf.workspace_id = ?
             JOIN ({inner}) matched ON (
                 {norm_photo} = {norm_folder}
-                OR {norm_photo} LIKE {norm_folder} || '/%' ESCAPE '\\'
+                OR {norm_photo} LIKE {norm_folder_like} || '/%' ESCAPE '\\'
             )
             WHERE ff.path IS NOT NULL{q_condition}
             GROUP BY ff.path

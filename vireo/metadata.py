@@ -419,6 +419,11 @@ def exif_summary_columns(grouped_meta):
     splice into an UPDATE. String fields are stripped; numeric fields are
     coerced (ExifTool runs with -n so values are usually numeric already,
     but sidecar-sourced or vendor-quirk values can be strings or lists).
+
+    The full set of managed columns is ``EXIF_SUMMARY_COLUMNS``. Absent
+    entries in the returned dict mean "no value in the current metadata";
+    on a rescan, callers should clear those columns rather than leave
+    stale prior values in place.
     """
     summary = extract_summary_fields(grouped_meta)
     columns = {}
