@@ -19,7 +19,15 @@ BOOLEAN_OPS = ["is"]
 FLAG_VALUES = ["flagged", "none", "rejected"]
 FLAG_LABELS = {"flagged": "Picked", "none": "Unflagged", "rejected": "Rejected"}
 COLOR_VALUES = ["red", "yellow", "green", "blue", "purple"]
-PREDICTION_STATUS_VALUES = ["pending", "accepted", "rejected"]
+# ``reviewed`` is a distinct persisted status the review UI sets via
+# ``/api/predictions/<id>/reviewed`` (``update_prediction_status(id,
+# "reviewed")``) — a prediction the user has looked at without accepting or
+# rejecting. The rule engine's ``prediction_status`` branch compares against
+# ``COALESCE(prv.status, 'pending')`` so this string filters as-is; omit it
+# and the universal-filter UI silently loses the ability to build a
+# "reviewed-but-not-accepted/rejected" rule even though the underlying data
+# supports it.
+PREDICTION_STATUS_VALUES = ["pending", "accepted", "rejected", "reviewed"]
 
 
 def _field(label, category, type_, ops, **extra):
