@@ -160,6 +160,114 @@ def _merge_review_winning_column_sql(column):
     """
 
 
+def _merge_null_species_predictions(conn):
+    """Explicit merge path for classifier predictions with ``species IS NULL``.
+
+    The main INSERT relies on the ``UNIQUE(detection_id, classifier_model,
+    labels_fingerprint, species)`` constraint to drive its ON CONFLICT UPSERT,
+    but SQLite treats NULLs as distinct in UNIQUE constraints — so two rows
+    with matching non-null columns and ``species = NULL`` do not collide.
+    Without this pass every legacy NULL-species prediction would be inserted
+    as a fresh row on the survivor detection, leaving a duplicate that
+    ``legacy_prediction_merge`` never maps to; that duplicate would then
+    surface as an extra cached prediction (with a stale higher confidence
+    than the merged winner).
+
+    For each legacy NULL-species prediction: if the survivor already has a
+    matching (classifier_model, labels_fingerprint, species=NULL) row, merge
+    into it using the same rules as the main UPSERT (winning confidence,
+    COALESCEd taxonomy, earliest created_at). Otherwise insert onto the
+    survivor. Subsequent losers targeting the same survivor row fall back
+    into the merge branch on the freshly inserted row.
+    """
+    null_losers = conn.execute(
+        """
+        SELECT m.survivor_id, p.classifier_model, p.labels_fingerprint,
+               p.confidence, p.category, p.scientific_name,
+               p.taxonomy_kingdom, p.taxonomy_phylum, p.taxonomy_class,
+               p.taxonomy_order, p.taxonomy_family, p.taxonomy_genus,
+               p.created_at
+        FROM predictions p
+        JOIN legacy_detection_merge m ON m.old_id = p.detection_id
+        WHERE p.species IS NULL
+        """
+    ).fetchall()
+
+    def _pick_higher_confidence(cur, new):
+        if cur is None:
+            return new
+        if new is None:
+            return cur
+        return max(cur, new)
+
+    def _pick_earlier(cur, new):
+        if cur is None:
+            return new
+        if new is None:
+            return cur
+        return min(cur, new)
+
+    for row in null_losers:
+        (survivor_id, classifier_model, labels_fingerprint, loser_confidence,
+         loser_category, loser_sci, loser_king, loser_phyl, loser_cls,
+         loser_ord, loser_fam, loser_gen, loser_created) = row
+
+        existing = conn.execute(
+            """
+            SELECT id, confidence, created_at
+            FROM predictions
+            WHERE detection_id = ?
+              AND classifier_model = ?
+              AND labels_fingerprint = ?
+              AND species IS NULL
+            """,
+            (survivor_id, classifier_model, labels_fingerprint),
+        ).fetchone()
+
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO predictions (
+                  detection_id, classifier_model, labels_fingerprint, species,
+                  confidence, category, scientific_name, taxonomy_kingdom,
+                  taxonomy_phylum, taxonomy_class, taxonomy_order,
+                  taxonomy_family, taxonomy_genus, created_at
+                ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (survivor_id, classifier_model, labels_fingerprint,
+                 loser_confidence, loser_category, loser_sci,
+                 loser_king, loser_phyl, loser_cls, loser_ord, loser_fam,
+                 loser_gen, loser_created),
+            )
+            continue
+
+        existing_id, existing_confidence, existing_created = existing
+        conn.execute(
+            """
+            UPDATE predictions
+            SET confidence = ?,
+                category = COALESCE(category, ?),
+                scientific_name = COALESCE(scientific_name, ?),
+                taxonomy_kingdom = COALESCE(taxonomy_kingdom, ?),
+                taxonomy_phylum = COALESCE(taxonomy_phylum, ?),
+                taxonomy_class = COALESCE(taxonomy_class, ?),
+                taxonomy_order = COALESCE(taxonomy_order, ?),
+                taxonomy_family = COALESCE(taxonomy_family, ?),
+                taxonomy_genus = COALESCE(taxonomy_genus, ?),
+                created_at = ?
+            WHERE id = ?
+            """,
+            (
+                _pick_higher_confidence(existing_confidence, loser_confidence),
+                loser_category, loser_sci,
+                loser_king, loser_phyl, loser_cls,
+                loser_ord, loser_fam, loser_gen,
+                _pick_earlier(existing_created, loser_created),
+                existing_id,
+            ),
+        )
+
+
 def _merge_legacy_detector_alias(conn):
     """Consolidate pre-versioned MegaDetector cache rows without losing review data.
 
@@ -440,7 +548,29 @@ def _merge_legacy_detector_alias(conn):
     # canonicalized by the rename above): another detector's mask can
     # coincidentally share the loser's prompt coordinates, and rewriting it
     # would break equality against its own detection row.
+    #
+    # Skip the remap when another retained megadetector-v6 detection on the
+    # same photo still sits at the loser's exact coordinates (for example the
+    # same box under a different category, outside this alias group). Because
+    # find_stale_masks compares only (detector_model, prompt_xywh) and ignores
+    # category, that mask remains fresh against the other detection — moving
+    # it to this group's survivor would point it at a different subject and
+    # make the cache stale.
     for photo_id, loser_coords, survivor_coords in mask_prompt_remaps:
+        other_match = conn.execute(
+            """
+            SELECT 1 FROM detections d
+            WHERE d.photo_id = ?
+              AND d.detector_model = ?
+              AND d.box_x = ? AND d.box_y = ?
+              AND d.box_w = ? AND d.box_h = ?
+              AND d.id NOT IN (SELECT old_id FROM legacy_detection_merge)
+            LIMIT 1
+            """,
+            (photo_id, _CANONICAL_DETECTOR_MODEL, *loser_coords),
+        ).fetchone()
+        if other_match is not None:
+            continue
         conn.execute(
             """
             UPDATE photo_masks
@@ -456,6 +586,13 @@ def _merge_legacy_detector_alias(conn):
     # Copy loser predictions onto their survivor detection. The identity UNIQUE
     # makes this both an insert for legacy-only information and a merge for output
     # already regenerated under the canonical detection id.
+    #
+    # NULL species is handled separately below: SQLite's UNIQUE constraint treats
+    # NULLs as distinct, so ON CONFLICT would never fire for species=NULL rows and
+    # a stray duplicate would be inserted on the survivor. That duplicate would
+    # not receive a `legacy_prediction_merge` entry pointing at it, so it would
+    # linger as an unmapped extra row and could surface as the top cached
+    # prediction (with a stale/higher confidence than the merged winner).
     conn.execute(
         """
         INSERT INTO predictions (
@@ -471,7 +608,7 @@ def _merge_legacy_detector_alias(conn):
                p.created_at
         FROM predictions p
         JOIN legacy_detection_merge m ON m.old_id = p.detection_id
-        WHERE 1
+        WHERE p.species IS NOT NULL
         ON CONFLICT(detection_id, classifier_model, labels_fingerprint, species)
         DO UPDATE SET
           confidence = CASE
@@ -496,6 +633,8 @@ def _merge_legacy_detector_alias(conn):
           END
         """
     )
+
+    _merge_null_species_predictions(conn)
 
     # Map every soon-to-be-deleted prediction id to the prediction that now owns
     # its identity on the survivor. This drives both review-state and undo-history

@@ -1108,3 +1108,209 @@ def test_legacy_megadetector_zero_box_run_is_normalized_without_detections(tmp_p
             (photo_id,),
         ).fetchone() == ("megadetector-v6", 0)
         assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+
+
+def test_legacy_merge_prompt_remap_skips_when_other_detection_matches(tmp_path):
+    """Skip the mask prompt realignment when another retained megadetector-v6
+    detection on the same photo still sits at the loser's exact coordinates.
+
+    ``find_stale_masks`` compares only ``(detector_model, prompt_xywh)`` and
+    ignores category, so a mask that already matches that other detection
+    would remain fresh against it. Rewriting the mask to this alias group's
+    survivor coordinates would silently point it at a different subject and
+    turn a valid cache entry stale.
+    """
+    canonical_coords = (0.10002, 0.2, 0.3, 0.4)
+    legacy_coords = (0.10001, 0.2, 0.3, 0.4)
+
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+
+    with Database(db_path, initialize_schema=False) as db:
+        folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+        photo_id = db.add_photo(
+            folder_id,
+            "bird.jpg",
+            ".jpg",
+            1,
+            1.0,
+            timestamp="2026-01-01T00:00:00",
+            width=100,
+            height=100,
+        )
+        # Unrelated megadetector-v6 detection whose coords equal the loser's
+        # (e.g. same box under a different category). Its id must fall outside
+        # ``legacy_detection_merge`` so it counts as retained.
+        other_detection_id = detection_id(
+            photo_id, "megadetector-v6", legacy_coords, "person",
+        )
+        db.conn.executemany(
+            """
+            INSERT INTO detections (
+              id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                # MegaDetector alias pair — canonical survives, legacy loses.
+                (100, photo_id, "megadetector-v6",
+                 *canonical_coords, 0.8, "animal", "2026-04-26T00:00:00"),
+                (101, photo_id, "MegaDetector",
+                 *legacy_coords, 0.85, "animal", "2026-04-23T00:00:00"),
+                # Retained megadetector-v6 row co-located with the loser.
+                (other_detection_id, photo_id, "megadetector-v6",
+                 *legacy_coords, 0.95, "person", "2026-04-24T00:00:00"),
+            ],
+        )
+        # Mask stored under the loser's exact coordinates, model
+        # ``megadetector-v6`` (so both the ``other`` retained detection and
+        # the loser row share its ``(detector_model, prompt_xywh)`` identity).
+        db.conn.execute(
+            """
+            INSERT INTO photo_masks (
+              photo_id, variant, path, created_at, detector_model,
+              prompt_x, prompt_y, prompt_w, prompt_h
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (photo_id, "sam2-small", "/masks/bird.png", 1,
+             "megadetector-v6", *legacy_coords),
+        )
+        db.conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA user_version = 7")
+
+    schema.ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        mask = conn.execute(
+            """
+            SELECT detector_model, prompt_x, prompt_y, prompt_w, prompt_h
+            FROM photo_masks WHERE photo_id = ?
+            """,
+            (photo_id,),
+        ).fetchone()
+        # The mask must stay pinned to the loser coordinates because the
+        # retained ``other`` detection still matches it. Remapping to the
+        # alias survivor would make it stale against every remaining row.
+        assert mask["detector_model"] == "megadetector-v6"
+        assert (
+            mask["prompt_x"], mask["prompt_y"],
+            mask["prompt_w"], mask["prompt_h"],
+        ) == pytest.approx(legacy_coords)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_legacy_merge_null_species_predictions_collapse_to_one_row(tmp_path):
+    """A migrated legacy/canonical pair whose classifier rows carry
+    ``species IS NULL`` must produce exactly one NULL-species prediction on
+    the survivor, not two.
+
+    SQLite treats NULLs as distinct in UNIQUE constraints, so the main
+    prediction INSERT's ON CONFLICT branch never fires for NULL species and
+    a naive UPSERT would insert a duplicate row. ``legacy_prediction_merge``
+    then maps review/history to ``MIN(new_p.id)`` and the extra row is left
+    unmapped — surfacing as an additional cached prediction with the loser's
+    (potentially higher) confidence.
+    """
+    canonical_coords = (0.10002, 0.2, 0.3, 0.4)
+    legacy_coords = (0.10001, 0.2, 0.3, 0.4)
+
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+
+    with Database(db_path, initialize_schema=False) as db:
+        workspace_id = db._active_workspace_id
+        folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+        photo_id = db.add_photo(
+            folder_id,
+            "bird.jpg",
+            ".jpg",
+            1,
+            1.0,
+            timestamp="2026-01-01T00:00:00",
+            width=100,
+            height=100,
+        )
+        db.conn.executemany(
+            """
+            INSERT INTO detections (
+              id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (100, photo_id, "megadetector-v6",
+                 *canonical_coords, 0.9, "animal", "2026-04-26T00:00:00"),
+                (101, photo_id, "MegaDetector",
+                 *legacy_coords, 0.9, "animal", "2026-04-23T00:00:00"),
+            ],
+        )
+        # Both classifier rows have species=NULL — the ambiguous "no
+        # confident label" output that classifiers cache alongside a
+        # confidence score. Same classifier_model/labels_fingerprint means
+        # they represent the same run identity on their respective detections.
+        db.conn.executemany(
+            """
+            INSERT INTO predictions (
+              id, detection_id, classifier_model, labels_fingerprint,
+              species, confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (200, 100, "BioCLIP-2.5", "birds", None,
+                 0.4, "match", "2026-04-26T01:00:00"),
+                (201, 101, "BioCLIP-2.5", "birds", None,
+                 0.9, "match", "2026-04-23T01:00:00"),
+            ],
+        )
+        db.conn.execute(
+            """
+            INSERT INTO prediction_review (
+              prediction_id, workspace_id, status, reviewed_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (201, workspace_id, "accepted", "2026-04-27T02:00:00"),
+        )
+        db.conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA user_version = 7")
+
+    schema.ensure_schema(db_path)
+
+    survivor_detection_id = detection_id(
+        photo_id, "megadetector-v6", canonical_coords, "animal",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT id, species, confidence, created_at
+            FROM predictions
+            WHERE detection_id = ?
+              AND classifier_model = 'BioCLIP-2.5'
+              AND labels_fingerprint = 'birds'
+            """,
+            (survivor_detection_id,),
+        ).fetchall()
+        # Exactly one NULL-species row survives on the merged detection.
+        assert len(rows) == 1
+        survivor_prediction = rows[0]
+        assert survivor_prediction["species"] is None
+        # Winning confidence and earliest created_at are merged in.
+        assert survivor_prediction["confidence"] == pytest.approx(0.9)
+        assert survivor_prediction["created_at"] == "2026-04-23T01:00:00"
+
+        # The legacy prediction's review must carry over to the surviving row.
+        review = conn.execute(
+            """
+            SELECT status FROM prediction_review
+            WHERE prediction_id = ? AND workspace_id = ?
+            """,
+            (survivor_prediction["id"], workspace_id),
+        ).fetchone()
+        assert review is not None
+        assert review["status"] == "accepted"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
