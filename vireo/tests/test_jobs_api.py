@@ -4111,6 +4111,94 @@ def test_after_process_move_rejects_strftime_template_landing_under_mount(
     assert resp.status_code == 200, resp.get_json()
 
 
+def test_after_process_move_accepts_digit_template_against_letter_mount_leaf(
+    app_and_db, tmp_path, stub_move,
+):
+    """The pre-fix guard treated every ``%``-bearing template component as
+    a wildcard that could produce anything at the mount's depth, so the
+    default ``%Y/%Y-%m-%d`` template against a mount whose leaf is a
+    letter-only name like ``NAS`` was falsely rejected — yet ``%Y``
+    renders four digits and can never equal ``NAS``. Users with a NAS
+    mount below their archive root (a common Photos-drive layout) could
+    not enable the chained move with the default template. Lock in that
+    the guard now inspects each ``%``-bearing component's actual output
+    shape via ``_strftime_template_can_render``: digit-only directives
+    cannot match a letter-only mount leaf, so the request is accepted."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    # Mount lives at <root>/NAS — the leaf is letters, so no strftime
+    # render of ``%Y`` (four digits) can ever equal it.
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "NAS"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # Default dated template: neither ``%Y`` nor ``%Y-%m-%d`` can render
+    # the letter-only mount leaf ``NAS``. Legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y/%Y-%m-%d",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    # Deeper mount whose leaves are letters — no digit-only template can
+    # reach either component. Legal.
+    target["mount_path"] = str(root / "NAS" / "shoots")
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y/%m/%d",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    # Mixed literal + strftime template where the ``%``-bearing component
+    # can't produce the mount leaf at its depth. ``%d`` renders 1-2 digits,
+    # never ``mixed`` — the guard should not reject.
+    target["mount_path"] = str(root / "shoots" / "mixed")
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots/%d",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    # Sanity: locale-varying month-name directive ``%B`` (renders
+    # "January", "February", …) is still treated as a wildcard for
+    # letter-only mount leaves — some locale could plausibly render
+    # ``NAS``-shaped strings, and the guard must stay at least as strict
+    # as the pre-fix wildcard behavior for these tokens.
+    target["mount_path"] = str(root / "NAS")
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%B/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+
+
 def test_after_process_move_rejects_separator_rendering_strftime_template(
     app_and_db, tmp_path, stub_move,
 ):

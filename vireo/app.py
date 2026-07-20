@@ -2128,6 +2128,98 @@ def _build_explorer_species(db, genus_id):
     return {"genus_id": genus_id, "species": species}
 
 
+# strftime directives grouped by what they can render. Used by
+# ``_strftime_template_can_render`` so the NAS-mount overlap guard does not
+# treat every ``%``-bearing template component as matching whatever the mount
+# has at that depth — ``%Y`` renders only 4 digits and can never equal a
+# letter-only mount leaf like ``NAS``. Missing tokens fall back to ``.*`` so
+# unknown/exotic directives keep the pre-fix conservative wildcard behavior.
+_STRFTIME_TOKEN_RE = {
+    "Y": r"\d{4}",
+    "y": r"\d{2}",
+    "C": r"\d{2}",
+    "m": r"\d{1,2}",
+    "d": r"\d{1,2}",
+    "e": r"[ \d]{1,2}",
+    "H": r"\d{1,2}",
+    "k": r"[ \d]{1,2}",
+    "I": r"\d{1,2}",
+    "l": r"[ \d]{1,2}",
+    "M": r"\d{2}",
+    "S": r"\d{2}",
+    "j": r"\d{3}",
+    "U": r"\d{2}",
+    "W": r"\d{2}",
+    "V": r"\d{2}",
+    "G": r"\d{4}",
+    "g": r"\d{2}",
+    "u": r"\d",
+    "w": r"\d",
+    "s": r"\d+",
+    "f": r"\d{6}",
+    "z": r"[+\-]\d{4}(?:\d{2})?",
+    "%": r"%",
+    "n": r"\s",
+    "t": r"\s",
+    # Locale-dependent renders are unknowable at request time — keep them
+    # wildcard-matching so the guard stays at least as strict as the
+    # pre-fix behavior for these directives.
+    "A": r".+", "a": r".+",
+    "B": r".+", "b": r".+", "h": r".+",
+    "p": r".*", "P": r".*",
+    "Z": r".*",
+    "c": r".+", "x": r".+", "X": r".+",
+    "D": r".+", "F": r".+", "T": r".+", "R": r".+", "r": r".+",
+    "+": r".+",
+}
+
+
+def _strftime_template_can_render(template_component, target):
+    """Return True if a strftime render of ``template_component`` could
+    equal ``target`` (case-insensitively, to match case-alias filesystems).
+
+    Compile the template component into a regex whose token character
+    classes are the strftime directives' actual output shapes, then match
+    ``target`` against it. A template component without ``%`` is a pure
+    literal and only equals a case-folded copy of itself.
+
+    Unknown or locale-varying directives fall back to ``.*``/``.+`` so the
+    guard remains conservative — never LESS strict than the pre-fix
+    wildcard behavior for those tokens.
+    """
+    if "%" not in template_component:
+        return template_component.casefold() == target.casefold()
+    parts = []
+    i = 0
+    n = len(template_component)
+    while i < n:
+        c = template_component[i]
+        if c == "%" and i + 1 < n:
+            j = i + 1
+            # Skip glibc pad / case / E / O modifiers before the directive
+            # letter: %_d, %-d, %0d, %^d, %#d, %Ed, %Od.
+            while j < n and template_component[j] in "_-0^#EO":
+                j += 1
+            if j < n:
+                parts.append(
+                    _STRFTIME_TOKEN_RE.get(template_component[j], r".*"))
+                i = j + 1
+            else:
+                # Trailing "%" with no directive — treat as literal.
+                parts.append(re.escape(c))
+                i += 1
+        else:
+            parts.append(re.escape(c))
+            i += 1
+    pattern = "".join(parts)
+    try:
+        return re.fullmatch(pattern, target, re.IGNORECASE) is not None
+    except re.error:
+        # Malformed pattern — be conservative and treat as renderable so
+        # the guard errs on rejection rather than silently accepting.
+        return True
+
+
 def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -20784,16 +20876,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         #       INSIDE the source ``/Photos/2026`` so ``move_folder``
         #       rejects mid-run and the photos sit in the local archive.
         # strftime tokens make the exact render unknowable at request time,
-        # so treat any ``%``-bearing template component as a wildcard that
-        # could produce whatever the mount has at that depth (``%Y`` can
-        # render "2026", ``%m`` can render "07", etc.). If every overlap
-        # position matches (literal-equal or ``%``-bearing), SOME render
-        # will overlap the mount in one of the two directions above. An
-        # earlier guard that reduced this to only the leading static prefix
-        # would still accept the default ``%Y/%Y-%m-%d`` template against a
-        # ``.../2026`` mount, and one that gated on ``template depth >=
-        # mount depth`` would still accept ``%Y`` against a
-        # ``.../2026/07`` mount even though the first render wraps it.
+        # but the tokens themselves narrow what strftime can produce —
+        # ``%Y`` renders only 4 digits, ``%m`` only 2, and so on. Use
+        # ``_strftime_template_can_render`` to ask, per overlap position,
+        # whether the template component can actually produce the mount's
+        # component: an earlier guard treated every ``%``-bearing component
+        # as an unconditional wildcard and rejected the default
+        # ``%Y/%Y-%m-%d`` template against a mount leaf like ``NAS`` even
+        # though ``%Y`` can never render letters. If every overlap position
+        # can render, SOME real strftime output overlaps the mount in one
+        # of the two directions above and the request must be rejected.
+        # Locale-dependent directives (``%B``, ``%A``, ``%Z``, …) whose
+        # renders are truly unknowable fall back to a wildcard pattern, so
+        # the guard stays at least as strict as before for those tokens.
         #
         # Normalize the template with ``os.path.normpath`` before splitting
         # so ``.`` components collapse the same way the import path does
@@ -20833,21 +20928,42 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 c for c in mount_rel.split(os.sep) if c and c != ".."
             ]
             if mount_rel_parts:
-                # For each position in the overlap between template and
-                # mount, substitute the mount's actual component when the
-                # template component is a strftime wildcard; otherwise
-                # keep the template's literal. Any template component past
-                # the mount's depth extends the candidate below the mount
-                # (unknown %-bearing tails become a placeholder so the
-                # candidate stays inside the mount subtree for case (a)).
-                # An empty ``template_components`` (folder_template = "" /
-                # ".") makes the candidate the destination itself: the
-                # import lands on ``dest_real`` with no subfolder, and the
-                # outer condition already says the mount sits inside it,
-                # so case (b) — mount wraps by the import folder — still
-                # applies and must be caught here.
+                # For each ``%``-bearing overlap position, ask whether the
+                # template component can ACTUALLY produce the mount's
+                # component. ``%Y`` renders four digits only, so it cannot
+                # equal a letter-only mount leaf like ``NAS``; treating
+                # every ``%``-bearing component as an unconditional wildcard
+                # (the pre-fix behavior) falsely rejected the default
+                # ``%Y/%Y-%m-%d`` template against such mounts. Locale-
+                # dependent directives (``%B``, ``%A``, ``%Z``, …) whose
+                # renders are truly unknowable fall back to a ``.+`` pattern
+                # so the guard stays at least as strict as the wildcard
+                # behavior for those tokens. Literal template components
+                # are excluded from the renderability filter — filesystem
+                # case-alias awareness for those goes through the
+                # ``_path_equal_or_descends`` check on the built candidate
+                # path below, which honours the volume's real case
+                # sensitivity via inode/samefile.
                 overlap = min(
                     len(template_components), len(mount_rel_parts))
+                all_percent_reachable = all(
+                    _strftime_template_can_render(tc, mc)
+                    for tc, mc in zip(
+                        template_components[:overlap],
+                        mount_rel_parts[:overlap],
+                        strict=True,
+                    )
+                    if "%" in tc
+                )
+                # Substitute the mount's actual component at ``%``-bearing
+                # positions — we just verified strftime CAN produce that
+                # value there, so the candidate is an honest example
+                # render. Keep literals as-is; extend past the mount depth
+                # with a placeholder for ``%``-bearing tails so the
+                # candidate stays inside the mount subtree for case (a).
+                # An empty ``template_components`` (folder_template = "" /
+                # ".") produces ``candidate = dest_real``, which the outer
+                # condition already says wraps the mount — case (b).
                 candidate_parts = [
                     mc if "%" in tc else tc
                     for tc, mc in zip(
@@ -20861,9 +20977,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 candidate = os.path.join(dest_real, *candidate_parts)
                 # Reject if the candidate lands AT/UNDER the mount (case
                 # a) OR wraps the mount (case b). ``_path_equal_or_descends``
-                # is alias-aware in both directions.
-                if _path_equal_or_descends(candidate, mount_real) \
-                        or _path_equal_or_descends(mount_real, candidate):
+                # is alias-aware in both directions, so literal template
+                # components that differ from a mount component only by
+                # case on a case-insensitive volume still trigger rejection.
+                if all_percent_reachable and (
+                        _path_equal_or_descends(candidate, mount_real)
+                        or _path_equal_or_descends(mount_real, candidate)):
                     if template_components:
                         detail = (
                             f"the components in \"{folder_template}\" can "
