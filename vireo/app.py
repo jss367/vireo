@@ -20832,7 +20832,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             mount_rel_parts = [
                 c for c in mount_rel.split(os.sep) if c and c != ".."
             ]
-            if mount_rel_parts and template_components:
+            if mount_rel_parts:
                 # For each position in the overlap between template and
                 # mount, substitute the mount's actual component when the
                 # template component is a strftime wildcard; otherwise
@@ -20840,6 +20840,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # the mount's depth extends the candidate below the mount
                 # (unknown %-bearing tails become a placeholder so the
                 # candidate stays inside the mount subtree for case (a)).
+                # An empty ``template_components`` (folder_template = "" /
+                # ".") makes the candidate the destination itself: the
+                # import lands on ``dest_real`` with no subfolder, and the
+                # outer condition already says the mount sits inside it,
+                # so case (b) — mount wraps by the import folder — still
+                # applies and must be caught here.
                 overlap = min(
                     len(template_components), len(mount_rel_parts))
                 candidate_parts = [
@@ -20858,16 +20864,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # is alias-aware in both directions.
                 if _path_equal_or_descends(candidate, mount_real) \
                         or _path_equal_or_descends(mount_real, candidate):
+                    if template_components:
+                        detail = (
+                            f"the components in \"{folder_template}\" can "
+                            f"produce a path matching \"{mount_rel}\" under "
+                            "the destination, so some renders would land on "
+                            "the NAS or wrap the mount"
+                        )
+                    else:
+                        detail = (
+                            f"the folder template (\"{folder_template}\") "
+                            "leaves the import at the destination itself, "
+                            f"and the mount sits at \"{mount_rel}\" under "
+                            "it — the mount ends up inside the import "
+                            "source tree"
+                        )
                     return None, json_error(
                         "folder_template can render the import into the "
                         f"same tree as the target's NAS mount ({mount}) — "
-                        f"the components in \"{folder_template}\" can "
-                        f"produce a path matching \"{mount_rel}\" under "
-                        "the destination, so some renders would land on "
-                        "the NAS or wrap the mount and the chained move "
-                        "would either duplicate them under the remote "
-                        "path or be refused as a destination inside the "
-                        "source; pick a template that stays outside the "
+                        f"{detail} and the chained move would either "
+                        "duplicate them under the remote path or be refused "
+                        "as a destination inside the source; pick a "
+                        "template or destination that stays outside the "
                         "mount")
         dest_is_root = _path_equal_or_descends(root, destination)
         # Root-level import with a folder template that resolves to "." lands

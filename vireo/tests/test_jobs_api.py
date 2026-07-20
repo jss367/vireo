@@ -4361,6 +4361,68 @@ def test_after_process_move_rejects_template_wrapping_mount(
     assert resp.status_code == 200, resp.get_json()
 
 
+def test_after_process_move_rejects_empty_template_wrapping_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """When the destination is a SUBFOLDER of local_archive_root that
+    contains the target's mount, a folder_template that renders empty
+    (``""`` or ``"."``) leaves the import at the destination itself. The
+    mount then sits INSIDE the import source tree, and the chained move
+    computes the NAS-side destination as ``mount_path/<rel(dest, root)>``
+    — which is inside the source — so ``move_folder`` rejects it as
+    destination-inside-source only after the import and processing have
+    already run. Reject up front. The earlier template-vs-mount guard
+    accepted this because it required ``template_components`` to be
+    non-empty; the fix lets that check run with an empty template
+    (candidate = the destination itself)."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    shoot = root / "Shoot"
+    # local_archive_root broader than the destination; the mount sits
+    # INSIDE the destination the user picked.
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(shoot / "NAS"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # Empty and "." both render to ".", so the import lands at
+    # ``<shoot>`` and the mount ``<shoot>/NAS`` sits inside the source.
+    for template in ("", "."):
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [card],
+            "destination": str(shoot),
+            "folder_template": template,
+            "after_import": cull_ready_id,
+            "after_process_move": {"remote_target_id": "nas1"},
+        })
+        assert resp.status_code == 400, (template, resp.get_json())
+        err = resp.get_json()["error"]
+        # Explains that the destination itself would wrap the mount, so
+        # the user sees WHY at request time — not later, silently.
+        assert "NAS mount" in err
+        assert "NAS" in err
+
+    # A non-empty template that steers away from the mount is legal:
+    # the import lands in ``<shoot>/shoots/2026`` and the mount stays
+    # a sibling below ``<shoot>``.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(shoot),
+        "folder_template": "shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
 def test_after_process_move_non_string_target_id(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
