@@ -2850,7 +2850,8 @@ async function bootstrapBrowse() {
     initParams.set('sort', document.getElementById('sortSelect').value);
     if (activeFolderId) initParams.set('folder_id', activeFolderId);
     ['date_from', 'date_to'].forEach(function(name) {
-      if (pageParams.has(name)) initParams.set(name, pageParams.get(name));
+      var value = pageParams.get(name);
+      if (value) initParams.set(name, value);
     });
     // Collection-only deep links keep their historical endpoint behavior,
     // while Dashboard links opt into composable filters via dashboard_scope.
