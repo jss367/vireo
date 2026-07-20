@@ -12772,16 +12772,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             else:
                 preds = db.get_predictions(status=status, rules=rules)
 
-            # Fetch alternatives to attach to their parent predictions
+            # Fetch alternatives to attach to their parent predictions.
+            # Constrain by the returned parents' photo_ids and skip ``rules``
+            # for this lookup: row-level parent predicates (e.g.
+            # ``prediction_confidence >= 0.8`` or
+            # ``prediction_status is pending``) evaluate against each row's
+            # own values, so alternatives — whose status is
+            # ``alternative`` and whose confidence/species usually differ
+            # from the matching parent — would otherwise be dropped by
+            # ``_filter_prediction_rows_by_rules`` before ``alts_by_key`` is
+            # built. The parent would then render with an empty
+            # ``alternatives`` list and the user could not accept an
+            # alternate species in that filtered view. The
+            # ``(detection_id, model)`` key in ``alts_by_key`` already
+            # restricts attachment to alternatives whose parent is in
+            # ``preds``, so no extra rows leak into the response.
             alt_preds = []
             if not status or status == "pending":
-                if collection_id:
-                    if photo_ids:
-                        alt_preds = db.get_predictions(
-                            photo_ids=photo_ids, status="alternative", rules=rules,
-                        )
-                else:
-                    alt_preds = db.get_predictions(status="alternative", rules=rules)
+                parent_photo_ids = list({
+                    p["photo_id"] for p in preds
+                    if p["photo_id"] is not None
+                })
+                if parent_photo_ids:
+                    alt_preds = db.get_predictions(
+                        photo_ids=parent_photo_ids, status="alternative",
+                    )
         except ValueError as e:
             return json_error(str(e), 400)
 

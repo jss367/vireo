@@ -15334,7 +15334,7 @@ class Database:
                 "taxonomy_family",
                 "taxonomy_genus",
             ):
-                col = row[field] if field in row.keys() else None
+                col = row[field] if field in row.keys() else None  # noqa: SIM118 -- sqlite3.Row supports `in` on keys() but not on the row itself
                 if op == "contains":
                     return _text_match(col, "contains", value)
                 return _text_match(col, op, value)

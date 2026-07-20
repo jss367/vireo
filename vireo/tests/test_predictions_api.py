@@ -342,6 +342,50 @@ def test_predictions_include_alternatives(app_and_db):
     assert alt_species == ['Sparrow', 'Finch']
 
 
+def test_predictions_alternatives_survive_row_level_rules(app_and_db):
+    """Row-level Review filters must not strip alternatives off the
+    parent prediction.
+
+    ``get_predictions()`` re-applies row-level predicates (like
+    ``prediction_confidence`` / ``prediction_status``) to each returned
+    row. If we forward the same ``rules`` to the ``status='alternative'``
+    lookup, alternatives whose own confidence/status differ from the
+    parent are dropped before ``alts_by_key`` is built — the parent then
+    renders in the Review grid with an empty ``alternatives`` list and
+    the user cannot accept an alternate species in that filtered view.
+    """
+    app, db = app_and_db
+    photos = db.get_photos()
+    det_ids = db.save_detections(photos[0]['id'], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}, "confidence": 0.9}
+    ], detector_model="MDV6")
+    det_id = det_ids[0]
+    db.add_prediction(detection_id=det_id, species='Robin', confidence=0.95,
+                      model='test-model')
+    db.add_prediction(detection_id=det_id, species='Sparrow', confidence=0.10,
+                      model='test-model')
+    db.add_prediction(detection_id=det_id, species='Finch', confidence=0.05,
+                      model='test-model')
+    ws_id = db._active_workspace_id
+    for sp in ('Sparrow', 'Finch'):
+        row = db.conn.execute(
+            "SELECT id FROM predictions WHERE species = ?", (sp,)
+        ).fetchone()
+        db.set_review_status(row['id'], ws_id, 'alternative')
+
+    client = app.test_client()
+    rules = json.dumps([
+        {"field": "prediction_confidence", "op": ">=", "value": 0.8},
+    ])
+    resp = client.get(f'/api/predictions?rules={rules}')
+    assert resp.status_code == 200
+    preds = resp.get_json()['predictions']
+    assert len(preds) == 1
+    assert preds[0]['species'] == 'Robin'
+    alt_species = [a['species'] for a in preds[0]['alternatives']]
+    assert alt_species == ['Sparrow', 'Finch']
+
+
 def test_accept_alternative_prediction(app_and_db):
     """Accepting an alternative marks it accepted, rejects the top-1, and adds keyword."""
     app, db = app_and_db
