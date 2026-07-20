@@ -2011,10 +2011,9 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             # Timestamp from ExifTool
             timestamp = _extract_timestamp(exif_group)
 
-            # Focal length
-            focal_length = exif_group.get("FocalLength")
-            if focal_length is not None:
-                focal_length = float(focal_length)
+            # Focal length is written via the EXIF summary columns loop
+            # below (see ``EXIF_SUMMARY_COLUMNS``) so a rescan that loses
+            # the tag clears the column instead of leaving a stale value.
 
             # Burst ID (ImageUniqueID)
             burst_id = exif_group.get("ImageUniqueID")
@@ -2072,9 +2071,6 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             if phash is not None:
                 updates.append("phash=?")
                 update_params.append(phash)
-            if focal_length is not None:
-                updates.append("focal_length=?")
-                update_params.append(focal_length)
             if burst_id is not None:
                 updates.append("burst_id=?")
                 update_params.append(burst_id)

@@ -406,6 +406,7 @@ EXIF_SUMMARY_COLUMNS = (
     "camera_make",
     "camera_model",
     "lens",
+    "focal_length",
     "aperture",
     "shutter_speed",
     "iso",
@@ -459,6 +460,7 @@ def exif_summary_columns(grouped_meta):
         if value is not None:
             columns[column] = value
     for column, key in (
+        ("focal_length", "focal_length"),
         ("aperture", "f_number"),
         ("shutter_speed", "exposure_time"),
     ):

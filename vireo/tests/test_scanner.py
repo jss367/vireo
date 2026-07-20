@@ -996,11 +996,13 @@ def test_scan_populates_exif_data(tmp_path):
 
 
 def test_rescan_clears_absent_exif_summary_columns(tmp_path, monkeypatch):
-    """Promoted EXIF columns (camera_make / camera_model / lens / aperture /
-    shutter_speed / iso) are derived from the current file metadata, so a
-    rescan whose metadata omits a field must clear that column to NULL.
-    Otherwise a replaced or edited file leaves stale values that
-    /api/photos/query and /api/filters/values keep matching."""
+    """Promoted EXIF columns (camera_make / camera_model / lens /
+    focal_length / aperture / shutter_speed / iso) are derived from the
+    current file metadata, so a rescan whose metadata omits a field must
+    clear that column to NULL. Otherwise a replaced or edited file leaves
+    stale values that /api/photos/query and /api/filters/values keep
+    matching. focal_length is included because it's exposed as a
+    filter/typeahead field just like the other camera-exposure columns."""
     import scanner
     from db import Database
     from scanner import scan
@@ -1020,6 +1022,7 @@ def test_rescan_clears_absent_exif_summary_columns(tmp_path, monkeypatch):
     monkeypatch.setattr(scanner, "extract_metadata", make_extract({
         "EXIF": {
             "Make": "Sony", "Model": "ILCE-1", "LensModel": "FE 200-600",
+            "FocalLength": 450.0,
             "FNumber": 6.3, "ExposureTime": 0.001, "ISO": 800,
         },
         "Composite": {},
@@ -1027,12 +1030,13 @@ def test_rescan_clears_absent_exif_summary_columns(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "test.db"))
     scan(str(root), db)
     row = db.conn.execute(
-        "SELECT camera_make, camera_model, lens, aperture, shutter_speed, iso "
-        "FROM photos LIMIT 1"
+        "SELECT camera_make, camera_model, lens, focal_length, aperture, "
+        "shutter_speed, iso FROM photos LIMIT 1"
     ).fetchone()
     assert row["camera_make"] == "Sony"
     assert row["camera_model"] == "ILCE-1"
     assert row["lens"] == "FE 200-600"
+    assert row["focal_length"] == pytest.approx(450.0)
     assert row["aperture"] == pytest.approx(6.3)
     assert row["iso"] == 800
 
@@ -1048,12 +1052,13 @@ def test_rescan_clears_absent_exif_summary_columns(tmp_path, monkeypatch):
     }))
     scan(str(root), db)
     row = db.conn.execute(
-        "SELECT camera_make, camera_model, lens, aperture, shutter_speed, iso "
-        "FROM photos LIMIT 1"
+        "SELECT camera_make, camera_model, lens, focal_length, aperture, "
+        "shutter_speed, iso FROM photos LIMIT 1"
     ).fetchone()
     assert row["camera_make"] is None
     assert row["camera_model"] is None
     assert row["lens"] is None
+    assert row["focal_length"] is None
     assert row["aperture"] is None
     assert row["shutter_speed"] is None
     assert row["iso"] is None

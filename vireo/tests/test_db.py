@@ -20200,10 +20200,15 @@ def test_universal_filter_timestamp_recent_and_comparisons(tmp_path):
     old = db.add_photo(folder_id=fid, filename='old.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     now = datetime.now(UTC)
+    # Scanner writes ``datetime.isoformat()``, so timestamps carry the ``T``
+    # separator in real DBs. The recent-cutoff must be formatted to match;
+    # a space-separated cutoff against a T-separated timestamp is a lexical
+    # mismatch where every photo on the cutoff day slips past ``>=`` (``T``
+    # sorts after space), regressing "last N days" by nearly a day.
     db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
-                    ((now - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S'), fresh))
+                    ((now - timedelta(days=2)).isoformat(timespec='seconds'), fresh))
     db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
-                    ('2020-06-01 12:00:00', old))
+                    ('2020-06-01T12:00:00', old))
     db.conn.commit()
 
     count = db.count_photos_for_rules
@@ -20217,6 +20222,51 @@ def test_universal_filter_timestamp_recent_and_comparisons(tmp_path):
     assert count([{"field": "timestamp", "op": "<", "value": "2021-01-01"}]) == 1
     # <= is inclusive of the named day
     assert count([{"field": "timestamp", "op": "<=", "value": "2020-06-01"}]) == 1
+
+
+def test_universal_filter_recent_cutoff_matches_iso_separator(tmp_path):
+    """Regression: the ``recent`` cutoff must use the same ``T`` separator
+    as stored timestamps. Before the fix the cutoff came from SQLite's
+    ``datetime('now', ?)`` which returns ``YYYY-MM-DD HH:MM:SS`` (space
+    separator); a lexical ``>=`` against ``YYYY-MM-DDTHH:MM:SS`` treated
+    every photo on the cutoff day as recent because ``T`` (0x54) sorts
+    after ``' '`` (0x20). Place the photo on the cutoff day *before* the
+    cutoff clock time so the mismatch flips the answer.
+    """
+    from datetime import UTC, datetime, timedelta
+    db, fid = _filter_db(tmp_path)
+    boundary = db.add_photo(folder_id=fid, filename='boundary.jpg',
+                            extension='.jpg', file_size=100, file_mtime=1.0)
+    # 5-days-ago at 00:05 UTC. The ``recent 5 days`` cutoff lands 5 days
+    # ago at the *current* clock time — so the photo is on the cutoff day
+    # but strictly earlier than the cutoff, and its true age is > 5 days.
+    # Correct answer: excluded. Bug behavior: the T/space mismatch makes
+    # the photo lexically sort after the space-separated cutoff and the
+    # rule wrongly includes it. Skip if the test happens to run in the
+    # first minute of a UTC day (where cutoff clock time is <= 00:05 and
+    # the boundary is legitimately within the window).
+    now = datetime.now(UTC)
+    if now.hour == 0 and now.minute <= 5:
+        pytest.skip("cutoff clock time <= photo time — inconclusive boundary")
+    boundary_ts = (
+        (now - timedelta(days=5))
+        .replace(hour=0, minute=5, second=0, microsecond=0)
+        .isoformat(timespec='seconds')
+    )
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    (boundary_ts, boundary))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # A photo whose true age is > 5 days must not match "recent 5 days".
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 5, "unit": "days"}}]) == 0
+    # ``recent_days`` shares the cutoff formatting — guard it too.
+    assert count([{"field": "timestamp", "op": "recent_days",
+                   "value": 5}]) == 0
+    # A wider window still matches, sanity-check.
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 30, "unit": "days"}}]) == 1
 
 
 def test_universal_filter_species_any_match(tmp_path):

@@ -18042,7 +18042,19 @@ class Database:
                         _inclusive_date_to(value[1]),
                     ]
                 if op == "recent_days":
-                    return "p.timestamp >= datetime('now', ?)", [f"-{value} days"]
+                    # ``strftime`` with an explicit ``T`` separator so the
+                    # cutoff format matches the scanner's ``dt.isoformat()``
+                    # storage. SQLite's plain ``datetime('now', ?)`` returns
+                    # ``YYYY-MM-DD HH:MM:SS`` (space separator); comparing a
+                    # T-separated timestamp against a space-separated cutoff
+                    # is a lexical mismatch where ``T`` (0x54) sorts after
+                    # ``' '`` (0x20), so any photo on the cutoff day would
+                    # spuriously satisfy ``>=`` even when its clock time is
+                    # earlier than the cutoff's clock time.
+                    return (
+                        "p.timestamp >= strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)",
+                        [f"-{value} days"],
+                    )
                 if op == "recent":
                     n = value["n"]
                     unit = value.get("unit", "days")
@@ -18052,7 +18064,10 @@ class Database:
                         "months": f"-{n} months",
                         "years": f"-{n} years",
                     }[unit]
-                    return "p.timestamp >= datetime('now', ?)", [modifier]
+                    return (
+                        "p.timestamp >= strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)",
+                        [modifier],
+                    )
                 # Comparison ops for "on or after / before" style rules.
                 # Timestamps are ISO strings, so lexical compare is correct;
                 # date-only bounds are inclusive of the named day on the
