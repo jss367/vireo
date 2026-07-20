@@ -304,6 +304,9 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
                 (empty_photo_id, "MegaDetector", "2026-04-23T04:01:00", 0),
             ],
         )
+        # Mask prompt matches the exact coordinates of a *legacy* row (id=101),
+        # not the canonical survivor (id=100). Without a prompt remap the mask
+        # would be flagged stale after the merge because 0.10001 != 0.10002.
         db.conn.execute(
             """
             INSERT INTO photo_masks (
@@ -313,7 +316,7 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
             """,
             (
                 photo_id, "sam2-small", "/masks/bird.png", 1,
-                "MegaDetector", 0.10002, 0.2, 0.3, 0.4,
+                "MegaDetector", 0.10001, 0.2, 0.3, 0.4,
             ),
         )
         db.conn.executemany(
@@ -429,11 +432,20 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
             "no_tag": True,
         }
 
-        mask_model = conn.execute(
-            "SELECT detector_model FROM photo_masks WHERE photo_id = ?",
+        mask_row = conn.execute(
+            """
+            SELECT detector_model, prompt_x, prompt_y, prompt_w, prompt_h
+            FROM photo_masks WHERE photo_id = ?
+            """,
             (photo_id,),
-        ).fetchone()[0]
-        assert mask_model == "megadetector-v6"
+        ).fetchone()
+        assert mask_row["detector_model"] == "megadetector-v6"
+        # Prompt coords must be realigned to the survivor detection's exact
+        # coordinates so find_stale_masks / count_extract_stale keep matching.
+        assert mask_row["prompt_x"] == pytest.approx(0.10002)
+        assert mask_row["prompt_y"] == pytest.approx(0.2)
+        assert mask_row["prompt_w"] == pytest.approx(0.3)
+        assert mask_row["prompt_h"] == pytest.approx(0.4)
 
         detector_runs = conn.execute(
             """

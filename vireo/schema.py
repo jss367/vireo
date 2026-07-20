@@ -251,6 +251,15 @@ def _merge_legacy_detector_alias(conn):
         """
     )
 
+    # find_stale_masks and count_extract_stale require exact equality between
+    # photo_masks.prompt_xywh and a detection row's box_xywh. When two aliased
+    # detections differ by sub-quantization drift (e.g. 0.10001 vs 0.10002),
+    # a mask created from the loser box would suddenly fail that equality
+    # against the surviving canonical row and be flagged stale. Track the
+    # (photo, loser_coords) -> survivor_coords remaps so we can realign the
+    # mask prompt in the same transaction.
+    mask_prompt_remaps: list[tuple[int, tuple, tuple]] = []
+
     for group_rows in groups.values():
         if not any(
             row["detector_model"] == _LEGACY_DETECTOR_MODEL
@@ -318,6 +327,24 @@ def _merge_legacy_detector_alias(conn):
             ],
         )
 
+        # Plan mask prompt remaps for every loser box whose exact coordinates
+        # differ from the survivor's. Skip rows with any NULL coordinate — a
+        # mask cannot exactly-match a NULL prompt column, so there is nothing
+        # to realign.
+        if any(value is None for value in coords):
+            continue
+        for row in group_rows:
+            loser_coords = (
+                row["box_x"], row["box_y"], row["box_w"], row["box_h"],
+            )
+            if any(value is None for value in loser_coords):
+                continue
+            if loser_coords == coords:
+                continue
+            mask_prompt_remaps.append(
+                (source["photo_id"], loser_coords, coords),
+            )
+
     # Keep the strongest cached confidence and oldest creation timestamp on the
     # survivor. In the normal duplicate case these values are already identical.
     conn.execute(
@@ -334,6 +361,23 @@ def _merge_legacy_detector_alias(conn):
         WHERE id IN (SELECT survivor_id FROM legacy_detector_groups)
         """
     )
+
+    # Realign mask prompts stored under a loser box to the survivor's exact
+    # coordinates so find_stale_masks and count_extract_stale keep matching
+    # after the alias merge. Runs before predictions are moved because
+    # photo_masks and detections are not FK-linked; ordering is only for
+    # locality with the group-building code above.
+    for photo_id, loser_coords, survivor_coords in mask_prompt_remaps:
+        conn.execute(
+            """
+            UPDATE photo_masks
+               SET prompt_x = ?, prompt_y = ?, prompt_w = ?, prompt_h = ?
+             WHERE photo_id = ?
+               AND prompt_x = ? AND prompt_y = ?
+               AND prompt_w = ? AND prompt_h = ?
+            """,
+            (*survivor_coords, photo_id, *loser_coords),
+        )
 
     # Copy loser predictions onto their survivor detection. The identity UNIQUE
     # makes this both an insert for legacy-only information and a merge for output
