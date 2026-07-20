@@ -2601,6 +2601,28 @@ function renderChainInfo(res) {
       if (plan.note) parts.push('Note: ' + plan.note + '.');
     }
   }
+  // Pre-block path: processing couldn't start, so the import hook fired
+  // the promised NAS move itself. `_chain_after_move` writes its outcome
+  // (move_job_ids / after_move_skipped / after_move_note /
+  // after_move_errors) onto the import result — surface it here so the
+  // user isn't left thinking "processing paused" also means the requested
+  // NAS move silently didn't happen.
+  const moveIds = res.move_job_ids || [];
+  if (moveIds.length) {
+    parts.push(
+      'Move to NAS: ' + moveIds.length + ' move job'
+      + (moveIds.length === 1 ? '' : 's') + ' started.');
+    if (res.after_move_note) parts.push('Note: ' + res.after_move_note + '.');
+  } else if (res.after_move_skipped) {
+    parts.push('Move to NAS skipped: ' + res.after_move_skipped + '.');
+  }
+  const moveErrors = res.after_move_errors || [];
+  if (moveErrors.length) {
+    parts.push(
+      'Move to NAS: ' + moveErrors.length + ' folder'
+      + (moveErrors.length === 1 ? '' : 's')
+      + ' failed to start — ' + moveErrors.join('; ') + '.');
+  }
   chain.textContent = parts.join(' ');
 }
 
