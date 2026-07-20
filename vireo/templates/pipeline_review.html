@@ -3066,6 +3066,9 @@ function renderResults() {
   // management below can pick a *visible* encounter (not one that was
   // filtered out by species filter, hide-confirmed, or label filter).
   var renderedIndices = [];
+  // Reset the click-time target cache; it's rebuilt below to mirror the exact
+  // set of photos each Reject/Clear button represents on screen.
+  pipelineReviewVisibleTargets = {};
   encounterSortOrder().forEach(function(ei) {
     var enc = pipelineResults.encounters[ei];
     var timeRange = '';
@@ -3078,23 +3081,21 @@ function renderResults() {
     // Check if the encounter passes the species/filename search.
     if (!encounterMatchesSearch(enc, photoMap)) return;
 
-    // Hide confirmed: skip the whole encounter if every one of its photos is hidden
+    // Build the set of photos this encounter will actually draw: skip
+    // hide-confirmed photos and photos filtered out by the active label /
+    // species-conflict filter. The encounter card is rendered only if this
+    // set is non-empty, and the encounter-level Reject/Clear button targets
+    // exactly this set so it can never flip flags on photos the user can't
+    // see.
     var encPhotoIds = enc.photo_ids || [];
-    if (hideConfirmed) {
-      var anyVisible = encPhotoIds.some(function(pid) {
-        return !confirmedHiddenIds.has(pid);
-      });
-      if (!anyVisible) return;
-    }
-
-    // Check if any photo in this encounter passes the label filter
-    var hasVisible = encPhotoIds.some(function(pid) {
+    var visibleEncIds = encPhotoIds.filter(function(pid) {
       var p = photoMap[pid];
       if (!p) return false;
       if (confirmedHiddenIds && confirmedHiddenIds.has(pid)) return false;
       return photoMatchesPipelineFilter(p, speciesConflictEvidence[pid]);
     });
-    if (!hasVisible) return;
+    if (!visibleEncIds.length) return;
+    pipelineReviewVisibleTargets['encounter:' + ei] = visibleEncIds;
 
     renderedIndices.push(ei);
 
@@ -3112,7 +3113,7 @@ function renderResults() {
     html += missingTimestampBadge(enc);
     html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
     html += '</span>';
-    html += renderGroupRejectButton('encounter', ei, null, visibleEncounterPhotoIds(enc), photoMap);
+    html += renderGroupRejectButton('encounter', ei, null, visibleEncIds, photoMap);
     html += '</div>';
     html += '<div class="encounter-body" id="encBody' + ei + '"' + (isCollapsed ? ' style="display:none;"' : '') + '>';
 
@@ -3120,6 +3121,15 @@ function renderResults() {
       enc.bursts.forEach(function(burst, bi) {
         if (hideConfirmed && isBurstConfirmed(enc, burst)) return;
         var burstIds = burst.photo_ids || burst;
+        // Narrow the burst's Reject/Clear target to photos that actually
+        // render — the active label / species-conflict filter can hide
+        // frames inside a burst even though the burst strip itself is drawn.
+        var visibleBurstIds = burstIds.filter(function(pid) {
+          var p = photoMap[pid];
+          if (!p) return false;
+          return photoMatchesPipelineFilter(p, speciesConflictEvidence[pid]);
+        });
+        pipelineReviewVisibleTargets['burst:' + ei + ':' + bi] = visibleBurstIds;
         html += '<div class="burst-strip">';
         html += '<div class="burst-controls">';
         if (enc.bursts.length > 1) {
@@ -3133,7 +3143,7 @@ function renderResults() {
           html += '<span class="burst-species-edit" onclick="toggleSpeciesDropdown(event,' + ei + ',' + bi + ',\'top\')">&#9998;</span>';
         }
         html += renderBurstSpeciesConflict(enc, ei, burst, bi, speciesConflictEvidence);
-        html += renderGroupRejectButton('burst', ei, bi, burstIds, photoMap);
+        html += renderGroupRejectButton('burst', ei, bi, visibleBurstIds, photoMap);
         html += '<button class="detach-btn" onclick="detachBurst(' + ei + ',' + bi + ')" title="Detach burst">&times;</button>';
         html += '</div>';
         burstIds.forEach(function(pid) {
@@ -3692,6 +3702,13 @@ function findEncounterForPhoto(photoId) {
 
 var inspectPhotoId = null;
 var pipelineReviewGroupFlagInFlight = {};
+// Photo IDs each rendered bulk-reject button actually represents, keyed by the
+// same 'encounter:ei' / 'burst:ei:bi' strings that group flag targets use.
+// renderResults() rebuilds this every render so hide-confirmed AND the label /
+// species-conflict filter both narrow the target to what the user can see.
+// groupFlagTarget() reads from here so the click applies to the visible set,
+// not the raw underlying photo list.
+var pipelineReviewVisibleTargets = {};
 
 function pipelineReviewBareKey(e, key) {
   return !e.ctrlKey && !e.metaKey && !e.altKey && e.key && e.key.toLowerCase() === key;
@@ -3744,17 +3761,26 @@ function groupFlagTarget(encIdx, burstIdx) {
   var enc = pipelineResults.encounters[encIdx];
   if (!enc) return null;
   if (burstIdx == null) {
-    // Match the button's rendered scope: when "Hide confirmed" is on we
-    // exclude confirmed bursts so users can't accidentally flag photos
-    // they can't see.
-    return {key: 'encounter:' + encIdx, noun: 'encounter', photoIds: visibleEncounterPhotoIds(enc)};
+    // Read the exact set of photos the encounter button represents on
+    // screen: renderResults() cached it under this key, and it already
+    // excludes photos hidden by Hide confirmed or by the active label /
+    // species-conflict filter so a click can't flip flags on photos the
+    // user can't see. Fall back to the hide-confirmed-only set only when
+    // the cache is missing (e.g. no render has happened yet).
+    var encKey = 'encounter:' + encIdx;
+    var encIds = pipelineReviewVisibleTargets[encKey];
+    if (!encIds) encIds = visibleEncounterPhotoIds(enc);
+    return {key: encKey, noun: 'encounter', photoIds: encIds};
   }
   var burst = enc.bursts && enc.bursts[burstIdx];
   if (!burst) return null;
+  var burstKey = 'burst:' + encIdx + ':' + burstIdx;
+  var burstIds = pipelineReviewVisibleTargets[burstKey];
+  if (!burstIds) burstIds = burst.photo_ids || burst || [];
   return {
-    key: 'burst:' + encIdx + ':' + burstIdx,
+    key: burstKey,
     noun: 'burst',
-    photoIds: burst.photo_ids || burst || [],
+    photoIds: burstIds,
   };
 }
 

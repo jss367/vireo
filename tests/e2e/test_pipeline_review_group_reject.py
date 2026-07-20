@@ -224,3 +224,117 @@ def test_encounter_reject_skips_hidden_confirmed_bursts(live_server, page):
         "Cleared rejects from 2 photos in encounter"
     )
     assert _flags(db, photo_ids) == ["none"] * 4
+
+
+def _write_mixed_label_pipeline_cache(live_server, photo_ids):
+    """Encounter with a single burst whose photos carry mixed labels so
+    changing the label filter hides some frames inside the burst."""
+    db = live_server["db"]
+    placeholders = ",".join("?" for _ in photo_ids)
+    rows = db.conn.execute(
+        f"SELECT id, filename, timestamp, flag FROM photos "
+        f"WHERE id IN ({placeholders}) ORDER BY id",
+        photo_ids,
+    ).fetchall()
+    # First two photos are KEEP, last two are REVIEW. Selecting the REVIEW
+    # filter should hide the KEEP frames but still render the burst.
+    labels = ["KEEP", "KEEP", "REVIEW", "REVIEW"]
+    photos = [
+        {
+            "id": row["id"],
+            "filename": row["filename"],
+            "timestamp": row["timestamp"],
+            "label": labels[idx],
+            "quality_composite": 0.5,
+            "flag": row["flag"],
+            "rating": 0,
+        }
+        for idx, row in enumerate(rows)
+    ]
+    ids = [photo["id"] for photo in photos]
+    bursts = [
+        {"photo_ids": ids, "species_predictions": [], "species_override": None},
+    ]
+    cache = {
+        "photos": photos,
+        "encounters": [
+            {
+                "photo_ids": ids,
+                "photo_count": len(ids),
+                "burst_count": len(bursts),
+                "time_range": [photos[0]["timestamp"], photos[-1]["timestamp"]],
+                "species": [],
+                "species_predictions": [],
+                "species_confirmed": False,
+                "confirmed_species": None,
+                "bursts": bursts,
+            }
+        ],
+        "summary": {
+            "total_photos": len(ids),
+            "encounter_count": 1,
+            "burst_count": len(bursts),
+            "keep_count": 2,
+            "review_count": 2,
+            "reject_count": 0,
+            "rarity_protected": 0,
+        },
+    }
+    path = os.path.join(
+        os.path.dirname(db._db_path),
+        f"pipeline_results_ws{db._active_workspace_id}.json",
+    )
+    with open(path, "w") as cache_file:
+        json.dump(cache, cache_file)
+
+
+def test_burst_reject_respects_active_label_filter(live_server, page):
+    """When the Review label filter is active, clicking `Reject burst` must
+    only touch photos that pass the filter. Regression for the case where the
+    button targeted the raw burst photo list, so it could flip flags on
+    KEEP/non-conflict frames hidden by the filter."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:4]
+    _write_mixed_label_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    page.locator('.filter-btn[data-filter="REVIEW"]').click()
+    # Two KEEP frames hide; the two REVIEW frames remain rendered in the burst.
+    expect(page.locator(".photo-card")).to_have_count(2)
+
+    burst_button = page.get_by_test_id("reject-burst")
+    burst_button.click()
+
+    expect(page.locator("#undoMsg")).to_have_text("Rejected 2 photos in burst")
+    expect(burst_button).to_have_attribute("aria-label", "Clear rejects")
+    # The hidden KEEP frames must be untouched; only the visible REVIEW frames
+    # are rejected.
+    assert _flags(db, photo_ids) == ["none", "none", "rejected", "rejected"]
+
+
+def test_encounter_reject_respects_active_label_filter(live_server, page):
+    """Same guarantee as the burst-level test, but for the encounter-level
+    Reject/Clear button: hidden KEEP frames stay untouched when the Review
+    filter is active."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:4]
+    _write_mixed_label_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    page.locator('.filter-btn[data-filter="REVIEW"]').click()
+    expect(page.locator(".photo-card")).to_have_count(2)
+
+    encounter_button = page.get_by_test_id("reject-encounter")
+    encounter_button.click()
+
+    expect(page.locator("#undoMsg")).to_have_text("Rejected 2 photos in encounter")
+    expect(encounter_button).to_have_attribute("aria-label", "Clear rejects")
+    assert _flags(db, photo_ids) == ["none", "none", "rejected", "rejected"]
+
+    encounter_button.click()
+
+    expect(encounter_button).to_have_attribute("aria-label", "Reject encounter")
+    expect(page.locator("#undoMsg")).to_have_text(
+        "Cleared rejects from 2 photos in encounter"
+    )
+    assert _flags(db, photo_ids) == ["none"] * 4
