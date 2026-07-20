@@ -292,6 +292,22 @@ def _merge_legacy_detector_alias(conn):
                 f"canonical detection id collision while migrating {survivor_id}"
             )
 
+        # When an existing content-addressed row already occupies survivor_id, it
+        # is the row that will remain in the table after the merge — the INSERT
+        # below is skipped, so its raw box coordinates are what masks must be
+        # realigned to. Otherwise the retained row is the freshly inserted one
+        # using `source`'s coordinates.
+        if occupant is not None:
+            survivor_row = next(
+                row for row in group_rows if row["id"] == occupant["id"]
+            )
+        else:
+            survivor_row = source
+        survivor_coords = (
+            survivor_row["box_x"], survivor_row["box_y"],
+            survivor_row["box_w"], survivor_row["box_h"],
+        )
+
         confidences = [
             row["detector_confidence"] for row in group_rows
             if row["detector_confidence"] is not None
@@ -331,7 +347,7 @@ def _merge_legacy_detector_alias(conn):
         # differ from the survivor's. Skip rows with any NULL coordinate — a
         # mask cannot exactly-match a NULL prompt column, so there is nothing
         # to realign.
-        if any(value is None for value in coords):
+        if any(value is None for value in survivor_coords):
             continue
         for row in group_rows:
             loser_coords = (
@@ -339,10 +355,10 @@ def _merge_legacy_detector_alias(conn):
             )
             if any(value is None for value in loser_coords):
                 continue
-            if loser_coords == coords:
+            if loser_coords == survivor_coords:
                 continue
             mask_prompt_remaps.append(
-                (source["photo_id"], loser_coords, coords),
+                (source["photo_id"], loser_coords, survivor_coords),
             )
 
     # Keep the strongest cached confidence and oldest creation timestamp on the

@@ -494,6 +494,102 @@ def test_legacy_megadetector_alias_merge_preserves_predictions_and_reviews(tmp_p
         assert remaining == 3
 
 
+def test_legacy_merge_realigns_masks_to_existing_survivor_row_coords(tmp_path):
+    """When a content-addressed canonical row already occupies ``survivor_id`` and a
+    lower-id canonical duplicate exists with different raw box coordinates, mask
+    prompts must be realigned to the retained row's coordinates. Using the lower-id
+    duplicate's coordinates (the previous behaviour) would leave every mask stale
+    against ``find_stale_masks``/``count_extract_stale``.
+    """
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+
+    occupant_coords = (0.10002, 0.2, 0.3, 0.4)
+    source_coords = (0.10001, 0.2, 0.3, 0.4)
+
+    with Database(db_path, initialize_schema=False) as db:
+        folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+        photo_id = db.add_photo(
+            folder_id,
+            "bird.jpg",
+            ".jpg",
+            1,
+            1.0,
+            timestamp="2026-01-01T00:00:00",
+            width=100,
+            height=100,
+        )
+        occupant_id = detection_id(
+            photo_id, "megadetector-v6", occupant_coords, "animal",
+        )
+        # Guard: the retained row must have a non-trivial content-addressed id so
+        # the lower-id duplicate wins `min(..., key=row.id)`.
+        assert occupant_id != 100
+
+        db.conn.executemany(
+            """
+            INSERT INTO detections (
+              id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                # Lower-id canonical duplicate — becomes ``source``.
+                (100, photo_id, "megadetector-v6",
+                 *source_coords, 0.8, "animal", "2026-04-24T00:00:00"),
+                # Existing content-addressed canonical row — becomes ``occupant``.
+                (occupant_id, photo_id, "megadetector-v6",
+                 *occupant_coords, 0.9, "animal", "2026-04-26T00:00:00"),
+                # A legacy row so this group is included in the merge.
+                (101, photo_id, "MegaDetector",
+                 *source_coords, 0.85, "animal", "2026-04-23T00:00:00"),
+            ],
+        )
+        # Mask stored at the retained row's exact coordinates. A remap targeting
+        # ``source``'s coordinates would break equality against every remaining
+        # detection.
+        db.conn.execute(
+            """
+            INSERT INTO photo_masks (
+              photo_id, variant, path, created_at, detector_model,
+              prompt_x, prompt_y, prompt_w, prompt_h
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (photo_id, "sam2-small", "/masks/bird.png", 1,
+             "megadetector-v6", *occupant_coords),
+        )
+        db.conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA user_version = 7")
+
+    schema.ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        detections = conn.execute(
+            "SELECT id, box_x, box_y, box_w, box_h FROM detections WHERE photo_id = ?",
+            (photo_id,),
+        ).fetchall()
+        # Only the pre-existing content-addressed row remains.
+        assert [r["id"] for r in detections] == [occupant_id]
+        assert detections[0]["box_x"] == pytest.approx(occupant_coords[0])
+
+        mask = conn.execute(
+            "SELECT prompt_x, prompt_y, prompt_w, prompt_h FROM photo_masks WHERE photo_id = ?",
+            (photo_id,),
+        ).fetchone()
+        assert (
+            mask["prompt_x"],
+            mask["prompt_y"],
+            mask["prompt_w"],
+            mask["prompt_h"],
+        ) == pytest.approx(occupant_coords)
+
+    with Database(db_path, initialize_schema=False) as migrated_db:
+        assert migrated_db.find_stale_masks() == []
+
+
 def test_legacy_megadetector_zero_box_run_is_normalized_without_detections(tmp_path):
     """A legacy empty-scene run has no detection row to drive the main merge."""
     db_path = str(tmp_path / "vireo.db")
