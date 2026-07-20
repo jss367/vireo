@@ -1059,6 +1059,74 @@ def test_rescan_clears_absent_exif_summary_columns(tmp_path, monkeypatch):
     assert row["iso"] is None
 
 
+def test_incremental_rescan_populates_phase1_summary_for_partial_marker(tmp_path, monkeypatch):
+    """Rows scanned before Phase 1 with only the ``exif_data='{}'`` marker
+    (extract_full_metadata=False path) get promoted-column values on the
+    next incremental scan. The DB migration clears '{}' to NULL, and the
+    scanner's pre-pass then re-flags the row as ``metadata_missing`` via
+    ``summary_needs_extract`` — otherwise the row's timestamp is populated
+    and the standard skip triggers, leaving camera_make etc. permanently
+    NULL on upgraded libraries."""
+    import scanner
+    from db import Database
+    from scanner import scan
+
+    root = tmp_path / "photos"
+    root.mkdir()
+    photo = root / "test.jpg"
+    Image.new("RGB", (100, 100), color="red").save(str(photo))
+
+    def make_extract(payload):
+        def fake(paths, restricted_tags=None, progress_callback=None,
+                checkpoint=None):
+            return {p: payload for p in paths}
+        return fake
+
+    # Seed the row as if a pre-Phase-1 scan with extract_full_metadata=False
+    # had run: exif_data='{}', promoted cols NULL, timestamp populated.
+    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+        "EXIF": {
+            "DateTimeOriginal": "2024:01:15 10:30:00",
+            "Make": "Sony", "Model": "ILCE-1",
+        },
+        "Composite": {},
+    }))
+    db = Database(str(tmp_path / "test.db"))
+    scan(str(root), db)
+    # Simulate the pre-Phase-1 storage shape: keep the timestamp, clear
+    # the promoted cols, and put the '{}' marker back on exif_data.
+    db.conn.execute(
+        "UPDATE photos SET exif_data='{}', camera_make=NULL, camera_model=NULL, "
+        "lens=NULL, aperture=NULL, shutter_speed=NULL, iso=NULL")
+    # Reset the migration marker and re-open so the migration reruns and
+    # clears the '{}' marker to NULL (Phase-1 backfill behavior).
+    db.conn.execute("DELETE FROM db_meta WHERE key='exif_summary_backfill_v1'")
+    db.conn.commit()
+    db.close()
+    db = Database(str(tmp_path / "test.db"))
+    row = db.conn.execute(
+        "SELECT exif_data, camera_make FROM photos LIMIT 1").fetchone()
+    assert row["exif_data"] is None  # cleared by migration
+    assert row["camera_make"] is None
+
+    # Incremental scan with the file unchanged (same mtime, same content).
+    # Without the summary_needs_extract trigger, the pre-pass would skip
+    # this row because timestamp is populated. With it, the row is re-
+    # extracted and camera_make gets filled from the re-run metadata.
+    monkeypatch.setattr(scanner, "extract_metadata", make_extract({
+        "EXIF": {
+            "DateTimeOriginal": "2024:01:15 10:30:00",
+            "Make": "Sony", "Model": "ILCE-1",
+        },
+        "Composite": {},
+    }))
+    scan(str(root), db)
+    row = db.conn.execute(
+        "SELECT camera_make, camera_model FROM photos LIMIT 1").fetchone()
+    assert row["camera_make"] == "Sony"
+    assert row["camera_model"] == "ILCE-1"
+
+
 def test_scan_pairs_raw_and_jpeg(tmp_path):
     """When a folder has IMG.cr3 and IMG.jpg, they become one photo with companion_path."""
     from db import Database
@@ -2354,20 +2422,21 @@ def test_incremental_rescan_reextracts_when_raw_dims_suspect(tmp_path, monkeypat
 def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch):
     """Incremental scan does NOT re-process a non-RAW row with suspicious
     small dimensions. The dims heuristic is RAW-specific so JPEGs, PNGs,
-    etc. that are legitimately tiny aren't re-extracted repeatedly.
-    ``exif_data`` is kept non-NULL so the "no payload → re-extract"
-    branch (the migration-driven re-summarize path) doesn't fire — this
-    test is specifically about the RAW-only dims heuristic."""
+    etc. that are legitimately tiny aren't re-extracted repeatedly."""
     import scanner
 
     db, root, image_path, pid = _setup_scanned_photo(tmp_path)
 
-    # Simulate small-dims on a non-RAW extension; timestamp populated and
-    # exif_data set to the marker written by earlier scans so the
-    # ``not in exif_extracted`` branch stays False.
+    # Simulate small-dims on a non-RAW extension; timestamp populated so
+    # the NULL-timestamp branch doesn't fire either. camera_make stays
+    # non-NULL so the Phase-1 ``summary_needs_extract`` trigger — which
+    # re-extracts rows whose promoted EXIF cols are all NULL alongside a
+    # NULL ``exif_data`` (the pre-Phase-1 upgrade shape) — doesn't fire
+    # here; this test is about the RAW-only dim heuristic in isolation.
     db.conn.execute(
         "UPDATE photos SET extension='.jpg', width=160, height=120, "
-        "timestamp='2020-01-01T12:00:00', exif_data='{}' WHERE id=?", (pid,)
+        "timestamp='2020-01-01T12:00:00', exif_data=NULL, "
+        "camera_make='Sony' WHERE id=?", (pid,)
     )
     db.conn.commit()
 
@@ -2389,63 +2458,6 @@ def test_incremental_rescan_skips_small_jpeg_dims_not_raw(tmp_path, monkeypatch)
     assert row["height"] == 120
     # And extract_metadata was never called with this file.
     assert all(image_path not in batch for batch in called_with)
-
-
-def test_incremental_rescan_reextracts_after_exif_backfill_migration(
-    tmp_path, monkeypatch,
-):
-    """Rows whose ``exif_data='{}'`` marker was cleared to NULL by the
-    ``exif_summary_backfill_v1`` migration must be re-processed on the next
-    incremental scan even when the row still carries a stored timestamp
-    (from the earlier ``extract_full_metadata=False`` pass). Before this
-    change the pre-pass required timestamp=NULL / repair / dims_suspect, so
-    migrated rows stayed skipped and the promoted EXIF summary columns
-    (camera_make / camera_model / lens / iso / aperture / shutter_speed)
-    remained NULL until the user forced a full non-incremental scan."""
-    import scanner
-
-    db, root, image_path, pid = _setup_scanned_photo(tmp_path)
-
-    # Simulate the post-migration state: exif_data cleared, timestamp
-    # populated, promoted columns still NULL. No repair flag, non-RAW
-    # extension — the OLD pre-pass would skip this row.
-    db.conn.execute(
-        "UPDATE photos SET exif_data=NULL, "
-        "timestamp='2020-01-01T12:00:00', extension='.jpg', "
-        "width=640, height=480, "
-        "camera_make=NULL, camera_model=NULL, lens=NULL, "
-        "aperture=NULL, shutter_speed=NULL, iso=NULL WHERE id=?", (pid,)
-    )
-    db.conn.commit()
-
-    called_with = []
-    def fake_extract(paths, restricted_tags=None, progress_callback=None,
-                     checkpoint=None):
-        called_with.append(list(paths))
-        return {p: {
-            "File": {"ImageWidth": 640, "ImageHeight": 480},
-            "EXIF": {"Make": "Sony", "Model": "ILCE-1", "LensModel": "FE 200-600",
-                     "FNumber": 6.3, "ExposureTime": 0.001, "ISO": 800},
-            "Composite": {},
-        } for p in paths}
-    monkeypatch.setattr(scanner, "extract_metadata", fake_extract)
-
-    scanner.scan(root, db, incremental=True)
-
-    # The row was re-processed and the promoted columns are populated.
-    row = db.conn.execute(
-        "SELECT camera_make, camera_model, lens, aperture, iso, exif_data "
-        "FROM photos WHERE id=?", (pid,)
-    ).fetchone()
-    assert row["camera_make"] == "Sony"
-    assert row["camera_model"] == "ILCE-1"
-    assert row["lens"] == "FE 200-600"
-    assert row["aperture"] == pytest.approx(6.3)
-    assert row["iso"] == 800
-    # exif_data marker is restored so the next scan skips this row.
-    assert row["exif_data"] is not None
-    # And extract_metadata was called with this file (proof of re-extract).
-    assert any(image_path in batch for batch in called_with)
 
 
 def test_scan_restrict_files_ignores_files_not_in_list(tmp_path, monkeypatch):

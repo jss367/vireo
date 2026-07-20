@@ -1456,15 +1456,13 @@ class Database:
                 self.conn.execute("SELECT exif_data FROM photos LIMIT 0")
             except sqlite3.OperationalError:
                 rows = []
+                exif_column_present = False
             else:
                 rows = self.conn.execute(
                     "SELECT id, exif_data FROM photos "
                     "WHERE exif_data IS NOT NULL AND exif_data != '{}'"
                 ).fetchall()
-                self.conn.execute(
-                    "UPDATE photos SET exif_data = NULL "
-                    "WHERE exif_data = '{}'"
-                )
+                exif_column_present = True
             for row in rows:
                 try:
                     grouped = json.loads(row["exif_data"])
@@ -1477,6 +1475,20 @@ class Database:
                 self.conn.execute(
                     f"UPDATE photos SET {assignments} WHERE id = ?",
                     [*cols.values(), row["id"]],
+                )
+            if exif_column_present:
+                # Clear the minimal ``'{}'`` marker left by older scans that
+                # ran with ``extract_full_metadata=False``. Those rows have
+                # no JSON to backfill from, and the scanner's incremental
+                # pre-pass otherwise skips them forever (their ``exif_data``
+                # is non-NULL, so they're treated as already extracted),
+                # leaving the new camera/lens/aperture/... columns
+                # permanently empty on upgraded libraries. Clearing to NULL
+                # lets the pre-pass's ``summary_needs_extract`` query pick
+                # them up on the next scan and populate the promoted
+                # columns in a single re-extraction.
+                self.conn.execute(
+                    "UPDATE photos SET exif_data = NULL WHERE exif_data = '{}'"
                 )
             self.conn.execute(
                 "INSERT INTO db_meta(key, value) VALUES ('exif_summary_backfill_v1', '1')"
@@ -17979,13 +17991,15 @@ class Database:
                         return f"NOT {cond}", params
                     return cond, params
             if field == "has_species":
-                # Mirror the species-filter and ``get_species_keywords_for_photos``
-                # eligibility (``is_species = 1 OR type = 'taxonomy'``, gated
-                # to species-rank / no-rank taxa). Legacy/upgraded photos
-                # store species as ``type='taxonomy'`` with ``is_species=0``,
-                # so a plain ``k.is_species = 1`` check disagreed with the
-                # species names Browse and the species filter show for the
-                # same photo.
+                # Mirror the species-filter / get_species_keywords_for_photos
+                # eligibility: a keyword counts as a species when either the
+                # legacy ``is_species`` flag is set OR it is a taxonomy row,
+                # AND its linked taxon (if any) has rank ``species``. Falling
+                # back to ``k.is_species = 1`` would exclude photos whose
+                # species is a ``type='taxonomy', is_species=0`` row —
+                # exactly the shape upgraded libraries store — so the "Has
+                # species" chip would disagree with everywhere the species
+                # is actually shown.
                 has_species_exists = (
                     "EXISTS (SELECT 1 FROM photo_keywords pk "
                     "JOIN keywords k ON k.id = pk.keyword_id "
@@ -18431,25 +18445,19 @@ class Database:
         """
         return self.conn.execute(query, [*params, per_page, offset]).fetchall()
 
-    # (display_expr, group_expr, filter_expr) for value suggestions:
-    #   * display_expr — column shown to the user (aliased as ``value``).
-    #   * group_expr  — SQL used for GROUP BY / ORDER BY. Must match the
-    #     rule engine's comparison semantics so counts describe the rule
-    #     the suggestion becomes: camera_make/camera_model/lens are
-    #     case-insensitive in ``_text_condition`` (no ``case_toggle`` on
-    #     the registry), so their facet folds by ``LOWER(...)`` — else
-    #     ``Sony A1`` and ``sony a1`` would split into two 1-count
-    #     suggestions while selecting either fires ``LOWER(col)=LOWER(?)``
-    #     and returns both photos. ``MIN(col)`` picks a deterministic
-    #     display spelling within each case-folded group.
-    #   * filter_expr — used for ``IS NOT NULL`` and the LIKE typeahead
-    #     narrowing. Kept as the raw column so SQLite's default
-    #     case-insensitive LIKE works and does not double-normalize.
+    # (display_expr, group_expr) for suggest-capable columns.
+    # ``group_expr`` folds the value the same way the corresponding filter
+    # matches it — camera/lens rules use ``LOWER(col) = LOWER(?)`` so their
+    # facets must group case-insensitively, or ``Sony A1`` and ``sony a1``
+    # would split into two 1-count suggestions while selecting either would
+    # match both photos. ``display_expr`` is what the picker shows; using
+    # ``MIN(col)`` picks a stable representative spelling within each
+    # case-insensitive bucket instead of always lower-casing the label.
     _SUGGEST_VALUE_EXPRS = {
-        "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)", "p.camera_make"),
-        "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)", "p.camera_model"),
-        "lens": ("MIN(p.lens)", "LOWER(p.lens)", "p.lens"),
-        "extension": ("LOWER(p.extension)", "LOWER(p.extension)", "LOWER(p.extension)"),
+        "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)"),
+        "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)"),
+        "lens": ("MIN(p.lens)", "LOWER(p.lens)"),
+        "extension": ("LOWER(p.extension)", "LOWER(p.extension)"),
     }
 
     def get_filter_field_values(self, field, rules=None, q=None, limit=20):
@@ -18473,7 +18481,7 @@ class Database:
         extra_joins = ""
         extra_params = []
         if field in self._SUGGEST_VALUE_EXPRS:
-            display_expr, group_expr, filter_expr = self._SUGGEST_VALUE_EXPRS[field]
+            display_expr, group_expr = self._SUGGEST_VALUE_EXPRS[field]
         elif field in ("keyword", "species"):
             extra_joins = (
                 " JOIN photo_keywords pkv ON pkv.photo_id = p.id"
@@ -18504,16 +18512,22 @@ class Database:
                 conditions.append("(kv.is_species = 1 OR kv.type = 'taxonomy')")
                 conditions.append("(tv.rank = 'species' OR tv.rank IS NULL)")
                 display_expr = "COALESCE(root_kv.name, kv.name)"
+                group_expr = display_expr
             else:
                 display_expr = "kv.name"
-            group_expr = display_expr
-            filter_expr = display_expr
+                group_expr = display_expr
         else:
             raise ValueError(f"field {field!r} does not support value suggestions")
-        conditions.append(f"{filter_expr} IS NOT NULL")
+        # IS NOT NULL and the typeahead LIKE compare against ``group_expr``
+        # so a facet grouped case-insensitively (camera fields, extension)
+        # also matches case-insensitively — otherwise ``camera_model``
+        # would list a single ``Sony A1`` bucket but drop it as soon as the
+        # user typed ``sony``.
+        conditions.append(f"{group_expr} IS NOT NULL")
         if q:
-            conditions.append(f"{filter_expr} LIKE ? ESCAPE '\\'")
-            extra_params.append(f"%{_escape_like(str(q))}%")
+            conditions.append(f"{group_expr} LIKE ? ESCAPE '\\'")
+            q_norm = str(q).lower() if group_expr.startswith("LOWER(") else str(q)
+            extra_params.append(f"%{_escape_like(q_norm)}%")
         joined = " AND ".join(conditions)
         where_full = f"{where} AND {joined}" if where else f"WHERE {joined}"
         query = f"""

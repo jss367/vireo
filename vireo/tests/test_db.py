@@ -20758,6 +20758,21 @@ def test_exif_backfill_migration_clears_empty_marker_for_rescan(tmp_path):
     assert row["camera_model"] is None
     db2.close()
 
+    # Second re-open is a no-op (marker set): a fresh '{}' written after
+    # the migration ran must not be cleared on subsequent opens —
+    # otherwise the scanner's own ``COALESCE(exif_data, '{}')`` write
+    # would bounce right back to NULL every time.
+    db3 = Database(path)
+    db3.conn.execute(
+        "UPDATE photos SET exif_data='{}' WHERE id=?", (empty,))
+    db3.conn.commit()
+    db3.close()
+    db4 = Database(path)
+    row = db4.conn.execute(
+        "SELECT exif_data FROM photos WHERE id=?", (empty,)).fetchone()
+    assert row["exif_data"] == '{}'
+    db4.close()
+
 
 def test_universal_filter_has_species_matches_taxonomy_type_keyword(tmp_path):
     """``has_species`` must accept species stored as
@@ -20766,11 +20781,15 @@ def test_universal_filter_has_species_matches_taxonomy_type_keyword(tmp_path):
     ``get_species_keywords_for_photos``, and Browse all treat as species.
     A plain ``k.is_species = 1`` check disagreed: the same photo would
     appear under ``species is Verdin`` yet fail ``has_species is true``.
+    Also validates the newer ``is_species=1`` flag path so both storage
+    shapes count toward the "Has species" chip.
     """
     db, fid = _filter_db(tmp_path)
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
     p_legacy = db.add_photo(folder_id=fid, filename='legacy.jpg', extension='.jpg',
                             file_size=100, file_mtime=1.0)
+    p_flag = db.add_photo(folder_id=fid, filename='flag.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
     p_none = db.add_photo(folder_id=fid, filename='none.jpg', extension='.jpg',
                           file_size=100, file_mtime=1.0)
     # Legacy shape: type='taxonomy', is_species=0, taxon linked to a species.
@@ -20780,12 +20799,15 @@ def test_universal_filter_has_species_matches_taxonomy_type_keyword(tmp_path):
         "WHERE id=?", (taxa["Verdin"], legacy_kw))
     db.conn.commit()
     db.tag_photo(p_legacy, legacy_kw)
+    # Newer shape: is_species=1 flag.
+    flag_kw = db.add_keyword("Great Blue Heron", is_species=True)
+    db.tag_photo(p_flag, flag_kw)
 
     count = db.count_photos_for_rules
-    # Sanity: the species filter already accepts this shape.
+    # Sanity: the species filter already accepts the legacy shape.
     assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 1
-    # ``has_species true`` must agree — legacy taxonomy keyword counts.
-    assert count([{"field": "has_species", "op": "is", "value": 1}]) == 1
-    # ``has_species false`` must exclude the same photo.
+    # Both storage shapes count toward has_species=true; only p_none
+    # (untagged) matches has_species=false.
+    assert count([{"field": "has_species", "op": "is", "value": 1}]) == 2
     assert count([{"field": "has_species", "op": "is", "value": 0}]) == 1
     _ = p_none  # keep the untagged photo alive for the negative branch.
