@@ -4755,11 +4755,31 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         weak_confidence=weak_detection_confidence,
                         max_gap=pipeline_cfg.get("burst_time_gap", 3.0),
                     )
-                    contextual_weak_ids = {
+                    weak_scope_ids = {
                         photo_id
                         for run in weak_runs
-                        for photo_id in run["photo_ids"]
+                        for photo_id in (
+                            run["left_photo_id"],
+                            *run["photo_ids"],
+                            run["right_photo_id"],
+                        )
                     }
+                    if weak_scope_ids:
+                        # Mask only frames that pass the same matching-species
+                        # anchor gate as encounter grouping. Candidate weak
+                        # runs with conflicting or unclassified anchors remain
+                        # ordinary sub-threshold detections throughout.
+                        from pipeline import load_photo_features
+                        weak_features = load_photo_features(
+                            thread_db,
+                            config=effective_cfg,
+                            photo_ids=weak_scope_ids,
+                        )
+                        contextual_weak_ids = {
+                            feature["id"]
+                            for feature in weak_features
+                            if feature.get("subject_uncertain")
+                        }
 
                 photo_det_map = {}
                 photos_with_detections = 0

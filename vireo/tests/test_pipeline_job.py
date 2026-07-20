@@ -8204,14 +8204,17 @@ def _stub_extract_masks_heavy_ops(monkeypatch):
     return state
 
 
-def test_extract_masks_stage_includes_bracketed_weak_detection(
-    tmp_path, monkeypatch,
+@pytest.mark.parametrize(
+    ("right_species", "expected_proxy_calls"),
+    (("Great-tailed Grackle", 3), ("Brown-headed Cowbird", 2)),
+)
+def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
+    tmp_path, monkeypatch, right_species, expected_proxy_calls,
 ):
-    """A context-rescued weak box must enter the SAM mask worklist.
+    """Only a species-validated weak box enters the SAM mask worklist.
 
     Classification already lowers its crop floor for a bracketed weak frame;
-    mask extraction must use the same contextual set or a first-time full
-    pipeline run later rejects that frame for having no subject mask.
+    mask extraction must also apply grouping's matching-anchor-species gate.
     """
     import config as cfg
     from db import Database
@@ -8227,6 +8230,7 @@ def test_extract_masks_stage_includes_bracketed_weak_detection(
     folder_id = db.add_folder(folder_path)
 
     photo_ids = []
+    detection_ids = []
     for index, confidence in enumerate((0.9, 0.18, 0.9)):
         filename = f"bird{index}.jpg"
         photo_id = db.add_photo(
@@ -8234,7 +8238,7 @@ def test_extract_masks_stage_includes_bracketed_weak_detection(
             timestamp=f"2026-07-18T08:36:3{index}",
         )
         _drop_jpeg(folder_path, filename)
-        db.write_detection_batch(
+        detection_id = db.write_detection_batch(
             photo_id,
             "megadetector-v6",
             [{
@@ -8242,8 +8246,16 @@ def test_extract_masks_stage_includes_bracketed_weak_detection(
                 "confidence": confidence,
                 "category": "animal",
             }],
-        )
+        )[0]
         photo_ids.append(photo_id)
+        detection_ids.append(detection_id)
+
+    db.add_prediction(
+        detection_ids[0], "Great-tailed Grackle", 0.9, "inat21",
+    )
+    db.add_prediction(
+        detection_ids[-1], right_species, 0.9, "inat21",
+    )
 
     collection_id = db.add_collection(
         "Weak mask bridge",
@@ -8260,7 +8272,7 @@ def test_extract_masks_stage_includes_bracketed_weak_detection(
     runner = FakeRunner()
     run_pipeline_job(_make_job(), runner, db_path, ws_id, params)
 
-    assert state["proxy_calls"] == 3
+    assert state["proxy_calls"] == expected_proxy_calls
 
 
 def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
