@@ -397,7 +397,10 @@
   }
 
   function matchesExceptRule(photo, skip) {
-    return contextMatches(photo, state.context) && evaluateNodeExcept(photo, pageState().root, skip);
+    const page = pageState();
+    return contextMatches(photo, state.context)
+      && evaluateNodeExcept(photo, page.root, skip)
+      && matchesVisual(photo, page);
   }
 
   function contextMatches(photo, context) {
@@ -405,6 +408,18 @@
     if (context === "review") return photo.prediction_status === "pending";
     if (context === "duplicates") return Boolean(photo.duplicate_group);
     return true;
+  }
+
+  const VISUAL_THRESHOLDS = { broad: .29, balanced: .43, strict: .58 };
+
+  function visualIsActive(visual) {
+    return Boolean(visual) && !["unsupported", "no_index"].includes(visual.status);
+  }
+
+  function matchesVisual(photo, page) {
+    if (!visualIsActive(page.visual)) return true;
+    const threshold = VISUAL_THRESHOLDS[page.visual.strength || "balanced"];
+    return Boolean(photo.indexed) && visualScore(photo, page.visual.prompt) >= threshold;
   }
 
   function visualScore(photo, prompt) {
@@ -422,9 +437,8 @@
 
   function applyUserFilters(page) {
     let result = photos.filter((photo) => contextMatches(photo, state.context) && evaluateNode(photo, page.root));
-    if (page.visual && !["unsupported", "no_index"].includes(page.visual.status)) {
-      const thresholds = { broad: .29, balanced: .43, strict: .58 };
-      const threshold = thresholds[page.visual.strength || "balanced"];
+    if (visualIsActive(page.visual)) {
+      const threshold = VISUAL_THRESHOLDS[page.visual.strength || "balanced"];
       result = result
         .filter((photo) => photo.indexed && visualScore(photo, page.visual.prompt) >= threshold)
         .map((photo) => ({ ...photo, _similarity: visualScore(photo, page.visual.prompt) }));
@@ -882,7 +896,9 @@
       const fresh = emptyPageState();
       if (id.startsWith("saved:")) {
         const saved = state.savedCollections[Number(id.split(":")[1])];
-        state.pages[state.context] = clone(saved.page);
+        const target = saved.includeScope && saved.context && CONTEXTS[saved.context] ? saved.context : state.context;
+        state.pages[target] = clone(saved.page);
+        if (target !== state.context) state.context = target;
         return;
       }
       if (id === "filename") {
