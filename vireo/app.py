@@ -20798,33 +20798,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             c for c in normalized_template.split(os.sep)
             if c and c != "."
         ]
-        # normcase both sides so the prefix compare behaves the same way
-        # _path_equal_or_descends does on Windows; POSIX normcase is a
-        # no-op which matches realpath there. Case-insensitive POSIX
-        # (macOS APFS) can still miss a pure case-alias mount, but the
-        # settings blank-on-inside-mount check already handles that
-        # setup — the request here would already have hit the
-        # destination-inside-mount rejection above via
-        # _path_equal_or_descends' samefile fallback.
-        dest_cf = os.path.normcase(dest_real)
-        mount_cf = os.path.normcase(os.path.realpath(mount))
-        dest_prefix = dest_cf.rstrip(os.sep) + os.sep
-        if (mount_cf == dest_cf
-                or mount_cf.startswith(dest_prefix)):
-            mount_rel = mount_cf[len(dest_prefix):] if (
-                mount_cf != dest_cf) else ""
-            mount_components = [c for c in mount_rel.split(os.sep) if c]
-            if mount_components and (
-                    len(template_components) >= len(mount_components)):
-                could_reach_mount = True
-                for tc, mc in zip(
-                        template_components, mount_components, strict=False):
-                    if "%" in tc:
-                        continue
-                    if os.path.normcase(tc) != mc:
-                        could_reach_mount = False
-                        break
-                if could_reach_mount:
+        # Test the template's reach against the mount via
+        # ``_path_equal_or_descends`` on a constructed candidate path,
+        # not a byte-wise ``os.path.normcase`` compare of the leaf
+        # components. On default case-insensitive POSIX volumes (macOS
+        # APFS) ``normcase`` is a no-op, so ``normcase("nas") !=
+        # normcase("NAS")`` and a template ``nas/%Y`` against mount leaf
+        # ``NAS`` slips past the guard — the import then resolves onto
+        # the existing NAS alias and the chained move re-copies the
+        # on-mount files under ``remote_path/nas/…``. ``samefile`` folds
+        # by device+inode on any case-insensitive volume regardless of
+        # platform, and ``_path_equal_or_descends`` also carries the
+        # case-fold string fallback for the missing-leaves subtree that
+        # ``os.path.normcase`` skips on POSIX.
+        mount_real = os.path.realpath(mount)
+        if _path_equal_or_descends(mount_real, dest_real) \
+                and not _path_equal_or_descends(dest_real, mount_real):
+            try:
+                mount_rel = os.path.relpath(mount_real, dest_real)
+            except ValueError:
+                mount_rel = ""
+            mount_rel_parts = [
+                c for c in mount_rel.split(os.sep) if c and c != ".."
+            ]
+            if mount_rel_parts and (
+                    len(template_components) >= len(mount_rel_parts)):
+                # Substitute the mount's actual component for every
+                # ``%``-bearing template component: that render is the
+                # worst case that WOULD hit, and ``_path_equal_or_descends``
+                # will then say whether the alias-folded candidate lands
+                # inside the mount.
+                candidate_parts = [
+                    mc if "%" in tc else tc
+                    for tc, mc in zip(
+                        template_components, mount_rel_parts, strict=False)
+                ]
+                candidate = os.path.join(dest_real, *candidate_parts)
+                if _path_equal_or_descends(candidate, mount_real):
                     return None, json_error(
                         "folder_template can render the import into the "
                         f"target's NAS mount ({mount}) — the components in "

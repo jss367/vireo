@@ -4151,6 +4151,64 @@ def test_after_process_move_rejects_dot_prefixed_template_landing_under_mount(
     assert resp.status_code == 200, resp.get_json()
 
 
+def test_after_process_move_rejects_case_alias_template_landing_under_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """On a case-insensitive volume (default macOS APFS), a template whose
+    component differs only by case from the mount leaf still resolves onto
+    the mount because the filesystem treats the names as the same directory.
+    A byte-wise ``os.path.normcase`` compare is a no-op on POSIX and would
+    let ``nas/%Y`` slip past when the mount leaf is ``NAS`` — the import
+    would land straight on the NAS mount and the chained move would then
+    re-copy the on-mount files under ``remote_path/nas/…``. The guard must
+    fold case via the filesystem itself (``os.path.samefile`` /
+    ``_path_equal_or_descends``)."""
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("requires a case-insensitive filesystem")
+
+    import config as cfg
+    root = tmp_path / "Photos"
+    (root / "NAS").mkdir(parents=True)
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "NAS"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # Template component differs only in case from the mount leaf. On the
+    # case-insensitive volume the render lands directly on the NAS mount.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "nas/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+    assert "NAS" in err
+
+    # A literal component that cannot alias the mount leaf stays legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
 def test_after_process_move_non_string_target_id(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
