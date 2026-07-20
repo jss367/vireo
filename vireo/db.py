@@ -396,6 +396,20 @@ def _inclusive_date_to(date_to):
     return date_to
 
 
+def _rule_upper_bound(value):
+    """Pad only bare ``YYYY-MM-DD`` values for universal-filter upper bounds.
+
+    A precise instant like ``2024-01-01T12:00:00`` is what the caller meant;
+    padding it to ``.999999`` would spuriously include sub-second photos in
+    that same clock second (e.g. ``12:00:00.5``) on a strict ``>`` or match
+    them on a ``<=``. Only bare dates need to be advanced to end-of-day so
+    ``<= 2024-01-01`` covers the whole named day.
+    """
+    if isinstance(value, str) and len(value) == 10:
+        return _inclusive_date_to(value)
+    return value
+
+
 _PHOTO_DATE_ASC_ORDER = "p.timestamp IS NULL, p.timestamp ASC, p.filename ASC, p.id ASC"
 _PHOTO_DATE_DESC_ORDER = "p.timestamp IS NULL, p.timestamp DESC, p.filename ASC, p.id ASC"
 
@@ -18082,7 +18096,7 @@ class Database:
                 if op == "between" and isinstance(value, list) and len(value) == 2:
                     return "p.timestamp >= ? AND p.timestamp <= ?", [
                         value[0],
-                        _inclusive_date_to(value[1]),
+                        _rule_upper_bound(value[1]),
                     ]
                 if op == "recent_days":
                     # ``strftime`` with an explicit ``T`` separator so the
@@ -18125,14 +18139,14 @@ class Database:
                     # sub-second photos in the same clock second
                     # (``12:00:00.5``) that ARE strictly greater than the
                     # requested instant.
-                    upper = (
-                        _inclusive_date_to(value)
-                        if isinstance(value, str) and len(value) == 10
-                        else value
-                    )
-                    return "p.timestamp > ?", [upper]
+                    return "p.timestamp > ?", [_rule_upper_bound(value)]
                 if op == "<=":
-                    return "p.timestamp <= ?", [_inclusive_date_to(value)]
+                    # Symmetric to ``>`` above: only pad bare dates. A
+                    # precise ``<= 2024-01-01T12:00:00`` request means the
+                    # exact instant, not the whole clock second — padding
+                    # would spuriously *include* ``12:00:00.5`` photos
+                    # that are after the requested instant.
+                    return "p.timestamp <= ?", [_rule_upper_bound(value)]
                 if op == "<":
                     return "p.timestamp < ?", [value]
             if field == "extension":
@@ -18341,9 +18355,9 @@ class Database:
                 def _species_exists(name_op):
                     # ``name_op`` is a SQL fragment with ``{name_col}`` for
                     # the column reference — e.g. ``{name_col} = ?`` or
-                    # ``{name_col} LIKE ?``. Named twice: once as
-                    # ``k.name`` for legacy no-taxon rows and once for the
-                    # same-taxon root branch.
+                    # ``{name_col} LIKE ?``. Formatted four times, once per
+                    # branch below; parameter order below must match this
+                    # ordering.
                     legacy_pred = name_op.format(name_col="k.name")
                     # A hierarchy leaf (``parent_id IS NOT NULL``) is displayed
                     # as its same-taxon root in Browse / life list /
@@ -18356,8 +18370,19 @@ class Database:
                     # because a hierarchy leaf by that name exists for the
                     # same taxon. Multiple roots per taxon (from prior data
                     # merges) still match any of their root spellings.
-                    root_pred = name_op.format(name_col="root.name")
                     self_pred = name_op.format(name_col="k.name")
+                    root_pred = name_op.format(name_col="root.name")
+                    # A hierarchy leaf whose taxon has no top-level root row
+                    # in ``keywords`` (repair detached the ``Verdin`` root
+                    # and left only the ``Desert Verdin`` leaf) is shown as
+                    # its own leaf spelling by
+                    # ``get_species_keywords_for_photos`` and by
+                    # ``/api/filters/values`` (``COALESCE(root.name, k.name)``).
+                    # Fall back to matching the leaf's own ``k.name`` so a
+                    # ``species is "Desert Verdin"`` rule matches those
+                    # photos — otherwise the filter would silently exclude
+                    # them (and ``is not`` would silently include them).
+                    leaf_no_root_pred = name_op.format(name_col="k.name")
                     return (
                         "EXISTS (SELECT 1 FROM photo_keywords pk "
                         "JOIN keywords k ON k.id = pk.keyword_id "
@@ -18374,30 +18399,37 @@ class Database:
                         "WHERE root.taxon_id = k.taxon_id "
                         "AND root.parent_id IS NULL "
                         "AND (root.is_species = 1 OR root.type = 'taxonomy') "
-                        f"AND {root_pred})))))"
+                        f"AND {root_pred})"
+                        " OR (k.parent_id IS NOT NULL AND NOT EXISTS ("
+                        "SELECT 1 FROM keywords rootless "
+                        "WHERE rootless.taxon_id = k.taxon_id "
+                        "AND rootless.parent_id IS NULL "
+                        "AND (rootless.is_species = 1 OR rootless.type = 'taxonomy')"
+                        f") AND {leaf_no_root_pred})"
+                        "))))"
                     )
                 if op == "contains":
                     # Escape user LIKE metacharacters so ``%``/``_`` in the
                     # value stay literal — matches the other text/folder
                     # rules and blocks a ``value="%"`` request from matching
                     # every species-tagged photo. One param each for the
-                    # legacy no-taxon branch, the attached-root branch, and
-                    # the same-taxon root lookup.
+                    # legacy no-taxon branch, the attached-root branch, the
+                    # same-taxon root lookup, and the rootless-leaf fallback.
                     like = f"%{_escape_like(str(value or ''))}%"
                     return (
                         _species_exists("{name_col} LIKE ? ESCAPE '\\'"),
-                        [like, like, like],
+                        [like, like, like, like],
                     )
                 if op == "not_contains":
                     like = f"%{_escape_like(str(value or ''))}%"
                     return (
                         "NOT " + _species_exists("{name_col} LIKE ? ESCAPE '\\'"),
-                        [like, like, like],
+                        [like, like, like, like],
                     )
                 if op in ("equals", "is"):
-                    return _species_exists("{name_col} = ?"), [value, value, value]
+                    return _species_exists("{name_col} = ?"), [value, value, value, value]
                 if op == "is not":
-                    return "NOT " + _species_exists("{name_col} = ?"), [value, value, value]
+                    return "NOT " + _species_exists("{name_col} = ?"), [value, value, value, value]
             raise ValueError(f"unsupported collection rule field/op: {field}/{op}")
 
         def _build_node(node):

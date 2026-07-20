@@ -1039,7 +1039,9 @@ def test_collection_recent_days_rule(tmp_path):
 
 
 def test_collection_timestamp_between_subsec(tmp_path):
-    """Collection timestamp 'between' rule includes sub-second photos."""
+    """Collection ``between`` upper: bare-date bound covers the whole day
+    (sub-second photos included); a precise-instant bound is treated as
+    an exact instant (sub-second photos after it are excluded)."""
     import json
 
     from db import Database
@@ -1053,12 +1055,22 @@ def test_collection_timestamp_between_subsec(tmp_path):
     db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0, timestamp='2024-06-15T12:00:00')
 
-    rules = [{"field": "timestamp", "op": "between",
-              "value": ["2024-06-15", "2024-06-15T23:59:59"]}]
-    cid = db.add_collection('June 15', json.dumps(rules))
+    # Bare-date upper covers the full named day, including sub-second
+    # photos in ``23:59:59``.
+    bare_rules = [{"field": "timestamp", "op": "between",
+                   "value": ["2024-06-15", "2024-06-15"]}]
+    cid_bare = db.add_collection('June 15 bare', json.dumps(bare_rules))
+    assert len(db.get_collection_photos(cid_bare)) == 2
 
-    photos = db.get_collection_photos(cid)
-    assert len(photos) == 2
+    # A precise-instant upper ``2024-06-15T23:59:59`` is treated as
+    # exactly that instant — a photo at ``23:59:59.500000`` is strictly
+    # after it and must be excluded, matching the semantics of ``<=``
+    # on precise instants.
+    precise_rules = [{"field": "timestamp", "op": "between",
+                      "value": ["2024-06-15", "2024-06-15T23:59:59"]}]
+    cid_precise = db.add_collection('June 15 precise', json.dumps(precise_rules))
+    matched = {p['filename'] for p in db.get_collection_photos(cid_precise)}
+    assert matched == {'b.jpg'}
 
 
 def test_collection_timestamp_rules_match_ui_shape(tmp_path):
@@ -20226,6 +20238,47 @@ def test_universal_filter_timestamp_recent_and_comparisons(tmp_path):
     assert count([{"field": "timestamp", "op": "<=", "value": "2020-06-01"}]) == 1
 
 
+def test_universal_filter_timestamp_precise_upper_bounds_stay_exact(tmp_path):
+    """``<=`` and ``between`` upper bounds only pad bare ``YYYY-MM-DD``.
+
+    A precise-instant upper ``2024-01-01T12:00:00`` means exactly that
+    instant, not the whole clock second — padding it to ``.999999``
+    would spuriously include ``12:00:00.500000`` photos that are strictly
+    after the requested instant. Bare-date bounds still cover the full
+    named day so the UI's ``<input type="date">`` output stays inclusive.
+    """
+    db, fid = _filter_db(tmp_path)
+    early = db.add_photo(folder_id=fid, filename='early.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    on_second = db.add_photo(folder_id=fid, filename='on.jpg', extension='.jpg',
+                             file_size=100, file_mtime=1.0)
+    subsec = db.add_photo(folder_id=fid, filename='subsec.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2024-01-01T11:59:59', early))
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2024-01-01T12:00:00', on_second))
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2024-01-01T12:00:00.500000', subsec))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # ``<=`` on a precise instant is exact: matches the pre-instant photo
+    # and the instant itself, excludes ``.500000`` which is strictly after.
+    assert count([{"field": "timestamp", "op": "<=",
+                   "value": "2024-01-01T12:00:00"}]) == 2
+    # Same for ``between`` — precise upper excludes sub-second photos
+    # in the same clock second.
+    assert count([{"field": "timestamp", "op": "between",
+                   "value": ["2024-01-01T00:00:00",
+                             "2024-01-01T12:00:00"]}]) == 2
+    # Bare-date upper still covers the whole day.
+    assert count([{"field": "timestamp", "op": "<=",
+                   "value": "2024-01-01"}]) == 3
+    assert count([{"field": "timestamp", "op": "between",
+                   "value": ["2024-01-01", "2024-01-01"]}]) == 3
+
+
 def test_universal_filter_recent_cutoff_matches_iso_separator(tmp_path):
     """Regression: the ``recent`` cutoff must use the same ``T`` separator
     as stored timestamps. Before the fix the cutoff came from SQLite's
@@ -21032,6 +21085,55 @@ def test_universal_filter_species_matches_by_displayed_root_name(tmp_path):
                    "value": "Auriparus flaviceps"}]) == 1
     assert count([{"field": "species", "op": "not_contains",
                    "value": "flaviceps"}]) == 1
+
+
+def test_universal_filter_species_matches_rootless_hierarchy_leaf(tmp_path):
+    """When a hierarchy leaf's taxon has no top-level root row in
+    ``keywords`` (repair detached the ``Verdin`` root and left only the
+    ``Desert Verdin`` leaf), ``get_species_keywords_for_photos`` and the
+    values typeahead both fall back to the leaf's own ``k.name``. The
+    species filter must fall back the same way — otherwise
+    ``species is "Desert Verdin"`` silently excludes the photo (and
+    ``is not`` silently includes it) even though the leaf name is what
+    the rest of the app surfaces.
+    """
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    pid = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    other = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.conn.commit()
+    db.tag_photo(pid, leaf)
+    # No top-level ``Verdin`` root exists — this is the rootless-leaf
+    # shape the repair pass leaves behind.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords "
+        "WHERE parent_id IS NULL AND taxon_id=?", (taxa["Verdin"],)
+    ).fetchone()[0] == 0
+
+    # The displayed species falls back to the leaf's own spelling.
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Desert Verdin"]}
+
+    count = db.count_photos_for_rules
+    # The leaf name matches ``is`` / ``equals`` / ``contains``.
+    assert count([{"field": "species", "op": "is",
+                   "value": "Desert Verdin"}]) == 1
+    assert count([{"field": "species", "op": "equals",
+                   "value": "Desert Verdin"}]) == 1
+    assert count([{"field": "species", "op": "contains",
+                   "value": "Verdin"}]) == 1
+    # And the inverses correctly exclude the leaf-tagged photo.
+    assert count([{"field": "species", "op": "is not",
+                   "value": "Desert Verdin"}]) == 1
+    assert count([{"field": "species", "op": "not_contains",
+                   "value": "Verdin"}]) == 1
+    _ = other
 
 
 def test_exif_backfill_migration_clears_empty_marker_for_rescan(tmp_path):
