@@ -930,6 +930,38 @@ class JobRunner:
             if job:
                 job["steps"] = full_steps
 
+    def append_step(self, job_id, step_id, label, *, status="completed",
+                    summary=None, error=None, error_count=0):
+        """Append an already-terminal step to a job's plan after the fact.
+
+        For completion hooks that learn of extra work — or its failure —
+        only when the job ends (the after-process NAS-move handoff). A
+        stepped job's panel view renders ONLY the step tree: per-step
+        summary/error/error_count are its sole error surface (global
+        ``job.errors`` shows only for failed jobs), so a hook outcome that
+        lives just in ``job.result`` would be invisible to the user.
+
+        Appends under the runner lock — worker-thread mutation of
+        ``job["steps"]`` outside it races ``_snapshot_job``'s copy.
+        """
+        now = datetime.now().isoformat()
+        step = {
+            "id": step_id,
+            "label": label,
+            "status": status,
+            "progress": {"current": 0, "total": 0},
+            "started_at": now,
+            "finished_at": now,
+            "duration": 0.0,
+            "summary": summary,
+            "error": error,
+            "error_count": error_count,
+        }
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None:
+                job.setdefault("steps", []).append(step)
+
     def update_step(self, job_id, step_id, **kwargs):
         """Update a step's fields (status, progress, summary, error).
 
