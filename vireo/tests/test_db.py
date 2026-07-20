@@ -20956,6 +20956,57 @@ def test_get_filter_field_values_counts_respect_rules(tmp_path):
         db.get_filter_field_values("rating")
 
 
+def test_get_filter_field_values_counts_wrap_or_rules(tmp_path):
+    """Facet counts under a top-level ``any`` (OR) rule group must not leak
+    rows that satisfy the first OR branch but fail the facet's own predicate.
+
+    ``_build_query_from_rules`` returns ``WHERE (A) OR (B)`` for
+    ``{mode: any}``; appending ``AND {facet}`` would bind to the last OR
+    branch by SQL precedence (``(A) OR ((B) AND facet)``), letting
+    branch-A rows with a NULL/non-matching facet field still inflate the
+    suggestion count. The facet must wrap the existing rule condition so
+    every matched row also satisfies the ``value IS NOT NULL``/typeahead
+    predicates the suggestion helper appends.
+    """
+    db, fid = _filter_db(tmp_path)
+    # Two-branch tree: rating >= 5  OR  camera_model = "Nikon Z9".
+    # Sony has rating 5 (matches branch A) but a distinct model. Under the
+    # buggy binding, Sony would leak into the Nikon-branch AND camera_model
+    # facet — but only Nikon should count under "Nikon Z9".
+    for name, model, rating in [
+        ('sony_hi.jpg', 'Sony A1', 5),      # matches branch A only
+        ('nikon_lo.jpg', 'Nikon Z9', 1),    # matches branch B only
+        ('nikon_hi.jpg', 'Nikon Z9', 5),    # matches both branches
+        ('nomodel.jpg', None, 5),           # matches branch A, NULL camera
+    ]:
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        db.update_photo_rating(pid, rating)
+        if model:
+            db.conn.execute(
+                "UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
+    db.conn.commit()
+
+    rules = {"mode": "any", "rules": [
+        {"field": "rating", "op": ">=", "value": 5},
+        {"field": "camera_model", "op": "is", "value": "Nikon Z9"},
+    ]}
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values("camera_model", rules=rules)}
+    # Three photos total match the OR tree (sony_hi, nikon_lo, nikon_hi);
+    # the NULL-camera one is excluded by the facet's IS NOT NULL guard.
+    # Counts must match what ``camera_model is <val>`` would return when
+    # combined with the sibling OR tree — one Sony, two Nikon.
+    assert values == {"Sony A1": 1, "Nikon Z9": 2}
+    # Typeahead ``son`` combined with the OR tree must also stay honest —
+    # the ``AND LIKE ?`` clause the helper appends must apply to every
+    # matched row, not just the last OR branch.
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values(
+                  "camera_model", rules=rules, q="son")}
+    assert values == {"Sony A1": 1}
+
+
 def test_get_filter_field_values_folder_counts_over_subtree(tmp_path):
     """Folder suggestions must aggregate over subtrees so counts match the
     ``folder under=<path>`` operator the rule engine implements. A parent

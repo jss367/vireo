@@ -18763,7 +18763,17 @@ class Database:
             q_norm = str(q).lower() if group_expr.startswith("LOWER(") else str(q)
             extra_params.append(f"%{_escape_like(q_norm)}%")
         joined = " AND ".join(conditions)
-        where_full = f"{where} AND {joined}" if where else f"WHERE {joined}"
+        # ``where`` from ``_build_query_from_rules`` is ``WHERE (A) OR (B)``
+        # for a top-level ``any`` group. Appending ``AND {joined}`` without
+        # wrapping would bind to the last OR branch (AND binds tighter than
+        # OR in SQL) and let first-branch rows leak through even when the
+        # facet field is NULL or the typeahead doesn't match — so the count
+        # no longer answers "how many results would selecting this suggestion
+        # return".
+        if where:
+            where_full = f"WHERE ({where[len('WHERE '):]}) AND {joined}"
+        else:
+            where_full = f"WHERE {joined}"
         query = f"""
             SELECT {display_expr} AS value, COUNT(DISTINCT p.id) AS count
             FROM photos p
