@@ -75,6 +75,14 @@ def test_shared_folder_local_status_follows_workspace_switch(live_server, page, 
     page.get_by_role("button", name="Work Locally", exact=True).click()
     expect(page.get_by_text("Local · 2 workspaces", exact=True)).to_be_visible(timeout=15000)
 
+    local_row = page.locator(".workspace-folder-row-stacked")
+    expect(local_row).to_have_count(1)
+    main_box = local_row.locator(".workspace-folder-main").bounding_box()
+    actions_box = local_row.locator(".workspace-folder-actions").bounding_box()
+    assert main_box is not None
+    assert actions_box is not None
+    assert actions_box["y"] >= main_box["y"] + main_box["height"]
+
     assert page.request.post(f"{live_server['url']}/api/workspaces/{second}/activate").ok
     page.reload(timeout=5000)
     expect(page.get_by_text("Local · 2 workspaces", exact=True)).to_be_visible(timeout=5000)
