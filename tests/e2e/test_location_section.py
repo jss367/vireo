@@ -163,9 +163,17 @@ def test_browse_coordinate_filter_deep_link(live_server, page):
         )
 
     page.goto(f"{live_server['url']}/browse?location_status=none")
-    expect(page.locator("#locationStatusFilter")).to_have_value("none")
+    # The legacy deep-link param compiles to a "Has GPS is No" filter rule.
+    page.wait_for_function(
+        "document.querySelector('.vf-chips') && "
+        "document.querySelector('.vf-chips').textContent.includes('Has GPS is No')",
+        timeout=15000,
+    )
     page.locator(".grid-card").first.wait_for(state="visible")
-    assert page.locator(f".grid-card[data-id='{exif_id}']").count() == 0
+    page.wait_for_function(
+        f"!document.querySelector(\".grid-card[data-id='{exif_id}']\")",
+        timeout=15000,
+    )
     assert page.locator(".grid-location-status.none").count() > 0
 
 

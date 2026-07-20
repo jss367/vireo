@@ -18645,14 +18645,17 @@ class Database:
             return False
         return True
 
-    def count_photos_for_rules(self, rules):
+    def count_photos_for_rules(self, rules, collection_id=None, folder_id=None):
         """Return the number of photos in the active workspace that match
-        an unsaved rules list. Used by the smart-collection modal preview.
+        an unsaved rules list. Used by the smart-collection modal preview
+        and /api/photos/query totals.
 
         Raises ValueError on malformed input (propagated from
         ``_build_query_from_rules``).
         """
         folder_join, join_clause, where, params = self._build_query_from_rules(rules)
+        where, params = self._append_collection_restriction(collection_id, where, params)
+        where, params = self._append_folder_restriction(folder_id, where, params)
         query = f"""
             SELECT COUNT(DISTINCT p.id) FROM photos p
             {folder_join}
@@ -18661,7 +18664,41 @@ class Database:
         """
         return self.conn.execute(query, params).fetchone()[0]
 
-    def query_photos(self, rules, sort="date", page=1, per_page=50):
+    def _append_folder_restriction(self, folder_id, where, params):
+        """AND a folder-subtree restriction onto built rule clauses, matching
+        get_photos' folder_id semantics (the folder and its descendants)."""
+        if folder_id is None:
+            return where, params
+        subtree = self.get_folder_subtree_ids(folder_id)
+        placeholders = ",".join("?" for _ in subtree)
+        clause = f"p.folder_id IN ({placeholders})"
+        where = f"{where} AND {clause}" if where else f"WHERE {clause}"
+        return where, list(params) + list(subtree)
+
+    def _append_collection_restriction(self, collection_id, where, params):
+        """AND a collection-membership subquery onto built rule clauses.
+
+        Lets /api/photos/query serve Browse's dashboard-scoped collection
+        view (collection as a restriction on the filtered grid) without the
+        rule tree needing to reference collections. Raises ValueError for a
+        collection missing from the active workspace.
+        """
+        if collection_id is None:
+            return where, params
+        parts = self._build_collection_query(collection_id)
+        if parts is None:
+            raise ValueError("collection not found in active workspace")
+        c_folder_join, c_join, c_where, c_params = parts
+        sub = (
+            f"SELECT DISTINCT p.id FROM photos p {c_folder_join} "
+            f"{c_join} {c_where}"
+        )
+        clause = f"p.id IN ({sub})"
+        where = f"{where} AND {clause}" if where else f"WHERE {clause}"
+        return where, list(params) + list(c_params)
+
+    def query_photos(self, rules, sort="date", page=1, per_page=50,
+                     collection_id=None, folder_id=None):
         """Return paginated photos matching a universal-filter rule tree.
 
         The rules format is the smart-collection tree (see
@@ -18669,6 +18706,8 @@ class Database:
         matching total. Raises ValueError on malformed rules.
         """
         folder_join, join_clause, where, params = self._build_query_from_rules(rules)
+        where, params = self._append_collection_restriction(collection_id, where, params)
+        where, params = self._append_folder_restriction(folder_id, where, params)
         sort_map = {
             "date": _PHOTO_DATE_ASC_ORDER,
             "date_desc": _PHOTO_DATE_DESC_ORDER,
@@ -18701,12 +18740,15 @@ class Database:
     # match both photos. ``display_expr`` is what the picker shows; using
     # ``MIN(col)`` picks a stable representative spelling within each
     # case-insensitive bucket instead of always lower-casing the label.
-    def query_photo_ids(self, rules, sort="date"):
+    def query_photo_ids(self, rules, sort="date", collection_id=None,
+                        folder_id=None):
         """Return every photo id matching a universal-filter rule tree, in
         display order — the rules analog of ``get_photo_ids`` (select-all,
         visual-search candidate scope). Raises ValueError on malformed rules.
         """
         folder_join, join_clause, where, params = self._build_query_from_rules(rules)
+        where, params = self._append_collection_restriction(collection_id, where, params)
+        where, params = self._append_folder_restriction(folder_id, where, params)
         order = {
             "date": _PHOTO_DATE_ASC_ORDER,
             "date_desc": _PHOTO_DATE_DESC_ORDER,

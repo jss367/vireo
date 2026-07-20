@@ -5524,19 +5524,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(sort, str):
             return json_error("sort must be a string", 400)
         per_page = min(per_page, _MAX_PER_PAGE)
+        collection_id = payload.get("collection_id")
+        if collection_id is not None and (
+            not isinstance(collection_id, int) or isinstance(collection_id, bool)
+        ):
+            return json_error("collection_id must be an integer", 400)
+        folder_id = payload.get("folder_id")
+        if folder_id is not None and (
+            not isinstance(folder_id, int) or isinstance(folder_id, bool)
+        ):
+            return json_error("folder_id must be an integer", 400)
         rules = _inject_active_visual_model(rules)
         if payload.get("ids_only"):
             # Select-all and other bulk flows need the complete matching id
             # set; it must resolve exactly the photos the filtered grid
             # shows, so it shares this endpoint rather than a legacy path.
             try:
-                ids = db.query_photo_ids(rules, sort=sort)
+                ids = db.query_photo_ids(rules, sort=sort, collection_id=collection_id,
+                                         folder_id=folder_id)
             except ValueError as exc:
                 return json_error(str(exc), 400)
             return jsonify({"ids": ids, "total": len(ids)})
         try:
-            photos = db.query_photos(rules, sort=sort, page=page, per_page=per_page)
-            total = db.count_photos_for_rules(rules)
+            photos = db.query_photos(rules, sort=sort, page=page, per_page=per_page,
+                                     collection_id=collection_id, folder_id=folder_id)
+            total = db.count_photos_for_rules(rules, collection_id=collection_id,
+                                              folder_id=folder_id)
         except ValueError as exc:
             return json_error(str(exc), 400)
 

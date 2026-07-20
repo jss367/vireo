@@ -185,6 +185,11 @@ body.sidebar-resizing {
 }
 
 /* ---------- Filter Bar ---------- */
+.browse-filter-shell { display: block; }
+.browse-filter-shell .vf-bar { width: 100%; }
+.browse-view-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.browse-view-controls input[type=text] { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 4px; padding: 5px 10px; font-size: 12px; flex: 1; min-width: 200px; }
+.browse-view-controls select { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-secondary); border-radius: 4px; padding: 5px 8px; font-size: 12px; }
 .filter-bar {
   background: var(--bg-primary);
   padding: 10px 20px;
@@ -1522,80 +1527,45 @@ body.sidebar-resizing {
   <!-- Content -->
   <div class="content-area">
 
-    <!-- Filter Bar -->
-    <div class="filter-bar">
-      <div class="search-control">
-        <input type="text" id="searchInput" placeholder="Search keywords or filenames..."
-               autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
-               onkeydown="if(event.key==='Enter')applySearchFilterNow()" oninput="scheduleSearchFilter()">
-        <button id="keywordMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('match_case')" title="Match case">Aa</button>
-        <button id="keywordWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleKeywordSearchOption('whole_word')" title="Match whole word">ab</button>
+    <!-- Universal filter bar (shared module) + Browse view controls -->
+    <div class="filter-bar browse-filter-shell">
+      {% include '_filterbar.html' %}
+      <div class="browse-view-controls">
+        <input type="text" id="clipSearchInput" placeholder="CLIP search: describe what you see..."
+               onkeydown="if(event.key==='Enter')runClipSearch()">
+        <button id="clipSearchBtn" onclick="runClipSearch()"
+                style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;white-space:nowrap;">
+          Search
+        </button>
+        <button id="clipClearBtn" onclick="clearClipSearch()" style="display:none;background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;">
+          Clear
+        </button>
+        <select id="sortSelect" onchange="applyFilters()" title="Sort order">
+          <option value="date">Capture date (oldest)</option>
+          <option value="date_desc">Capture date (newest)</option>
+          <option value="name">Filename (A-Z)</option>
+          <option value="name_desc">Filename (Z-A)</option>
+          <option value="rating">Rating (highest)</option>
+          <option value="quality">Quality (best)</option>
+          <option value="sharpness">Sharpness (sharpest)</option>
+          <option value="sharpness_asc">Sharpness (softest)</option>
+        </select>
+        <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
+          <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
+                 style="width:80px;accent-color:var(--accent);"
+                 oninput="updateThumbSize(this.value)">
+          <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
+        </label>
+        <button id="detBoxToggle" onclick="toggleDetectionBoxes()" title="Show/hide detection boxes"
+                style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
+          &#9634; Boxes
+        </button>
+        <button id="calToggle" onclick="toggleTimelineMode()" title="Calendar heatmap"
+                style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
+          &#128197; Calendar
+        </button>
+        <span class="filter-summary" id="filterSummary"></span>
       </div>
-      <input type="text" id="clipSearchInput" placeholder="CLIP search: describe what you see..."
-             style="flex:1;min-width:200px;"
-             onkeydown="if(event.key==='Enter')runClipSearch()">
-      <button id="clipSearchBtn" onclick="runClipSearch()"
-              style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;white-space:nowrap;">
-        Search
-      </button>
-      <button id="clipClearBtn" onclick="clearClipSearch()" style="display:none;background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;">
-        Clear
-      </button>
-      <label title="EXIF capture date (DateTimeOriginal)">Captured from</label>
-      <input type="date" id="dateFrom" onchange="applyFilters()" title="Filter by EXIF capture date (DateTimeOriginal)">
-      <label>to</label>
-      <input type="date" id="dateTo" onchange="applyFilters()" title="Filter by EXIF capture date (DateTimeOriginal)">
-      <div class="rating-filter">
-        <label title="Minimum star rating">Min:</label>
-        <span class="rating-star" data-val="1" onclick="setFilterRating(1)">&#9733;</span>
-        <span class="rating-star" data-val="2" onclick="setFilterRating(2)">&#9733;</span>
-        <span class="rating-star" data-val="3" onclick="setFilterRating(3)">&#9733;</span>
-        <span class="rating-star" data-val="4" onclick="setFilterRating(4)">&#9733;</span>
-        <span class="rating-star" data-val="5" onclick="setFilterRating(5)">&#9733;</span>
-      </div>
-      <div class="flag-filter" aria-label="Flag filters">
-        <button id="pickFilterBtn" class="flag-filter-btn" type="button" onclick="setFlagFilter('flagged')" title="Show only picks">P Picks</button>
-        <button id="rejectFilterBtn" class="flag-filter-btn" type="button" onclick="setFlagFilter('rejected')" title="Show only rejects">X Rejects</button>
-      </div>
-      <select id="colorFilter" onchange="applyFilters()" title="Filter by color label" style="font-size:12px;">
-        <option value="">Color: Any</option>
-        <option value="red">Red</option>
-        <option value="yellow">Yellow</option>
-        <option value="green">Green</option>
-        <option value="blue">Blue</option>
-        <option value="purple">Purple</option>
-      </select>
-      <select id="locationStatusFilter" onchange="applyFilters()" title="Filter by coordinate source" style="font-size:12px;">
-        <option value="">Coordinates: Any</option>
-        <option value="exif">EXIF GPS</option>
-        <option value="assigned">Assigned map location</option>
-        <option value="none">No coordinates</option>
-      </select>
-      <select id="sortSelect" onchange="applyFilters()" title="Sort order">
-        <option value="date">Capture date (oldest)</option>
-        <option value="date_desc">Capture date (newest)</option>
-        <option value="name">Filename (A-Z)</option>
-        <option value="name_desc">Filename (Z-A)</option>
-        <option value="rating">Rating (highest)</option>
-        <option value="quality">Quality (best)</option>
-        <option value="sharpness">Sharpness (sharpest)</option>
-        <option value="sharpness_asc">Sharpness (softest)</option>
-      </select>
-      <label style="display:flex;align-items:center;gap:4px;" title="Thumbnail size">
-        <input type="range" id="thumbSizeSlider" min="120" max="400" step="20" value="220"
-               style="width:80px;accent-color:var(--accent);"
-               oninput="updateThumbSize(this.value)">
-        <span style="font-size:10px;color:var(--text-faint);">&#9638;</span>
-      </label>
-      <button id="detBoxToggle" onclick="toggleDetectionBoxes()" title="Show/hide detection boxes"
-              style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
-        &#9634; Boxes
-      </button>
-      <button id="calToggle" onclick="toggleTimelineMode()" title="Calendar heatmap"
-              style="background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-secondary);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;">
-        &#128197; Calendar
-      </button>
-      <span class="filter-summary" id="filterSummary"></span>
     </div>
 
     <!-- Calendar Heatmap (Timeline Mode) -->
@@ -2023,24 +1993,22 @@ var colorLabelsFetched = new Set();
 var colorLabelGen = 0;   // bumped on local edits; guards against stale fetch responses
 var loadEpoch = 0;       // bumped on any grid reset; guards against stale loadPhotos responses
 var selectAllRequestSeq = 0; // bumped to ignore stale async select-all responses
-var filterRating = 0;
-var flagFilter = '';
+// rating/flag/color/date/keyword filter state now lives in VireoFilter
+// (the universal filter bar); Browse keeps only page-scope state.
 var activeFolderId = null;
 var activeKeyword = null;
 var activeCollectionId = null;
 // A Dashboard deep link can combine a collection with date/keyword filters.
 // Normal collection clicks keep the historical collection-only behavior.
 var dashboardCollectionScope = false;
-var keywordSearchMatchCase = false;
-var keywordSearchWholeWord = false;
+
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
 var selectedDay = null;
 var calendarData = null;
 var clipSearchActive = false;
 var clipSearchSeq = 0;
-var searchFilterTimer = null;
-var appliedKeywordSearch = '';
+
 var bestBatchData = null;
 var keywordAutocompleteCache = null;
 var keywordAutocompletePromise = null;
@@ -2456,23 +2424,12 @@ function bindKeywordAutocomplete(inputId, dropdownId, submitFn) {
 }
 
 function hasActiveBrowseFilter() {
-  var searchInput = document.getElementById('searchInput');
-  var colorFilter = document.getElementById('colorFilter');
-  var locationStatusFilter = document.getElementById('locationStatusFilter');
-  var dateFrom = document.getElementById('dateFrom');
-  var dateTo = document.getElementById('dateTo');
   return !!(
     activeFolderId ||
     activeKeyword ||
     activeCollectionId ||
     clipSearchActive ||
-    filterRating > 0 ||
-    flagFilter ||
-    (searchInput && searchInput.value.trim()) ||
-    (colorFilter && colorFilter.value) ||
-    (locationStatusFilter && locationStatusFilter.value) ||
-    (dateFrom && dateFrom.value) ||
-    (dateTo && dateTo.value)
+    (window.VireoFilter && VireoFilter.hasFilters())
   );
 }
 
@@ -2895,33 +2852,11 @@ async function bootstrapBrowse() {
       activeCollectionId = initialCollectionId;
       dashboardCollectionScope = pageParams.get('dashboard_scope') === '1';
     }
-    document.getElementById('dateFrom').value = pageParams.get('date_from') || '';
-    document.getElementById('dateTo').value = pageParams.get('date_to') || '';
-    var initialKeyword = pageParams.get('keyword') || '';
-    if (initialKeyword) {
-      document.getElementById('searchInput').value = initialKeyword;
-      appliedKeywordSearch = initialKeyword;
-    }
-    var initialRating = parseInt(pageParams.get('rating_min'), 10);
-    if (!isNaN(initialRating) && initialRating >= 1 && initialRating <= 5) {
-      filterRating = initialRating;
-      document.querySelectorAll('.rating-filter .rating-star').forEach(function(el) {
-        el.classList.toggle('active', parseInt(el.dataset.val, 10) <= filterRating);
-      });
-    }
-    var initialFlag = pageParams.get('flag') || '';
-    if (['none', 'flagged', 'rejected'].indexOf(initialFlag) !== -1) {
-      flagFilter = initialFlag;
-      updateFlagFilterButtons();
-    }
-    var initialLocationStatus = pageParams.get('location_status') || '';
-    if (!initialLocationStatus && pageParams.get('missing_gps') === '1') {
-      initialLocationStatus = 'none';
-    }
-    if (['exif', 'assigned', 'none'].indexOf(initialLocationStatus) !== -1) {
-      document.getElementById('locationStatusFilter').value = initialLocationStatus;
-    }
-    var initParams = buildCurrentBrowseParams();
+    // Legacy filter deep-link params (rating_min/flag/keyword/dates/…) are
+    // compiled into an initial rule tree by VireoFilter.init below.
+    var initParams = new URLSearchParams();
+    initParams.set('sort', document.getElementById('sortSelect').value);
+    if (activeFolderId) initParams.set('folder_id', activeFolderId);
     // Collection-only deep links keep their historical endpoint behavior,
     // while Dashboard links opt into composable filters via dashboard_scope.
     // The combined init endpoint still needs the collection id for first paint
@@ -2949,6 +2884,23 @@ async function bootstrapBrowse() {
     // Lazy-load collection photo counts to avoid N+1 on init
     loadCollectionCounts();
     bootstrapSucceeded = true;
+
+    // Universal filter bar: registry + persisted/deep-linked state load
+    // async; when it comes up with active filters the unfiltered first
+    // paint above is stale, so reload through the rules path.
+    VireoFilter.init({
+      page: 'browse',
+      root: document.getElementById('vireoFilterBar'),
+      scopeLabel: 'Workspace \u00b7 All available photos',
+      onChange: function() {
+        if (timelineMode) loadCalendarData();
+        if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
+        resetAndLoad({ preserveAnchor: true });
+      },
+    }).then(function() {
+      VireoFilter.setResultTotal(totalPhotos);
+      if (VireoFilter.hasFilters()) resetAndLoad();
+    }).catch(function() {});
   } catch(e) {
     document.getElementById('loadingState').textContent = 'Error loading.';
   }
@@ -3060,17 +3012,12 @@ function toggleTree(e, el) {
 }
 
 function filterByFolder(folderId) {
-  var previousKeyword = activeKeyword;
   if (activeFolderId === folderId) {
     activeFolderId = null;
   } else {
     activeFolderId = folderId;
   }
   activeKeyword = null;
-  var searchInput = document.getElementById('searchInput');
-  if (previousKeyword && searchInput && searchInput.value.trim() === previousKeyword) {
-    searchInput.value = '';
-  }
   activeCollectionId = null;
   if (timelineMode) loadCalendarData();
   reloadBrowseResults();
@@ -3137,9 +3084,9 @@ function filterByKeyword(name) {
   }
   activeFolderId = null;
   activeCollectionId = null;
-  document.getElementById('searchInput').value = activeKeyword || '';
-  if (timelineMode) loadCalendarData();
-  reloadBrowseResults();
+  // The rule toggles: adding an identical keyword rule removes it. The
+  // filter bar's onChange handles the reload.
+  VireoFilter.addRule('keyword', 'is', name);
   document.querySelectorAll('#keywordTree .tree-item').forEach(function(el) {
     el.classList.toggle('active', el.dataset.keyword === activeKeyword);
   });
@@ -3239,25 +3186,14 @@ function refreshActiveKeywordAfterRemoval(removedName) {
   // `resetAndLoad`, which clears `activeCollectionId` and drops the user
   // into the global keyword search.
   if (activeCollectionId) return;
-  var searchInput = document.getElementById('searchInput');
-  var query = searchInput ? searchInput.value.trim() : '';
-  if (!query) return;
-  // The backend keyword filter tokenizes `keyword=<query>` and satisfies
-  // each token independently — a token can match via a different keyword
-  // or the filename. So a photo can appear in the grid because
-  // `removedName` satisfied one token while other tokens matched
-  // elsewhere. Reload whenever any query token still matches the removed
-  // keyword name; requiring the whole query to match would miss those
-  // multi-token cases.
-  var opts = {
-    matchCase: keywordSearchMatchCase,
-    wholeWord: keywordSearchWholeWord,
-  };
-  var tokens = query.split(/\s+/);
-  var anyTokenMatches = tokens.some(function(token) {
-    return token && VireoTextSearch.tokenMatches(removedName, token, opts);
-  });
-  if (anyTokenMatches) {
+  // The universal filter expression may reference the removed keyword via
+  // keyword/species rules or the quick-search group; a name substring test
+  // over the serialized expression over-reloads at worst (reloading is
+  // safe), never under-reloads.
+  var rules = getBrowseRules();
+  if (!rules) return;
+  var needle = String(removedName).toLowerCase();
+  if (JSON.stringify(rules).toLowerCase().indexOf(needle) !== -1) {
     reloadBrowseResults();
   }
 }
@@ -3286,7 +3222,6 @@ async function filterByCollection(id, options) {
     }
     return;
   }
-  cancelScheduledSearchFilter();
   var preserveAnchor = !(options && options.preserveAnchor === false);
   var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
@@ -3907,17 +3842,9 @@ async function saveCollection() {
 
 /* ---------- Photo Loading ---------- */
 async function resetAndLoad(options) {
-  cancelScheduledSearchFilter();
-  var searchInput = document.getElementById('searchInput');
-  var currentSearch = searchInput ? searchInput.value.trim() : '';
-  var searchWasCleared = appliedKeywordSearch !== '' && currentSearch === '';
-  var preserveAnchor = !!(options && options.preserveAnchor) || searchWasCleared;
+  var preserveAnchor = !!(options && options.preserveAnchor);
   var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
-  // Any non-collection reload also applies the current text box through
-  // buildCurrentBrowseParams(). Keep the tracker aligned when another control
-  // (sort/date/color/etc.) beats the search debounce to this reset.
-  appliedKeywordSearch = currentSearch;
   if (clipSearchActive) {
     clipSearchActive = false;
     document.getElementById('clipSearchInput').value = '';
@@ -3938,14 +3865,18 @@ async function resetAndLoad(options) {
   selectedIndex = -1;
   // Leaving collection mode when applying non-collection filters (sort, rating,
   // date, keyword, folder) so the summary stays in sync with the visible grid.
-  activeCollectionId = null;
+  // Dashboard-scoped collections are the exception: there the collection is an
+  // explicit composable restriction that filters combine WITH, so it must
+  // survive filter-driven reloads (dashboard drill-down deep links).
+  if (!dashboardCollectionScope) activeCollectionId = null;
   if (anchor) hideDetailPanel();
   else closeDetail();
   document.getElementById('grid').innerHTML = '';
   document.getElementById('gridContainer').scrollTop = 0;
 
   function resetRequestIsCurrent() {
-    return resetLoadEpoch === loadEpoch && activeCollectionId == null;
+    return resetLoadEpoch === loadEpoch &&
+      (activeCollectionId == null || dashboardCollectionScope);
   }
   function anchorScanShouldContinue() {
     return resetRequestIsCurrent() && anchorRestoreEpoch === restoreEpoch;
@@ -3986,59 +3917,23 @@ async function resetAndLoad(options) {
   }
 }
 
+function getBrowseRules() {
+  if (!window.VireoFilter || !VireoFilter.getRules) return null;
+  var rules = VireoFilter.getRules();
+  var count = Array.isArray(rules) ? rules.length : (rules.rules || []).length;
+  return count ? rules : null;
+}
+
 function buildCurrentBrowseParams() {
   var params = new URLSearchParams();
   params.set('sort', document.getElementById('sortSelect').value);
-
   if (activeFolderId) params.set('folder_id', activeFolderId);
   if (activeCollectionId && dashboardCollectionScope) {
     params.set('collection_id', activeCollectionId);
   }
-  if (filterRating > 0) params.set('rating_min', filterRating);
-  if (flagFilter) params.set('flag', flagFilter);
-
-  var colorFilter = document.getElementById('colorFilter').value;
-  if (colorFilter) params.set('color_label', colorFilter);
-
-  var locationStatus = document.getElementById('locationStatusFilter').value;
-  if (locationStatus) params.set('location_status', locationStatus);
-
-  var dateFrom = document.getElementById('dateFrom').value;
-  var dateTo = document.getElementById('dateTo').value;
-  if (dateFrom) params.set('date_from', dateFrom);
-  if (dateTo) params.set('date_to', dateTo);
-
-  appendKeywordSearchParams(params);
+  var rules = getBrowseRules();
+  if (rules) params.set('rules', JSON.stringify(rules));
   return params;
-}
-
-function appendKeywordSearchParams(params) {
-  var search = document.getElementById('searchInput').value.trim();
-  if (search) params.set('keyword', search);
-  if (activeKeyword) params.set('keyword', activeKeyword);
-  if (params.has('keyword')) {
-    VireoTextSearch.appendParams(
-      params,
-      { matchCase: keywordSearchMatchCase, wholeWord: keywordSearchWholeWord },
-      'keyword_match_case',
-      'keyword_whole_word'
-    );
-  }
-}
-
-function renderKeywordSearchOptions() {
-  VireoTextSearch.renderOptions('keyword', {
-    matchCase: keywordSearchMatchCase,
-    wholeWord: keywordSearchWholeWord,
-  });
-}
-
-function toggleKeywordSearchOption(option) {
-  VireoTextSearch.toggle('keyword', option, function(options) {
-    keywordSearchMatchCase = options.matchCase;
-    keywordSearchWholeWord = options.wholeWord;
-    applySearchFilterNow();
-  });
 }
 
 async function loadPhotos(options) {
@@ -4071,22 +3966,34 @@ async function loadPhotos(options) {
   var reqPerPage = perPage * chunk;
 
   var url;
+  var fetchOptions = {};
   if (activeCollectionId && !dashboardCollectionScope) {
     var cparams = new URLSearchParams();
     cparams.set('page', reqPage);
     cparams.set('per_page', reqPerPage);
     url = '/api/collections/' + activeCollectionId + '/photos?' + cparams.toString();
   } else {
-    var params = buildCurrentBrowseParams();
-    params.set('page', reqPage);
-    params.set('per_page', reqPerPage);
-    url = '/api/photos?' + params.toString();
+    url = '/api/photos/query';
+    var body = {
+      rules: getBrowseRules() || [],
+      sort: document.getElementById('sortSelect').value,
+      page: reqPage,
+      per_page: reqPerPage,
+    };
+    if (activeFolderId) body.folder_id = activeFolderId;
+    if (activeCollectionId && dashboardCollectionScope) body.collection_id = activeCollectionId;
+    fetchOptions = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    };
   }
 
   try {
-    var data = await safeFetch(url);
+    var data = await safeFetch(url, fetchOptions);
     if (epoch !== loadEpoch) return;  // grid was reset mid-flight; drop stale response
     totalPhotos = data.total;
+    if (window.VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(totalPhotos);
     var firstNewIdx = photos.length;
 
     if (data.photos.length === 0) {
@@ -4159,13 +4066,8 @@ async function loadCalendarData() {
   var params = new URLSearchParams();
   params.set('year', calendarYear);
   if (activeFolderId) params.set('folder_id', activeFolderId);
-  if (filterRating > 0) params.set('rating_min', filterRating);
-  if (flagFilter) params.set('flag', flagFilter);
-  var colorFilter = document.getElementById('colorFilter').value;
-  if (colorFilter) params.set('color_label', colorFilter);
-  var locationStatus = document.getElementById('locationStatusFilter').value;
-  if (locationStatus) params.set('location_status', locationStatus);
-  appendKeywordSearchParams(params);
+  var rules = getBrowseRules();
+  if (rules) params.set('rules', JSON.stringify(rules));
 
   calendarData = await safeFetch('/api/photos/calendar?' + params.toString());
   renderCalendar();
@@ -4276,24 +4178,18 @@ function selectCalendarDay(dateStr, count) {
   document.getElementById('calSelectionText').textContent = formatted + ' \u00b7 ' + count + ' photo' + (count !== 1 ? 's' : '');
   document.getElementById('calSelection').classList.add('active');
 
-  // Update date inputs and reload. #dateTo is <input type="date">, which
-  // rejects datetime strings (the value would silently blank and the filter
-  // would lose its upper bound). A bare date is correct: the backend pads
-  // date_to to end-of-day (_inclusive_date_to in db.py).
-  document.getElementById('dateFrom').value = dateStr;
-  document.getElementById('dateTo').value = dateStr;
+  // Day selection is a capture-date rule in the filter bar (single-day
+  // between; the backend pads the upper bound to end-of-day).
+  VireoFilter.addRule('timestamp', 'between', [dateStr, dateStr]);
   activeCollectionId = null;
-  reloadBrowseResults();
   renderCalendar(); // update selected state
 }
 
 function clearCalendarSelection() {
   selectedDay = null;
   document.getElementById('calSelection').classList.remove('active');
-  document.getElementById('dateFrom').value = '';
-  document.getElementById('dateTo').value = '';
+  if (window.VireoFilter) VireoFilter.removeField('timestamp');
   activeCollectionId = null;
-  reloadBrowseResults();
   if (calendarData) renderCalendar();
 }
 
@@ -4303,81 +4199,15 @@ function calendarChangeYear(delta) {
   calendarYear += delta;
   selectedDay = null;
   document.getElementById('calSelection').classList.remove('active');
-  document.getElementById('dateFrom').value = '';
-  document.getElementById('dateTo').value = '';
+  if (window.VireoFilter) VireoFilter.removeField('timestamp');
   loadCalendarData();
   activeCollectionId = null;
-  reloadBrowseResults();
 }
 
 function applyFilters() {
-  var locationStatus = document.getElementById('locationStatusFilter').value;
-  var url = new URL(window.location.href);
-  if (locationStatus) url.searchParams.set('location_status', locationStatus);
-  else url.searchParams.delete('location_status');
-  url.searchParams.delete('missing_gps');
-  window.history.replaceState({}, '', url.pathname + url.search);
   if (timelineMode) loadCalendarData();
   activeCollectionId = null;
   reloadBrowseResults();
-}
-
-function scheduleSearchFilter() {
-  cancelScheduledSearchFilter();
-  searchFilterTimer = setTimeout(function() {
-    searchFilterTimer = null;
-    applySearchFilters();
-  }, 250);
-}
-
-function cancelScheduledSearchFilter() {
-  if (searchFilterTimer) {
-    clearTimeout(searchFilterTimer);
-    searchFilterTimer = null;
-  }
-}
-
-function applySearchFilterNow() {
-  cancelScheduledSearchFilter();
-  applySearchFilters();
-}
-
-function applySearchFilters() {
-  var input = document.getElementById('searchInput');
-  var nextSearch = input ? input.value.trim() : '';
-  var preserveAnchor = appliedKeywordSearch !== '' && nextSearch === '';
-  appliedKeywordSearch = nextSearch;
-  if (timelineMode) loadCalendarData();
-  activeCollectionId = null;
-  reloadBrowseResults({ preserveAnchor: preserveAnchor });
-}
-
-function setFilterRating(val) {
-  if (filterRating === val) {
-    filterRating = 0;
-  } else {
-    filterRating = val;
-  }
-  document.querySelectorAll('.rating-filter .rating-star').forEach(function(el) {
-    el.classList.toggle('active', parseInt(el.dataset.val) <= filterRating);
-  });
-  activeCollectionId = null;
-  reloadBrowseResults();
-}
-
-function setFlagFilter(flag) {
-  flagFilter = flagFilter === flag ? '' : flag;
-  updateFlagFilterButtons();
-  if (timelineMode) loadCalendarData();
-  activeCollectionId = null;
-  reloadBrowseResults();
-}
-
-function updateFlagFilterButtons() {
-  var pick = document.getElementById('pickFilterBtn');
-  var reject = document.getElementById('rejectFilterBtn');
-  if (pick) pick.classList.toggle('active-pick', flagFilter === 'flagged');
-  if (reject) reject.classList.toggle('active-reject', flagFilter === 'rejected');
 }
 
 function updateFilterSummary() {
@@ -4408,20 +4238,8 @@ function appendClipSearchScopeParams(params) {
     return;
   }
   if (activeFolderId) params.set('folder_id', activeFolderId);
-  if (filterRating > 0) params.set('rating_min', filterRating);
-  if (flagFilter) params.set('flag', flagFilter);
-
-  var colorFilter = document.getElementById('colorFilter').value;
-  if (colorFilter) params.set('color_label', colorFilter);
-  var locationStatus = document.getElementById('locationStatusFilter').value;
-  if (locationStatus) params.set('location_status', locationStatus);
-
-  var dateFrom = document.getElementById('dateFrom').value;
-  var dateTo = document.getElementById('dateTo').value;
-  if (dateFrom) params.set('date_from', dateFrom);
-  if (dateTo) params.set('date_to', dateTo);
-
-  appendKeywordSearchParams(params);
+  var rules = getBrowseRules();
+  if (rules) params.set('rules', JSON.stringify(rules));
 }
 
 function reloadBrowseResults(options) {
@@ -4842,18 +4660,31 @@ async function selectAllMatchingPhotos() {
   }
 
   var url;
+  var fetchOpts = {};
   if (activeCollectionId && !dashboardCollectionScope) {
     url = '/api/collections/' + activeCollectionId + '/photo-ids';
   } else {
-    url = '/api/photos/ids?' + buildCurrentBrowseParams().toString();
+    url = '/api/photos/query';
+    var idsBody = {
+      rules: getBrowseRules() || [],
+      sort: document.getElementById('sortSelect').value,
+      ids_only: true,
+    };
+    if (activeFolderId) idsBody.folder_id = activeFolderId;
+    if (activeCollectionId && dashboardCollectionScope) idsBody.collection_id = activeCollectionId;
+    fetchOpts = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(idsBody),
+    };
   }
 
   showToast('Selecting all matching photos...');
   try {
-    var data = await safeFetch(url, {}, { toast: false });
+    var data = await safeFetch(url, fetchOpts, { toast: false });
     if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
     selectedPhotos.clear();
-    (data.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
+    (data.photo_ids || data.ids || []).forEach(function(id) { selectedPhotos.add(id); });
     renderGrid();
     updateBatchBar();
     showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' photo' + (selectedPhotos.size === 1 ? '' : 's'));
@@ -6628,17 +6459,8 @@ function closeDetail() {
 async function loadSummary() {
   var params = new URLSearchParams();
   if (activeFolderId) params.set('folder_id', activeFolderId);
-  if (filterRating > 0) params.set('rating_min', filterRating);
-  if (flagFilter) params.set('flag', flagFilter);
-  var colorFilter = document.getElementById('colorFilter').value;
-  if (colorFilter) params.set('color_label', colorFilter);
-  var locationStatus = document.getElementById('locationStatusFilter').value;
-  if (locationStatus) params.set('location_status', locationStatus);
-  var dateFrom = document.getElementById('dateFrom').value;
-  var dateTo = document.getElementById('dateTo').value;
-  if (dateFrom) params.set('date_from', dateFrom);
-  if (dateTo) params.set('date_to', dateTo);
-  appendKeywordSearchParams(params);
+  var rules = getBrowseRules();
+  if (rules) params.set('rules', JSON.stringify(rules));
   if (activeCollectionId) params.set('collection_id', activeCollectionId);
 
   try {
@@ -7170,7 +6992,7 @@ async function _afterLocationMutation(photoIds, detailPhotoId) {
     await filterByCollection(activeCollectionId);
     return;
   }
-  if (document.getElementById('locationStatusFilter').value) {
+  if (window.VireoFilter && VireoFilter.hasFilters()) {
     resetAndLoad();
     return;
   }
