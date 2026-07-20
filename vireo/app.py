@@ -11996,6 +11996,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "new_count_so_far": progress.get("found", 0),
         }
 
+    def _new_images_walk_blocked_by_move():
+        """True while a storage move owns the source/archive filesystem.
+
+        The navbar probe is automatic and can otherwise start a whole-library
+        walk seconds after a move begins.  On SMB/NAS libraries that doubles
+        metadata/read pressure at exactly the point rsync is building its
+        file list.  Return a deferred pending response instead; the existing
+        client poll starts the walk after the move reaches a terminal state.
+        """
+        for job in app._job_runner.list_jobs():
+            if job.get("status") not in (
+                "queued", "running", "pausing", "paused",
+            ):
+                continue
+            if job.get("type") in ("move-folder", "move-photos"):
+                return True
+        return False
+
     @app.route("/api/workspaces/active/new-images")
     def api_workspace_new_images():
         db = _get_db()
@@ -12030,6 +12048,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "per_root": [],
                 "sample": [],
                 "error": recent_err,
+            })
+
+        if _new_images_walk_blocked_by_move():
+            return jsonify({
+                "workspace_id": ws_id,
+                "new_count": None,
+                "per_root": [],
+                "sample": [],
+                "pending": True,
+                "deferred_reason": "storage_move_active",
             })
 
         # Cache cold: run the filesystem walk in a background thread so the
@@ -12101,6 +12129,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         recent_err = cache.get_recent_error(db_path, ws_id)
         if recent_err is not None:
             return jsonify({"error": recent_err}), 500
+
+        if _new_images_walk_blocked_by_move():
+            return jsonify({
+                "pending": True,
+                "deferred_reason": "storage_move_active",
+                **_new_images_walk_progress_fields(db_path, ws_id),
+            }), 202
 
         # Cache cold (e.g. a scan just invalidated it): kick off — or
         # coalesce onto — a background walk. ``kickoff_compute`` reuses an
