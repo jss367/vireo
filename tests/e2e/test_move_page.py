@@ -46,6 +46,12 @@ def test_move_folder_button_shows_preflight_progress(live_server, page):
         "Confirm moving 3 photos from /photos/park to "
         "/tmp/vireo-archive/park?"
     )
+    assert page.locator("#confirmMessage").text_content() == (
+        "Confirm moving 3 photos from /photos/park to "
+        "/tmp/vireo-archive/park?\n\n"
+        "Files will be copied and verified before originals are removed."
+    )
+    expect(page.locator("#confirmMessage")).to_have_css("white-space", "pre-line")
     expect(btn).to_contain_text("Review move")
     expect(btn).to_be_enabled()
 
