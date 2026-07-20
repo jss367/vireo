@@ -20055,3 +20055,372 @@ def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_p
         "so only one of the two distinct spellings got renamed"
     )
     assert "Sparrow" in remaining_species
+
+
+# ---------------------------------------------------------------------------
+# Universal filter engine (Phase 1) — new fields, ops, and value suggestions.
+# Design: docs/plans/2026-07-19-universal-filters-design.md
+# ---------------------------------------------------------------------------
+
+
+def _filter_db(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    return db, fid
+
+
+def test_universal_filter_numeric_fields_and_between(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    small = db.add_photo(folder_id=fid, filename='small.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    big = db.add_photo(folder_id=fid, filename='big.jpg', extension='.jpg',
+                       file_size=9000, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET width=8640, height=5760, focal_length=600, "
+        "iso=3200, aperture=6.3, shutter_speed=0.0004 WHERE id=?", (big,))
+    db.conn.execute(
+        "UPDATE photos SET width=4000, height=3000, focal_length=300, "
+        "iso=200, aperture=2.8, shutter_speed=0.008 WHERE id=?", (small,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "file_size", "op": ">", "value": 500}]) == 1
+    assert count([{"field": "width", "op": ">=", "value": 8000}]) == 1
+    assert count([{"field": "height", "op": "<", "value": 4000}]) == 1
+    assert count([{"field": "iso", "op": "between", "value": [100, 400]}]) == 1
+    assert count([{"field": "focal_length", "op": "between", "value": [200, 700]}]) == 2
+    assert count([{"field": "aperture", "op": "is", "value": 2.8}]) == 1
+    assert count([{"field": "shutter_speed", "op": "<", "value": 0.001}]) == 1
+    # rating between rides the same generalized numeric path
+    db.update_photo_rating(small, 2)
+    db.update_photo_rating(big, 5)
+    assert count([{"field": "rating", "op": "between", "value": [4, 5]}]) == 1
+
+
+def test_universal_filter_filename_text_ops(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    db.add_photo(folder_id=fid, filename='Owl_2101.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='eagle_2102.cr3', extension='.cr3',
+                 file_size=100, file_mtime=1.0)
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "filename", "op": "contains", "value": "owl"}]) == 1
+    assert count([{"field": "filename", "op": "contains", "value": "owl",
+                   "case": True}]) == 0
+    assert count([{"field": "filename", "op": "contains", "value": "Owl",
+                   "case": True}]) == 1
+    assert count([{"field": "filename", "op": "not_contains", "value": "owl"}]) == 1
+    assert count([{"field": "filename", "op": "starts_with", "value": "eagle"}]) == 1
+    assert count([{"field": "filename", "op": "ends_with", "value": ".cr3"}]) == 1
+    assert count([{"field": "filename", "op": "is", "value": "owl_2101.jpg"}]) == 1
+    assert count([{"field": "filename", "op": "is", "value": "owl_2101.jpg",
+                   "case": True}]) == 0
+    # LIKE wildcards in user input must be literal
+    assert count([{"field": "filename", "op": "contains", "value": "%"}]) == 0
+
+
+def test_universal_filter_flag_null_is_unflagged(tmp_path):
+    """Legacy rows store NULL for unflagged; the Unflagged chip must still
+    return them (plan step 4 regression guard)."""
+    db, fid = _filter_db(tmp_path)
+    null_flag = db.add_photo(folder_id=fid, filename='legacy.jpg', extension='.jpg',
+                             file_size=100, file_mtime=1.0)
+    picked = db.add_photo(folder_id=fid, filename='picked.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET flag=NULL WHERE id=?", (null_flag,))
+    db.conn.execute("UPDATE photos SET flag='flagged' WHERE id=?", (picked,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "flag", "op": "is", "value": "none"}]) == 1
+    assert count([{"field": "flag", "op": "is not", "value": "none"}]) == 1
+    assert count([{"field": "flag", "op": "in", "value": ["none", "flagged"]}]) == 2
+    assert count([{"field": "flag", "op": "in", "value": ["rejected"]}]) == 0
+    assert count([{"field": "flag", "op": "not_in", "value": ["flagged"]}]) == 1
+
+
+def test_universal_filter_in_not_in_enums(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    red = db.add_photo(folder_id=fid, filename='red.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    yellow = db.add_photo(folder_id=fid, filename='yellow.cr3', extension='.cr3',
+                          file_size=100, file_mtime=1.0)
+    plain = db.add_photo(folder_id=fid, filename='plain.nef', extension='.nef',
+                         file_size=100, file_mtime=1.0)
+    ws = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO photo_color_labels(photo_id, workspace_id, color) VALUES (?,?,?)",
+        (red, ws, 'red'))
+    db.conn.execute(
+        "INSERT INTO photo_color_labels(photo_id, workspace_id, color) VALUES (?,?,?)",
+        (yellow, ws, 'yellow'))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "color_label", "op": "in", "value": ["red", "yellow"]}]) == 2
+    assert count([{"field": "color_label", "op": "in", "value": ["green"]}]) == 0
+    # not_in: photos without any label from the set — unlabeled photos match
+    assert count([{"field": "color_label", "op": "not_in", "value": ["red"]}]) == 2
+    assert count([{"field": "extension", "op": "in", "value": [".jpg", ".NEF"]}]) == 2
+    assert count([{"field": "extension", "op": "not_in", "value": [".cr3"]}]) == 2
+    # empty selections: in [] matches nothing, not_in [] excludes nothing
+    assert count([{"field": "flag", "op": "in", "value": []}]) == 0
+    assert count([{"field": "flag", "op": "not_in", "value": []}]) == 3
+
+
+def test_universal_filter_empty_in_preserves_any_none_semantics(tmp_path):
+    """Constant-true/false leaves must stay in their group; dropping them
+    would invert any/none semantics (prototype review regression)."""
+    db, fid = _filter_db(tmp_path)
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+    db.update_photo_rating(p, 5)
+
+    count = db.count_photos_for_rules
+    # any(in [], rating >= 4): first clause false, second true -> matches
+    assert count({"mode": "any", "rules": [
+        {"field": "flag", "op": "in", "value": []},
+        {"field": "rating", "op": ">=", "value": 4},
+    ]}) == 1
+    # none(not_in []): the clause is always true -> none-group matches nothing
+    assert count({"mode": "none", "rules": [
+        {"field": "flag", "op": "not_in", "value": []},
+    ]}) == 0
+
+
+def test_universal_filter_timestamp_recent_and_comparisons(tmp_path):
+    from datetime import UTC, datetime, timedelta
+    db, fid = _filter_db(tmp_path)
+    fresh = db.add_photo(folder_id=fid, filename='fresh.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    old = db.add_photo(folder_id=fid, filename='old.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    now = datetime.now(UTC)
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ((now - timedelta(days=2)).strftime('%Y-%m-%d %H:%M:%S'), fresh))
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2020-06-01 12:00:00', old))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 7, "unit": "days"}}]) == 1
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 1, "unit": "days"}}]) == 0
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 10, "unit": "years"}}]) == 2
+    assert count([{"field": "timestamp", "op": ">=", "value": "2021-01-01"}]) == 1
+    assert count([{"field": "timestamp", "op": "<", "value": "2021-01-01"}]) == 1
+    # <= is inclusive of the named day
+    assert count([{"field": "timestamp", "op": "<=", "value": "2020-06-01"}]) == 1
+
+
+def test_universal_filter_species_any_match(tmp_path):
+    """A multi-species photo matches when ANY of its species matches."""
+    db, fid = _filter_db(tmp_path)
+    multi = db.add_photo(folder_id=fid, filename='multi.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    single = db.add_photo(folder_id=fid, filename='single.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    heron = db.add_keyword('Great Blue Heron', is_species=True)
+    egret = db.add_keyword('Snowy Egret', is_species=True)
+    plain = db.add_keyword('wetlands')
+    db.tag_photo(multi, heron)
+    db.tag_photo(multi, egret)
+    db.tag_photo(single, heron)
+    db.tag_photo(single, plain)
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "species", "op": "is", "value": "Snowy Egret"}]) == 1
+    assert count([{"field": "species", "op": "is", "value": "Great Blue Heron"}]) == 2
+    assert count([{"field": "species", "op": "contains", "value": "egret"}]) == 1
+    assert count([{"field": "species", "op": "is not", "value": "Snowy Egret"}]) == 1
+    # non-species keywords never match the species field
+    assert count([{"field": "species", "op": "contains", "value": "wetlands"}]) == 0
+
+
+def test_universal_filter_workflow_fields(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    edited = db.add_photo(folder_id=fid, filename='edited.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    indexed = db.add_photo(folder_id=fid, filename='indexed.jpg', extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+    burst = db.add_photo(folder_id=fid, filename='burst.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    db.set_photo_edit_recipe(edited, {"rotation": 90})
+    db.conn.execute(
+        "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+        "VALUES (?,?,?,?)", (indexed, 'clip-vit', '', b'\x01'))
+    db.conn.execute("UPDATE photos SET burst_id='B42' WHERE id=?", (burst,))
+    db.conn.execute("UPDATE photos SET file_hash='abc123' WHERE id=?", (burst,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "has_edits", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "has_edits", "op": "is", "value": 0}]) == 2
+    assert count([{"field": "has_visual_index", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "clip-vit"}]) == 1
+    assert count([{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "other-model"}]) == 0
+    assert count([{"field": "in_burst", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "burst_id", "op": "is", "value": "B42"}]) == 1
+    assert count([{"field": "duplicate_group", "op": "is", "value": "abc123"}]) == 1
+
+
+def test_universal_filter_validation_errors(tmp_path):
+    import pytest
+    db, _ = _filter_db(tmp_path)
+    count = db.count_photos_for_rules
+
+    with pytest.raises(ValueError):
+        count([{"field": "flag", "op": "in", "value": "none"}])  # not a list
+    with pytest.raises(ValueError):
+        count([{"field": "iso", "op": "between", "value": [100]}])  # wrong arity
+    with pytest.raises(ValueError):
+        count([{"field": "timestamp", "op": "recent", "value": 30}])  # not a dict
+    with pytest.raises(ValueError):
+        count([{"field": "timestamp", "op": "recent",
+                "value": {"n": 0, "unit": "days"}}])
+    with pytest.raises(ValueError):
+        count([{"field": "timestamp", "op": "recent",
+                "value": {"n": 3, "unit": "fortnights"}}])
+    with pytest.raises(ValueError):
+        count([{"field": "no_such_field", "op": "is", "value": 1}])
+
+
+def test_registry_ops_all_compile(tmp_path):
+    """Every field/op combination the registry advertises must build SQL —
+    the registry and the engine share this test so they cannot drift."""
+    from filter_fields import FILTER_FIELDS
+    db, _ = _filter_db(tmp_path)
+
+    sample_values = {
+        "text": "x", "number": 1, "rating": 3, "date": "2024-01-01",
+        "boolean": 1, "enum": None, "folder": "/photos",
+    }
+    for key, spec in FILTER_FIELDS.items():
+        for op in spec["ops"]:
+            value = sample_values[spec["type"]]
+            if spec["type"] == "enum":
+                value = (spec.get("values") or [".jpg"])[0]
+            if op in ("in", "not_in"):
+                value = [value]
+            elif op == "between":
+                value = ["2024-01-01", "2024-12-31"] if spec["type"] == "date" else [0, 5]
+            elif op == "recent":
+                value = {"n": 7, "unit": "days"}
+            rule = {"field": key, "op": op, "value": value}
+            count = db.count_photos_for_rules([rule])
+            assert isinstance(count, int), f"{key}/{op} failed"
+
+
+def test_exif_backfill_migration_and_idempotence(tmp_path):
+    import json as _json
+
+    from db import Database
+    path = str(tmp_path / "test.db")
+    db, fid = _filter_db(tmp_path)
+    pid = db.add_photo(folder_id=fid, filename='sony.arw', extension='.arw',
+                       file_size=100, file_mtime=1.0)
+    exif = {
+        "EXIF": {"Make": "Sony", "Model": "ILCE-1", "FNumber": 6.3,
+                 "ExposureTime": 0.0004, "ISO": 800},
+        "Composite": {"LensID": "FE 200-600mm F5.6-6.3 G OSS"},
+    }
+    db.conn.execute(
+        "UPDATE photos SET exif_data=?, camera_make=NULL, camera_model=NULL, "
+        "lens=NULL, aperture=NULL, shutter_speed=NULL, iso=NULL WHERE id=?",
+        (_json.dumps(exif), pid))
+    # Simulate a pre-backfill database so reopening runs the migration.
+    db.conn.execute("DELETE FROM db_meta WHERE key='exif_summary_backfill_v1'")
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(path)
+    row = db2.conn.execute(
+        "SELECT camera_make, camera_model, lens, aperture, shutter_speed, iso "
+        "FROM photos WHERE id=?", (pid,)).fetchone()
+    assert row["camera_make"] == "Sony"
+    assert row["camera_model"] == "ILCE-1"
+    assert row["lens"] == "FE 200-600mm F5.6-6.3 G OSS"
+    assert row["aperture"] == 6.3
+    assert row["shutter_speed"] == 0.0004
+    assert row["iso"] == 800
+    # The promoted columns are filterable.
+    ws_id = db2.ensure_default_workspace()
+    db2.set_active_workspace(ws_id)
+    assert db2.count_photos_for_rules(
+        [{"field": "camera_model", "op": "contains", "value": "ilce"}]) == 1
+
+    # Idempotence: with the marker set, reopening must not overwrite.
+    db2.conn.execute("UPDATE photos SET camera_make='UserEdited' WHERE id=?", (pid,))
+    db2.conn.commit()
+    db2.close()
+    db3 = Database(path)
+    row = db3.conn.execute(
+        "SELECT camera_make FROM photos WHERE id=?", (pid,)).fetchone()
+    assert row["camera_make"] == "UserEdited"
+    db3.close()
+
+
+def test_query_photos_sort_and_paging(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    for i, (name, rating) in enumerate([('a.jpg', 1), ('b.jpg', 5), ('c.jpg', 3)]):
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0,
+                           timestamp=f'2024-01-0{i + 1} 10:00:00')
+        db.update_photo_rating(pid, rating)
+
+    rows = db.query_photos([], sort="rating")
+    assert [r["filename"] for r in rows] == ['b.jpg', 'c.jpg', 'a.jpg']
+    rows = db.query_photos([], sort="name", page=2, per_page=2)
+    assert [r["filename"] for r in rows] == ['c.jpg']
+    rows = db.query_photos([{"field": "rating", "op": ">=", "value": 3}], sort="name")
+    assert [r["filename"] for r in rows] == ['b.jpg', 'c.jpg']
+
+
+def test_get_filter_field_values_counts_respect_rules(tmp_path):
+    import pytest
+    db, fid = _filter_db(tmp_path)
+    ids = []
+    for name, model, rating in [
+        ('a.jpg', 'Sony A1', 5), ('b.jpg', 'Sony A1', 1),
+        ('c.jpg', 'Canon R5', 5), ('d.jpg', None, 5),
+    ]:
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        db.update_photo_rating(pid, rating)
+        if model:
+            db.conn.execute("UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
+        ids.append(pid)
+    db.conn.commit()
+
+    # Unfiltered: counts over the whole workspace, NULLs excluded.
+    values = db.get_filter_field_values("camera_model")
+    assert values == [
+        {"value": "Sony A1", "count": 2},
+        {"value": "Canon R5", "count": 1},
+    ]
+    # Sibling rules constrain the counts (facet semantics).
+    values = db.get_filter_field_values(
+        "camera_model", rules=[{"field": "rating", "op": ">=", "value": 4}])
+    assert values == [
+        {"value": "Canon R5", "count": 1},
+        {"value": "Sony A1", "count": 1},
+    ]
+    # Typeahead narrowing.
+    values = db.get_filter_field_values("camera_model", q="son")
+    assert values == [{"value": "Sony A1", "count": 2}]
+    # Keyword and species values come from the keyword tables.
+    heron = db.add_keyword('Great Blue Heron', is_species=True)
+    db.tag_photo(ids[0], heron)
+    assert db.get_filter_field_values("species") == [
+        {"value": "Great Blue Heron", "count": 1}]
+    # Non-suggest fields are rejected.
+    with pytest.raises(ValueError):
+        db.get_filter_field_values("rating")

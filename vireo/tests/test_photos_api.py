@@ -9571,3 +9571,108 @@ def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
     assert recipes[str(photo_id)]["local"]["mask"]["ref"] == r1["local"]["mask"]["ref"]
     assert recipes[str(pid2)]["local"]["mask"]["ref"] == r2["local"]["mask"]["ref"]
     assert recipes[str(pid2)]["local"]["mask"]["ref"] != recipes[str(photo_id)]["local"]["mask"]["ref"]
+
+
+# ---------------------------------------------------------------------------
+# Universal filter endpoints (Phase 1).
+# Design: docs/plans/2026-07-19-universal-filters-design.md
+# ---------------------------------------------------------------------------
+
+
+def test_api_photos_query_basic(app_and_db):
+    """POST /api/photos/query evaluates a rule tree; response shape matches
+    /api/photos so pages can switch fetch paths without renderer changes."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "rating", "op": ">=", "value": 4}],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert set(data) == {"photos", "total", "page", "per_page"}
+    assert data["total"] == 1
+    assert [p["filename"] for p in data["photos"]] == ["bird3.jpg"]
+    # species attachment matches /api/photos behavior
+    assert "species" in data["photos"][0]
+
+
+def test_api_photos_query_group_tree_and_paging(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={
+        "rules": {"mode": "any", "rules": [
+            {"field": "rating", "op": ">=", "value": 5},
+            {"field": "filename", "op": "contains", "value": "bird1"},
+        ]},
+        "sort": "name",
+        "per_page": 1,
+        "page": 2,
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 2
+    assert [p["filename"] for p in data["photos"]] == ["bird3.jpg"]
+
+
+def test_api_photos_query_validation(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    assert client.post('/api/photos/query', json={
+        "rules": [{"field": "nope", "op": "is", "value": 1}],
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": [], "page": 0,
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": [], "per_page": "many",
+    }).status_code == 400
+    assert client.post('/api/photos/query', data="not json",
+                       content_type="text/plain").status_code == 400
+
+
+def test_api_filter_fields_registry(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/filters/fields')
+    assert resp.status_code == 200
+    fields = {f["key"]: f for f in resp.get_json()["fields"]}
+    assert "between" in fields["iso"]["ops"]
+    assert fields["flag"]["values"] == ["flagged", "none", "rejected"]
+    assert fields["camera_model"]["suggest"] is True
+    assert fields["timestamp"]["type"] == "date"
+
+
+def test_api_filter_values_counts(app_and_db):
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    db.conn.execute("UPDATE photos SET camera_model='Sony A1' WHERE id IN (?, ?)",
+                    (photos["bird1.jpg"], photos["bird3.jpg"]))
+    db.conn.execute("UPDATE photos SET camera_model='Canon R5' WHERE id=?",
+                    (photos["bird2.jpg"],))
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get('/api/filters/values?field=camera_model')
+    assert resp.status_code == 200
+    assert resp.get_json()["values"] == [
+        {"value": "Sony A1", "count": 2},
+        {"value": "Canon R5", "count": 1},
+    ]
+    # Counts respect the expression-minus-edited-rule passed as ?rules=
+    import json as _json
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/filters/values?field=camera_model&rules={rules}')
+    assert resp.get_json()["values"] == [{"value": "Sony A1", "count": 1}]
+    # Typeahead query narrowing
+    resp = client.get('/api/filters/values?field=camera_model&q=can')
+    assert resp.get_json()["values"] == [{"value": "Canon R5", "count": 1}]
+
+
+def test_api_filter_values_rejects_bad_input(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    assert client.get('/api/filters/values?field=rating').status_code == 400
+    assert client.get('/api/filters/values?field=camera_model&rules=notjson').status_code == 400
+    assert client.get(
+        '/api/filters/values?field=camera_model&rules=[{"field":"nope","op":"is","value":1}]'
+    ).status_code == 400

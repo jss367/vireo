@@ -25,7 +25,7 @@ from image_loader import (
     safe_scan_walk,
 )
 from keyword_normalization import keyword_match_key
-from metadata import extract_metadata
+from metadata import exif_summary_columns, extract_metadata
 from PIL import Image
 from render_source import exif_orientation as _exif_orientation_from_data
 from render_source import is_undersized
@@ -2086,6 +2086,13 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 # placeholder would be worse than leaving it as-is; the
                 # duplicates page already flags empty-byte groups for
                 # manual review.
+            if file_meta:
+                # Promoted EXIF summary columns (universal filter fields).
+                # Written whenever ExifTool ran, independent of whether the
+                # full JSON blob is stored below.
+                for column, value in exif_summary_columns(file_meta).items():
+                    updates.append(f"{column}=?")
+                    update_params.append(value)
             if file_meta and extract_full_metadata:
                 updates.append("exif_data=?")
                 update_params.append(json.dumps(file_meta))

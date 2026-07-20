@@ -396,3 +396,57 @@ def extract_summary_fields(grouped_meta):
         "iso": exif.get("ISO"),
         "datetime_original": exif.get("DateTimeOriginal"),
     }
+
+
+def exif_summary_columns(grouped_meta):
+    """Map grouped metadata to the photos-table EXIF summary columns.
+
+    Returns {column: value} with only present, type-valid entries — safe to
+    splice into an UPDATE. String fields are stripped; numeric fields are
+    coerced (ExifTool runs with -n so values are usually numeric already,
+    but sidecar-sourced or vendor-quirk values can be strings or lists).
+    """
+    summary = extract_summary_fields(grouped_meta)
+    columns = {}
+
+    def _text(value):
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            value = str(value)
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value or None
+
+    def _number(value):
+        if isinstance(value, list) and value:
+            value = value[0]
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int | float):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip())
+            except ValueError:
+                return None
+        return None
+
+    for column, key in (
+        ("camera_make", "camera_make"),
+        ("camera_model", "camera_model"),
+        ("lens", "lens"),
+    ):
+        value = _text(summary.get(key))
+        if value is not None:
+            columns[column] = value
+    for column, key in (
+        ("aperture", "f_number"),
+        ("shutter_speed", "exposure_time"),
+    ):
+        value = _number(summary.get(key))
+        if value is not None:
+            columns[column] = value
+    iso = _number(summary.get("iso"))
+    if iso is not None:
+        columns["iso"] = int(iso)
+    return columns

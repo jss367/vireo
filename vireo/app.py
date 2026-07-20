@@ -39,6 +39,7 @@ from db import (
     commit_with_retry,
     text_search_match,
 )
+from filter_fields import SUGGEST_FIELDS, fields_for_api
 from flask import (
     Flask,
     Response,
@@ -5323,6 +5324,85 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "per_page": per_page,
             }
         )
+
+    @app.route("/api/photos/query", methods=["POST"])
+    def api_photos_query():
+        """Universal-filter photo query: a smart-collection rule tree plus
+        sort and paging. Response shape matches /api/photos so pages can
+        switch fetch paths without re-plumbing their renderers.
+
+        Design: docs/plans/2026-07-19-universal-filters-design.md.
+        """
+        db = _get_db()
+        payload = request.get_json(silent=True)
+        if payload is None or not isinstance(payload, dict):
+            return json_error("request body must be a JSON object", 400)
+        rules = payload.get("rules")
+        if rules is None:
+            rules = []
+        page = payload.get("page", 1)
+        per_page = payload.get("per_page", 50)
+        sort = payload.get("sort", "date")
+        if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+            return json_error("page must be a positive integer", 400)
+        if not isinstance(per_page, int) or isinstance(per_page, bool) or per_page < 1:
+            return json_error("per_page must be a positive integer", 400)
+        per_page = min(per_page, _MAX_PER_PAGE)
+        try:
+            photos = db.query_photos(rules, sort=sort, page=page, per_page=per_page)
+            total = db.count_photos_for_rules(rules)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+
+        photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
+        _attach_species(db, photo_dicts)
+        _attach_species_representatives(db, photo_dicts)
+        _attach_detections(db, photo_dicts)
+        _attach_edit_recipes(db, photo_dicts)
+
+        return jsonify(
+            {
+                "photos": photo_dicts,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+            }
+        )
+
+    @app.route("/api/filters/fields")
+    def api_filter_fields():
+        """The filter field registry: one source of truth for the UI picker
+        (labels, categories, types, operators, enum values, suggest flags).
+        """
+        return jsonify({"fields": fields_for_api()})
+
+    @app.route("/api/filters/values")
+    def api_filter_values():
+        """Typeahead values with live counts for a suggest-capable field.
+
+        ``rules`` (JSON, optional) is the active expression minus the rule
+        being edited, so counts answer "how many results would I get" under
+        the user's other selections — never a global COUNT(*).
+        """
+        db = _get_db()
+        field = request.args.get("field", "")
+        if field not in SUGGEST_FIELDS:
+            return json_error(f"field {field!r} does not support value suggestions", 400)
+        raw_rules = request.args.get("rules")
+        rules = []
+        if raw_rules:
+            try:
+                rules = json.loads(raw_rules)
+            except ValueError:
+                return json_error("rules must be valid JSON", 400)
+        q = request.args.get("q") or None
+        limit = request.args.get("limit", 20, type=int)
+        try:
+            values = db.get_filter_field_values(field, rules=rules, q=q, limit=limit)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        return jsonify({"field": field, "values": values})
 
     @app.route("/api/photos/ids")
     def api_photo_ids():
