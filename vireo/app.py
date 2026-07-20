@@ -12750,7 +12750,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()
-            rules, visual_info = _apply_visual_to_rules(db, rules, visual)
+            # Forward ``collection_id`` so ``visual_info`` (matched /
+            # candidates / indexed) describes the collection-scoped Review
+            # queue the filter bar chip is showing — not a workspace-wide
+            # proxy that misrepresents the actual queue and also wastes
+            # embedding work on photos outside it.
+            rules, visual_info = _apply_visual_to_rules(
+                db, rules, visual, collection_id=collection_id,
+            )
         except ValueError as e:
             return json_error(str(e), 400)
         try:

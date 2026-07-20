@@ -484,13 +484,21 @@
   // duplicate sets stay resolvable.
   var _filterMatchedIds = null;
 
+  // Bumped by every refreshFilterMatches() invocation. Slow queries (a
+  // visual clause on a large library, in particular) can still be in
+  // flight when the user edits the chips or hits Pause; a stale response
+  // must not overwrite _filterMatchedIds and re-render _lastScanResult
+  // for filters that are no longer shown — that would expose and enable
+  // apply/bulk-resolve on groups outside the current chips.
+  var _filterEpoch = 0;
+
   async function refreshFilterMatches() {
+    var myEpoch = ++_filterEpoch;
     var hasFilters = window.VireoFilter && VireoFilter.hasFilters && VireoFilter.hasFilters()
       && !VireoFilter.isMuted();
     var visualInfo = null;
-    if (!hasFilters) {
-      _filterMatchedIds = null;
-    } else {
+    var nextMatchedIds = null;
+    if (hasFilters) {
       try {
         var body = { rules: VireoFilter.getRules(), ids_only: true };
         var visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
@@ -500,9 +508,11 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         }, { toast: false });
-        _filterMatchedIds = new Set(data.ids || []);
+        if (myEpoch !== _filterEpoch) return;  // superseded — drop
+        nextMatchedIds = new Set(data.ids || []);
         visualInfo = data.visual || null;
       } catch (e) {
+        if (myEpoch !== _filterEpoch) return;  // superseded — drop
         // Failing the query (400 on a stale/deep-linked rule, transient
         // network error) must NOT null out _filterMatchedIds — the old
         // behaviour let ``groupMatchesFilter`` treat null as "no filters
@@ -511,12 +521,13 @@
         // groups the user meant to exclude. Empty set instead so every
         // group correctly fails the filter and the "N hidden" empty-state
         // renders.
-        _filterMatchedIds = new Set();
+        nextMatchedIds = new Set();
         if (typeof showToast === 'function') {
           showToast('Filter query failed — check the rules or your connection', 'error');
         }
       }
     }
+    _filterMatchedIds = nextMatchedIds;
     if (window.VireoFilter && VireoFilter.setResultTotal) {
       VireoFilter.setResultTotal(_filterMatchedIds ? _filterMatchedIds.size : null);
     }

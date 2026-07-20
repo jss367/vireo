@@ -1184,6 +1184,14 @@
       } else {
         if (!e.target.closest('.vf-value-wrap')) hideSuggests();
         if (!e.target.closest('.vf-add-wrap')) $('.vf-field-picker').hidden = true;
+        // Same rule as the field picker: clicks inside the filter bar but
+        // outside the handoff wrap (search input, other dropdowns) should
+        // close the menu — otherwise it stays open while the user moves
+        // on to something else.
+        if (!e.target.closest('.vf-handoff-wrap')) {
+          const handoffMenu = $('.vf-handoff-menu');
+          if (handoffMenu) handoffMenu.hidden = true;
+        }
       }
     });
     window.addEventListener('resize', updateChipOverflow);
@@ -1237,9 +1245,17 @@
             const payload = JSON.parse(handoffRaw);
             if (payload && payload.root && Array.isArray(payload.root.rules)) {
               state.root = payload.root;
+              // Reconstruct the visual clause from the allowed fields
+              // rather than trusting the parsed URL payload — an invalid
+              // ``strength`` (or an unknown extra key) would otherwise
+              // ride through to ``/api/photos/query`` and 500 the request.
+              // Mirrors ``restorePersisted()``.
               state.visual = (
                 payload.visual && typeof payload.visual.prompt === 'string' && payload.visual.prompt
-              ) ? payload.visual : null;
+              ) ? { prompt: payload.visual.prompt,
+                    strength: ['broad', 'balanced', 'strict'].includes(payload.visual.strength)
+                      ? payload.visual.strength : 'balanced' }
+                : null;
               fromUrl = true;
             }
           } catch (e) { /* malformed handoff param — fall through */ }

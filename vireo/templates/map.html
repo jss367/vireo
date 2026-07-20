@@ -538,7 +538,13 @@ async function loadPhotos() {
   var focusPhotoId = requestedPhotoId;
   requestedPhotoId = null;
   var params = new URLSearchParams();
-  if (window.VireoFilter && VireoFilter.getRules) {
+  // When the user follows a Browse "View on Map" deep link (``?photo_id=``),
+  // skip any restored/persisted filter rules for this one load — otherwise a
+  // saved rule that excludes the requested photo silently hides its marker
+  // and the page reports "No map location found" even though the photo is
+  // plottable. The filter chips stay on-screen and reapply on the next
+  // filter-driven reload; only this focus-triggered request is unfiltered.
+  if (focusPhotoId === null && window.VireoFilter && VireoFilter.getRules) {
     var rules = VireoFilter.getRules();
     var count = Array.isArray(rules) ? rules.length : (rules.rules || []).length;
     if (count) params.set('rules', JSON.stringify(rules));
