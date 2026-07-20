@@ -2080,6 +2080,62 @@ def test_move_photos_rejects_case_folded_stem_collision(tmp_path, monkeypatch):
     assert file_b.read_bytes() == b"raw-b"
 
 
+def test_move_photos_folds_stems_for_configured_developed_volume(
+    tmp_path, monkeypatch,
+):
+    """A case-folding developed volume governs render stem collisions."""
+    import move as move_module
+    from move import move_photos
+
+    destination = tmp_path / "case-sensitive-archive"
+    developed_dir = tmp_path / "case-folding-developed"
+    developed_dir.mkdir()
+
+    def fake_case_probe(path):
+        return os.path.normpath(path) == os.path.normpath(developed_dir)
+
+    monkeypatch.setattr(
+        move_module, "_is_case_insensitive_path", fake_case_probe,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    source_a = tmp_path / "cardA"
+    source_b = tmp_path / "cardB"
+    source_a.mkdir()
+    source_b.mkdir()
+    fid_a = db.add_folder(str(source_a), name="cardA")
+    fid_b = db.add_folder(str(source_b), name="cardB")
+    db.add_workspace_folder(ws_id, fid_a)
+    db.add_workspace_folder(ws_id, fid_b)
+
+    file_a = source_a / "IMG.CR3"
+    file_b = source_b / "img.NEF"
+    file_a.write_bytes(b"raw-a")
+    file_b.write_bytes(b"raw-b")
+    pid_a = db.add_photo(
+        folder_id=fid_a, filename=file_a.name, extension=".cr3",
+        file_size=file_a.stat().st_size, file_mtime=1.0,
+    )
+    pid_b = db.add_photo(
+        folder_id=fid_b, filename=file_b.name, extension=".nef",
+        file_size=file_b.stat().st_size, file_mtime=2.0,
+    )
+
+    result = move_photos(
+        db, [pid_a, pid_b], str(destination),
+        developed_dir=str(developed_dir),
+    )
+
+    assert result["moved"] == 1
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert db.get_photo(pid_a)["folder_id"] != fid_a
+    assert db.get_photo(pid_b)["folder_id"] == fid_b
+    assert file_b.exists()
+
+
 def test_move_photos_allows_case_folded_stem_on_case_sensitive_destination(
     tmp_path, monkeypatch,
 ):

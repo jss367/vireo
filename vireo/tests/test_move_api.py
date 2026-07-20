@@ -150,9 +150,12 @@ def test_move_photos_job_invalidates_missing_originals_cache(
     pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
     key = _seed_missing_originals_cache(app, db)
 
-    def fake_move_photos(db, photo_ids, destination, progress_cb=None):
+    def fake_move_photos(
+        db, photo_ids, destination, progress_cb=None, developed_dir="",
+    ):
         assert photo_ids == [pid]
         assert destination == str(dst)
+        assert developed_dir == ""
         return {"moved": 1, "errors": [], "destination_folder_id": 123}
 
     monkeypatch.setattr(move_module, "move_photos", fake_move_photos)
@@ -167,6 +170,46 @@ def test_move_photos_job_invalidates_missing_originals_cache(
     assert job["status"] == "completed", job
     with app._missing_originals_lock:
         assert key not in app._missing_originals_cache
+
+
+def test_move_photos_job_passes_configured_developed_dir(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Selected-photo jobs preserve renders from the configured output dir."""
+    import config as cfg
+    import move as move_module
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    destination = tmp_path / "move-destination"
+    destination.mkdir()
+    developed_dir = tmp_path / "configured-developed"
+    developed_dir.mkdir()
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    monkeypatch.setattr(
+        cfg, "load", lambda: {"darktable_output_dir": str(developed_dir)},
+    )
+
+    def fake_move_photos(
+        db, photo_ids, destination, progress_cb=None, developed_dir="",
+    ):
+        assert photo_ids == [pid]
+        assert destination == str(tmp_path / "move-destination")
+        assert developed_dir == str(tmp_path / "configured-developed")
+        return {"moved": 1, "errors": [], "destination_folder_id": 123}
+
+    monkeypatch.setattr(move_module, "move_photos", fake_move_photos)
+
+    response = app.test_client().post("/api/jobs/move-photos", json={
+        "photo_ids": [pid],
+        "destination": str(destination),
+    })
+
+    assert response.status_code == 200, response.get_json()
+    job = wait_for_job_via_client(
+        app.test_client(), response.get_json()["job_id"],
+    )
+    assert job["status"] == "completed", job
 
 
 def test_move_photos_requires_params(app_and_db):

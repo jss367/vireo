@@ -19374,6 +19374,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
+        import config as cfg
+        effective_cfg = _get_db().get_effective_config(cfg.load())
+        developed_dir = effective_cfg.get("darktable_output_dir", "") or ""
 
         def work(job):
             from move import move_photos
@@ -19403,6 +19406,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 photo_ids=photo_ids,
                 destination=destination,
                 progress_cb=progress_cb,
+                developed_dir=developed_dir,
             )
             if int(result.get("moved") or 0) > 0:
                 try:

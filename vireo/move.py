@@ -1934,18 +1934,20 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     errors = []
     managed_default_developed = {}
 
-    # The destination filesystem's case sensitivity governs whether two
-    # same-stem-different-extension photos collide there. On case-insensitive
-    # volumes (Windows, default macOS APFS) a keyed-by-raw-case dict would
-    # treat ``IMG`` and ``img`` as distinct entries and let two unrelated
-    # source folders' ``IMG.CR3`` + ``img.NEF`` both land in one date folder,
-    # where their ``*.jpg`` renders would collide but this guard wouldn't
-    # detect it. Probe once and fold the stem before every lookup/write into
+    # Both the photo destination and a separately configured developed-output
+    # directory can impose case-folded render names. For example, originals
+    # may land on case-sensitive ext4 while renders land on a default macOS
+    # APFS volume; ``IMG.CR3`` and ``img.NEF`` coexist in the former but their
+    # ``*.jpg`` renders collide in the latter. Fold whenever either output
+    # volume is case-insensitive before every lookup/write into
     # ``destination_stem_origins``.
-    dest_case_insensitive = _is_case_insensitive_path(destination)
+    render_case_insensitive = _is_case_insensitive_path(destination)
+    if developed_dir:
+        render_case_insensitive = render_case_insensitive or \
+            _is_case_insensitive_path(developed_dir)
 
     def _stem_key(raw_stem):
-        return raw_stem.casefold() if dest_case_insensitive else raw_stem
+        return raw_stem.casefold() if render_case_insensitive else raw_stem
 
     # Ensure destination folder record exists (workspace link deferred until first successful move)
     dest_row = db.conn.execute("SELECT id FROM folders WHERE path = ?", (destination,)).fetchone()
@@ -2058,7 +2060,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             if existing_origin is no_destination_stem and \
                     _has_untracked_destination_developed(
                         destination, stem, developed_dir,
-                        case_insensitive=dest_case_insensitive,
+                        case_insensitive=render_case_insensitive,
                     ):
                 log.warning(
                     "Move skipped for %s: developed render already exists "
