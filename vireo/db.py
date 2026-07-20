@@ -7348,9 +7348,11 @@ class Database:
         keyword=None,
         keyword_match_case=False,
         keyword_whole_word=False,
+        collection_id=None,
         color_label=None,
         flag=None,
         location_status=None,
+        rules=None,
     ):
         """Return daily photo counts for a given year, scoped to active workspace."""
         ws = self._ws_id()
@@ -7358,6 +7360,34 @@ class Database:
                       "substr(p.timestamp, 1, 4) = ?"]
         join_params = []
         where_params = [ws, str(year)]
+        if rules is not None:
+            r_folder_join, r_join_clause, r_where, r_params = (
+                self._build_query_from_rules(rules)
+            )
+            conditions.append(
+                "p.id IN (SELECT DISTINCT p.id FROM photos p "
+                f"{r_folder_join} {r_join_clause} {r_where})"
+            )
+            where_params.extend(r_params)
+
+        # Dashboard-scoped collection Browse composes the collection with the
+        # active rules/folder — the calendar must match the grid, so restrict
+        # counts to photos in the collection (same subquery shape as
+        # get_browse_summary). Match get_photos / _append_collection_restriction:
+        # raise on a missing/invalid collection instead of silently returning
+        # unfiltered workspace data (which would mislead users into thinking
+        # the collection contains those photos).
+        if collection_id is not None:
+            parts = self._build_collection_query(collection_id)
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+            coll_subquery = (
+                f"SELECT DISTINCT p.id FROM photos p "
+                f"{coll_folder_join} {coll_join_clause} {coll_where}"
+            )
+            conditions.append(f"p.id IN ({coll_subquery})")
+            where_params.extend(coll_params)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -7707,8 +7737,15 @@ class Database:
         color_label=None,
         flag=None,
         location_status=None,
+        rules=None,
     ):
-        """Return summary stats for the browse panel, scoped to active workspace and filters."""
+        """Return summary stats for the browse panel, scoped to active workspace and filters.
+
+        ``rules`` (a universal-filter rule tree) restricts every aggregate to
+        the matching photo set, exactly like the collection_id subquery path —
+        the summary panel must describe the same photos the filtered grid
+        shows. Raises ValueError on malformed rules.
+        """
         ws = self._ws_id()
 
         # Build shared filter conditions
@@ -7736,20 +7773,36 @@ class Database:
 
         # When browsing a collection, restrict photos to those matching the
         # collection's rules by using a subquery from _build_collection_query.
+        # Match get_photos / _append_collection_restriction: raise on a
+        # missing/invalid collection instead of silently returning unfiltered
+        # workspace numbers (which would mislead users into thinking the
+        # collection contains those photos).
         if collection_id is not None:
             parts = self._build_collection_query(collection_id)
-            if parts is not None:
-                coll_folder_join, coll_join_clause, coll_where, coll_params = parts
-                # Build a subquery that returns the photo IDs in this collection.
-                # Use alias "p" to match the alias expected by _build_collection_query;
-                # the subquery is wrapped in parentheses so "p" is scoped to it and
-                # does not conflict with the outer query's "p" alias.
-                coll_subquery = (
-                    f"SELECT DISTINCT p.id FROM photos p "
-                    f"{coll_folder_join} {coll_join_clause} {coll_where}"
-                )
-                conditions.append(f"p.id IN ({coll_subquery})")
-                where_params.extend(coll_params)
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+            # Build a subquery that returns the photo IDs in this collection.
+            # Use alias "p" to match the alias expected by _build_collection_query;
+            # the subquery is wrapped in parentheses so "p" is scoped to it and
+            # does not conflict with the outer query's "p" alias.
+            coll_subquery = (
+                f"SELECT DISTINCT p.id FROM photos p "
+                f"{coll_folder_join} {coll_join_clause} {coll_where}"
+            )
+            conditions.append(f"p.id IN ({coll_subquery})")
+            where_params.extend(coll_params)
+
+        if rules is not None:
+            r_folder_join, r_join_clause, r_where, r_params = (
+                self._build_query_from_rules(rules)
+            )
+            rules_subquery = (
+                f"SELECT DISTINCT p.id FROM photos p "
+                f"{r_folder_join} {r_join_clause} {r_where}"
+            )
+            conditions.append(f"p.id IN ({rules_subquery})")
+            where_params.extend(r_params)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -18597,6 +18650,19 @@ class Database:
                     "WHERE pk.photo_id = p.id AND k.type = 'location')"
                 )
                 return _boolean_predicate(has, op, value)
+            if field == "has_coord_location_keyword":
+                # A structured location supplies coordinates the map can
+                # place. Matches the ``assigned`` branch of
+                # ``_append_location_status_filter`` — the deep-link path
+                # depends on this being distinct from ``has_location_keyword``
+                # (which also matches free-text locations without lat/lng).
+                has = (
+                    "EXISTS (SELECT 1 FROM photo_keywords pk "
+                    "JOIN keywords k ON k.id = pk.keyword_id "
+                    "WHERE pk.photo_id = p.id AND k.type = 'location' "
+                    "AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL)"
+                )
+                return _boolean_predicate(has, op, value)
             if field == "location_keyword_missing":
                 gps = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
                 no_loc = (
@@ -18891,14 +18957,17 @@ class Database:
             return False
         return True
 
-    def count_photos_for_rules(self, rules):
+    def count_photos_for_rules(self, rules, collection_id=None, folder_id=None):
         """Return the number of photos in the active workspace that match
-        an unsaved rules list. Used by the smart-collection modal preview.
+        an unsaved rules list. Used by the smart-collection modal preview
+        and /api/photos/query totals.
 
         Raises ValueError on malformed input (propagated from
         ``_build_query_from_rules``).
         """
         folder_join, join_clause, where, params = self._build_query_from_rules(rules)
+        where, params = self._append_collection_restriction(collection_id, where, params)
+        where, params = self._append_folder_restriction(folder_id, where, params)
         query = f"""
             SELECT COUNT(DISTINCT p.id) FROM photos p
             {folder_join}
@@ -18907,7 +18976,58 @@ class Database:
         """
         return self.conn.execute(query, params).fetchone()[0]
 
-    def query_photos(self, rules, sort="date", page=1, per_page=50):
+    def _append_folder_restriction(self, folder_id, where, params):
+        """AND a folder-subtree restriction onto built rule clauses, matching
+        get_photos' folder_id semantics (the folder and its descendants).
+
+        Wraps the existing WHERE body in parentheses before ANDing so a
+        top-level ``any`` rule tree (``WHERE (A) OR (B)``) doesn't have the
+        folder restriction bind only to the last OR branch — AND binds
+        tighter than OR in SQL, and without wrapping photos outside the
+        selected folder would leak through the earlier branches.
+        """
+        if folder_id is None:
+            return where, params
+        subtree = self.get_folder_subtree_ids(folder_id)
+        placeholders = ",".join("?" for _ in subtree)
+        clause = f"p.folder_id IN ({placeholders})"
+        if where:
+            body = where[len("WHERE "):]
+            where = f"WHERE ({body}) AND {clause}"
+        else:
+            where = f"WHERE {clause}"
+        return where, list(params) + list(subtree)
+
+    def _append_collection_restriction(self, collection_id, where, params):
+        """AND a collection-membership subquery onto built rule clauses.
+
+        Lets /api/photos/query serve Browse's dashboard-scoped collection
+        view (collection as a restriction on the filtered grid) without the
+        rule tree needing to reference collections. Raises ValueError for a
+        collection missing from the active workspace. Wraps the existing
+        WHERE body in parentheses before ANDing for the same OR-precedence
+        reason as ``_append_folder_restriction``.
+        """
+        if collection_id is None:
+            return where, params
+        parts = self._build_collection_query(collection_id)
+        if parts is None:
+            raise ValueError("collection not found in active workspace")
+        c_folder_join, c_join, c_where, c_params = parts
+        sub = (
+            f"SELECT DISTINCT p.id FROM photos p {c_folder_join} "
+            f"{c_join} {c_where}"
+        )
+        clause = f"p.id IN ({sub})"
+        if where:
+            body = where[len("WHERE "):]
+            where = f"WHERE ({body}) AND {clause}"
+        else:
+            where = f"WHERE {clause}"
+        return where, list(params) + list(c_params)
+
+    def query_photos(self, rules, sort="date", page=1, per_page=50,
+                     collection_id=None, folder_id=None):
         """Return paginated photos matching a universal-filter rule tree.
 
         The rules format is the smart-collection tree (see
@@ -18915,6 +19035,8 @@ class Database:
         matching total. Raises ValueError on malformed rules.
         """
         folder_join, join_clause, where, params = self._build_query_from_rules(rules)
+        where, params = self._append_collection_restriction(collection_id, where, params)
+        where, params = self._append_folder_restriction(folder_id, where, params)
         sort_map = {
             "date": _PHOTO_DATE_ASC_ORDER,
             "date_desc": _PHOTO_DATE_DESC_ORDER,
@@ -18947,6 +19069,34 @@ class Database:
     # match both photos. ``display_expr`` is what the picker shows; using
     # ``MIN(col)`` picks a stable representative spelling within each
     # case-insensitive bucket instead of always lower-casing the label.
+    def query_photo_ids(self, rules, sort="date", collection_id=None,
+                        folder_id=None):
+        """Return every photo id matching a universal-filter rule tree, in
+        display order — the rules analog of ``get_photo_ids`` (select-all,
+        visual-search candidate scope). Raises ValueError on malformed rules.
+        """
+        folder_join, join_clause, where, params = self._build_query_from_rules(rules)
+        where, params = self._append_collection_restriction(collection_id, where, params)
+        where, params = self._append_folder_restriction(folder_id, where, params)
+        order = {
+            "date": _PHOTO_DATE_ASC_ORDER,
+            "date_desc": _PHOTO_DATE_DESC_ORDER,
+            "name": "p.filename ASC, p.id ASC",
+            "name_desc": "p.filename DESC, p.id ASC",
+            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
+            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
+            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
+            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
+        }.get(sort, _PHOTO_DATE_ASC_ORDER)
+        query = f"""
+            SELECT DISTINCT p.id FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+            ORDER BY {order}
+        """
+        return [row["id"] for row in self.conn.execute(query, params).fetchall()]
+
     _SUGGEST_VALUE_EXPRS = {
         "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)"),
         "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)"),
@@ -18954,18 +19104,26 @@ class Database:
         "extension": ("LOWER(p.extension)", "LOWER(p.extension)"),
     }
 
-    def get_filter_field_values(self, field, rules=None, q=None, limit=20):
+    def get_filter_field_values(self, field, rules=None, q=None, limit=20,
+                                 folder_id=None, collection_id=None):
         """Distinct values (with photo counts) for a suggest-capable field.
 
         Counts respect the supplied rule tree, so the caller can pass the
         active expression minus the rule being edited and get live facet
         counts (design requirement: counts answer "how many results would I
-        get", never a global COUNT(*)). Raises ValueError for fields without
-        value suggestions or malformed rules.
+        get", never a global COUNT(*)). ``folder_id``/``collection_id`` AND
+        the same page-scope restrictions Browse applies to
+        ``/api/photos/query``; without them the typeahead advertises counts
+        computed over the whole workspace while the visible grid is
+        folder/collection-scoped, so picking a suggestion can yield fewer
+        (or zero) grid results than the badge promised. Raises ValueError
+        for fields without value suggestions or malformed rules.
         """
         folder_join, join_clause, where, params = self._build_query_from_rules(
             rules if rules is not None else []
         )
+        where, params = self._append_collection_restriction(collection_id, where, params)
+        where, params = self._append_folder_restriction(folder_id, where, params)
         limit = max(1, min(int(limit or 20), 50))
         if field == "folder":
             return self._folder_filter_values(

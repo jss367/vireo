@@ -9899,3 +9899,88 @@ def test_api_filter_values_clamps_limit(app_and_db):
     resp = client.get('/api/filters/values?field=camera_model&limit=999999')
     assert resp.status_code == 200
     assert len(resp.get_json()["values"]) <= 500
+
+
+def test_api_filter_values_respects_scope(app_and_db):
+    """Typeahead counts must respect the folder / dashboard-collection scope
+    Browse passes to /api/photos/query; without this the badge beside each
+    suggestion counts photos over the whole workspace while the grid is
+    folder- or collection-restricted, and a pick can produce fewer visible
+    grid rows than the count promised."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    folders = db.get_folder_tree()
+    jan = [f for f in folders if f["name"] == "January"][0]
+    db.conn.execute(
+        "UPDATE photos SET camera_model='Sony A1' WHERE id IN (?, ?)",
+        (photos["bird1.jpg"], photos["bird3.jpg"]),
+    )
+    db.conn.execute(
+        "UPDATE photos SET camera_model='Canon R5' WHERE id=?",
+        (photos["bird2.jpg"],),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    # Unscoped: sees both models.
+    resp = client.get('/api/filters/values?field=camera_model')
+    assert {v["value"] for v in resp.get_json()["values"]} == {"Sony A1", "Canon R5"}
+    # folder_id narrows to only the January folder (bird2.jpg — Canon R5).
+    resp = client.get(
+        f'/api/filters/values?field=camera_model&folder_id={jan["id"]}'
+    )
+    assert resp.get_json()["values"] == [{"value": "Canon R5", "count": 1}]
+
+    # collection_id narrows to only the two picked photos (bird1 + bird3 — Sony A1).
+    collection_id = db.add_collection(
+        "Two Sonys",
+        json.dumps([{
+            "field": "photo_ids",
+            "value": [photos["bird1.jpg"], photos["bird3.jpg"]],
+        }]),
+    )
+    resp = client.get(
+        f'/api/filters/values?field=camera_model&collection_id={collection_id}'
+    )
+    assert resp.get_json()["values"] == [{"value": "Sony A1", "count": 2}]
+
+
+def test_api_photos_query_ids_only(app_and_db):
+    """ids_only returns the complete matching id set in display order —
+    select-all must resolve exactly what the filtered grid shows."""
+    app, db = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "rating", "op": ">=", "value": 3}],
+        "ids_only": True,
+        "sort": "name",
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    assert data["ids"] == [photos["bird1.jpg"], photos["bird3.jpg"]]
+    assert data["total"] == 2
+
+
+def test_api_browse_summary_accepts_rules(app_and_db):
+    import json as _json
+    app, _ = app_and_db
+    client = app.test_client()
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/browse/summary?rules={rules}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["filtered_total"] == 1
+    assert client.get('/api/browse/summary?rules=notjson').status_code == 400
+
+
+def test_api_photos_calendar_accepts_rules(app_and_db):
+    import json as _json
+    app, _ = app_and_db
+    client = app.test_client()
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/photos/calendar?year=2024&rules={rules}')
+    assert resp.status_code == 200
+    # bird3.jpg (rating 5, 2024-06-10) is the only match in 2024
+    assert resp.get_json()["days"] == {"2024-06-10": 1}
+    assert client.get('/api/photos/calendar?rules=notjson').status_code == 400

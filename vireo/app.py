@@ -3877,6 +3877,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         raw = request.args.get(name, "")
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
+    def _request_rules_arg():
+        """Parse the optional ``rules`` query param (a JSON universal-filter
+        rule tree). Returns None when absent; raises ValueError on invalid
+        JSON so callers surface a 400. The active visual model is injected
+        exactly as /api/photos/query does, keeping every rules-accepting
+        endpoint's notion of "has a visual index" consistent.
+        """
+        raw = request.args.get("rules")
+        if not raw:
+            return None
+        try:
+            rules = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError("rules must be valid JSON") from exc
+        return _inject_active_visual_model(rules)
+
     def _request_location_status_filter():
         value = (request.args.get("location_status") or "").strip().lower()
         if not value:
@@ -5509,10 +5525,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if not isinstance(sort, str):
             return json_error("sort must be a string", 400)
         per_page = min(per_page, _MAX_PER_PAGE)
+        collection_id = payload.get("collection_id")
+        if collection_id is not None and (
+            not isinstance(collection_id, int) or isinstance(collection_id, bool)
+        ):
+            return json_error("collection_id must be an integer", 400)
+        folder_id = payload.get("folder_id")
+        if folder_id is not None and (
+            not isinstance(folder_id, int) or isinstance(folder_id, bool)
+        ):
+            return json_error("folder_id must be an integer", 400)
         rules = _inject_active_visual_model(rules)
+        if payload.get("ids_only"):
+            # Select-all and other bulk flows need the complete matching id
+            # set; it must resolve exactly the photos the filtered grid
+            # shows, so it shares this endpoint rather than a legacy path.
+            try:
+                ids = db.query_photo_ids(rules, sort=sort, collection_id=collection_id,
+                                         folder_id=folder_id)
+            except ValueError as exc:
+                return json_error(str(exc), 400)
+            return jsonify({"ids": ids, "total": len(ids)})
         try:
-            photos = db.query_photos(rules, sort=sort, page=page, per_page=per_page)
-            total = db.count_photos_for_rules(rules)
+            photos = db.query_photos(rules, sort=sort, page=page, per_page=per_page,
+                                     collection_id=collection_id, folder_id=folder_id)
+            total = db.count_photos_for_rules(rules, collection_id=collection_id,
+                                              folder_id=folder_id)
         except ValueError as exc:
             return json_error(str(exc), 400)
 
@@ -5546,6 +5584,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``rules`` (JSON, optional) is the active expression minus the rule
         being edited, so counts answer "how many results would I get" under
         the user's other selections — never a global COUNT(*).
+        ``folder_id``/``collection_id`` (optional) narrow the count set to
+        the page-scope restriction Browse applies to ``/api/photos/query``,
+        so a folder- or dashboard-collection-scoped Browse view shows
+        typeahead counts that match its visible grid instead of the whole
+        workspace.
         """
         db = _get_db()
         field = request.args.get("field", "")
@@ -5559,6 +5602,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except ValueError:
                 return json_error("rules must be valid JSON", 400)
         q = request.args.get("q") or None
+        folder_id = request.args.get("folder_id", None, type=int)
+        collection_id = request.args.get("collection_id", None, type=int)
         # Clamp ``limit`` to a positive bounded range. Werkzeug's ``type=int``
         # cheerfully parses ``?limit=0``/``?limit=-5`` (SQLite treats a
         # negative ``LIMIT`` as "no limit" and returns everything), and
@@ -5570,7 +5615,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         limit = max(1, min(limit_raw, 500))
         rules = _inject_active_visual_model(rules)
         try:
-            values = db.get_filter_field_values(field, rules=rules, q=q, limit=limit)
+            values = db.get_filter_field_values(
+                field, rules=rules, q=q, limit=limit,
+                folder_id=folder_id, collection_id=collection_id,
+            )
         except ValueError as exc:
             return json_error(str(exc), 400)
         return jsonify({"field": field, "values": values})
@@ -5625,19 +5673,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         keyword = request.args.get("keyword", None)
         keyword_match_case = _request_bool_arg("keyword_match_case")
         keyword_whole_word = _request_bool_arg("keyword_whole_word")
+        collection_id = request.args.get("collection_id", None, type=int)
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
             location_status = _request_location_status_filter()
+            rules = _request_rules_arg()
         except ValueError as e:
             return json_error(str(e), 400)
-        data = db.get_calendar_data(
-            year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            color_label=color_label, flag=flag,
-            location_status=location_status,
-        )
+        try:
+            data = db.get_calendar_data(
+                year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
+                collection_id=collection_id,
+                color_label=color_label, flag=flag,
+                location_status=location_status,
+                rules=rules,
+            )
+        except ValueError as e:
+            return json_error(str(e), 400)
         return jsonify(data)
 
     @app.route("/api/browse/summary")
@@ -5655,10 +5710,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             flag = _request_flag_filter()
             location_status = _request_location_status_filter()
+            rules = _request_rules_arg()
         except ValueError as e:
             return json_error(str(e), 400)
-        return jsonify(
-            db.get_browse_summary(
+        try:
+            summary = db.get_browse_summary(
                 folder_id=folder_id,
                 rating_min=rating_min,
                 date_from=date_from,
@@ -5670,8 +5726,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 color_label=color_label,
                 flag=flag,
                 location_status=location_status,
+                rules=rules,
             )
-        )
+        except ValueError as e:
+            return json_error(str(e), 400)
+        return jsonify(summary)
 
     @app.route("/api/photos/<int:photo_id>")
     def api_photo_detail(photo_id):
@@ -26881,8 +26940,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return jsonify({"results": [], "total_matches": 0, "model_used": model_name,
                             "reason": "model_no_text_search"})
 
+        try:
+            scope_rules = _request_rules_arg()
+        except ValueError as e:
+            return json_error(str(e), 400)
+
         candidate_photo_ids = None
-        if collection_id is not None:
+        if scope_rules is not None:
+            try:
+                candidate_photo_ids = db.query_photo_ids(
+                    scope_rules,
+                    collection_id=collection_id,
+                    folder_id=folder_id,
+                )
+            except ValueError as e:
+                return json_error(str(e), 400)
+        elif collection_id is not None:
             candidate_photo_ids = db.get_collection_photo_ids(collection_id)
         elif any([folder_id, rating_min, date_from, date_to, keyword, color_label, flag, location_status]):
             candidate_photo_ids = db.get_photo_ids(

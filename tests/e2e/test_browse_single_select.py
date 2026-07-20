@@ -52,9 +52,9 @@ def test_large_library_uses_bounded_placeholder_runway(live_server, page):
           var nextId = 100000;
           var calls = 0;
           safeFetch = function(url, options, fetchOptions) {
-            if (url.indexOf('/api/photos?') === 0) {
+            if (url === '/api/photos/query') {
               calls++;
-              var perPage = parseInt(new URL(url, location.origin).searchParams.get('per_page'), 10);
+              var perPage = JSON.parse(options.body).per_page;
               if (calls >= 10) return Promise.resolve({photos: [], total: totalPhotos});
               var batch = [];
               for (var i = 0; i < perPage; i++) {
@@ -1161,7 +1161,9 @@ def test_filterByCollection_cancels_pending_search_debounce(live_server, page):
     page.goto(f"{url}/browse")
     page.locator(".grid-card").first.wait_for(state="visible")
 
-    page.locator("#searchInput").fill("hum")
+    # Text sitting in the quick-search box (no Enter yet) must not apply
+    # later and kick the user out of collection mode.
+    page.locator(".vf-search input").fill("hum")
     page.evaluate(f"filterByCollection({collection_id})")
     page.wait_for_function(
         f"activeCollectionId === {collection_id}", timeout=2000

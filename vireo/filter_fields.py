@@ -74,6 +74,14 @@ FILTER_FIELDS = {
     "has_gps": _field("Has GPS", "Location", "boolean", BOOLEAN_OPS),
     "has_location_keyword": _field("Has named location", "Location", "boolean",
                                    BOOLEAN_OPS),
+    # Distinct from ``has_location_keyword``: a free-text location keyword
+    # (no lat/lng) counts as "has named location" but cannot place the photo
+    # on the map. Legacy Browse ``?location_status=assigned``/``none`` deep
+    # links depend on this coordinate-bearing check to round-trip correctly.
+    "has_coord_location_keyword": _field(
+        "Has location keyword with coordinates", "Location", "boolean",
+        BOOLEAN_OPS,
+    ),
     "gps_lat": _field("GPS latitude", "Location", "number", NUMBER_OPS),
     "gps_lng": _field("GPS longitude", "Location", "number", NUMBER_OPS),
     # Quality & AI

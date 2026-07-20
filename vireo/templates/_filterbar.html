@@ -1,0 +1,218 @@
+<!-- Universal photo filter bar (shared: Browse now, Map/Review/Duplicates in
+     Phase 4). Markup + scoped styles; behavior in /static/vireo-filter.js.
+     Pages include this, then call VireoFilter.init({...}).
+     Design: docs/plans/2026-07-19-universal-filters-design.md -->
+<div id="vireoFilterBar" class="vf-bar">
+  <div class="vf-primary">
+    <div class="vf-search">
+      <span class="vf-search-icon" aria-hidden="true">⌕</span>
+      <input type="search" autocomplete="off" spellcheck="false"
+             placeholder="Search photos…" aria-label="Search photos">
+      <kbd>⌘F</kbd>
+    </div>
+    <button class="vf-filters-btn" type="button" aria-expanded="false">
+      <span aria-hidden="true">≡</span> Filters <span class="vf-count" hidden>0</span>
+    </button>
+    <div class="vf-total" aria-live="polite"><strong>–</strong> <span>photos</span></div>
+    <button class="vf-mute" type="button" hidden>⏸ Pause</button>
+    <button class="vf-clear" type="button" hidden>Clear</button>
+  </div>
+
+  <div class="vf-chip-row">
+    <div class="vf-scope-chip" title="This page always applies this scope">
+      <span></span><em aria-hidden="true">⌁</em>
+    </div>
+    <div class="vf-chip-viewport"><div class="vf-chips" aria-label="Active filters"></div></div>
+    <button class="vf-overflow" type="button" hidden>+0</button>
+  </div>
+
+  <div class="vf-paused-note" hidden></div>
+
+  <div class="vf-popover" role="dialog" aria-label="Edit photo filters" hidden>
+    <div class="vf-popover-header">
+      <div><h2>Filter photos</h2><p>Changes update the page immediately.</p></div>
+      <button class="vf-popover-close" type="button" aria-label="Close">×</button>
+    </div>
+
+    <section class="vf-quick">
+      <div class="vf-section-heading"><h3>Quick filters</h3><span>Click again to clear · flags and colors combine</span></div>
+      <div class="vf-quick-grid">
+        <div class="vf-quick-group vf-quick-rating">
+          <span>Rating</span>
+          <div class="vf-quick-control">
+            <select aria-label="Rating comparison">
+              <option value=">=">At least (≥)</option>
+              <option value="is">Exactly (=)</option>
+              <option value="<=">At most (≤)</option>
+            </select>
+            <div class="vf-stars" aria-label="Rating value">
+              <button type="button" class="vf-star" data-rating="1" aria-label="1 star">★</button>
+              <button type="button" class="vf-star" data-rating="2" aria-label="2 stars">★</button>
+              <button type="button" class="vf-star" data-rating="3" aria-label="3 stars">★</button>
+              <button type="button" class="vf-star" data-rating="4" aria-label="4 stars">★</button>
+              <button type="button" class="vf-star" data-rating="5" aria-label="5 stars">★</button>
+            </div>
+          </div>
+        </div>
+        <div class="vf-quick-group">
+          <span>Flag</span>
+          <div class="vf-segmented vf-quick-flags">
+            <button type="button" data-flag="flagged">⚑ Picked</button>
+            <button type="button" data-flag="none">– Unflagged</button>
+            <button type="button" data-flag="rejected">× Rejected</button>
+          </div>
+        </div>
+        <div class="vf-quick-group">
+          <span>Color</span>
+          <div class="vf-quick-colors" aria-label="Color label">
+            <button type="button" data-color="red" aria-label="Red label"></button>
+            <button type="button" data-color="yellow" aria-label="Yellow label"></button>
+            <button type="button" data-color="green" aria-label="Green label"></button>
+            <button type="button" data-color="blue" aria-label="Blue label"></button>
+            <button type="button" data-color="purple" aria-label="Purple label"></button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="vf-rules">
+      <div class="vf-section-heading">
+        <div class="vf-heading-toggle">
+          <h3>Rules</h3>
+          <label class="vf-advanced"><input type="checkbox"> Advanced logic</label>
+        </div>
+        <button class="vf-text-btn vf-clear-rules" type="button">Clear rules</button>
+      </div>
+      <div class="vf-rule-tree"></div>
+      <div class="vf-add-row">
+        <div class="vf-add-wrap">
+          <button class="vf-add-filter" type="button">＋ Add filter</button>
+          <div class="vf-field-picker" hidden>
+            <input class="vf-field-search" type="search" placeholder="Find a field…" aria-label="Find a filter field">
+            <div class="vf-field-options"></div>
+          </div>
+        </div>
+        <button class="vf-text-btn vf-add-group" type="button" hidden>＋ Add group</button>
+      </div>
+    </section>
+
+    <footer class="vf-popover-footer">
+      <span class="vf-match-count"></span>
+      <button class="vf-done" type="button">Done</button>
+    </footer>
+  </div>
+
+  <div class="vf-toast" role="status" aria-live="polite" hidden><span></span><button type="button">Undo</button></div>
+</div>
+
+<style>
+.vf-bar { position: relative; z-index: 30; }
+.vf-primary { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.vf-search { position: relative; flex: 1 1 420px; min-width: 160px; }
+.vf-search input { width: 100%; height: 34px; padding: 0 46px 0 30px; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-input); color: var(--text-primary); }
+.vf-search input:focus { border-color: var(--accent); outline: none; }
+.vf-search-icon { position: absolute; left: 9px; top: 6px; color: var(--text-muted); font-size: 17px; }
+.vf-search kbd { position: absolute; right: 8px; top: 8px; padding: 1px 5px; border: 1px solid var(--border-primary); border-radius: 4px; background: var(--bg-tertiary); color: var(--text-dim); font-size: 10px; }
+.vf-filters-btn, .vf-mute, .vf-clear { height: 34px; display: inline-flex; align-items: center; gap: 6px; padding: 0 11px; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-input); color: var(--text-secondary); cursor: pointer; white-space: nowrap; }
+.vf-filters-btn:hover, .vf-mute:hover, .vf-clear:hover { border-color: var(--accent); color: var(--text-primary); }
+.vf-filters-btn.open { border-color: var(--accent); color: var(--accent); }
+.vf-count { min-width: 17px; padding: 1px 5px; border-radius: 9px; background: var(--accent); color: var(--accent-text); font-size: 11px; font-weight: 700; text-align: center; }
+.vf-mute.active { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 55%, transparent); background: color-mix(in srgb, var(--warning) 10%, transparent); }
+.vf-total { min-width: 70px; text-align: right; white-space: nowrap; color: var(--text-dim); }
+.vf-total strong { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.vf-chip-row { display: flex; align-items: center; gap: 6px; min-width: 0; height: 32px; margin-top: 6px; }
+.vf-scope-chip, .vf-chip, .vf-overflow { height: 26px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; border: 1px solid var(--border-secondary); border-radius: 13px; background: var(--bg-secondary); color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+.vf-scope-chip { border-style: dashed; color: var(--text-muted); flex: none; }
+.vf-scope-chip em { font-style: normal; color: var(--text-faint); }
+.vf-chip-viewport { min-width: 0; flex: 1; overflow: hidden; }
+.vf-chips { display: flex; gap: 6px; }
+.vf-chip { cursor: pointer; border-color: color-mix(in srgb, var(--accent) 45%, var(--border-secondary)); background: color-mix(in srgb, var(--accent) 8%, var(--bg-primary)); }
+.vf-chip:hover { border-color: var(--accent); }
+.vf-chip-row.muted .vf-chip { opacity: .45; border-style: dashed; }
+.vf-chip-x { width: 16px; height: 16px; display: grid; place-items: center; margin-right: -4px; border-radius: 50%; color: var(--text-dim); cursor: pointer; }
+.vf-chip-x:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.vf-overflow { cursor: pointer; flex: none; }
+.vf-paused-note { margin-top: 6px; padding: 5px 9px; border-radius: 6px; background: color-mix(in srgb, var(--warning) 12%, var(--bg-tertiary)); color: var(--warning); font-size: 12px; }
+.vf-popover { position: absolute; top: calc(100% + 8px); left: 0; z-index: 5000; width: min(680px, 100%); max-height: min(72vh, 640px); overflow-y: auto; border: 1px solid var(--border-secondary); border-radius: 11px; background: var(--bg-panel); box-shadow: 0 18px 50px rgba(0,0,0,.34); }
+.vf-popover-header { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: flex-start; padding: 13px 16px 10px; background: var(--bg-panel); border-bottom: 1px solid var(--border-primary); }
+.vf-popover-header h2 { margin: 0; font-size: 15px; color: var(--text-primary); }
+.vf-popover-header p { margin: 3px 0 0; color: var(--text-dim); font-size: 11px; }
+.vf-popover-close { width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 17px; }
+.vf-popover-close:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.vf-quick, .vf-rules { padding: 12px 16px; }
+.vf-quick { border-bottom: 1px solid var(--border-primary); }
+.vf-section-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 9px; }
+.vf-section-heading h3 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); }
+.vf-section-heading > span { color: var(--text-faint); font-size: 10px; }
+.vf-heading-toggle { display: flex; align-items: center; gap: 12px; }
+.vf-advanced { display: inline-flex; align-items: center; gap: 5px; color: var(--text-dim); font-size: 11px; cursor: pointer; }
+.vf-quick-grid { display: flex; flex-wrap: wrap; gap: 18px; }
+.vf-quick-group { display: grid; gap: 5px; }
+.vf-quick-group > span { color: var(--text-dim); font-size: 10px; }
+.vf-quick-control { display: flex; align-items: center; gap: 8px; }
+.vf-quick-control select, .vf-group-mode select { height: 27px; padding: 0 7px; border: 1px solid var(--border-primary); border-radius: 6px; background: var(--bg-input); color: var(--text-secondary); font-size: 11px; }
+.vf-stars { display: flex; }
+.vf-star { padding: 0 2px; border: 0; background: transparent; color: var(--text-faint); cursor: pointer; font-size: 18px; }
+.vf-star.active { color: var(--warning); }
+.vf-segmented { display: flex; width: max-content; padding: 2px; border-radius: 7px; background: var(--bg-secondary); }
+.vf-segmented button { padding: 5px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 11px; }
+.vf-segmented button.active { background: var(--bg-tertiary); color: var(--accent); }
+.vf-quick-colors { display: flex; align-items: center; gap: 7px; padding-top: 3px; }
+.vf-quick-colors button { width: 20px; height: 20px; border: 2px solid transparent; border-radius: 50%; cursor: pointer; box-shadow: 0 0 0 1px var(--border-secondary); }
+.vf-quick-colors button.active { border-color: var(--text-primary); box-shadow: 0 0 0 2px var(--accent); }
+.vf-quick-colors [data-color="red"] { background: #ef635b; }
+.vf-quick-colors [data-color="yellow"] { background: #f6c945; }
+.vf-quick-colors [data-color="green"] { background: #6fcf75; }
+.vf-quick-colors [data-color="blue"] { background: #4aa9e9; }
+.vf-quick-colors [data-color="purple"] { background: #a782ff; }
+.vf-rule-tree { display: grid; gap: 7px; }
+.vf-rule-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(110px, .9fr) minmax(140px, 1.3fr) 25px; gap: 6px; align-items: center; }
+.vf-rule-row select, .vf-rule-row input, .vf-value-pair input, .vf-value-pair select { min-width: 0; height: 30px; padding: 0 8px; border: 1px solid var(--border-primary); border-radius: 6px; background: var(--bg-input); color: var(--text-primary); font-size: 12px; }
+.vf-rule-row select:focus, .vf-rule-row input:focus { border-color: var(--accent); outline: none; }
+.vf-qs-row { grid-template-columns: 1fr 25px; }
+.vf-qs-label { color: var(--text-secondary); font-size: 12px; padding-left: 2px; }
+.vf-remove { width: 25px; height: 25px; border: 0; border-radius: 5px; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 16px; }
+.vf-remove:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.vf-rule-opts { grid-column: 1 / -1; display: flex; justify-content: flex-end; margin-top: -4px; }
+.vf-rule-opts label { color: var(--text-dim); font-size: 10px; cursor: pointer; }
+.vf-value-pair { min-width: 0; display: flex; align-items: center; gap: 5px; }
+.vf-value-pair input, .vf-value-pair select { flex: 1; }
+.vf-value-pair > span { color: var(--text-dim); font-size: 11px; }
+.vf-enum-multi { min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.vf-enum-pill { padding: 5px 8px; border: 1px solid var(--border-primary); border-radius: 6px; background: var(--bg-input); color: var(--text-muted); cursor: pointer; font-size: 11px; }
+.vf-enum-pill:hover { border-color: var(--border-secondary); color: var(--text-primary); }
+.vf-enum-pill.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg-input)); color: var(--text-primary); }
+.vf-value-wrap { position: relative; min-width: 0; display: block; }
+.vf-value-wrap input { width: 100%; }
+.vf-suggest { position: absolute; top: 33px; left: 0; right: 0; z-index: 5010; overflow: hidden; padding: 4px; border: 1px solid var(--border-secondary); border-radius: 7px; background: var(--bg-panel); box-shadow: 0 12px 32px rgba(0,0,0,.3); }
+.vf-suggest-hint { padding: 4px 7px 5px; color: var(--text-faint); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; }
+.vf-value-option { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 7px; border: 0; border-radius: 5px; background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer; font-size: 12px; }
+.vf-value-option:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.vf-value-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vf-value-option em { color: var(--accent); font-size: 11px; font-style: normal; font-variant-numeric: tabular-nums; }
+.vf-group { padding: 8px; border: 1px solid var(--border-primary); border-radius: 8px; background: color-mix(in srgb, var(--bg-secondary) 65%, transparent); }
+.vf-group-mode { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; color: var(--text-dim); font-size: 11px; }
+.vf-group-mode .vf-remove { margin-left: auto; }
+.vf-group-children { display: grid; gap: 7px; padding-left: 11px; border-left: 2px solid var(--border-primary); }
+.vf-group-actions { display: flex; gap: 8px; margin: 8px 0 0 12px; }
+.vf-text-btn { border: 0; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 11px; }
+.vf-text-btn:hover { color: var(--accent); }
+.vf-add-row { display: flex; align-items: center; gap: 7px; margin-top: 10px; }
+.vf-add-wrap { position: relative; }
+.vf-add-filter { height: 30px; padding: 0 10px; border: 1px dashed var(--border-secondary); border-radius: 7px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.vf-add-filter:hover { color: var(--accent); border-color: var(--accent); }
+.vf-field-picker { position: absolute; left: 0; top: 36px; z-index: 5010; width: 300px; max-height: 340px; overflow: hidden; padding: 7px; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-panel); box-shadow: 0 12px 32px rgba(0,0,0,.3); }
+.vf-field-picker input { width: 100%; height: 30px; padding: 0 8px; border: 1px solid var(--border-primary); border-radius: 6px; background: var(--bg-input); color: var(--text-primary); }
+.vf-field-options { max-height: 280px; overflow-y: auto; margin-top: 6px; }
+.vf-field-category { padding: 7px 8px 3px; color: var(--text-dim); font-size: 9px; text-transform: uppercase; letter-spacing: .09em; }
+.vf-field-option { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 7px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer; font-size: 12px; }
+.vf-field-option:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.vf-field-option span:last-child { color: var(--text-faint); font-size: 10px; }
+.vf-empty-rules { padding: 12px; border: 1px dashed var(--border-primary); border-radius: 7px; color: var(--text-dim); font-size: 11px; text-align: center; }
+.vf-popover-footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; border-top: 1px solid var(--border-primary); background: var(--bg-panel); }
+.vf-match-count { color: var(--text-muted); font-size: 11px; }
+.vf-done { height: 30px; padding: 0 14px; border: 0; border-radius: 7px; background: var(--accent); color: var(--accent-text); cursor: pointer; font-weight: 700; }
+.vf-toast { position: fixed; z-index: 100; left: 50%; bottom: 22px; display: flex; align-items: center; gap: 14px; transform: translateX(-50%); padding: 9px 12px; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-panel); box-shadow: 0 12px 32px rgba(0,0,0,.3); color: var(--text-secondary); font-size: 12px; }
+.vf-toast button { border: 0; background: transparent; color: var(--accent); cursor: pointer; font-weight: 700; }
+</style>
+<script src="/static/vireo-filter.js"></script>
