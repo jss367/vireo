@@ -698,6 +698,10 @@ def test_higher_rank_taxonomy_identification_is_listed(life_app):
         timestamp="2024-06-01T12:00:00",
     )
     db.tag_photo(photo_id, keyword_id)
+    # Tag the same photo with an existing location keyword so the entry
+    # must surface its location chip / CSV value like species-rank rows do.
+    location_id = db.add_keyword("Backyard", kw_type="location")
+    db.tag_photo(photo_id, location_id)
     db.conn.commit()
 
     entry = _entry(_get_life_list(app), "Accipiter")
@@ -707,6 +711,7 @@ def test_higher_rank_taxonomy_identification_is_listed(life_app):
         "name": "Aves",
         "common_name": "Birds",
     }
+    assert entry["locations"] == ["Backyard"]
 
 
 def test_locations_from_location_keywords(life_app):

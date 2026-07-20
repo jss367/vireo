@@ -13205,15 +13205,20 @@ class Database:
         return sorted(chosen.values(), key=lambda n: keyword_match_key(n))
 
     def get_life_list_locations(self, species=None):
-        """Return {species name: [location keyword names]} for the life list.
+        """Return {identification name: [location keyword names]} for the life list.
 
-        A location is attributed to a species when at least one
-        workspace-visible, non-rejected photo carries both the species
-        keyword and a ``type = 'location'`` keyword.
+        A location is attributed to an identification when at least one
+        workspace-visible, non-rejected photo carries both the
+        identification keyword and a ``type = 'location'`` keyword.
+        Higher-rank taxonomy identifications (genus, family, class, …) are
+        eligible here for the same reason they are in
+        :meth:`get_life_list_candidates` — so a genus-level entry rendered
+        on the Life List keeps its location chips and CSV values instead of
+        appearing with an empty ``locations`` list.
 
-        When ``species`` is given, only that species is scanned — used by
-        the single-species paging endpoint so incremental loads don't do
-        catalog-wide work. Matching mirrors
+        When ``species`` is given, only that identification is scanned —
+        used by the single-identification paging endpoint so incremental
+        loads don't do catalog-wide work. Matching mirrors
         :meth:`get_life_list_candidates`: raw ``k.name`` first, then a
         taxon-linked root fallback so a hierarchy leaf surviving repair
         (``verdin`` vs canonical root ``Verdin``) still contributes its
@@ -13245,7 +13250,6 @@ class Database:
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
                 {species_filter}
-               LEFT JOIN taxa t ON t.id = k.taxon_id
                JOIN photos p ON p.id = pk.photo_id
                 AND COALESCE(p.flag, 'none') != 'rejected'
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
@@ -13255,7 +13259,6 @@ class Database:
                JOIN photo_keywords plk ON plk.photo_id = p.id
                JOIN keywords lk ON lk.id = plk.keyword_id
                 AND lk.type = 'location'
-               WHERE t.rank = 'species' OR t.rank IS NULL
                ORDER BY k.name, lk.name""",
             tuple(params),
         ).fetchall()
