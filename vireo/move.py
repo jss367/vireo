@@ -1859,14 +1859,19 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             ).fetchone()["id"]
     workspace_linked = False
     no_destination_stem = object()
+    # Provenance is keyed by the source folder's **path** (not folders.id).
+    # SQLite ``INTEGER PRIMARY KEY`` without AUTOINCREMENT can reuse a freed
+    # rowid after ``Database.delete_folder``; storing the reusable id would
+    # let a new unrelated folder that lands on the same rowid compare equal
+    # to a stale reference and bypass the collision guard below.
     destination_stem_origins = {}
     for row in db.conn.execute(
-        "SELECT filename, last_move_source_folder_id "
+        "SELECT filename, last_move_source_folder_path "
         "FROM photos WHERE folder_id = ?",
         (dest_folder_id,),
     ):
         stem = os.path.splitext(row["filename"])[0]
-        origin = row["last_move_source_folder_id"]
+        origin = row["last_move_source_folder_path"]
         known_origin = destination_stem_origins.get(
             stem, no_destination_stem,
         )
@@ -1919,7 +1924,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                 stem, no_destination_stem,
             )
             if existing_origin is not no_destination_stem \
-                    and existing_origin != photo["folder_id"]:
+                    and existing_origin != src_dir:
                 log.warning(
                     "Move skipped for %s: developed render stem collides at "
                     "destination", photo["filename"],
@@ -1983,14 +1988,16 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             # This ensures a crash leaves duplicates (safe) rather than orphans
             db.conn.execute(
                 "UPDATE photos SET folder_id = ?, "
-                "last_move_source_folder_id = ? WHERE id = ?",
-                (dest_folder_id, photo["folder_id"], pid),
+                "last_move_source_folder_path = ? WHERE id = ?",
+                (dest_folder_id, src_dir, pid),
             )
             db.conn.commit()
-            # Pin the stem to the proven source folder so a same-source
+            # Pin the stem to the proven source folder path so a same-source
             # sibling can follow in this call while a distinct source is
-            # still rejected.
-            destination_stem_origins[stem] = photo["folder_id"]
+            # still rejected. Using the path (not folders.id) survives a
+            # later delete/re-create of the source folder that would reuse
+            # the same rowid.
+            destination_stem_origins[stem] = src_dir
 
             # Rebase this photo's developed-output file(s) for the new folder
             # BEFORE removing originals. Both develop-job layouts need to

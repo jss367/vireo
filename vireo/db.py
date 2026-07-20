@@ -605,7 +605,7 @@ class Database:
                 working_copy_failed_at   TEXT,
                 working_copy_failed_mtime REAL,
                 working_copy_failed_source TEXT,
-                last_move_source_folder_id INTEGER,
+                last_move_source_folder_path TEXT,
                 eye_x                    REAL,
                 eye_y                    REAL,
                 eye_conf                 REAL,
@@ -1335,14 +1335,18 @@ class Database:
         # per-photo moves prove that a same-stem file already at the
         # destination is a RAW/JPEG sibling from the same source instead of
         # an unrelated photo whose developed render would be overwritten.
+        # The value is the source folder's path (not its folders.id): SQLite
+        # INTEGER PRIMARY KEY without AUTOINCREMENT reuses freed rowids after
+        # ``delete_folder``, so a stale id could compare equal to an unrelated
+        # new folder and bypass the collision guard.
         try:
             self.conn.execute(
-                "SELECT last_move_source_folder_id FROM photos LIMIT 0"
+                "SELECT last_move_source_folder_path FROM photos LIMIT 0"
             )
         except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE photos "
-                "ADD COLUMN last_move_source_folder_id INTEGER"
+                "ADD COLUMN last_move_source_folder_path TEXT"
             )
         # Migration: add eye_kp_fingerprint column. Set to NULL for new
         # photos; populated when the eye-keypoint stage runs. Phase 1 also

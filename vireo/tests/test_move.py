@@ -1061,6 +1061,75 @@ def test_move_photos_rejects_unknown_destination_same_stem_origin(tmp_path):
     assert db.get_photo(incoming_pid)["folder_id"] == source_fid
 
 
+def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
+    """SQLite ``INTEGER PRIMARY KEY`` without AUTOINCREMENT reuses freed
+    rowids after ``delete_folder``. Storing the source folder's *id* on
+    ``last_move_source_folder_*`` would let a brand-new unrelated folder
+    that lands on the same rowid compare equal to a stale reference and
+    bypass the same-stem developed-render collision guard. The check must
+    use a non-reusable identifier (the source folder's path).
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    original_source = tmp_path / "original"
+    destination = tmp_path / "destination"
+    original_source.mkdir()
+    original_fid = db.add_folder(str(original_source), name="original")
+    original_file = original_source / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    dest_fid = db.get_photo(original_pid)["folder_id"]
+    assert dest_fid != original_fid
+
+    # Drop the original source folder. SQLite is now free to reuse its
+    # rowid on the next folders INSERT.
+    db.delete_folder(original_fid)
+
+    # Force a rowid collision by inserting a synthetic folder row at the
+    # freed id. This mirrors what SQLite would do on the next real
+    # add_folder if that id happens to be at max(id)+1.
+    replacement_source = tmp_path / "replacement"
+    replacement_source.mkdir()
+    db.conn.execute(
+        "INSERT INTO folders (id, path, name) VALUES (?, ?, ?)",
+        (original_fid, str(replacement_source), "replacement"),
+    )
+    db.conn.commit()
+    db.add_workspace_folder(ws_id, original_fid)
+
+    incoming_file = replacement_source / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=original_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The replacement folder shares its rowid with the deleted original,
+    # but its path is different, so the collision guard must reject the
+    # move rather than treat it as a same-source sibling.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == original_fid
+
+
 def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
     """Regression: ``os.makedirs(destination, exist_ok=True)`` raises
     ``FileExistsError`` when the path exists as a regular file, so a
