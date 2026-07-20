@@ -1074,6 +1074,16 @@ async function loadPredictions() {
       if (p.model && !modelSet[p.model]) modelSet[p.model] = true;
     });
     availableModels = Object.keys(modelSet);
+    // Reset a stale ``currentModel`` when the new response no longer
+    // contains it. Without this, a filter change (or collection switch)
+    // that narrows the model universe leaves ``currentModel`` pinned to a
+    // model that's not present: ``renderModelFilter()`` hides the selector
+    // (0 or 1 models remain), while ``getVisibleItems()`` still filters by
+    // the stale model — leaving an empty grid with no visible way to
+    // clear the filter.
+    if (currentModel !== 'all' && !modelSet[currentModel]) {
+      currentModel = 'all';
+    }
 
     var pending = allPredictions.filter(function(p) { return p.status === 'pending'; });
     mode = allPredictions.length > 0 ? 'review' : 'browse';
