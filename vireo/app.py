@@ -5857,7 +5857,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             location_status = _request_location_status_filter()
             rules = _request_rules_arg()
             visual = _request_visual_arg()
-            rules = _apply_visual_to_rules(db, rules, visual, folder_id=folder_id)
+            rules = _apply_visual_to_rules(
+                db, rules, visual,
+                collection_id=collection_id, folder_id=folder_id,
+            )
         except ValueError as e:
             return json_error(str(e), 400)
         try:

@@ -471,6 +471,14 @@
     mutate(() => {
       state.root.rules = state.root.rules.filter((n) => !(isGroup(n) && n._qs));
       if (value) state.root.rules.unshift(buildQuickSearchGroup(value));
+      // The visual clause and the quick-search clause are alternatives for
+      // the top bar: setting one replaces the other. Without this, a
+      // text search would compose with a still-active visual clause
+      // (visual ∩ text) instead of replacing it.
+      if (value) {
+        state.visual = null;
+        state.visualInfo = null;
+      }
     }, cleared ? { reason: 'quickSearchCleared' } : undefined);
   }
 
@@ -1240,6 +1248,8 @@
       if (silent) {
         state.root = { mode: 'all', rules: [] };
         state.muted = false;
+        state.visual = null;
+        state.visualInfo = null;
         schedulePersist();
         if (state.ready) render();
         return;
@@ -1247,6 +1257,8 @@
       mutate(() => {
         state.root = { mode: 'all', rules: [] };
         state.muted = false;
+        state.visual = null;
+        state.visualInfo = null;
       });
     },
     isReady() { return !!state.ready && !!state.fields; },

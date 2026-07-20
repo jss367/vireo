@@ -10125,6 +10125,35 @@ def test_api_summary_and_values_respect_visual(app_and_db, monkeypatch):
     assert resp.get_json()["values"] == [{"value": "Sony A1", "count": 1}]
 
 
+def test_api_calendar_scopes_visual_to_collection(app_and_db, monkeypatch):
+    """Calendar's visual clause must resolve within the collection scope.
+
+    If the collection has no active-model embeddings but the wider
+    workspace does, the clause must fail 'no_embeddings' and fall back
+    to metadata-only within the collection — matching the grid — rather
+    than injecting outside-collection matches that get intersected away.
+    """
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos(sort="name")}
+    for name, vec in [("bird1.jpg", [0.95, 0.0]), ("bird2.jpg", [0.8, 0.0])]:
+        db.upsert_photo_embedding(
+            photos[name], "test-clip", np.array(vec, dtype=np.float32).tobytes()
+        )
+    # bird3 (the only photo in the collection) has no embedding.
+    collection_id = db.add_collection(
+        "Only bird3",
+        json.dumps([{"field": "photo_ids", "value": [photos["bird3.jpg"]]}]),
+    )
+    _stub_clip(monkeypatch)
+    client = app.test_client()
+    visual = json.dumps({"prompt": "a bird", "strength": "balanced"})
+    resp = client.get(
+        f"/api/photos/calendar?year=2024&collection_id={collection_id}&visual={visual}"
+    )
+    assert resp.status_code == 200
+    assert list(resp.get_json()["days"].keys()) == ["2024-06-10"]
+
+
 def test_embedding_fetch_chunks_over_999_ids(app_and_db):
     """A broad rule tree passes every photo id as the candidate set; the
     embedding fetch must chunk below SQLITE_MAX_VARIABLE_NUMBER."""
