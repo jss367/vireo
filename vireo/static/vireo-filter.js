@@ -279,7 +279,12 @@
     if (options.lightRender) renderLight();
     else render();
     schedulePersist();
-    if (state.onChange && !options.silent) state.onChange();
+    // `reason` (optional string) is forwarded to onChange so pages can
+    // pick per-cause reload behavior — e.g. Browse preserving the
+    // selected-photo anchor when a quick search is cleared but not for
+    // every filter change (arbitrary edits usually exclude the anchor,
+    // and loadUntilPhotoRendered would then page through the whole set).
+    if (state.onChange && !options.silent) state.onChange({ reason: options.reason || null });
     if (state.muted) refreshWouldMatch();
   }
 
@@ -290,7 +295,7 @@
     state.muted = prev.muted;
     render();
     schedulePersist();
-    if (state.onChange) state.onChange();
+    if (state.onChange) state.onChange({ reason: null });
   }
 
   function toast(text, withUndo) {
@@ -439,10 +444,15 @@
 
   function applyQuickSearch(text) {
     const value = String(text || '').trim();
+    // A cleared quick search is the one filter edit where the previously
+    // selected/open photo is expected to reappear in the wider result set.
+    // Flag it so the page can preserve the anchor for this case without
+    // reintroducing preservation for every filter change.
+    const cleared = !value && !!quickSearchGroup();
     mutate(() => {
       state.root.rules = state.root.rules.filter((n) => !(isGroup(n) && n._qs));
       if (value) state.root.rules.unshift(buildQuickSearchGroup(value));
-    });
+    }, cleared ? { reason: 'quickSearchCleared' } : undefined);
   }
 
   function syncQuickSearchInput() {
@@ -1057,6 +1067,24 @@
       mutate(() => { state.root.rules.splice(idx, 1); });
     },
     hasFilters() { return hasUserFilters(); },
+    // Wipe restored/current filters without firing onChange. Used when the
+    // page detects a deep-link (e.g. plain collection view) that must
+    // ignore whatever was persisted — the alternative (applying then
+    // dropping them on the first filter interaction) briefly paints the
+    // wrong photo set and desyncs chips from the visible grid.
+    clearAll(silent) {
+      if (silent) {
+        state.root = { mode: 'all', rules: [] };
+        state.muted = false;
+        schedulePersist();
+        if (state.ready) render();
+        return;
+      }
+      mutate(() => {
+        state.root = { mode: 'all', rules: [] };
+        state.muted = false;
+      });
+    },
     isReady() { return !!state.ready && !!state.fields; },
     isMuted() { return state.muted; },
     setScopeLabel(label) {

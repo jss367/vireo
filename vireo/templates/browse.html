@@ -2892,14 +2892,18 @@ async function bootstrapBrowse() {
       page: 'browse',
       root: document.getElementById('vireoFilterBar'),
       scopeLabel: 'Workspace \u00b7 All available photos',
-      onChange: function() {
+      onChange: function(info) {
         if (timelineMode) loadCalendarData();
         if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
-        // Don't preserveAnchor: a filter change usually excludes the previously
+        // A cleared quick search is the one filter edit where the previously
+        // selected photo is expected to reappear in the wider result set \u2014
+        // preserve the anchor so the detail panel and scroll position don't
+        // reset. Every other filter change usually excludes the previously
         // selected photo, and loadUntilPhotoRendered would then keep paging
         // through the whole matching set (potentially many /api/photos/query
         // requests) just to prove the anchor is gone.
-        resetAndLoad();
+        var preserveAnchor = info && info.reason === 'quickSearchCleared';
+        resetAndLoad(preserveAnchor ? { preserveAnchor: true } : undefined);
         // Summary panel (photo count, classified, top species) is a separate
         // endpoint from the grid; without this the filter changes the grid
         // but leaves the summary showing pre-filter numbers.
@@ -2920,6 +2924,20 @@ async function bootstrapBrowse() {
       },
     }).then(function() {
       VireoFilter.setResultTotal(totalPhotos);
+      // Plain collection deep-link (?collection_id=... with no
+      // ?dashboard_scope=1) must show exactly that collection. A saved
+      // workspace filter restored from ui_state makes hasFilters() true,
+      // and the resetAndLoad() below would then clear activeCollectionId
+      // via the resetAndLoad path (see line ~3901 \u2014 non-dashboard scopes),
+      // silently switching from the requested collection to the saved
+      // filter. Drop the persisted state so the deep link is honored.
+      var urlParams = new URLSearchParams(window.location.search);
+      var plainCollectionLink = !!urlParams.get('collection_id') &&
+        urlParams.get('dashboard_scope') !== '1';
+      if (plainCollectionLink && VireoFilter.hasFilters()) {
+        VireoFilter.clearAll(true);
+        return;
+      }
       if (VireoFilter.hasFilters()) {
         resetAndLoad();
         loadSummary();
@@ -4235,11 +4253,16 @@ function clearCalendarSelection() {
   // onChange, so a silent activeCollectionId=null would leave the grid
   // showing the collection while infinite-scroll/summary/select-all
   // silently widened to the whole workspace.
+  //
+  // The removeField('timestamp') is also gated on hadSelection: a user
+  // with a manual capture-date rule from a deep link or the filter
+  // popover (never entered via the calendar) toggling the calendar on
+  // and back off would otherwise silently clear their date filter.
   var hadSelection = selectedDay !== null;
   selectedDay = null;
   document.getElementById('calSelection').classList.remove('active');
   if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
-  if (window.VireoFilter) VireoFilter.removeField('timestamp');
+  if (hadSelection && window.VireoFilter) VireoFilter.removeField('timestamp');
   if (calendarData) renderCalendar();
 }
 
@@ -4247,15 +4270,18 @@ function calendarChangeYear(delta) {
   if (delta < 0 && calendarData && calendarYear <= calendarData.min_year) return;
   if (delta > 0 && calendarData && calendarYear >= calendarData.max_year) return;
   calendarYear += delta;
-  // Same guard as clearCalendarSelection: only touch collection scope
-  // when a day was actually picked (that day-pick is what dropped it).
-  // Without this, switching year in a collection view before ever
-  // selecting a day silently widens later requests to the workspace.
+  // Same guards as clearCalendarSelection: only touch collection scope
+  // and only removeField('timestamp') when a day was actually picked
+  // (that day-pick is what dropped scope and set the timestamp rule).
+  // Without them, switching year in a collection view before ever
+  // selecting a day silently widens later requests to the workspace,
+  // and stepping through years with a manual timestamp rule active
+  // would silently clear the user's date filter.
   var hadSelection = selectedDay !== null;
   selectedDay = null;
   document.getElementById('calSelection').classList.remove('active');
   if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
-  if (window.VireoFilter) VireoFilter.removeField('timestamp');
+  if (hadSelection && window.VireoFilter) VireoFilter.removeField('timestamp');
   loadCalendarData();
 }
 

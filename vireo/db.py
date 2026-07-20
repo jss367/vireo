@@ -7182,17 +7182,21 @@ class Database:
         # Dashboard-scoped collection Browse composes the collection with the
         # active rules/folder — the calendar must match the grid, so restrict
         # counts to photos in the collection (same subquery shape as
-        # get_browse_summary).
+        # get_browse_summary). Match get_photos / _append_collection_restriction:
+        # raise on a missing/invalid collection instead of silently returning
+        # unfiltered workspace data (which would mislead users into thinking
+        # the collection contains those photos).
         if collection_id is not None:
             parts = self._build_collection_query(collection_id)
-            if parts is not None:
-                coll_folder_join, coll_join_clause, coll_where, coll_params = parts
-                coll_subquery = (
-                    f"SELECT DISTINCT p.id FROM photos p "
-                    f"{coll_folder_join} {coll_join_clause} {coll_where}"
-                )
-                conditions.append(f"p.id IN ({coll_subquery})")
-                where_params.extend(coll_params)
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+            coll_subquery = (
+                f"SELECT DISTINCT p.id FROM photos p "
+                f"{coll_folder_join} {coll_join_clause} {coll_where}"
+            )
+            conditions.append(f"p.id IN ({coll_subquery})")
+            where_params.extend(coll_params)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -7578,20 +7582,25 @@ class Database:
 
         # When browsing a collection, restrict photos to those matching the
         # collection's rules by using a subquery from _build_collection_query.
+        # Match get_photos / _append_collection_restriction: raise on a
+        # missing/invalid collection instead of silently returning unfiltered
+        # workspace numbers (which would mislead users into thinking the
+        # collection contains those photos).
         if collection_id is not None:
             parts = self._build_collection_query(collection_id)
-            if parts is not None:
-                coll_folder_join, coll_join_clause, coll_where, coll_params = parts
-                # Build a subquery that returns the photo IDs in this collection.
-                # Use alias "p" to match the alias expected by _build_collection_query;
-                # the subquery is wrapped in parentheses so "p" is scoped to it and
-                # does not conflict with the outer query's "p" alias.
-                coll_subquery = (
-                    f"SELECT DISTINCT p.id FROM photos p "
-                    f"{coll_folder_join} {coll_join_clause} {coll_where}"
-                )
-                conditions.append(f"p.id IN ({coll_subquery})")
-                where_params.extend(coll_params)
+            if parts is None:
+                raise ValueError("collection not found in active workspace")
+            coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+            # Build a subquery that returns the photo IDs in this collection.
+            # Use alias "p" to match the alias expected by _build_collection_query;
+            # the subquery is wrapped in parentheses so "p" is scoped to it and
+            # does not conflict with the outer query's "p" alias.
+            coll_subquery = (
+                f"SELECT DISTINCT p.id FROM photos p "
+                f"{coll_folder_join} {coll_join_clause} {coll_where}"
+            )
+            conditions.append(f"p.id IN ({coll_subquery})")
+            where_params.extend(coll_params)
 
         if rules is not None:
             r_folder_join, r_join_clause, r_where, r_params = (
