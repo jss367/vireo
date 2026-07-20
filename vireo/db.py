@@ -3880,6 +3880,19 @@ class Database:
                 )
                 cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
 
+        # The surviving missing-child rows above have moved from each old
+        # path to its candidate under the existing target root. Keep any
+        # moved-photo provenance aligned with those live source rows. Clearing
+        # only the merged root path is insufficient: a same-stem sibling from
+        # a cascaded child would otherwise compare against its stale old path,
+        # and that freed path could later be reused by unrelated content.
+        for child in cascaded:
+            self.conn.execute(
+                "UPDATE photos SET last_move_source_folder_path = ? "
+                "WHERE last_move_source_folder_path = ?",
+                (child["new_path"], child["old_path"]),
+            )
+
         self._relink_parents_by_path([c["id"] for c in cascaded])
         if commit:
             self.conn.commit()

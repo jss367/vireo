@@ -1754,6 +1754,99 @@ def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing
     assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
 
 
+def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
+    """Missing-root merges rebase provenance for surviving child folders."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    old_root = tmp_path / "OLD"
+    old_child = old_root / "child"
+    old_child.mkdir(parents=True)
+    new_root = tmp_path / "NEW"
+    new_child = new_root / "child"
+    new_child.mkdir(parents=True)
+    destination = tmp_path / "archive"
+
+    old_root_id = db.add_folder(str(old_root), name="OLD")
+    child_id = db.add_folder(
+        str(old_child), name="child", parent_id=old_root_id,
+    )
+    new_root_id = db.add_folder(str(new_root), name="NEW")
+
+    moved_file = old_child / "IMG.JPG"
+    sibling_file = old_child / "IMG.CR3"
+    moved_file.write_bytes(b"jpeg")
+    sibling_file.write_bytes(b"raw")
+    moved_pid = db.add_photo(
+        folder_id=child_id, filename=moved_file.name, extension=".jpg",
+        file_size=4, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=child_id, filename=sibling_file.name, extension=".cr3",
+        file_size=3, file_mtime=2.0,
+    )
+
+    first = move_photos(db, [moved_pid], str(destination))
+    assert first["moved"] == 1
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (moved_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(old_child)
+    )
+
+    # The old root is now missing. Relocating it onto an already-tracked
+    # root merges the root row while cascading the surviving child row onto
+    # the real child directory beneath the target.
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id IN (?, ?)",
+        (old_root_id, child_id),
+    )
+    db.conn.commit()
+    sibling_file.unlink()
+    old_child.rmdir()
+    old_root.rmdir()
+
+    cascaded = db.relocate_folder(old_root_id, str(new_root))
+
+    assert cascaded == [{
+        "id": child_id,
+        "old_path": str(old_child),
+        "new_path": str(new_child),
+    }]
+    assert db.conn.execute(
+        "SELECT path, parent_id FROM folders WHERE id = ?", (child_id,),
+    ).fetchone()["parent_id"] == new_root_id
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (moved_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(new_child)
+    )
+
+    # Reuse the freed old child path with unrelated same-stem content. The
+    # rebased provenance must make the destination collision guard reject it.
+    old_child.mkdir(parents=True)
+    replacement_id = db.add_folder(str(old_child), name="child")
+    incoming = old_child / "IMG.NEF"
+    incoming.write_bytes(b"replacement")
+    incoming_pid = db.add_photo(
+        folder_id=replacement_id, filename=incoming.name, extension=".nef",
+        file_size=incoming.stat().st_size, file_mtime=3.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming.exists()
+    assert db.get_photo(incoming_pid)["folder_id"] == replacement_id
+
+
 def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
     """Renaming/moving a source folder via ``move_folder_path`` (e.g. the
     whole-folder move flow) frees the old path for reuse. Without cascading
