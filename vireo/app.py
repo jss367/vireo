@@ -5347,6 +5347,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("page must be a positive integer", 400)
         if not isinstance(per_page, int) or isinstance(per_page, bool) or per_page < 1:
             return json_error("per_page must be a positive integer", 400)
+        # sort feeds an unhashable-unsafe ``sort_map.get(sort, ...)`` in
+        # ``query_photos``; a JSON array/object here would raise TypeError
+        # (not ValueError) and bypass the 400 handler below.
+        if not isinstance(sort, str):
+            return json_error("sort must be a string", 400)
         per_page = min(per_page, _MAX_PER_PAGE)
         try:
             photos = db.query_photos(rules, sort=sort, page=page, per_page=per_page)

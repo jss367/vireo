@@ -9626,6 +9626,14 @@ def test_api_photos_query_validation(app_and_db):
     assert client.post('/api/photos/query', json={
         "rules": [], "per_page": "many",
     }).status_code == 400
+    # sort must be a string — a JSON array/object would otherwise raise
+    # TypeError inside ``sort_map.get(sort, ...)`` and surface as a 500.
+    assert client.post('/api/photos/query', json={
+        "rules": [], "sort": [],
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": [], "sort": {"col": "date"},
+    }).status_code == 400
     assert client.post('/api/photos/query', data="not json",
                        content_type="text/plain").status_code == 400
 
