@@ -926,13 +926,13 @@ async function switchCollection(val) {
   currentCollection = val;
   if (val === 'all') {
     collectionPhotoIds = null;
-    predictions = allPredictions.slice();
   } else {
-    // Fetch photo IDs in this collection
+    // Fetch photo IDs in this collection so ``loadPredictions``' existing
+    // safety intersection (allPredictions ∩ collectionPhotoIds) still
+    // narrows a stale ``allPredictions`` while the new fetch is in flight.
     try {
       var data = await safeFetch('/api/collections/' + val + '/photos?per_page=999999', {}, { toast: false });
       collectionPhotoIds = new Set(data.photos.map(function(p) { return p.id; }));
-      predictions = allPredictions.filter(function(p) { return collectionPhotoIds.has(p.photo_id); });
     } catch(e) {
       // The old catch fell back to allPredictions.slice(), which silently
       // widened the review scope to every prediction — the opposite of what
@@ -945,9 +945,17 @@ async function switchCollection(val) {
       if (typeof showToast === 'function') {
         showToast('Could not load photos for this collection — check its rules', 'error');
       }
+      renderAll();
+      return;
     }
   }
-  renderAll();
+  // Re-fetch server-side so ``/api/predictions`` resolves rules/visual
+  // against the new collection (not the stale one). Without this the
+  // visual_info chip would keep describing whichever collection was
+  // active at the last loadPredictions call, and — for a collection
+  // that hides some workspace embeddings — the filter-bar total would
+  // stay workspace-scoped instead of collection-scoped.
+  await loadPredictions();
 }
 
 // Bumped by every loadPredictions() invocation; responses whose epoch is
@@ -1023,6 +1031,18 @@ async function loadPredictions() {
       if (ruleCount) params.set('rules', JSON.stringify(rules));
       var visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
       if (visual) params.set('visual', JSON.stringify(visual));
+    }
+    // Forward the active Review collection so rule/visual resolution and the
+    // returned visual_info describe the collection-scoped queue (not the
+    // whole workspace). Without this, a visual clause with the collection
+    // holding no embeddings would still return ``status: ok`` from
+    // out-of-collection photos, the client would intersect those away, and
+    // the Review grid would empty out while the visual chip stayed on-screen
+    // with no fallback warning. Also keeps the filter-bar total honest —
+    // it's the collection-scoped match count, not a workspace-wide proxy.
+    if (currentCollection !== 'all') {
+      var collId = parseInt(currentCollection, 10);
+      if (!isNaN(collId)) params.set('collection_id', String(collId));
     }
     var qs = params.toString();
     var predData = await safeFetch('/api/predictions' + (qs ? '?' + qs : ''), {}, { toast: false });

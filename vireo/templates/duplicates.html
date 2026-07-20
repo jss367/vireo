@@ -1500,6 +1500,12 @@
     var remaining = 0;
     _proposals.forEach(function(p) {
       if (p.status !== 'resolved' || isBulkTrashProtected(p)) return;
+      // Only count losers from groups that survived the active filter.
+      // The bulk button label mirrors the render loop's filtered count
+      // (see ``bulkTrashableLoserCount``); walking the unfiltered list
+      // here would let the label drift to reflect hidden groups and
+      // trick the user into thinking the action still has work to do.
+      if (!groupMatchesFilter(p)) return;
       (p.losers || []).forEach(function(l) {
         var card = document.querySelector('.dup-card[data-photo-id="' + l.id + '"]');
         if (card && !card.classList.contains('trashed')) remaining++;
@@ -1515,7 +1521,16 @@
   }
 
   async function trashAllLoserFiles() {
-    var resolved = _proposals.filter(function(p) { return p.status === 'resolved'; });
+    // ``groupMatchesFilter`` restricts to groups the filter actually
+    // surfaced. Without it, an active filter shrinks the rendered
+    // resolved section and the button label (both driven by the
+    // filtered ``resolved`` list in ``renderResults``) while this
+    // action still walked every resolved proposal — a click on "Move
+    // N extra copies to Trash" would then trash records for groups the
+    // filter had hidden from view.
+    var resolved = _proposals.filter(function(p) {
+      return p.status === 'resolved' && groupMatchesFilter(p);
+    });
     var ids = [];
     resolved.forEach(function(p) {
       if (isBulkTrashProtected(p)) return;
