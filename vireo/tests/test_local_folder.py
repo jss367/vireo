@@ -120,6 +120,27 @@ def test_custom_local_destination_refuses_other_catalog_source(tmp_path):
         db.close()
 
 
+def test_custom_local_destination_refuses_other_session_directory(tmp_path):
+    db, vireo_dir, _source, _first, _second, folder_id = _shared_environment(tmp_path)
+    other_source = tmp_path / "nas" / "other-source"
+    other_source.mkdir()
+    other_id = db.add_folder(
+        str(other_source), name="other-source", link_to_workspace=False
+    )
+    other_session_base = vireo_dir / "local-folders" / str(other_id) / "files"
+    try:
+        with pytest.raises(LocalWorkspaceError, match="session storage"):
+            stage_folder(
+                db,
+                folder_id,
+                str(vireo_dir),
+                local_base=str(other_session_base),
+            )
+        assert not (other_session_base / "photos").exists()
+    finally:
+        db.close()
+
+
 def test_custom_local_cleanup_failure_preserves_session(tmp_path, monkeypatch):
     from services import local_folder as service
 

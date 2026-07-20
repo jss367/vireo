@@ -303,7 +303,9 @@ def _load_sync_recovery(vireo_dir: str, root_folder_id: int) -> set | None:
     return result
 
 
-def _catalog_records(db, root_folder_id: int, local_base: Path) -> tuple[list[dict], list[dict]]:
+def _catalog_records(
+    db, root_folder_id: int, local_base: Path, vireo_dir: str
+) -> tuple[list[dict], list[dict]]:
     row = db.conn.execute(
         "SELECT id, path, status FROM folders WHERE id=?", (root_folder_id,)
     ).fetchone()
@@ -373,6 +375,22 @@ def _catalog_records(db, root_folder_id: int, local_base: Path) -> tuple[list[di
         ):
             raise LocalWorkspaceError(
                 f"Local destination overlaps a folder Vireo already manages: {catalog_source}"
+            )
+    own_session_dir = folder_dir(vireo_dir, root_folder_id)
+    protected_session_roots = [
+        Path(vireo_dir) / "local-folders",
+        Path(vireo_dir) / "local-workspaces",
+    ]
+    for session_root in protected_session_roots:
+        overlaps = _physical_is_within(
+            str(local_root), str(session_root)
+        ) or _physical_is_within(str(session_root), str(local_root))
+        belongs_to_current_session = _physical_is_within(
+            str(local_root), str(own_session_dir)
+        )
+        if overlaps and not belongs_to_current_session:
+            raise LocalWorkspaceError(
+                f"Local destination overlaps Vireo session storage: {session_root}"
             )
     for existing in db.conn.execute(
         "SELECT root_folder_id, local_path FROM local_folder_mappings WHERE is_root=1"
@@ -483,7 +501,9 @@ def stage_folder(
             )
             if not selected_base.is_absolute():
                 raise LocalWorkspaceError("Local destination must be an absolute path")
-            roots, folders = _catalog_records(db, root_folder_id, selected_base)
+            roots, folders = _catalog_records(
+                db, root_folder_id, selected_base, vireo_dir
+            )
             local_root = roots[0]["local_path"]
             try:
                 os.makedirs(local_root, exist_ok=False)
