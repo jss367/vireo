@@ -1434,8 +1434,16 @@ class Database:
                 )
         # One-shot backfill from stored exif_data, gated by db_meta (not
         # user_version, which has drifted on live DBs). Rows whose exif_data
-        # is missing or the minimal "{}" marker have nothing to extract;
-        # they stay NULL and a future full-metadata scan fills them.
+        # is the minimal "{}" marker were scanned with
+        # ``extract_full_metadata=False`` before the promoted columns
+        # existed — nothing to backfill from the JSON, and the scanner's
+        # incremental pre-pass treats any non-NULL ``exif_data`` as
+        # "already extracted", so leaving the marker in place would keep
+        # camera/lens/iso NULL forever until a user manually forces a full
+        # non-incremental scan. Clear those rows back to NULL so the next
+        # scan re-runs ExifTool and populates the promoted columns
+        # (``scanner._compute_file_features`` writes them whenever
+        # ``file_meta`` is present, independent of the full-JSON flag).
         marker = self.conn.execute(
             "SELECT value FROM db_meta WHERE key='exif_summary_backfill_v1'"
         ).fetchone()
@@ -1453,6 +1461,10 @@ class Database:
                     "SELECT id, exif_data FROM photos "
                     "WHERE exif_data IS NOT NULL AND exif_data != '{}'"
                 ).fetchall()
+                self.conn.execute(
+                    "UPDATE photos SET exif_data = NULL "
+                    "WHERE exif_data = '{}'"
+                )
             for row in rows:
                 try:
                     grouped = json.loads(row["exif_data"])
@@ -17967,10 +17979,25 @@ class Database:
                         return f"NOT {cond}", params
                     return cond, params
             if field == "has_species":
+                # Mirror the species-filter and ``get_species_keywords_for_photos``
+                # eligibility (``is_species = 1 OR type = 'taxonomy'``, gated
+                # to species-rank / no-rank taxa). Legacy/upgraded photos
+                # store species as ``type='taxonomy'`` with ``is_species=0``,
+                # so a plain ``k.is_species = 1`` check disagreed with the
+                # species names Browse and the species filter show for the
+                # same photo.
+                has_species_exists = (
+                    "EXISTS (SELECT 1 FROM photo_keywords pk "
+                    "JOIN keywords k ON k.id = pk.keyword_id "
+                    "LEFT JOIN taxa t ON t.id = k.taxon_id "
+                    "WHERE pk.photo_id = p.id "
+                    "AND (k.is_species = 1 OR k.type = 'taxonomy') "
+                    "AND (t.rank = 'species' OR t.rank IS NULL))"
+                )
                 if op in ("equals", "is") and _falsey(value):
-                    return _keyword_not_exists("k.is_species = 1", [])
+                    return f"NOT {has_species_exists}", []
                 if op in ("equals", "is") and _truthy(value):
-                    return _keyword_exists("k.is_species = 1", [])
+                    return has_species_exists, []
             if field == "has_subject":
                 subject_types = sorted(self.get_subject_types())
                 if not subject_types:
@@ -18513,15 +18540,17 @@ class Database:
         """
         # Path normalization matches ``_build_query_from_rules`` for the
         # ``folder``/``under`` op so a Windows library's backslash paths
-        # aggregate the same way here as they filter there.
+        # aggregate the same way here as they filter there. ``norm_folder``
+        # is used both as an equality value and as a LIKE pattern prefix;
+        # ``norm_folder_like`` additionally escapes SQL LIKE metacharacters
+        # (``%``/``_``) so a folder like ``/pics/my_dir`` only aggregates
+        # its own subtree and does not double-count photos under a sibling
+        # ``/pics/myXdir``. The engine's ``folder under`` op escapes the
+        # same characters via ``_escape_like``. The ``\\`` escape char is
+        # safe to introduce here because path normalization above has
+        # already collapsed every literal ``\`` to ``/``.
         norm_photo = "REPLACE(matched.ppath, '\\', '/')"
         norm_folder = "REPLACE(ff.path, '\\', '/')"
-        # Subtree LIKE pattern needs its metacharacters (``_`` and ``%``)
-        # escaped, or a stored folder such as ``/photos/my_dir`` would
-        # match ``/photos/myXdir/...`` too and overcount the facet. The
-        # ``\\`` escape char is safe to introduce here because the path
-        # normalization above has already collapsed every literal ``\``
-        # to ``/``.
         norm_folder_like = (
             f"REPLACE(REPLACE({norm_folder}, '%', '\\%'), '_', '\\_')"
         )

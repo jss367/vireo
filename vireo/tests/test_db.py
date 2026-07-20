@@ -20601,3 +20601,83 @@ def test_get_filter_field_values_folder_escapes_like_metacharacters(tmp_path):
         assert rule_count == values.get(path), (
             f"mismatch for {path!r}: rule={rule_count} suggest={values.get(path)}"
         )
+
+
+def test_exif_backfill_migration_clears_empty_marker_for_rescan(tmp_path):
+    """Rows whose ``exif_data`` is the ``'{}'`` marker were scanned with
+    ``extract_full_metadata=False`` before the promoted EXIF columns
+    existed, so there is nothing to backfill from JSON. The scanner's
+    incremental pre-pass treats any non-NULL ``exif_data`` as already
+    extracted, so leaving the marker in place would keep camera/lens/iso
+    NULL until a user manually forces a full non-incremental scan. The
+    migration must clear those rows back to NULL so the next incremental
+    scan re-runs ExifTool and populates the promoted columns.
+    """
+    from db import Database
+    path = str(tmp_path / "test.db")
+    db, fid = _filter_db(tmp_path)
+    empty = db.add_photo(folder_id=fid, filename='empty.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    populated = db.add_photo(folder_id=fid, filename='sony.arw', extension='.arw',
+                             file_size=100, file_mtime=1.0)
+    import json as _json
+    exif = {"EXIF": {"Make": "Sony", "Model": "ILCE-1"}}
+    db.conn.execute(
+        "UPDATE photos SET exif_data='{}', camera_make=NULL, "
+        "camera_model=NULL WHERE id=?", (empty,))
+    db.conn.execute(
+        "UPDATE photos SET exif_data=?, camera_make=NULL, "
+        "camera_model=NULL WHERE id=?", (_json.dumps(exif), populated))
+    # Simulate pre-backfill.
+    db.conn.execute("DELETE FROM db_meta WHERE key='exif_summary_backfill_v1'")
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(path)
+    # Populated row is backfilled from its stored JSON.
+    row = db2.conn.execute(
+        "SELECT exif_data, camera_make, camera_model FROM photos WHERE id=?",
+        (populated,)).fetchone()
+    assert row["camera_make"] == "Sony"
+    assert row["camera_model"] == "ILCE-1"
+    # Empty-marker row is cleared so the next incremental scan re-extracts
+    # ExifTool for it (the pre-pass keys on ``exif_data IS NOT NULL``).
+    row = db2.conn.execute(
+        "SELECT exif_data, camera_make, camera_model FROM photos WHERE id=?",
+        (empty,)).fetchone()
+    assert row["exif_data"] is None
+    assert row["camera_make"] is None
+    assert row["camera_model"] is None
+    db2.close()
+
+
+def test_universal_filter_has_species_matches_taxonomy_type_keyword(tmp_path):
+    """``has_species`` must accept species stored as
+    ``type='taxonomy'`` with ``is_species=0`` — the shape upgraded/legacy
+    photos carry and that the species filter,
+    ``get_species_keywords_for_photos``, and Browse all treat as species.
+    A plain ``k.is_species = 1`` check disagreed: the same photo would
+    appear under ``species is Verdin`` yet fail ``has_species is true``.
+    """
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    p_legacy = db.add_photo(folder_id=fid, filename='legacy.jpg', extension='.jpg',
+                            file_size=100, file_mtime=1.0)
+    p_none = db.add_photo(folder_id=fid, filename='none.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    # Legacy shape: type='taxonomy', is_species=0, taxon linked to a species.
+    legacy_kw = db.add_keyword("Verdin")
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=0, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], legacy_kw))
+    db.conn.commit()
+    db.tag_photo(p_legacy, legacy_kw)
+
+    count = db.count_photos_for_rules
+    # Sanity: the species filter already accepts this shape.
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 1
+    # ``has_species true`` must agree — legacy taxonomy keyword counts.
+    assert count([{"field": "has_species", "op": "is", "value": 1}]) == 1
+    # ``has_species false`` must exclude the same photo.
+    assert count([{"field": "has_species", "op": "is", "value": 0}]) == 1
+    _ = p_none  # keep the untagged photo alive for the negative branch.
