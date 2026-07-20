@@ -57,6 +57,7 @@ window.addEventListener('unhandledrejection', function(event) {
  * @param {string} [title] - Dialog title
  * @param {object} [opts] - Options
  * @param {boolean} [opts.multiple] - Allow selecting multiple folders
+ * @param {string} [opts.defaultPath] - Directory shown when the dialog opens
  * @returns {Promise<string|string[]|null>} Selected directory path(s), or null if cancelled.
  *   Returns an array when `opts.multiple` is true, otherwise a string.
  */
@@ -67,6 +68,7 @@ async function pickDirectory(title, opts) {
     directory: true,
     multiple: !!opts.multiple,
     title: title || 'Select Folder',
+    defaultPath: opts.defaultPath || undefined,
   });
   return result || null;
 }

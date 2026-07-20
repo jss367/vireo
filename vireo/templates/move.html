@@ -508,7 +508,12 @@ body { padding-bottom: 48px; }
   line-height: 1.3;
   letter-spacing: -0.015em;
 }
-.confirm-message { color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
+.confirm-message {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-line;
+}
 .confirm-route {
   overflow: hidden;
   margin-bottom: 14px;
@@ -1019,6 +1024,13 @@ function populateFolderSelects() {
       sel.appendChild(opt);
     });
   });
+
+  var requestedFolderId = new URLSearchParams(window.location.search).get('folder_id');
+  if (requestedFolderId) {
+    var quickSelect = document.getElementById('quickFolderSelect');
+    quickSelect.value = requestedFolderId;
+    if (quickSelect.value === requestedFolderId) onQuickFolderChange();
+  }
 }
 
 /* ---------- Quick Move ---------- */
@@ -1703,8 +1715,8 @@ async function startQuickMove() {
     ? setQuickMoveSummary(folder, finalPath)
     : 'Confirm moving photos from ' + sourcePath + ' to ' + finalPath + '?';
   var verifyText = remoteId
-    ? ' Transferred over SSH and verified by checksum before originals are removed.'
-    : ' Files will be copied and verified before originals are removed.';
+    ? '\n\nTransferred over SSH and verified by checksum before originals are removed.'
+    : '\n\nFiles will be copied and verified before originals are removed.';
   if (pf.exists) {
     var p = pf.preview || {};
     var copyN = p.will_copy;

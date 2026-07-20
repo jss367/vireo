@@ -664,9 +664,17 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
     import shutil
     import subprocess
     import sys
+
+    import metadata
     monkeypatch.setattr(sys, "platform", "darwin")
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/local/bin/brew" if cmd == "brew" else (None if cmd == "exiftool" else original_which(cmd)))
+    monkeypatch.setattr(metadata, "find_homebrew", lambda: "/usr/local/bin/brew")
+    statuses = iter([
+        {"available": False, "path": "", "version": None, "error": None, "hint": ""},
+        {"available": True, "path": "/usr/local/bin/exiftool", "version": "13.59", "error": None, "hint": ""},
+    ])
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: next(statuses))
     monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0, "stderr": ""})())
     app, _ = app_and_db
     with app.test_client() as client:
@@ -674,15 +682,54 @@ def test_install_exiftool_endpoint_exists(app_and_db, monkeypatch):
         assert resp.status_code == 200
         data = resp.get_json()
         assert data.get("success") is True
+        assert data["exiftool"]["path"] == "/usr/local/bin/exiftool"
+
+
+def test_install_exiftool_verifies_homebrew_result(app_and_db, monkeypatch):
+    """A successful brew exit must not mask an undiscoverable ExifTool."""
+    import subprocess
+    import sys
+
+    import metadata
+
+    unavailable = {
+        "available": False,
+        "path": "",
+        "version": None,
+        "error": "not found",
+        "hint": "",
+    }
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: unavailable)
+    monkeypatch.setattr(metadata, "find_homebrew", lambda: "/opt/homebrew/bin/brew")
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **kw: type("R", (), {"returncode": 0, "stderr": ""})(),
+    )
+
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/system/install-exiftool")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["success"] is False
+        assert "could not run ExifTool" in data["error"]
 
 
 def test_install_exiftool_fails_without_brew(app_and_db, monkeypatch):
     """Install endpoint should fail gracefully when brew is not available."""
     import shutil
     import sys
+
+    import metadata
     monkeypatch.setattr(sys, "platform", "darwin")
     original_which = shutil.which
     monkeypatch.setattr(shutil, "which", lambda cmd: None if cmd in ("brew", "exiftool") else original_which(cmd))
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": False, "path": "", "version": None,
+        "error": None, "hint": "",
+    })
+    monkeypatch.setattr(metadata, "find_homebrew", lambda: None)
     app, _ = app_and_db
     with app.test_client() as client:
         resp = client.post("/api/system/install-exiftool")
@@ -2565,7 +2612,10 @@ def _fake_active_model(monkeypatch):
     survive to the job config unmangled."""
     import models
 
-    monkeypatch.setattr(models, "get_active_model", lambda: {"id": "fake"})
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "fake", "model_type": "timm", "model_str": "fake",
+        "weights_path": "",
+    })
 
 
 def _process_id(db, name):
@@ -3370,6 +3420,310 @@ def _import_card(tmp_path, names=("DSC_0001.jpg",)):
     return str(card)
 
 
+@pytest.mark.parametrize("route,copy_mode", [
+    ("/api/jobs/import-in-place", False),
+    ("/api/jobs/import-photos", True),
+])
+def test_photo_import_requires_exiftool_with_explicit_advanced_override(
+    app_and_db, tmp_path, monkeypatch, route, copy_mode,
+):
+    import metadata
+
+    app, _ = app_and_db
+    app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"] = True
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": False,
+        "path": "",
+        "version": None,
+        "error": None,
+        "hint": "repair ExifTool",
+    })
+    card = _import_card(tmp_path)
+    body = {"sources": [card], "after_import": None}
+    if copy_mode:
+        body["destination"] = str(tmp_path / "archive")
+
+    with app.test_client() as client:
+        blocked = client.post(route, json=body)
+        assert blocked.status_code == 409
+        assert blocked.get_json()["code"] == "exiftool_required"
+        assert "capture dates" in blocked.get_json()["error"]
+
+        body["allow_missing_exiftool"] = True
+        allowed = client.post(route, json=body)
+        assert allowed.status_code == 200, allowed.get_json()
+        job = wait_for_job_via_client(client, allowed.get_json()["job_id"])
+        assert job["status"] == "completed", job
+        assert job["config"]["allow_missing_exiftool"] is True
+
+
+def test_import_readiness_surfaces_and_starts_metadata_repair(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import metadata
+    import scanner
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+    monkeypatch.setattr(scanner, "extract_metadata", lambda paths, **kwargs: {
+        path: {"EXIF": {"Make": "Repair Camera"}, "File": {"FileType": "JPEG"}}
+        for path in paths
+    })
+    photos = tmp_path / "repair-photos"
+    photos.mkdir()
+    source = photos / "repair.jpg"
+    Image.new("RGB", (32, 24), "green").save(source)
+    folder_id = db.add_folder(str(photos), name="repair-photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename=source.name,
+        extension=".jpg",
+        file_size=source.stat().st_size,
+        file_mtime=source.stat().st_mtime,
+    )
+    assert db.conn.execute(
+        "SELECT exif_data FROM photos WHERE id = ?", (photo_id,),
+    ).fetchone()["exif_data"] is None
+
+    with app.test_client() as client:
+        ready = client.get("/api/import/readiness")
+        assert ready.status_code == 200
+        payload = ready.get_json()
+        assert payload["exiftool"]["available"] is True
+        assert payload["metadata_repair_count"] >= 1
+        assert payload["metadata_repair_available"] is True
+
+        started = client.post("/api/jobs/repair-metadata")
+        assert started.status_code == 200, started.get_json()
+        assert started.get_json()["photo_count"] >= 1
+        job = wait_for_job_via_client(client, started.get_json()["job_id"])
+        assert job["type"] == "metadata-repair"
+        assert job["config"]["repair_metadata"] is True
+        repaired = db.conn.execute(
+            "SELECT exif_data FROM photos WHERE id = ?", (photo_id,),
+        ).fetchone()["exif_data"]
+        assert json.loads(repaired)["EXIF"]["Make"] == "Repair Camera"
+
+
+def test_import_readiness_skips_excluded_bundle_roots(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The readiness endpoint fires as soon as the Import page opens; it
+    must never stat a workspace root that resolves inside a macOS
+    ``.photoslibrary`` bundle, since that stat itself trips the TCC
+    "access data from other apps" prompt for Photos Library-style
+    bundles."""
+    import app as app_module
+    import metadata
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    reachable = tmp_path / "reachable"
+    reachable.mkdir()
+    bundle = tmp_path / "Photos Library.photoslibrary"
+    bundle.mkdir()
+    db.add_folder(str(reachable), name="reachable")
+    db.add_folder(str(bundle), name="legacy-library")
+
+    original_isdir = os.path.isdir
+    isdir_calls = []
+
+    def tracking_isdir(path):
+        isdir_calls.append(path)
+        return original_isdir(path)
+
+    monkeypatch.setattr(app_module.os.path, "isdir", tracking_isdir)
+
+    with app.test_client() as client:
+        resp = client.get("/api/import/readiness")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload["reachable_root_count"] == 1
+
+    assert str(bundle) not in isdir_calls, (
+        f"os.path.isdir must not be called on excluded bundle roots; "
+        f"got calls: {isdir_calls!r}"
+    )
+
+
+def test_import_readiness_counts_photos_in_stale_missing_folders(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A workspace root that was marked ``status='missing'`` while its
+    drive was unplugged, then reconnected, still carries a stale status
+    until ``check_folder_health`` next runs. The readiness count must
+    include those photos anyway — otherwise the Import page would report
+    ``0`` repairable rows in the reconnection window and users would have
+    no button to click even though the repair job could scan the drive.
+    """
+    import metadata
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    photos = tmp_path / "reconnected"
+    photos.mkdir()
+    source = photos / "needs-repair.jpg"
+    Image.new("RGB", (32, 24), "green").save(source)
+    folder_id = db.add_folder(str(photos), name="reconnected")
+    db.add_photo(
+        folder_id=folder_id,
+        filename=source.name,
+        extension=".jpg",
+        file_size=source.stat().st_size,
+        file_mtime=source.stat().st_mtime,
+    )
+    # Simulate the drive-unplugged→plugged-back-in window: folder row
+    # still says missing even though ``os.path.isdir`` sees the tree.
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (folder_id,),
+    )
+    db.conn.commit()
+
+    with app.test_client() as client:
+        ready = client.get("/api/import/readiness")
+        assert ready.status_code == 200
+        payload = ready.get_json()
+        assert payload["metadata_repair_count"] >= 1
+        assert payload["metadata_repair_available"] is True
+
+        started = client.post("/api/jobs/repair-metadata")
+        assert started.status_code == 200, started.get_json()
+        assert started.get_json()["photo_count"] >= 1
+
+
+def test_import_readiness_excludes_offline_root_photos_from_repair_count(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Photos under an offline workspace root must not inflate the count.
+
+    Concrete pathology this closes: a workspace with two roots, one whose
+    drive is currently unplugged (photos there have ``exif_data IS NULL``)
+    and another that's fully imported. An unscoped count combined with a
+    non-empty reachable-roots list would enable the Repair button and
+    start a job that finishes without ever touching the offline photos —
+    the reported count would then stay the same, so the button would
+    remain enabled and the user could re-run the same no-op forever.
+    """
+    import metadata
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    # Reachable root — every photo already has EXIF, so this root
+    # contributes zero to the repair count on its own.
+    reachable = tmp_path / "reachable-drive"
+    reachable.mkdir()
+    reach_src = reachable / "ok.jpg"
+    Image.new("RGB", (32, 24), "green").save(reach_src)
+    reach_fid = db.add_folder(str(reachable), name="reachable-drive")
+    reach_pid = db.add_photo(
+        folder_id=reach_fid,
+        filename=reach_src.name,
+        extension=".jpg",
+        file_size=reach_src.stat().st_size,
+        file_mtime=reach_src.stat().st_mtime,
+    )
+    db.conn.execute(
+        "UPDATE photos SET exif_data = ? WHERE id = ?",
+        ('{"EXIF": {"Make": "cam"}}', reach_pid),
+    )
+
+    # Offline root — path lives in the DB, but the directory is not on
+    # disk (drive unplugged). The photo under it has NULL EXIF.
+    offline_path = str(tmp_path / "unplugged-drive")
+    off_fid = db.add_folder(offline_path, name="unplugged-drive")
+    db.add_photo(
+        folder_id=off_fid,
+        filename="orphan.jpg",
+        extension=".jpg",
+        file_size=1024,
+        file_mtime=0.0,
+    )
+    db.conn.commit()
+
+    with app.test_client() as client:
+        resp = client.get("/api/import/readiness")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+        assert payload["reachable_root_count"] == 1
+        # The offline root's photo is exif_data IS NULL but its root is
+        # not reachable, so the scoped count must exclude it. The
+        # reachable root has no NULL-EXIF photos, so the count is 0 and
+        # the Repair button stays disabled.
+        assert payload["metadata_repair_count"] == 0
+        assert payload["metadata_repair_available"] is False
+
+        # /api/jobs/repair-metadata must refuse to start the no-op job.
+        blocked = client.post("/api/jobs/repair-metadata")
+        assert blocked.status_code == 409
+        assert "no photos need metadata repair" in blocked.get_json()["error"]
+
+
+def test_import_readiness_excludes_deleted_originals_from_repair_count(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A DB-only photo cannot be repaired by the disk-discovery scan."""
+    import metadata
+
+    app, db = app_and_db
+    monkeypatch.setattr(metadata, "exiftool_status", lambda: {
+        "available": True,
+        "path": "/bundled/exiftool",
+        "version": "13.59",
+        "error": None,
+        "hint": "",
+    })
+
+    photos = tmp_path / "reachable-with-deleted-original"
+    photos.mkdir()
+    folder_id = db.add_folder(str(photos), name=photos.name)
+    db.add_photo(
+        folder_id=folder_id,
+        filename="deleted.jpg",
+        extension=".jpg",
+        file_size=1024,
+        file_mtime=0.0,
+    )
+
+    with app.test_client() as client:
+        ready = client.get("/api/import/readiness")
+        assert ready.status_code == 200
+        payload = ready.get_json()
+        assert payload["reachable_root_count"] == 1
+        assert payload["metadata_repair_count"] == 0
+        assert payload["metadata_repair_available"] is False
+
+        blocked = client.post("/api/jobs/repair-metadata")
+        assert blocked.status_code == 409
+        assert "no photos need metadata repair" in blocked.get_json()["error"]
+
+
 def test_lightroom_import_route_not_shadowed(app_and_db):
     """POST /api/jobs/import (Lightroom catalogs) keeps its contract —
     the photo import route is a NEW endpoint, not a rename."""
@@ -3411,6 +3765,1512 @@ def test_import_photos_happy_path(app_and_db, tmp_path):
     assert result["discovered"] == 1
     assert result["copied"] == 1
     assert result["safe_to_format"] is True
+
+
+def _save_nas_target(tmp_path, local_root=None):
+    import config as cfg
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos", "mount_path": str(tmp_path / "mnt"),
+    }
+    if local_root is not None:
+        target["local_archive_root"] = str(local_root)
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    return target
+
+
+def test_after_process_move_requires_after_import(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    local_root = tmp_path / "archive"
+    _save_nas_target(tmp_path, local_root=local_root)
+    card = _import_card(tmp_path)
+    dest = local_root / "sub"
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(dest),
+        "after_import": None,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "after_import" in resp.get_json()["error"]
+
+
+def test_after_process_move_unknown_target(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "archive"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nope"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "nope" in resp.get_json()["error"]
+
+
+def test_after_process_move_target_without_root(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    _save_nas_target(tmp_path)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "archive"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "local archive root" in resp.get_json()["error"]
+
+
+def test_after_process_move_target_without_mount_path(app_and_db, tmp_path):
+    """A target with a valid local_archive_root but an empty mount_path is
+    unusable for the chain — the move job would reject it, but only after
+    the import and processing have finished, stranding photos in the local
+    archive. Reject up front."""
+    import config as cfg
+    local_root = tmp_path / "archive"
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": "",
+        "local_archive_root": str(local_root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(local_root),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "mount path" in resp.get_json()["error"]
+
+
+def test_after_process_move_target_with_relative_mount_path(
+        app_and_db, tmp_path):
+    """A relative mount_path would be resolved against the server's CWD by
+    later realpath calls — that's non-deterministic and never what the user
+    intended. Reject up front so the chain doesn't accept a target it can't
+    actually deliver to."""
+    import config as cfg
+    local_root = tmp_path / "archive"
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": "NAS",
+        "local_archive_root": str(local_root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(local_root),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount path" in err and "absolute" in err
+
+
+def test_after_process_move_destination_outside_root(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    local_root = tmp_path / "archive"
+    _save_nas_target(tmp_path, local_root=local_root)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "elsewhere"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "archive root" in resp.get_json()["error"]
+
+
+def test_after_process_move_rejects_destination_under_mount(app_and_db, tmp_path, stub_move):
+    """A local_archive_root broader than mount_path can contain the mount:
+    a destination under the mount would land the import directly on the NAS
+    and the chained move would re-copy it under remote_path/<mount leaf>/…,
+    nesting duplicates. Reject it; a sibling inside the root stays legal."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "NAS"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root / "NAS" / "staging"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "mount" in resp.get_json()["error"]
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root / "staging"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    for mid in process_job["result"].get("move_job_ids", []):
+        wait_for_job_via_client(client, mid)
+
+
+def test_after_process_move_rejects_template_landing_under_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """The destination-vs-mount guard only inspects the base destination, but
+    ``run_import_job`` joins the rendered ``folder_template`` underneath it.
+    A template whose static prefix (everything before the first strftime
+    directive) is already at or inside the target's NAS mount lands every
+    render on the NAS — the chained move then treats "<mount leaf>/…" as
+    an archive-relative subpath and re-copies it under remote_path. Reject
+    up front; a sibling-in-root template stays legal."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "NAS"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "NAS/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+    assert "NAS" in err
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    for mid in process_job["result"].get("move_job_ids", []):
+        wait_for_job_via_client(client, mid)
+
+
+def test_after_process_move_rejects_strftime_template_landing_under_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """The static-prefix guard stops at the first ``%``-bearing component, so
+    a template like the default ``%Y/%Y-%m-%d`` slips past it even when a
+    render of ``%Y`` matches the mount leaf (e.g. mount=<root>/2026): the
+    import would land on the NAS and the chained move would re-copy it under
+    remote_path/2026/…. Treat strftime tokens as wildcards that could produce
+    whatever the mount has at that depth and reject up front. A template with
+    a literal component at the mount depth that can't match the mount leaf,
+    or a template shallower than the mount, stays legal — no render can
+    reach the mount."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    # Mount lives at <root>/2026 — a strftime-only template can slip past
+    # the leading-static-prefix check but every %Y render lands on it.
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "2026"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # Default dated template: %Y renders to "2026", matching the mount leaf.
+    # Every 2026 render would land directly on the NAS mount.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y/%Y-%m-%d",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+    assert "2026" in err
+
+    # Deeper mount plus a template whose components can all match every
+    # depth of the mount rel to destination — reject.
+    target["mount_path"] = str(root / "2026" / "07")
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y/%m/%d",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+
+    # Deeper mount with a template that has a literal at the mount-depth
+    # position that can't match the mount leaf — no render can reach the
+    # mount, so the request is legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y/fixed-name",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    # Template shallower than the mount, but every template component can
+    # match the corresponding mount component at that depth: the render
+    # WRAPS the mount (import folder ends up as an ancestor of the mount).
+    # Example: mount=<root>/2026/07, template=%Y renders to <root>/2026,
+    # which contains the mount — the chained move computes the NAS-side
+    # destination as ``mount_path/2026`` = ``<root>/2026/07/2026``, INSIDE
+    # the source ``<root>/2026``, and ``move_folder`` rejects mid-run
+    # after the import and processing have already completed. Reject the
+    # combination up front.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+
+    # Template shallower than the mount whose first component CAN'T match
+    # the mount's first component — the render lands elsewhere entirely,
+    # neither on nor around the mount. Legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_after_process_move_accepts_digit_template_against_letter_mount_leaf(
+    app_and_db, tmp_path, stub_move,
+):
+    """The pre-fix guard treated every ``%``-bearing template component as
+    a wildcard that could produce anything at the mount's depth, so the
+    default ``%Y/%Y-%m-%d`` template against a mount whose leaf is a
+    letter-only name like ``NAS`` was falsely rejected — yet ``%Y``
+    renders four digits and can never equal ``NAS``. Users with a NAS
+    mount below their archive root (a common Photos-drive layout) could
+    not enable the chained move with the default template. Lock in that
+    the guard now inspects each ``%``-bearing component's actual output
+    shape via ``_strftime_template_can_render``: digit-only directives
+    cannot match a letter-only mount leaf, so the request is accepted."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    # Mount lives at <root>/NAS — the leaf is letters, so no strftime
+    # render of ``%Y`` (four digits) can ever equal it.
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "NAS"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # Default dated template: neither ``%Y`` nor ``%Y-%m-%d`` can render
+    # the letter-only mount leaf ``NAS``. Legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y/%Y-%m-%d",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    # Deeper mount whose leaves are letters — no digit-only template can
+    # reach either component. Legal.
+    target["mount_path"] = str(root / "NAS" / "shoots")
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y/%m/%d",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    # Mixed literal + strftime template where the ``%``-bearing component
+    # can't produce the mount leaf at its depth. ``%d`` renders 1-2 digits,
+    # never ``mixed`` — the guard should not reject.
+    target["mount_path"] = str(root / "shoots" / "mixed")
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots/%d",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    # Sanity: locale-varying month-name directive ``%B`` (renders
+    # "January", "February", …) is still treated as a wildcard for
+    # letter-only mount leaves — some locale could plausibly render
+    # ``NAS``-shaped strings, and the guard must stay at least as strict
+    # as the pre-fix wildcard behavior for these tokens.
+    target["mount_path"] = str(root / "NAS")
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%B/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+
+
+def test_after_process_move_rejects_separator_rendering_strftime_template(
+    app_and_db, tmp_path, stub_move,
+):
+    """Some strftime directives render path separators — the POSIX ``%D``
+    always renders ``MM/DD/YY``, and ``%x`` does the same on common
+    locales. Those tokens survive the raw ``os.sep`` split as a single
+    component but expand to multiple path components at import time. A
+    template like ``%D`` with a mount at ``<root>/07/20`` slips a
+    per-component length check even though every render lands on the
+    NAS. Locks in that the mount-tree guard (whether via wildcard
+    treatment or an explicit probe render) rejects this case up front."""
+    import datetime as _dt
+
+    # Skip on hosts whose libc doesn't implement %D (e.g. some non-glibc
+    # setups) — the raw compare would then be identity to "%D", not a
+    # slash-bearing render, and the case never triggers.
+    if "/" not in _dt.datetime(2000, 1, 2).strftime("%D"):
+        pytest.skip("%D does not render slashes on this host's libc")
+
+    import config as cfg
+    root = tmp_path / "Photos"
+    # Mount lives at <root>/01/02 — deeper than the raw single-component
+    # split of "%D" but overlapping its rendered MM/DD prefix.
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "01" / "02"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%D",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+
+    # A template with a literal first component that can't match the
+    # mount's outer ancestor stays legal — no render of ``shoots/%Y``
+    # can reach or wrap ``<root>/01/02``.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_after_process_move_rejects_dot_prefixed_template_landing_under_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """The mount-check guard splits the template's components; without
+    normalization, a leading ``.`` stays as its own component and misaligns
+    with the mount's leaf. But the import path normalizes ``./NAS/%Y``
+    under ``destination`` into ``destination/NAS/2026`` — landing on the
+    mount and letting the chained move duplicate under remote_path. The
+    guard must normalize dot components the same way the import does."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "NAS"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # Leading ``./`` in the template renders to the same import path as
+    # "NAS/%Y" (which the earlier test already rejects). Must reject too.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "./NAS/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+    assert "NAS" in err
+
+    # Interior ``/./`` components should collapse too — the render lands on
+    # the mount just the same.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "NAS/./%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+
+    # After the leading dot is dropped, the template's mount-depth component
+    # is a literal that doesn't match the mount leaf — stays legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "./shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_after_process_move_rejects_case_alias_template_landing_under_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """On a case-insensitive volume (default macOS APFS), a template whose
+    component differs only by case from the mount leaf still resolves onto
+    the mount because the filesystem treats the names as the same directory.
+    A byte-wise ``os.path.normcase`` compare is a no-op on POSIX and would
+    let ``nas/%Y`` slip past when the mount leaf is ``NAS`` — the import
+    would land straight on the NAS mount and the chained move would then
+    re-copy the on-mount files under ``remote_path/nas/…``. The guard must
+    fold case via the filesystem itself (``os.path.samefile`` /
+    ``_path_equal_or_descends``)."""
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("requires a case-insensitive filesystem")
+
+    import config as cfg
+    root = tmp_path / "Photos"
+    (root / "NAS").mkdir(parents=True)
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "NAS"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # Template component differs only in case from the mount leaf. On the
+    # case-insensitive volume the render lands directly on the NAS mount.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "nas/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+    assert "NAS" in err
+
+    # A literal component that cannot alias the mount leaf stays legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_after_process_move_rejects_template_wrapping_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """The mount-depth gate accepted templates that render SHALLOWER than
+    the mount, on the theory that a render ending above the mount can't
+    land ON it. But when the shallower render's components all match the
+    mount's corresponding components (literal-equal or ``%``-bearing), the
+    render ends up as an ANCESTOR of the mount — the mount ends up inside
+    the import source tree. The chained move then computes the NAS-side
+    destination as ``mount_path/<rel>`` where ``<rel>`` is the import
+    folder's path relative to the archive root. That destination sits
+    strictly INSIDE the source folder (mount is under the source), and
+    ``move_folder`` refuses it as a destination-inside-source mid-run —
+    after the import and processing have already completed. Reject the
+    combination up front."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    # local_archive_root broader than mount_path: mount nested TWO levels
+    # deeper than what the template renders.
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "2026" / "07"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # ``%Y`` renders to ``2026`` — the import folder becomes ``<root>/2026``
+    # and the mount ``<root>/2026/07`` sits INSIDE it. Chained move would
+    # target ``<root>/2026/07/2026`` (inside source) — reject up front.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+    assert "2026" in err
+
+    # Literal shallower template that matches the mount's first component
+    # exactly wraps the mount too — reject.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "2026",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+
+    # Shallower template whose literal can't match the mount's first
+    # component — the render lands elsewhere, not on or around the mount.
+    # Legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_after_process_move_rejects_empty_template_wrapping_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """When the destination is a SUBFOLDER of local_archive_root that
+    contains the target's mount, a folder_template that renders empty
+    (``""`` or ``"."``) leaves the import at the destination itself. The
+    mount then sits INSIDE the import source tree, and the chained move
+    computes the NAS-side destination as ``mount_path/<rel(dest, root)>``
+    — which is inside the source — so ``move_folder`` rejects it as
+    destination-inside-source only after the import and processing have
+    already run. Reject up front. The earlier template-vs-mount guard
+    accepted this because it required ``template_components`` to be
+    non-empty; the fix lets that check run with an empty template
+    (candidate = the destination itself)."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    shoot = root / "Shoot"
+    # local_archive_root broader than the destination; the mount sits
+    # INSIDE the destination the user picked.
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(shoot / "NAS"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # Empty and "." both render to ".", so the import lands at
+    # ``<shoot>`` and the mount ``<shoot>/NAS`` sits inside the source.
+    for template in ("", "."):
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [card],
+            "destination": str(shoot),
+            "folder_template": template,
+            "after_import": cull_ready_id,
+            "after_process_move": {"remote_target_id": "nas1"},
+        })
+        assert resp.status_code == 400, (template, resp.get_json())
+        err = resp.get_json()["error"]
+        # Explains that the destination itself would wrap the mount, so
+        # the user sees WHY at request time — not later, silently.
+        assert "NAS mount" in err
+        assert "NAS" in err
+
+    # A non-empty template that steers away from the mount is legal:
+    # the import lands in ``<shoot>/shoots/2026`` and the mount stays
+    # a sibling below ``<shoot>``.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(shoot),
+        "folder_template": "shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_after_process_move_non_string_target_id(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    local_root = tmp_path / "archive"
+    _save_nas_target(tmp_path, local_root=local_root)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(local_root / "sub"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": 123},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "must be a string" in resp.get_json()["error"]
+
+
+def test_after_process_move_rejected_for_remote_destination(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    _save_nas_target(tmp_path, local_root=tmp_path / "archive")
+    card = _import_card(tmp_path)
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "remote_target_id": "nas1",
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "local archive destination" in resp.get_json()["error"]
+
+
+def test_import_in_place_rejects_after_process_move(app_and_db, tmp_path):
+    app, db = app_and_db
+    client = app.test_client()
+    _save_nas_target(tmp_path, local_root=tmp_path / "archive")
+    card = _import_card(tmp_path)
+
+    resp = client.post("/api/jobs/import-in-place", json={
+        "sources": [card],
+        "after_import": None,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "import-in-place" in resp.get_json()["error"]
+
+
+def test_after_process_move_rejects_root_destination_empty_template(
+        app_and_db, tmp_path):
+    """Root-level import with a rel-`.` folder template lands photos on the
+    local_archive_root itself. The chained move skips the root deliberately —
+    accepting the request would silently move nothing. Reject up front."""
+    app, db = app_and_db
+    client = app.test_client()
+    local_root = tmp_path / "archive"
+    local_root.mkdir()
+    _save_nas_target(tmp_path, local_root=local_root)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    for template in ("", ".", "   "):
+        resp = client.post("/api/jobs/import-photos", json={
+            "sources": [card],
+            "destination": str(local_root),
+            "folder_template": template,
+            "after_import": cull_ready_id,
+            "after_process_move": {"remote_target_id": "nas1"},
+        })
+        assert resp.status_code == 400, (template, resp.get_json())
+        err = resp.get_json()["error"]
+        assert "local archive root" in err
+        assert "folder_template" in err
+
+
+def test_after_process_move_allows_root_destination_with_dated_template(
+        app_and_db, tmp_path, stub_move):
+    """Destination == local_archive_root is fine when the folder template
+    resolves to a real subfolder — only the empty/dot case fails silently."""
+    app, db = app_and_db
+    client = app.test_client()
+    local_root = tmp_path / "archive"
+    local_root.mkdir()
+    _save_nas_target(tmp_path, local_root=local_root)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(local_root),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    # The accepted request starts a real import → process → move chain.
+    # Drain it (with move_folder stubbed) before the test ends, or the
+    # lingering move job's thread outlives this test and calls a LATER
+    # test's monkeypatched move_folder — polluting that test's stub with
+    # this test's destinations.
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed", import_job
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    for mid in process_job["result"].get("move_job_ids", []):
+        wait_for_job_via_client(client, mid)
+
+
+def test_after_process_move_failure_does_not_create_workspace(
+        app_and_db, tmp_path):
+    """new_workspace_name + an invalid after_process_move must leave no
+    orphan workspace behind: preflight the move before creating it."""
+    app, db = app_and_db
+    client = app.test_client()
+    _save_nas_target(tmp_path, local_root=tmp_path / "archive")
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+    before = {w["id"] for w in db.get_workspaces()}
+    old_ws = db._active_workspace_id
+
+    # Destination outside the target's local_archive_root — validated by
+    # _validate_after_process_move; must fail before workspace creation.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(tmp_path / "elsewhere"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+        "new_workspace_name": "Should Not Exist",
+    })
+    assert resp.status_code == 400, resp.get_json()
+
+    after = {w["id"] for w in db.get_workspaces()}
+    assert after == before, (
+        "workspace was created before after_process_move validation ran")
+    assert db._active_workspace_id == old_ws
+    names = {w["name"] for w in db.get_workspaces()}
+    assert "Should Not Exist" not in names
+
+
+@pytest.fixture
+def stub_move(monkeypatch):
+    """Stub the move machinery so chain tests exercise the chain, not rsync.
+
+    ``move.move_folder`` is imported inside the move job's work closure
+    (``from move import move_folder``), so patching the module attribute
+    intercepts it. The bin resolvers must return something truthy or the
+    enqueue helper refuses before ever reaching the stub.
+    """
+    import move as move_mod
+    calls = []
+
+    def fake_move_folder(db, folder_id, destination, progress_cb=None,
+                         developed_dir="", merge=False, remote=None,
+                         destination_name="", allow_tracked_merge=False):
+        calls.append({"folder_id": folder_id, "destination": destination,
+                      "merge": merge, "remote": remote,
+                      "allow_tracked_merge": allow_tracked_merge})
+        return {"moved": 1, "errors": []}
+
+    monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+    return calls
+
+
+def _run_chained_import(client, tmp_path, cull_ready_id):
+    card = _import_card(tmp_path)
+    dest = str(tmp_path / "archive")
+    _save_nas_target(tmp_path, local_root=dest)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    return wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+
+def test_chain_happy_path_enqueues_moves(app_and_db, tmp_path, stub_move):
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    import_job = _run_chained_import(client, tmp_path, cull_ready_id)
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    move_ids = process_job["result"]["move_job_ids"]
+    assert move_ids
+    for mid in move_ids:
+        mj = wait_for_job_via_client(client, mid)
+        assert mj["status"] == "completed", mj
+        assert _job_config(client, mid)["chained_from"] == import_job["result"]["process_job_id"]
+    # merge + allow_tracked_merge: re-importing into an existing shoot
+    # folder chains a move onto the tracked NAS copy of that folder — the
+    # chain must opt into move_folder's exact-overlap reconciliation or the
+    # repeat-import flow refuses and strands the new photos locally.
+    assert all(c["merge"] is True and c["allow_tracked_merge"] is True
+               and c["remote"] is not None
+               for c in stub_move)
+    # The move must aim at the target's mount view of the archive layout:
+    # destination is mount_path + the PARENT of the archive-relative
+    # subpath — move_folder re-appends the folder's own leaf name when it
+    # lands the folder inside that destination.
+    mount = str(tmp_path / "mnt")
+    assert all(c["destination"].startswith(mount) for c in stub_move)
+    # The import result card announces the planned move up front.
+    planned = import_job["result"]["after_process_move_planned"]
+    assert planned["target_name"] == "NAS"
+    assert isinstance(planned["folders"], list) and planned["folders"]
+    for entry in planned["folders"]:
+        assert set(entry) == {"folder_id", "subpath"}
+    # The handoff shows in the process job's step tree — the only surface a
+    # stepped job renders.
+    step = next(s for s in process_job["steps"] if s["id"] == "after-move")
+    assert step["status"] == "completed"
+    assert step["error_count"] == 0
+    assert "started" in step["summary"] and "NAS" in step["summary"]
+
+
+def test_chain_moves_even_when_process_raises(app_and_db, tmp_path, stub_move, monkeypatch):
+    import pipeline_job
+
+    def boom(*a, **k):
+        raise RuntimeError("model resolution failed")
+
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job", boom)
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    import_job = _run_chained_import(client, tmp_path, cull_ready_id)
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    assert process_job["status"] == "failed", process_job
+    # result is None on the raise path, so move_job_ids exists nowhere — the
+    # moves are only observable through the stub, and they run asynchronously
+    # on their own job threads. Poll with a deadline instead of asserting
+    # immediately.
+    deadline = time.time() + 10
+    while not stub_move and time.time() < deadline:
+        time.sleep(0.05)
+    assert stub_move, "chained move never fired after process failure"
+    # Let the move jobs reach a terminal state before the test ends so
+    # their worker threads don't race fixture teardown.
+    jobs = client.get("/api/jobs").get_json()
+    move_job_ids = [j["id"] for j in jobs["active"] + jobs["history"]
+                    if j.get("type") == "move-folder"]
+    assert move_job_ids
+    for mid in move_job_ids:
+        wait_for_job_via_client(client, mid)
+
+
+def test_chain_moves_when_process_preblocked_on_missing_labels(
+        app_and_db, tmp_path, stub_move, monkeypatch):
+    """Missing species labels pre-block the process job (no pipeline job is
+    enqueued), so the pipeline-side ``finally`` hook that normally fires the
+    NAS move never runs. But the user accepted a chain that ends on the NAS —
+    the import hook must fire the move itself so the "photos end on the NAS"
+    invariant holds identically to the runtime-failure case, and the outcome
+    is visible on the import job."""
+    import classify_job
+    import models
+
+    # Pretend a classifier is downloaded (a test env has no models by
+    # default; without an active model _enqueue_process_job skips the
+    # label-check entirely and never hits the pre-block path).
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-2", "name": "BioCLIP-2", "downloaded": True,
+        "model_type": "bioclip", "model_str": "hf-hub:imageomics/bioclip-2",
+        "weights_path": str(tmp_path / "bioclip-2"),
+    })
+
+    def boom(*a, **k):
+        raise RuntimeError("no species list configured")
+
+    monkeypatch.setattr(classify_job, "_load_labels", boom)
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    import_job = _run_chained_import(client, tmp_path, cull_ready_id)
+    assert import_job["status"] == "completed"
+    # The pre-block message reaches the user unchanged — it tells them what
+    # to fix (download labels) — and no process job was ever created.
+    assert "process_job_id" not in import_job["result"]
+    assert "species list" in import_job["result"]["after_import_skipped"]
+    # But the promised move fired anyway: photos still end on the NAS.
+    move_ids = import_job["result"]["move_job_ids"]
+    assert move_ids
+    for mid in move_ids:
+        mj = wait_for_job_via_client(client, mid)
+        assert mj["status"] == "completed", mj
+        assert _job_config(client, mid)["chained_from"] == import_job["id"]
+    # move_folder was actually called (via the stub) — the chain didn't
+    # just enqueue placeholder jobs.
+    assert stub_move
+    assert all(c["merge"] is True and c["allow_tracked_merge"] is True
+               and c["remote"] is not None
+               for c in stub_move)
+    # Stepped jobs render only their step tree, so the move outcome MUST
+    # land there — otherwise the import job looks clean while a chain
+    # branch just ran off it.
+    step = next(s for s in import_job["steps"] if s["id"] == "after-move")
+    assert step["status"] == "completed"
+    assert "started" in step["summary"] and "NAS" in step["summary"]
+
+
+def test_chain_skips_move_on_cancelled_process(app_and_db, tmp_path, stub_move, monkeypatch):
+    import pipeline_job
+    monkeypatch.setattr(pipeline_job, "run_pipeline_job",
+                        lambda *a, **k: {"cancelled": True, "stages": {}})
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    import_job = _run_chained_import(client, tmp_path, cull_ready_id)
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    # Deterministic: the moves enqueue synchronously in the process job's
+    # ``finally``, before its terminal status is set — so once the wait
+    # above returned, a wrongly-enqueued move job would already be listed.
+    jobs = client.get("/api/jobs").get_json()
+    assert not [j for j in jobs["active"] + jobs["history"]
+                if j.get("type") == "move-folder"]
+    # Grace period so a wrongly-enqueued move job's worker thread would
+    # also have had time to invoke the stub before the assertion.
+    time.sleep(0.5)
+    assert stub_move == [], stub_move
+    assert process_job["result"]["after_move_skipped"] == "process cancelled"
+
+
+def test_chain_root_level_import_reports_honest_skip(app_and_db, tmp_path, stub_move):
+    """Photos cataloged ON the archive root itself get an honest chain report.
+
+    The request-time guard rejects the obvious empty/"." templates, but it
+    cannot see every template that renders to the root at runtime ("./."
+    normalizes to the destination; a strftime directive can render empty for
+    some locales/timestamps). When that happens, the plan on the import card
+    and the process job's skip reason must both say the photos stay local —
+    not a bare "no folders to move"."""
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    card = _import_card(tmp_path)
+    dest = str(tmp_path / "archive")
+    _save_nas_target(tmp_path, local_root=dest)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "folder_template": "./.",
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed", import_job
+    planned = import_job["result"]["after_process_move_planned"]
+    assert planned["folders"] == []
+    assert "archive root" in planned["note"]
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    assert "archive root" in process_job["result"]["after_move_skipped"]
+    assert "move_job_ids" not in process_job["result"]
+    assert stub_move == []
+    # The honest reason also reaches the step tree as a warning.
+    step = next(s for s in process_job["steps"] if s["id"] == "after-move")
+    assert step["status"] == "completed"
+    assert step["error_count"] == 1
+    assert "archive root" in step["error"]
+
+
+def test_after_process_move_bad_target_does_not_strand_new_workspace(
+        app_and_db, tmp_path):
+    """An invalid after_process_move must be rejected BEFORE
+    _prepare_import_workspace creates the requested workspace — otherwise
+    the 400 leaves an empty stray workspace behind."""
+    app, db = app_and_db
+    client = app.test_client()
+    before = client.get("/api/workspaces").get_json()
+    active_before = client.get("/api/workspaces/active").get_json()
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(tmp_path / "archive"),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nope"},
+        "new_workspace_name": "Stranded",
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "nope" in resp.get_json()["error"]
+    assert client.get("/api/workspaces").get_json() == before
+    assert client.get("/api/workspaces/active").get_json() == active_before
+
+    # Same guarantee for the explicit after_import-null pairing error.
+    local_root = tmp_path / "archive"
+    _save_nas_target(tmp_path, local_root=local_root)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [_import_card(tmp_path)],
+        "destination": str(local_root / "sub"),
+        "after_import": None,
+        "after_process_move": {"remote_target_id": "nas1"},
+        "new_workspace_name": "Stranded",
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "after_import" in resp.get_json()["error"]
+    assert client.get("/api/workspaces").get_json() == before
+    assert client.get("/api/workspaces/active").get_json() == active_before
+
+
+def test_chain_accepts_case_alias_destination(app_and_db, tmp_path, stub_move):
+    """On a case-insensitive volume, a destination typed with different
+    casing than the saved local_archive_root is the same directory: the
+    request must be accepted AND the chain must still find the imported
+    folders inside the (respelled) root instead of skipping them all as
+    outside_root."""
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("requires a case-insensitive filesystem")
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    card = _import_card(tmp_path)
+    local_root = tmp_path / "Archive"
+    local_root.mkdir()
+    _save_nas_target(tmp_path, local_root=local_root)
+    # Case alias of the saved root.
+    alias_dest = str(tmp_path / "archive" / "sub")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": alias_dest,
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed", import_job
+    planned = import_job["result"]["after_process_move_planned"]
+    assert planned["folders"], planned
+    assert all(e["subpath"].startswith("sub") for e in planned["folders"])
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    move_ids = process_job["result"].get("move_job_ids")
+    assert move_ids, process_job["result"]
+    for mid in move_ids:
+        wait_for_job_via_client(client, mid)
+    assert stub_move
+
+
+def test_chain_move_enqueue_failure_surfaces_as_step(app_and_db, tmp_path, monkeypatch):
+    """Processing succeeds but the chained move cannot even be enqueued (no
+    usable rsync here). Stepped pipeline jobs render only the step tree, so
+    the failure must appear there — not just in result.after_move_errors."""
+    import move as move_mod
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: None)
+    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    import_job = _run_chained_import(client, tmp_path, cull_ready_id)
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    assert process_job["status"] == "completed", process_job
+    assert process_job["result"]["after_move_errors"]
+    assert "move_job_ids" not in process_job["result"]
+    step = next(s for s in process_job["steps"] if s["id"] == "after-move")
+    assert step["status"] == "failed"
+    assert step["error_count"] == 1
+    assert "rsync" in step["error"]
+
+
+def test_chain_cancel_while_waiting_for_serialize_lock(app_and_db, tmp_path, monkeypatch):
+    """A chained move blocked on the batch serialization lock honors Cancel
+    at the wait boundary instead of running the transfer anyway."""
+    import move as move_mod
+
+    release = threading.Event()
+    calls = []
+
+    def fake_move_folder(db, folder_id, destination, progress_cb=None,
+                         developed_dir="", merge=False, remote=None,
+                         destination_name="", allow_tracked_merge=False):
+        first = not calls
+        calls.append(folder_id)
+        if first:
+            # Hold the chain lock until the test releases us, pinning the
+            # other move job in its lock-wait loop.
+            assert release.wait(timeout=30), "test never released the holder"
+        return {"moved": 1, "errors": []}
+
+    monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+
+    # Two photos whose (mtime-derived) dates differ land in two archive
+    # folders, producing two chained move jobs that share the batch lock.
+    card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(os.path.join(card, "DSC_0002.jpg"))
+    os.utime(os.path.join(card, "DSC_0001.jpg"), (1577880000, 1577880000))
+    os.utime(os.path.join(card, "DSC_0002.jpg"), (1609502400, 1609502400))
+    dest = str(tmp_path / "archive")
+    _save_nas_target(tmp_path, local_root=dest)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    move_ids = process_job["result"]["move_job_ids"]
+    assert len(move_ids) == 2, process_job["result"]
+
+    try:
+        # Wait until one job holds the lock inside the stub; the other is
+        # then pinned in the waiting loop.
+        deadline = time.time() + 10
+        while not calls and time.time() < deadline:
+            time.sleep(0.05)
+        assert len(calls) == 1, calls
+        waiting = [mid for mid in move_ids
+                   if _job_config(client, mid)["folder_id"] != calls[0]]
+        assert len(waiting) == 1
+        resp = client.post(f"/api/jobs/{waiting[0]}/cancel")
+        assert resp.status_code == 200, resp.get_json()
+        cancelled = wait_for_job_via_client(client, waiting[0])
+    finally:
+        release.set()
+
+    assert cancelled["status"] == "cancelled", cancelled
+    assert cancelled["result"]["summary"] == "Cancelled before transfer started"
+    holder = next(mid for mid in move_ids if mid != waiting[0])
+    held = wait_for_job_via_client(client, holder)
+    assert held["status"] == "completed", held
+    # The cancelled job never ran its transfer.
+    assert len(calls) == 1, calls
+
+
+def test_chain_cancel_landing_between_lock_release_and_post_check(
+        app_and_db, tmp_path, monkeypatch):
+    """Codex race: cancel arrives during ``acquire(timeout=0.5)`` and the
+    holder releases the lock in that same interval. ``acquire`` returns
+    True and the wait loop exits WITHOUT hitting its in-loop
+    ``is_cancelled`` check — so the transfer would start regardless
+    without a cancel check taken with the lock now held. The test forces
+    the ordering by cancelling the waiter first and only then letting the
+    holder return, which releases the lock and makes the waiter's next
+    ``acquire`` succeed."""
+    import move as move_mod
+
+    release_holder = threading.Event()
+    holder_running = threading.Event()
+    calls = []
+
+    def fake_move_folder(db, folder_id, destination, progress_cb=None,
+                         developed_dir="", merge=False, remote=None,
+                         destination_name="", allow_tracked_merge=False):
+        calls.append(folder_id)
+        if len(calls) == 1:
+            holder_running.set()
+            assert release_holder.wait(timeout=30), (
+                "test never released the holder")
+        return {"moved": 1, "errors": []}
+
+    monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+
+    card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(os.path.join(card, "DSC_0002.jpg"))
+    os.utime(os.path.join(card, "DSC_0001.jpg"), (1577880000, 1577880000))
+    os.utime(os.path.join(card, "DSC_0002.jpg"), (1609502400, 1609502400))
+    dest = str(tmp_path / "archive")
+    _save_nas_target(tmp_path, local_root=dest)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    move_ids = process_job["result"]["move_job_ids"]
+    assert len(move_ids) == 2, process_job["result"]
+
+    try:
+        assert holder_running.wait(timeout=10), (
+            "holder never entered fake_move_folder")
+        assert len(calls) == 1, calls
+        waiting = [mid for mid in move_ids
+                   if _job_config(client, mid)["folder_id"] != calls[0]]
+        assert len(waiting) == 1
+        # Cancel the waiter BEFORE releasing the holder. The waiter is
+        # blocked in ``acquire(timeout=0.5)``; once we release the
+        # holder its acquire returns True, the loop exits, and the
+        # cancel here is only caught by the post-acquire check with the
+        # lock in hand.
+        resp = client.post(f"/api/jobs/{waiting[0]}/cancel")
+        assert resp.status_code == 200, resp.get_json()
+    finally:
+        release_holder.set()
+
+    cancelled = wait_for_job_via_client(client, waiting[0])
+    assert cancelled["status"] == "cancelled", cancelled
+    assert cancelled["result"]["summary"] == "Cancelled before transfer started"
+    holder = next(mid for mid in move_ids if mid != waiting[0])
+    held = wait_for_job_via_client(client, holder)
+    assert held["status"] == "completed", held
+    # move_folder for the waiter must never run — that's the whole point
+    # of the post-acquire cancel check.
+    assert len(calls) == 1, calls
+
+
+def test_chain_cancel_late_thread_skips_wait_loop_entirely(
+        app_and_db, tmp_path, monkeypatch):
+    """The second chained-move thread can start AFTER the first holder
+    has already run and released the batch lock — under CI load the
+    runner's ``thread.start()`` for the second move-folder job may not
+    schedule for tens of ms while the first job runs to completion.
+    When the second thread finally runs, its non-blocking
+    ``serialize_lock.acquire()`` succeeds immediately, so the wait loop
+    is SKIPPED. If ``/cancel`` was accepted during that gap, the only
+    place left to honor it before the transfer is the post-acquire
+    check — which must fire even on the non-waiter path."""
+    import threading as _t
+
+    import move as move_mod
+
+    calls = []
+    release_second_thread = _t.Event()
+    second_thread_started = _t.Event()
+
+    def fake_move_folder(db, folder_id, destination, progress_cb=None,
+                         developed_dir="", merge=False, remote=None,
+                         destination_name="", allow_tracked_merge=False):
+        calls.append(folder_id)
+        return {"moved": 1, "errors": []}
+
+    monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+
+    # Deterministic ordering: intercept the SECOND move-folder thread's
+    # ``start()`` and hold its worker at the front of _run_job until the
+    # test signals go. The first move-folder thread runs unimpeded and
+    # releases the batch lock before we let the second thread run — so
+    # the second thread's initial non-blocking acquire will succeed and
+    # it will NEVER enter the wait loop.
+    original_start = _t.Thread.start
+    move_thread_count = [0]
+
+    def wrap_second_move_thread(self):
+        target = getattr(self, "_target", None)
+        args = getattr(self, "_args", ())
+        kwargs = getattr(self, "_kwargs", {})
+        # Only wrap _run_job invocations for move-folder jobs.
+        if target is not None and getattr(target, "__name__", "") == "_run_job":
+            job = args[0] if args else None
+            if isinstance(job, dict) and job.get("type") == "move-folder":
+                move_thread_count[0] += 1
+                if move_thread_count[0] == 2:
+                    original_target = target
+                    original_args = args
+                    original_kwargs = kwargs
+
+                    def waited():
+                        second_thread_started.set()
+                        assert release_second_thread.wait(timeout=30), (
+                            "test never released the second thread")
+                        original_target(*original_args, **original_kwargs)
+
+                    self._target = waited
+                    self._args = ()
+                    self._kwargs = {}
+        return original_start(self)
+
+    monkeypatch.setattr(_t.Thread, "start", wrap_second_move_thread)
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+
+    card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(os.path.join(card, "DSC_0002.jpg"))
+    os.utime(os.path.join(card, "DSC_0001.jpg"), (1577880000, 1577880000))
+    os.utime(os.path.join(card, "DSC_0002.jpg"), (1609502400, 1609502400))
+    dest = str(tmp_path / "archive")
+    _save_nas_target(tmp_path, local_root=dest)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    move_ids = process_job["result"]["move_job_ids"]
+    assert len(move_ids) == 2, process_job["result"]
+
+    try:
+        # Wait until the second thread has entered _run_job and is
+        # blocked in front of the work function.
+        assert second_thread_started.wait(timeout=10), (
+            "second move-folder thread never started")
+        # The first move-folder thread ran to completion (no wait loop,
+        # no contention). Confirm it finished before the second thread
+        # got to run. Under CI load, ``second_thread_started`` can fire
+        # before the first thread has reached ``fake_move_folder``, so
+        # wait for that call to land before reading its folder id.
+        deadline = time.time() + 10
+        while not calls and time.time() < deadline:
+            time.sleep(0.02)
+        assert calls, "first move-folder thread never called fake_move_folder"
+        first_folder_id = calls[0]
+        first_move_id = next(
+            mid for mid in move_ids
+            if _job_config(client, mid)["folder_id"] == first_folder_id
+        )
+        first_move = wait_for_job_via_client(client, first_move_id)
+        assert first_move["status"] == "completed", first_move
+        second_id = next(mid for mid in move_ids if mid != first_move_id)
+        # Cancel the second job BEFORE its thread runs. Its non-blocking
+        # acquire will then succeed (lock is free) — the ONLY cancel
+        # check that can catch this is the post-acquire one.
+        resp = client.post(f"/api/jobs/{second_id}/cancel")
+        assert resp.status_code == 200, resp.get_json()
+    finally:
+        release_second_thread.set()
+
+    cancelled = wait_for_job_via_client(client, second_id)
+    assert cancelled["status"] == "cancelled", cancelled
+    assert cancelled["result"]["summary"] == "Cancelled before transfer started"
+    # fake_move_folder ran exactly once — for the first (holder) job.
+    assert len(calls) == 1, calls
 
 
 def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
@@ -4305,6 +6165,41 @@ def test_import_chains_process_job(app_and_db, tmp_path):
         assert res["collection_name"].startswith("Import ")
         photos = db.get_collection_photos(col_id, per_page=999999)
         assert sorted(p["id"] for p in photos) == sorted(res["photo_ids"])
+
+
+def test_import_pauses_chained_classification_when_labels_are_missing(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """A successful import must not enqueue a pipeline guaranteed to fail."""
+    import models
+
+    app, db = app_and_db
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-vit-b-16",
+        "downloaded": True,
+        "model_type": "bioclip",
+        "model_str": "ViT-B-16",
+        "weights_path": str(tmp_path / "model"),
+    })
+    identify_id = _process_id(db, "Identify birds")
+    card = _chain_card(tmp_path)
+
+    with app.test_client() as client:
+        job_id = _post_import(client, card, tmp_path / "arch", identify_id)
+        job = wait_for_job_via_client(client, job_id)
+        result = job["result"]
+
+        assert job["status"] == "completed", job
+        assert result["collection_id"]
+        assert "process_job_id" not in result
+        assert result["after_import_skipped"].startswith("paused —")
+        assert "Settings › Labels" in result["after_import_skipped"]
+        history = client.get("/api/jobs/history").get_json()
+        chained = [
+            item for item in history
+            if item.get("config", {}).get("chained_from") == job_id
+        ]
+        assert chained == []
 
 
 def test_import_only_choice_skips_chaining(app_and_db, tmp_path):

@@ -1835,7 +1835,9 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
     }
 
 
-def _has_untracked_destination_developed(destination, stem, developed_dir):
+def _has_untracked_destination_developed(
+    destination, stem, developed_dir, case_insensitive=False,
+):
     """Return True when the destination developed dir(s) already contain
     a same-stem file that no catalog row owns.
 
@@ -1869,11 +1871,12 @@ def _has_untracked_destination_developed(destination, stem, developed_dir):
             names = os.listdir(subdir)
         except OSError:
             continue
-        # Case-sensitive stem comparison mirrors ``_DevelopedDirIndex``:
-        # two photos differing only by case must not collapse onto each
-        # other's render on case-sensitive filesystems.
+        expected_stem = stem.casefold() if case_insensitive else stem
         for name in names:
-            if os.path.splitext(name)[0] != stem:
+            candidate_stem = os.path.splitext(name)[0]
+            if case_insensitive:
+                candidate_stem = candidate_stem.casefold()
+            if candidate_stem != expected_stem:
                 continue
             candidate = os.path.join(subdir, name)
             if os.path.isfile(candidate):
@@ -1942,7 +1945,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     dest_case_insensitive = _is_case_insensitive_path(destination)
 
     def _stem_key(raw_stem):
-        return raw_stem.lower() if dest_case_insensitive else raw_stem
+        return raw_stem.casefold() if dest_case_insensitive else raw_stem
 
     # Ensure destination folder record exists (workspace link deferred until first successful move)
     dest_row = db.conn.execute("SELECT id FROM folders WHERE path = ?", (destination,)).fetchone()
@@ -2055,6 +2058,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             if existing_origin is no_destination_stem and \
                     _has_untracked_destination_developed(
                         destination, stem, developed_dir,
+                        case_insensitive=dest_case_insensitive,
                     ):
                 log.warning(
                     "Move skipped for %s: developed render already exists "
@@ -2651,7 +2655,18 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
     # from `.rsync-partial/` instead of treating it as already-moved (which
     # would then fail the --checksum verify forever, stranding the partial
     # until the user manually deletes it).
+    # Prefer a discovered GNU rsync for local moves on POSIX. Finder-launched
+    # macOS apps usually inherit a sparse PATH, so a bare ``rsync`` resolves
+    # to Apple's legacy openrsync even when Homebrew GNU rsync is installed.
+    # openrsync has been observed spinning after a transient SMB short read;
+    # GNU rsync exits with a useful error instead. Windows rsync distributions
+    # expect POSIX-style paths and can misread a native ``C:\...`` source as
+    # remote-shell syntax, so retain the prior bare-name behavior there. Keep
+    # the bare-name fallback on POSIX when GNU rsync is unavailable (and the
+    # shutil fallback below when no rsync exists at all).
     rsync_bin = "rsync"
+    if sys.platform != "win32":
+        rsync_bin = resolve_rsync_bin() or rsync_bin
     extra_args = None
     if remote:
         rsync_bin = remote.get("rsync_bin")
@@ -2699,10 +2714,18 @@ def move_folder(db, folder_id, destination, progress_cb=None, developed_dir="",
 
     if timed_out:
         mins = RSYNC_STALL_TIMEOUT // 60
+        # rsync can emit the real cause (for example, the exact NAS file that
+        # returned a short read) and then wedge instead of exiting.  Do not
+        # throw that diagnostic away in favor of the generic watchdog text.
+        # Bound it because stderr can contain one warning per source file.
+        detail = stderr.strip()
+        if len(detail) > 1000:
+            detail = "…" + detail[-999:]
+        reported = f" rsync reported: {detail}" if detail else ""
         return {"moved": 0, "errors": [
             f"rsync stalled — no progress for over {mins} minutes, so the "
             f"copy was stopped. Originals are untouched; re-run with "
-            f"merge/resume to continue from where it left off."
+            f"merge/resume to continue from where it left off.{reported}"
         ]}
     if returncode != 0:
         return {"moved": 0, "errors": [f"rsync failed: {stderr.strip()}"]}

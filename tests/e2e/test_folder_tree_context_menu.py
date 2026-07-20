@@ -1,11 +1,12 @@
 """E2E tests for the folder-tree right-click context menu (Task 8).
 
-Menu items (first pass, per plan's "OPTION: skip for this first pass"):
+Menu items:
 - Filter by this folder
 - separator
 - Reveal in Finder/Folder
 - Copy Path
 - separator
+- Move…
 - Rescan this Folder
 
 "Expand All Children", "Collapse All Children", and "Hide from this Workspace"
@@ -30,11 +31,30 @@ def test_folder_tree_right_click_opens_menu(live_server, page):
         "Filter by this folder",
         "Reveal in",
         "Copy Path",
+        "Move…",
         "Rescan this Folder",
     ]:
         expect(
             menu.locator(".vireo-ctx-item", has_text=label)
         ).to_be_visible()
+
+
+def test_folder_tree_move_opens_move_page_with_source_selected(live_server, page):
+    """Move… opens Quick Move with the right-clicked folder as its source."""
+    live_server["db"].update_folder_counts()
+    url = live_server["url"]
+    page.goto(f"{url}/browse")
+
+    item = page.locator(".tree-item[data-folder-id]").first
+    item.wait_for(state="visible")
+    fid = item.get_attribute("data-folder-id")
+
+    item.click(button="right")
+    page.locator(".vireo-ctx-menu .vireo-ctx-item", has_text="Move…").click()
+
+    page.wait_for_url(f"**/move?folder_id={fid}")
+    expect(page.locator("#quickFolderSelect")).to_have_value(fid)
+    expect(page.locator("#quickFolderInfo")).not_to_be_empty()
 
 
 def test_folder_tree_filter_by_folder_fires_filter(live_server, page):

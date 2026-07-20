@@ -63,6 +63,179 @@ def test_shared_folder_uses_one_local_copy_in_every_workspace(tmp_path):
         db.close()
 
 
+def test_custom_local_destination_is_used_and_removed_after_sync(tmp_path):
+    db, vireo_dir, source, _first, _second, folder_id = _shared_environment(tmp_path)
+    local_parent = tmp_path / "fast-storage"
+    try:
+        result = stage_folder(
+            db, folder_id, str(vireo_dir), local_base=str(local_parent)
+        )
+
+        local_root = local_parent / "photos"
+        assert result["local_path"] == str(local_root)
+        assert db.get_folder(folder_id)["path"] == str(local_root)
+        assert (local_root / "bird.jpg").read_bytes() == b"original"
+        assert (vireo_dir / "local-folders" / str(folder_id) / "manifest.json").is_file()
+
+        (local_root / "bird.jpg").write_bytes(b"edited locally")
+        sync_folder(db, folder_id, str(vireo_dir))
+
+        assert (source / "bird.jpg").read_bytes() == b"edited locally"
+        assert not local_root.exists()
+        assert local_parent.is_dir()
+        assert not (vireo_dir / "local-folders" / str(folder_id)).exists()
+    finally:
+        db.close()
+
+
+def test_custom_local_destination_refuses_existing_folder(tmp_path):
+    db, vireo_dir, _source, _first, _second, folder_id = _shared_environment(tmp_path)
+    local_parent = tmp_path / "fast-storage"
+    existing = local_parent / "photos"
+    existing.mkdir(parents=True)
+    (existing / "keep.txt").write_text("do not overwrite")
+    try:
+        with pytest.raises(LocalWorkspaceError, match="already exists"):
+            stage_folder(
+                db, folder_id, str(vireo_dir), local_base=str(local_parent)
+            )
+        assert (existing / "keep.txt").read_text() == "do not overwrite"
+        assert Path(db.get_folder(folder_id)["path"]) == _source
+    finally:
+        db.close()
+
+
+def test_custom_local_destination_refuses_other_catalog_source(tmp_path):
+    db, vireo_dir, _source, _first, _second, folder_id = _shared_environment(tmp_path)
+    other_source = tmp_path / "nas" / "other-source"
+    other_source.mkdir()
+    db.add_folder(str(other_source), name="other-source", link_to_workspace=False)
+    try:
+        with pytest.raises(LocalWorkspaceError, match="already manages"):
+            stage_folder(
+                db, folder_id, str(vireo_dir), local_base=str(other_source)
+            )
+        assert not (other_source / "photos").exists()
+    finally:
+        db.close()
+
+
+def test_custom_local_destination_refuses_other_session_directory(tmp_path):
+    db, vireo_dir, _source, _first, _second, folder_id = _shared_environment(tmp_path)
+    other_source = tmp_path / "nas" / "other-source"
+    other_source.mkdir()
+    other_id = db.add_folder(
+        str(other_source), name="other-source", link_to_workspace=False
+    )
+    other_session_base = vireo_dir / "local-folders" / str(other_id) / "files"
+    try:
+        with pytest.raises(LocalWorkspaceError, match="session storage"):
+            stage_folder(
+                db,
+                folder_id,
+                str(vireo_dir),
+                local_base=str(other_session_base),
+            )
+        assert not (other_session_base / "photos").exists()
+    finally:
+        db.close()
+
+
+def test_custom_local_destination_refuses_session_metadata_directory(tmp_path):
+    source = tmp_path / "nas" / "1"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "vireo.db"))
+    workspace_id = db.create_workspace("Numeric folder")
+    folder_id = db.add_folder(str(source), name="1", link_to_workspace=False)
+    assert folder_id == 1
+    db.add_workspace_folder(workspace_id, folder_id)
+    try:
+        with pytest.raises(LocalWorkspaceError, match="session storage"):
+            stage_folder(
+                db,
+                folder_id,
+                str(vireo_dir),
+                local_base=str(vireo_dir / "local-folders"),
+            )
+        assert not (vireo_dir / "local-folders" / "1").exists()
+        assert db.get_folder(folder_id)["path"] == str(source)
+    finally:
+        db.close()
+
+
+def test_custom_local_cleanup_failure_preserves_copy_after_catalog_restore(
+    tmp_path, monkeypatch
+):
+    from services import local_folder as service
+
+    db, vireo_dir, source, first, _second, folder_id = _shared_environment(tmp_path)
+    local_parent = tmp_path / "fast-storage"
+    local_root = local_parent / "photos"
+    stage_folder(db, folder_id, str(vireo_dir), local_base=str(local_parent))
+    real_rmtree = service.shutil.rmtree
+
+    def refuse_custom_cleanup(path, *args, **kwargs):
+        if Path(path) == local_root:
+            raise PermissionError("destination is busy")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(service.shutil, "rmtree", refuse_custom_cleanup)
+    try:
+        with pytest.raises(LocalWorkspaceError, match="Could not remove local data"):
+            discard_folder(db, folder_id, str(vireo_dir))
+
+        assert local_root.is_dir()
+        assert Path(db.get_folder(folder_id)["path"]) == source
+        assert folder_status(db, folder_id, str(vireo_dir))["state"] == "remote"
+        assert workspace_status(db, first, str(vireo_dir))["state"] == "remote"
+        assert source.is_dir()
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("operation", ["discard", "sync"])
+def test_catalog_restore_failure_keeps_local_copy_and_session(
+    tmp_path, monkeypatch, operation
+):
+    from services import local_folder as service
+
+    db, vireo_dir, source, first, _second, folder_id = _shared_environment(tmp_path)
+    local_parent = tmp_path / "fast-storage"
+    local_root = local_parent / "photos"
+    stage_folder(db, folder_id, str(vireo_dir), local_base=str(local_parent))
+    (local_root / "bird.jpg").write_bytes(b"edited locally")
+
+    def refuse_catalog_restore(_db, _root_folder_id):
+        raise OSError("catalog is busy")
+
+    monkeypatch.setattr(service, "_restore_catalog", refuse_catalog_restore)
+    try:
+        with pytest.raises(OSError, match="catalog is busy"):
+            if operation == "sync":
+                sync_folder(db, folder_id, str(vireo_dir))
+            else:
+                discard_folder(db, folder_id, str(vireo_dir))
+
+        assert local_root.is_dir()
+        assert (local_root / "bird.jpg").read_bytes() == b"edited locally"
+        assert Path(db.get_folder(folder_id)["path"]) == local_root
+        expected_state = "recovery" if operation == "sync" else "active"
+        assert folder_status(db, folder_id, str(vireo_dir))["state"] == expected_state
+        workspace = workspace_status(db, first, str(vireo_dir))
+        assert workspace["state"] == "active"
+        assert workspace["folders"][0]["state"] == expected_state
+        assert service.folder_state(db, folder_id)["state"] == (
+            "syncing" if operation == "sync" else "active"
+        )
+        expected_source = b"edited locally" if operation == "sync" else b"original"
+        assert (source / "bird.jpg").read_bytes() == expected_source
+    finally:
+        db.close()
+
+
 def test_workspace_status_is_derived_from_independent_root_folders(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db.create_workspace("Mixed")
@@ -228,6 +401,57 @@ def test_folder_scoped_http_cycle_and_shared_status(tmp_path, monkeypatch):
         assert response.status_code == 202
         assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
         assert (source / "bird.jpg").read_bytes() == b"edited"
+
+
+def test_folder_stage_endpoint_accepts_destination_and_uses_folder_name_in_job(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "104NCZ_8"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+    db = Database(db_path)
+    workspace_id = db.create_workspace("Trip")
+    folder_id = db.add_folder(str(source), name="104NCZ_8", link_to_workspace=False)
+    db.add_workspace_folder(workspace_id, folder_id)
+    db.set_active_workspace(workspace_id)
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    destination = tmp_path / "chosen-local-storage"
+    with app.test_client() as client:
+        assert client.post(f"/api/workspaces/{workspace_id}/activate", json={}).status_code == 200
+        before = client.get("/api/workspaces/active/local-folders").get_json()
+        item = before["folders"][0]
+        assert item["default_local_base"] == str(
+            vireo_dir / "local-folders" / str(folder_id) / "files"
+        )
+        assert item["local_folder_name"] == "104NCZ_8"
+        assert Path(item["default_local_path"]).name == "104NCZ_8"
+
+        response = client.post(
+            "/api/workspaces/active/local-folders/stage",
+            json={
+                "folder_ids": [folder_id],
+                "destination_bases": {str(folder_id): str(destination)},
+            },
+        )
+        assert response.status_code == 202, response.get_json()
+        job = wait_for_job_via_client(client, response.get_json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["steps"][0]["label"] == "Copy 104NCZ_8 locally"
+        assert job["progress"]["phase"] == "Copying 104NCZ_8 locally"
+
+    check_db = Database(db_path)
+    try:
+        assert check_db.get_folder(folder_id)["path"] == str(destination / "104NCZ_8")
+    finally:
+        check_db.close()
 
 
 def test_local_root_under_folder_finds_descendant_session(tmp_path):

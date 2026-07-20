@@ -9571,3 +9571,331 @@ def test_bulk_apply_resnapshots_local_per_target(client_with_photo):
     assert recipes[str(photo_id)]["local"]["mask"]["ref"] == r1["local"]["mask"]["ref"]
     assert recipes[str(pid2)]["local"]["mask"]["ref"] == r2["local"]["mask"]["ref"]
     assert recipes[str(pid2)]["local"]["mask"]["ref"] != recipes[str(photo_id)]["local"]["mask"]["ref"]
+
+
+# ---------------------------------------------------------------------------
+# Universal filter endpoints (Phase 1).
+# Design: docs/plans/2026-07-19-universal-filters-design.md
+# ---------------------------------------------------------------------------
+
+
+def test_api_photos_query_basic(app_and_db):
+    """POST /api/photos/query evaluates a rule tree; response shape matches
+    /api/photos so pages can switch fetch paths without renderer changes."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "rating", "op": ">=", "value": 4}],
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert set(data) == {"photos", "total", "page", "per_page"}
+    assert data["total"] == 1
+    assert [p["filename"] for p in data["photos"]] == ["bird3.jpg"]
+    # species attachment matches /api/photos behavior
+    assert "species" in data["photos"][0]
+
+
+def test_api_photos_query_group_tree_and_paging(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={
+        "rules": {"mode": "any", "rules": [
+            {"field": "rating", "op": ">=", "value": 5},
+            {"field": "filename", "op": "contains", "value": "bird1"},
+        ]},
+        "sort": "name",
+        "per_page": 1,
+        "page": 2,
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total"] == 2
+    assert [p["filename"] for p in data["photos"]] == ["bird3.jpg"]
+
+
+def test_api_photos_query_validation(app_and_db, monkeypatch):
+    app, _ = app_and_db
+    # Force an active visual model so the active-model injection walker
+    # actually runs — that's the code path that must survive malformed
+    # group rules without raising TypeError. Without a monkeypatch,
+    # ``_inject_active_visual_model`` returns rules verbatim and the
+    # malformed-group asserts below wouldn't exercise the walker at all.
+    import models as models_mod
+    monkeypatch.setattr(
+        models_mod, "get_active_model",
+        lambda: {"name": "some-model", "id": "some-model", "downloaded": True},
+    )
+    client = app.test_client()
+    assert client.post('/api/photos/query', json={
+        "rules": [{"field": "nope", "op": "is", "value": 1}],
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": [], "page": 0,
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": [], "per_page": "many",
+    }).status_code == 400
+    # sort must be a string — a JSON array/object would otherwise raise
+    # TypeError inside ``sort_map.get(sort, ...)`` and surface as a 500.
+    assert client.post('/api/photos/query', json={
+        "rules": [], "sort": [],
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": [], "sort": {"col": "date"},
+    }).status_code == 400
+    # A group whose ``rules`` key is ``null`` (or any non-list) must land as
+    # a 400 from ``_validate_node``. Before the guard, the active-model
+    # walker would iterate ``None`` and raise ``TypeError`` → 500.
+    assert client.post('/api/photos/query', json={
+        "rules": {"mode": "all", "rules": None},
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": {"mode": "all", "rules": "not-a-list"},
+    }).status_code == 400
+    assert client.post('/api/photos/query', data="not json",
+                       content_type="text/plain").status_code == 400
+    # Unsupported operators on numeric fields must land as 400 (validation
+    # error), not 200 with an empty result set — otherwise a malformed
+    # rule like ``file_size contains 1`` looks like a query that legitimately
+    # matched nothing. Covers all fields routed through _numeric_condition:
+    # file_size/width/height/focal_length/aperture/shutter_speed/iso,
+    # gps_lat/gps_lng, rating/quality_score/sharpness/subject_sharpness/
+    # noise_estimate, keyword_count, and prediction_confidence.
+    for field in (
+        "file_size", "width", "height", "focal_length", "aperture",
+        "shutter_speed", "iso", "gps_lat", "gps_lng", "rating",
+        "quality_score", "sharpness", "noise_estimate", "keyword_count",
+        "prediction_confidence",
+    ):
+        assert client.post('/api/photos/query', json={
+            "rules": [{"field": field, "op": "contains", "value": 1}],
+        }).status_code == 400, f"{field} contains 1 must 400"
+
+
+def test_api_photos_query_has_visual_index_injects_active_model(app_and_db, monkeypatch):
+    """``has_visual_index`` rules emitted from the UI have no ``model`` key,
+    so the query API must inject the active visual model — otherwise
+    photos with only stale embeddings from previously-active models would
+    match, disagreeing with visual search (which loads only the active
+    model's embeddings)."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    # bird1 has a stale embedding from a former model; bird2 has one from
+    # the currently-active model. Only bird2 should satisfy the filter.
+    db.conn.execute(
+        "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+        "VALUES (?, 'old-model', '', ?)",
+        (photos["bird1.jpg"], b"\x01"),
+    )
+    db.conn.execute(
+        "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+        "VALUES (?, 'current-model', '', ?)",
+        (photos["bird2.jpg"], b"\x02"),
+    )
+    db.conn.commit()
+
+    import models as models_mod
+    monkeypatch.setattr(
+        models_mod, "get_active_model",
+        lambda: {"name": "current-model", "id": "current-model", "downloaded": True},
+    )
+
+    client = app.test_client()
+    # No ``model`` on the rule — API layer must inject the active one.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird2.jpg"]
+
+    # Nested rule groups get the same treatment.
+    resp = client.post('/api/photos/query', json={
+        "rules": {"mode": "all", "rules": [
+            {"field": "has_visual_index", "op": "is", "value": 1},
+        ]},
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird2.jpg"]
+
+    # An explicit ``model`` in the rule wins over the injection.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "old-model"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird1.jpg"]
+
+
+def test_api_photos_query_has_visual_index_fails_closed_without_active_model(
+    app_and_db, monkeypatch
+):
+    """When no active visual model is configured — fresh library or every
+    installed model was removed — a UI-emitted ``has_visual_index`` rule
+    (no ``model`` key) must fail closed: ``is true`` matches nothing and
+    ``is false`` matches everything. Otherwise the filter would keep
+    matching stale embeddings from a removed model while
+    ``/api/photos/search`` returns ``no_model``, so Browse and visual
+    search would disagree on what "has a visual index" means.
+    """
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    # Every photo has a stale embedding — the previously-active model was
+    # uninstalled but its rows remain in ``photo_embeddings``.
+    for filename in photos:
+        db.conn.execute(
+            "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+            "VALUES (?, 'removed-model', '', ?)",
+            (photos[filename], b"\x01"),
+        )
+    db.conn.commit()
+
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: None)
+
+    client = app.test_client()
+    # ``is true`` must match nothing — there is no usable visual index.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1}],
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()["photos"] == []
+
+    # ``is false`` must match every photo for the same reason.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 0}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == sorted(photos.keys())
+
+    # An explicit ``model`` in the rule is still honored — a saved smart
+    # collection with an old model name keeps working even when nothing is
+    # active, so it stays portable.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "removed-model"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == sorted(photos.keys())
+
+
+def test_api_photos_query_timestamp_gt_preserves_subsecond(app_and_db):
+    """``timestamp > 2024-01-01T12:00:00`` must NOT pad the value to
+    ``.999999`` — that would spuriously exclude sub-second photos in the
+    same clock second (``12:00:00.5``) that are strictly greater than the
+    requested instant. Only bare ``YYYY-MM-DD`` values advance to end of
+    day."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    db.conn.execute(
+        "UPDATE photos SET timestamp='2024-01-01T12:00:00.500000' WHERE id=?",
+        (photos["bird1.jpg"],),
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp='2024-01-02T09:00:00' WHERE id=?",
+        (photos["bird2.jpg"],),
+    )
+    db.conn.execute(
+        "UPDATE photos SET timestamp='2023-12-31T09:00:00' WHERE id=?",
+        (photos["bird3.jpg"],),
+    )
+    db.conn.commit()
+    client = app.test_client()
+
+    # Precise timestamp comparison — bird1 at 12:00:00.5 IS strictly > 12:00:00
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "timestamp", "op": ">",
+                   "value": "2024-01-01T12:00:00"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird1.jpg", "bird2.jpg"]
+
+    # Bare-date comparison — ``> 2024-01-01`` still means strictly after
+    # the whole day, so bird1 (on that day) is excluded.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "timestamp", "op": ">",
+                   "value": "2024-01-01"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == ["bird2.jpg"]
+
+
+def test_api_filter_fields_registry(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get('/api/filters/fields')
+    assert resp.status_code == 200
+    fields = {f["key"]: f for f in resp.get_json()["fields"]}
+    assert "between" in fields["iso"]["ops"]
+    assert fields["flag"]["values"] == ["flagged", "none", "rejected"]
+    assert fields["camera_model"]["suggest"] is True
+    assert fields["timestamp"]["type"] == "date"
+
+
+def test_api_filter_values_counts(app_and_db):
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    db.conn.execute("UPDATE photos SET camera_model='Sony A1' WHERE id IN (?, ?)",
+                    (photos["bird1.jpg"], photos["bird3.jpg"]))
+    db.conn.execute("UPDATE photos SET camera_model='Canon R5' WHERE id=?",
+                    (photos["bird2.jpg"],))
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get('/api/filters/values?field=camera_model')
+    assert resp.status_code == 200
+    assert resp.get_json()["values"] == [
+        {"value": "Sony A1", "count": 2},
+        {"value": "Canon R5", "count": 1},
+    ]
+    # Counts respect the expression-minus-edited-rule passed as ?rules=
+    import json as _json
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/filters/values?field=camera_model&rules={rules}')
+    assert resp.get_json()["values"] == [{"value": "Sony A1", "count": 1}]
+    # Typeahead query narrowing
+    resp = client.get('/api/filters/values?field=camera_model&q=can')
+    assert resp.get_json()["values"] == [{"value": "Canon R5", "count": 1}]
+
+
+def test_api_filter_values_rejects_bad_input(app_and_db):
+    app, _ = app_and_db
+    client = app.test_client()
+    assert client.get('/api/filters/values?field=rating').status_code == 400
+    assert client.get('/api/filters/values?field=camera_model&rules=notjson').status_code == 400
+    assert client.get(
+        '/api/filters/values?field=camera_model&rules=[{"field":"nope","op":"is","value":1}]'
+    ).status_code == 400
+
+
+def test_api_filter_values_clamps_limit(app_and_db):
+    """Zero/negative/oversized ``limit`` params must not produce unbounded
+    queries (SQLite treats a negative ``LIMIT`` as "no limit")."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    # Populate enough distinct camera_model values that a working limit clamp
+    # is observable — a limit of 0/-1 without the clamp would return them all.
+    for i, filename in enumerate(sorted(photos)):
+        db.conn.execute(
+            "UPDATE photos SET camera_model=? WHERE id=?",
+            (f"Model{i}", photos[filename]),
+        )
+    db.conn.commit()
+    client = app.test_client()
+    # Negative and zero clamp up to 1 — always at least one result.
+    for bad_limit in ("-5", "0"):
+        resp = client.get(f'/api/filters/values?field=camera_model&limit={bad_limit}')
+        assert resp.status_code == 200, bad_limit
+        assert len(resp.get_json()["values"]) == 1, bad_limit
+    # Absurdly large values clamp down to the server-side ceiling so a huge
+    # library can't stream every distinct value out through one request.
+    resp = client.get('/api/filters/values?field=camera_model&limit=999999')
+    assert resp.status_code == 200
+    assert len(resp.get_json()["values"]) <= 500

@@ -175,6 +175,13 @@ body { display: flex; flex-direction: column; height: 100vh; }
   border: 0; background: transparent; color: var(--text-secondary);
   cursor: pointer; padding: 0; line-height: 1;
 }
+.dependency-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.dependency-status { font-size: 12px; color: var(--text-secondary); }
+.dependency-status.ok { color: var(--success, #2da44e); }
+.dependency-status.bad { color: var(--warning, #bf8700); }
+.advanced-import { margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+.advanced-import summary { cursor: pointer; }
+.metadata-repair { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-primary); }
 </style>
 </head>
 <body>
@@ -189,6 +196,34 @@ body { display: flex; flex-direction: column; height: 100vh; }
         Cleanup is only enabled after every staged file is verified in the archive.
       </div>
       <div class="staging-items" id="orphanedStagingItems"></div>
+    </div>
+
+    <div class="card" id="exiftoolCard">
+      <h3>Photo metadata</h3>
+      <div id="importExiftoolStatus" class="dependency-status">Checking ExifTool…</div>
+      <div class="dependency-actions" id="importExiftoolActions" style="display:none;">
+        <button class="btn btn-primary" type="button" id="btnInstallExiftool"
+                onclick="installImportExiftool()">Repair ExifTool</button>
+      </div>
+      <details class="advanced-import" id="missingExiftoolAdvanced" style="display:none;">
+        <summary>Advanced</summary>
+        <label>
+          <input type="checkbox" id="chkAllowMissingExiftool">
+          Import without metadata
+        </label>
+        <div class="hint">
+          Capture dates, GPS, camera details, and date-based folder placement may be missing.
+          You can repair them later while the originals are available.
+        </div>
+      </details>
+      <div class="metadata-repair" id="metadataRepairSection" style="display:none;">
+        <div id="metadataRepairSummary" class="dependency-status"></div>
+        <div class="dependency-actions">
+          <button class="btn" type="button" id="btnRepairMetadata"
+                  onclick="startMetadataRepair()">Repair photo metadata</button>
+          <span id="metadataRepairStatus" class="hint"></span>
+        </div>
+      </div>
     </div>
 
     <div class="card" id="sourceCard">
@@ -345,6 +380,12 @@ body { display: flex; flex-direction: column; height: 100vh; }
         </select>
       </div>
       <div class="hint">Processing runs as its own job when the import finishes — a processing failure never touches imported photos.</div>
+      <div class="row" id="afterMoveRow" style="display:none; margin-top:10px;">
+        <label><input type="checkbox" id="chkAfterMove" onchange="updateAfterMoveUI()"> Then move to NAS</label>
+        <select id="afterMoveTarget" style="max-width:220px;" onchange="updateAfterMoveUI()"></select>
+      </div>
+      <div class="hint" id="afterMoveUnavailable" style="display:none;"></div>
+      <div class="remote-preview" id="afterMovePreview" style="display:none;"></div>
     </div>
 
     <div class="card">
@@ -428,6 +469,7 @@ let browserSelectAnchorPath = '';
 let activeImportMode = 'in_place';
 let importRemoteTargets = [];
 let importRsyncAvailable = false;
+let importSshAvailable = false;
 let destStructureSeq = 0;
 // Monotonic sequence for the import preview / duplicate-check flow so a
 // slow older previewImport() response can't overwrite the summary text
@@ -437,6 +479,85 @@ let importPreviewSeq = 0;
 let importPreviewTimer = null;
 let importThumbSchedulerCancel = null;
 let importTags = [];
+let importExiftoolReady = null;
+let importExiftoolRequired = true;
+
+async function loadImportReadiness() {
+  const status = document.getElementById('importExiftoolStatus');
+  const actions = document.getElementById('importExiftoolActions');
+  const advanced = document.getElementById('missingExiftoolAdvanced');
+  const repairSection = document.getElementById('metadataRepairSection');
+  try {
+    const resp = await fetch('/api/import/readiness');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'readiness check failed');
+    const exiftool = data.exiftool || {};
+    importExiftoolReady = !!exiftool.available;
+    importExiftoolRequired = data.requires_exiftool !== false;
+    status.className = 'dependency-status ' + (importExiftoolReady ? 'ok' : 'bad');
+    status.textContent = importExiftoolReady
+      ? 'ExifTool ' + (exiftool.version || '') + ' is ready. Capture dates, GPS, and camera details will be preserved.'
+      : 'ExifTool is unavailable. Repair it before importing so photo metadata is preserved.';
+    actions.style.display = importExiftoolReady ? 'none' : '';
+    advanced.style.display = importExiftoolReady ? 'none' : '';
+
+    const repairCount = Number(data.metadata_repair_count || 0);
+    repairSection.style.display = repairCount ? '' : 'none';
+    if (repairCount) {
+      document.getElementById('metadataRepairSummary').textContent =
+        repairCount.toLocaleString() + ' existing photo' + (repairCount === 1 ? '' : 's') +
+        ' need metadata repair.';
+      const repairBtn = document.getElementById('btnRepairMetadata');
+      repairBtn.disabled = !data.metadata_repair_available;
+      repairBtn.title = data.metadata_repair_available
+        ? '' : (importExiftoolReady ? 'Connect the original photo folder first.' : 'Repair ExifTool first.');
+    }
+  } catch (e) {
+    importExiftoolReady = null;
+    status.className = 'dependency-status bad';
+    status.textContent = 'Could not check ExifTool. Vireo will verify it when import starts.';
+    actions.style.display = 'none';
+    advanced.style.display = 'none';
+    repairSection.style.display = 'none';
+  }
+}
+
+async function installImportExiftool() {
+  const btn = document.getElementById('btnInstallExiftool');
+  const status = document.getElementById('importExiftoolStatus');
+  btn.disabled = true;
+  btn.textContent = 'Repairing…';
+  try {
+    const resp = await fetch('/api/system/install-exiftool', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok || !data.success) throw new Error(data.error || 'ExifTool repair failed');
+    status.textContent = 'ExifTool repaired. Verifying…';
+    await loadImportReadiness();
+  } catch (e) {
+    status.className = 'dependency-status bad';
+    status.textContent = String(e.message || e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Repair ExifTool';
+  }
+}
+
+async function startMetadataRepair() {
+  const btn = document.getElementById('btnRepairMetadata');
+  const status = document.getElementById('metadataRepairStatus');
+  btn.disabled = true;
+  status.textContent = 'Starting repair…';
+  try {
+    const resp = await fetch('/api/jobs/repair-metadata', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'repair failed to start');
+    status.innerHTML = 'Repair started for ' + Number(data.photo_count || 0).toLocaleString() +
+      ' photos · <a href="/jobs">Open Jobs</a>';
+  } catch (e) {
+    status.textContent = String(e.message || e);
+    btn.disabled = false;
+  }
+}
 
 function normalizedImportTag(name) {
   return String(name || '').trim().replace(/\s+/g, ' ');
@@ -505,6 +626,7 @@ function updateImportMode() {
   onImportDestModeChange();
   refreshSourceCounts();
   scheduleImportPreview();
+  updateAfterMoveUI();
 }
 
 function selectedFileTypes() {
@@ -589,6 +711,7 @@ function wireDestStructureInvalidation() {
     const onPreviewOptionChange = () => {
       hideDestStructure();
       scheduleImportPreview();
+      updateAfterMoveUI();
     };
     el.addEventListener('change', onPreviewOptionChange);
     el.addEventListener('input', onPreviewOptionChange);
@@ -609,6 +732,9 @@ function updateWorkspaceMode() {
   // which default (workspace-scoped vs global) the server will resolve
   // after_import against, so the After Import display must resync.
   updateAdvancedImportOptions();
+  // ...and the resync can change whether a process chains at all, which
+  // gates the "Then move to NAS" row.
+  updateAfterMoveUI();
 }
 
 function importRemoteTargetId() {
@@ -704,6 +830,7 @@ function onImportDestModeChange() {
   if (localRows) localRows.style.display = remoteId ? 'none' : '';
   if (remoteRows) remoteRows.style.display = remoteId ? '' : 'none';
   updateRemoteDestPreview();
+  updateAfterMoveUI();
 }
 
 async function loadImportRemoteTargets() {
@@ -713,9 +840,11 @@ async function loadImportRemoteTargets() {
     const data = await resp.json();
     importRemoteTargets = (data && data.targets) || [];
     importRsyncAvailable = !!(data && data.rsync_available);
+    importSshAvailable = !!(data && data.ssh_available);
   } catch (e) {
     importRemoteTargets = [];
     importRsyncAvailable = false;
+    importSshAvailable = false;
   }
   const sel = document.getElementById('destMode');
   if (!sel) return;
@@ -727,6 +856,7 @@ async function loadImportRemoteTargets() {
     sel.appendChild(opt);
   });
   onImportDestModeChange();
+  updateAfterMoveUI();
 }
 
 function importEscapeHtml(s) {
@@ -893,9 +1023,12 @@ async function browseForDestination() {
     if (result) {
       const path = Array.isArray(result) ? result[0] : result;
       if (path) {
-        document.getElementById('destInput').value = path;
-        hideDestStructure();
-        scheduleImportPreview();
+        const destination = document.getElementById('destInput');
+        destination.value = path;
+        // Notify destInput listeners (dest-structure invalidation, NAS-move
+        // row) exactly like a manual edit would — matches
+        // selectRecentDestination().
+        destination.dispatchEvent(new Event('input', { bubbles: true }));
       }
       return;
     }
@@ -1178,9 +1311,12 @@ function updateImportBrowserSelection() {
 function selectImportBrowserFolder() {
   if (browserMode === 'destination') {
     if (!browserPath) return;
-    document.getElementById('destInput').value = browserPath;
-    hideDestStructure();
-    scheduleImportPreview();
+    const destination = document.getElementById('destInput');
+    destination.value = browserPath;
+    // Notify destInput listeners (dest-structure invalidation, NAS-move
+    // row) exactly like a manual edit would — matches
+    // selectRecentDestination().
+    destination.dispatchEvent(new Event('input', { bubbles: true }));
   } else {
     const paths = browserSelectedPaths.length
       ? browserSelectedPaths
@@ -1220,6 +1356,157 @@ function selectedAfterImport() {
   if (v === '__none__' || v === '__hidden_default__') return null;
   const n = parseInt(v, 10);
   return Number.isNaN(n) ? null : n;
+}
+
+// True when a Start Import would chain a processing run — either the user
+// (or the workspace default prefill) has a real process selected, or the
+// "New workspace default" placeholder is masking a real global default the
+// server will apply after creating the workspace. The chained NAS move
+// fires from that processing run, so this gates the "Then move to NAS" row.
+function afterImportChainsProcess() {
+  const sel = document.getElementById('afterImportSelect');
+  if (!sel) return false;
+  if (sel.value === '__hidden_default__') {
+    const placeholder = document.getElementById('afterImportHiddenDefault');
+    return !!(placeholder && placeholder.dataset.maskedValue);
+  }
+  return selectedAfterImport() !== null;
+}
+
+// Normalize a path for display and prefix math: forward slashes, no
+// trailing slash. Case is PRESERVED — this feeds the visible move preview
+// (NAS-side paths are case-sensitive) and the rel-subpath slicing.
+function afterMoveNormPath(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+// Containment gate compares case-INSENSITIVELY, mirroring the server's
+// alias-folding check (_validate_after_process_move via
+// _path_equal_or_descends): on the default case-insensitive macOS/Windows
+// volumes "/volumes/photos/2026" IS inside "/Volumes/Photos", and a
+// case-sensitive gate here would hide the "Then move to NAS" row for a
+// request the server accepts. The server stays authoritative — on a
+// genuinely case-sensitive filesystem the worst case is a clear 400 at
+// Start Import instead of a silently missing option.
+function afterMovePathInsideRoot(destination, root) {
+  const d = afterMoveNormPath(destination).toLowerCase();
+  const r = afterMoveNormPath(root).toLowerCase();
+  return !!r && (d === r || d.indexOf(r + '/') === 0);
+}
+
+// A remote target can host the chained move only when the chosen archive
+// destination sits inside its local_archive_root. This client-side prefix
+// check mirrors the server's realpath/commonpath validation closely enough
+// for UI gating; the server remains the authority.
+function afterMoveEligibleTargets() {
+  const destination = (document.getElementById('destInput').value || '').trim();
+  if (!importIsAbsolutePath(destination)) return [];
+  return importRemoteTargets.filter(
+    (t) => t.local_archive_root
+      && afterMovePathInsideRoot(destination, t.local_archive_root));
+}
+
+function updateAfterMoveUI() {
+  const row = document.getElementById('afterMoveRow');
+  const unavailable = document.getElementById('afterMoveUnavailable');
+  const preview = document.getElementById('afterMovePreview');
+  const sel = document.getElementById('afterMoveTarget');
+  if (!row || !unavailable || !preview || !sel) return;
+  const hideAll = () => {
+    row.style.display = 'none';
+    unavailable.style.display = 'none';
+    preview.style.display = 'none';
+  };
+  // The chained move only exists for local-disk archive copies that chain
+  // a processing run — everything else hides the row entirely, and a
+  // hidden row means startImport() sends after_process_move: null no
+  // matter what the (stale) checkbox says.
+  if (selectedImportMode() !== 'copy' || importRemoteTargetId()
+      || !afterImportChainsProcess()) {
+    hideAll();
+    return;
+  }
+  const eligible = afterMoveEligibleTargets();
+  if (!eligible.length) {
+    hideAll();
+    // Only claim "unavailable" once there is a concrete destination to
+    // judge — an empty or relative destination isn't decidable yet.
+    const destination = (document.getElementById('destInput').value || '').trim();
+    if (importIsAbsolutePath(destination)) {
+      unavailable.textContent =
+        "Move to NAS unavailable: the destination is not inside any remote "
+        + "target's local archive root. Set one under Settings > Remote targets.";
+      unavailable.style.display = '';
+    }
+    return;
+  }
+  unavailable.style.display = 'none';
+  row.style.display = '';
+  // Repopulate with the currently-eligible targets, preserving the user's
+  // pick when it is still eligible; a single eligible target selects
+  // itself (a freshly-populated select shows its first option).
+  const previous = sel.value;
+  while (sel.options.length) sel.remove(0);
+  eligible.forEach((t) => {
+    const opt = document.createElement('option');
+    opt.value = t.id;
+    opt.textContent = t.name;
+    sel.appendChild(opt);
+  });
+  if (eligible.some((t) => t.id === previous)) sel.value = previous;
+  if (!document.getElementById('chkAfterMove').checked) {
+    preview.style.display = 'none';
+    preview.textContent = '';
+    return;
+  }
+  const target = eligible.find((t) => t.id === sel.value) || eligible[0];
+  const destination = afterMoveNormPath(
+    (document.getElementById('destInput').value || '').trim());
+  const root = afterMoveNormPath(target.local_archive_root);
+  const rel = destination === root ? '' : destination.slice(root.length + 1);
+  const remoteBase =
+    afterMoveNormPath(target.remote_path) + (rel ? '/' + rel : '');
+  const mountOk =
+    !!target.mount_path && importIsAbsolutePath(target.mount_path);
+  const mountBase = mountOk
+    ? afterMoveNormPath(target.mount_path) + (rel ? '/' + rel : '') : '';
+  preview.textContent = '';
+  const line = document.createElement('div');
+  line.textContent =
+    'After processing, each imported folder moves to '
+    + remoteBase + '/<imported folder>'
+    + (mountOk
+        ? ' and the catalog repoints to ' + mountBase + '/<imported folder>.'
+        : '.')
+    + " Photos leave this computer's archive.";
+  preview.appendChild(line);
+  if (!importRsyncAvailable) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: no GNU rsync found, so the move to NAS would fail. Install GNU rsync or set its path under Settings > Paths.'));
+  }
+  if (!importSshAvailable) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: no OpenSSH client found, so the move to NAS would fail.'));
+  }
+  if (!target.mount_path) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: the move to NAS would fail: this target has no local mount path — add one under Settings > Remote targets.'));
+  } else if (!importIsAbsolutePath(target.mount_path)) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: the move to NAS would fail: this target\'s local mount path must be absolute — fix it under Settings > Remote targets.'));
+  }
+  preview.style.display = '';
+}
+
+function afterMoveRequest() {
+  // Reads the row visibility updateAfterMoveUI maintains — keeping the
+  // writer and this reader adjacent so a refactor can't silently split them.
+  const row = document.getElementById('afterMoveRow');
+  const sel = document.getElementById('afterMoveTarget');
+  const chk = document.getElementById('chkAfterMove');
+  return (row && chk && sel && chk.checked &&
+          row.style.display !== 'none' && sel.value)
+    ? {remote_target_id: sel.value} : null;
 }
 
 function retireHiddenDefaultOption(sel) {
@@ -1295,8 +1582,12 @@ function updateAdvancedImportOptions() {
   _afterImportHidingDefault = false;
 }
 
-window.addEventListener('advancedmodechange', updateAdvancedImportOptions);
-window.addEventListener('devmodechange', updateAdvancedImportOptions);
+// Combined into one listener per event (rather than registering
+// updateAdvancedImportOptions then updateAfterMoveUI separately) so the
+// move row always re-evaluates against the already-updated After Import
+// selection, without depending on listener registration order.
+window.addEventListener('advancedmodechange', () => { updateAdvancedImportOptions(); updateAfterMoveUI(); });
+window.addEventListener('devmodechange', () => { updateAdvancedImportOptions(); updateAfterMoveUI(); });
 
 // True once initImportPage() has resolved the workspace's after-import
 // default into the select. Until then, the select still shows its HTML
@@ -1538,7 +1829,13 @@ function useStagingAsImportSource(result) {
     updateImportMode();
   }
   if (result.inferred_destination) {
-    document.getElementById('destInput').value = result.inferred_destination;
+    const destination = document.getElementById('destInput');
+    destination.value = result.inferred_destination;
+    // Dispatch AFTER the value is set so every destInput listener
+    // (dest-structure invalidation, NAS-move row) re-evaluates against the
+    // inferred destination — updateImportMode() above ran while destInput
+    // still held its previous value.
+    destination.dispatchEvent(new Event('input', { bubbles: true }));
     hideDestStructure();
   }
   scheduleImportPreview();
@@ -2035,11 +2332,18 @@ async function startImport() {
   showError('');
   addImportTagFromInput();
   if (!sources.length) { showError('Add at least one source folder.'); return; }
+  const allowMissingExiftool = !!document.getElementById('chkAllowMissingExiftool')?.checked;
+  if (importExiftoolRequired && importExiftoolReady === false && !allowMissingExiftool) {
+    showError('Repair ExifTool before importing, or use Advanced → Import without metadata.');
+    document.getElementById('exiftoolCard')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
   const copyMode = selectedImportMode() === 'copy';
   const body = {
     sources: sources,
     recursive: document.getElementById('chkRecursive').checked,
   };
+  if (allowMissingExiftool) body.allow_missing_exiftool = true;
   if (importTags.length) body.tags = importTags.slice();
   if (document.getElementById('chkLocationFromGps').checked) {
     body.location_from_gps = true;
@@ -2091,6 +2395,10 @@ async function startImport() {
   ) {
     body.after_import = selectedAfterImport();
   }
+  // The chained NAS move is only offered while its row is visible (local
+  // archive copy + chained process + eligible target) — a hidden row means
+  // a stale checkbox must not send anything.
+  body.after_process_move = afterMoveRequest();
   document.getElementById('btnStart').disabled = true;
   try {
     const resp = await fetch(copyMode ? '/api/jobs/import-photos' : '/api/jobs/import-in-place', {
@@ -2268,13 +2576,54 @@ function renderTaggingInfo(res) {
 
 function renderChainInfo(res) {
   const chain = document.getElementById('chainInfo');
+  const parts = [];
   if (res.process_job_id) {
-    chain.textContent = 'Processing started as its own job: ' + res.process_job_id;
+    parts.push('Processing started as its own job: ' + res.process_job_id);
   } else if (res.after_import_skipped) {
-    chain.textContent = 'Processing not started: ' + res.after_import_skipped;
-  } else {
-    chain.textContent = '';
+    parts.push('Processing not started: ' + res.after_import_skipped);
   }
+  // Set only when the chained process job actually enqueued with a move
+  // plan, so this states what WILL happen, not what was merely requested.
+  // `note` carries the honest reason when folders were skipped (photos
+  // cataloged directly on the archive root have no folder to move).
+  if (res.after_process_move_planned) {
+    const plan = res.after_process_move_planned;
+    const n = (plan.folders || []).length;
+    if (n === 0) {
+      parts.push(
+        'Move to NAS (' + plan.target_name + ') will not run: '
+        + (plan.note || 'no folders to move') + '.');
+    } else {
+      parts.push(
+        'Processing will be followed by a move to NAS ('
+        + plan.target_name + '): '
+        + n + ' folder' + (n === 1 ? '' : 's') + '.');
+      if (plan.note) parts.push('Note: ' + plan.note + '.');
+    }
+  }
+  // Pre-block path: processing couldn't start, so the import hook fired
+  // the promised NAS move itself. `_chain_after_move` writes its outcome
+  // (move_job_ids / after_move_skipped / after_move_note /
+  // after_move_errors) onto the import result — surface it here so the
+  // user isn't left thinking "processing paused" also means the requested
+  // NAS move silently didn't happen.
+  const moveIds = res.move_job_ids || [];
+  if (moveIds.length) {
+    parts.push(
+      'Move to NAS: ' + moveIds.length + ' move job'
+      + (moveIds.length === 1 ? '' : 's') + ' started.');
+    if (res.after_move_note) parts.push('Note: ' + res.after_move_note + '.');
+  } else if (res.after_move_skipped) {
+    parts.push('Move to NAS skipped: ' + res.after_move_skipped + '.');
+  }
+  const moveErrors = res.after_move_errors || [];
+  if (moveErrors.length) {
+    parts.push(
+      'Move to NAS: ' + moveErrors.length + ' folder'
+      + (moveErrors.length === 1 ? '' : 's')
+      + ' failed to start — ' + moveErrors.join('; ') + '.');
+  }
+  chain.textContent = parts.join(' ');
 }
 
 function renderModelWarning(res) {
@@ -2296,6 +2645,7 @@ async function initImportPage() {
   // template, or file-type controls without the rendered structure
   // being invalidated.
   wireDestStructureInvalidation();
+  await loadImportReadiness();
   // Native menu deep link: File > Import Folder... routes here as
   // /import?mode=copy&pick=source so it lands in Copy-to-archive with the
   // source picker open, while File > Import Photos... gets the page
@@ -2400,6 +2750,7 @@ async function initImportPage() {
     // default (hidden)" placeholder is no longer relevant — retire it
     // so it doesn't clutter the dropdown on the next open.
     if (sel.value !== '__hidden_default__') retireHiddenDefaultOption(sel);
+    updateAfterMoveUI();
   });
   _afterImportHidingDefault = false;
   // Only mark the resolved default as trustworthy when BOTH config

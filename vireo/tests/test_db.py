@@ -2,6 +2,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
@@ -1037,7 +1039,9 @@ def test_collection_recent_days_rule(tmp_path):
 
 
 def test_collection_timestamp_between_subsec(tmp_path):
-    """Collection timestamp 'between' rule includes sub-second photos."""
+    """Collection ``between`` upper: bare-date bound covers the whole day
+    (sub-second photos included); a precise-instant bound is treated as
+    an exact instant (sub-second photos after it are excluded)."""
     import json
 
     from db import Database
@@ -1051,12 +1055,22 @@ def test_collection_timestamp_between_subsec(tmp_path):
     db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0, timestamp='2024-06-15T12:00:00')
 
-    rules = [{"field": "timestamp", "op": "between",
-              "value": ["2024-06-15", "2024-06-15T23:59:59"]}]
-    cid = db.add_collection('June 15', json.dumps(rules))
+    # Bare-date upper covers the full named day, including sub-second
+    # photos in ``23:59:59``.
+    bare_rules = [{"field": "timestamp", "op": "between",
+                   "value": ["2024-06-15", "2024-06-15"]}]
+    cid_bare = db.add_collection('June 15 bare', json.dumps(bare_rules))
+    assert len(db.get_collection_photos(cid_bare)) == 2
 
-    photos = db.get_collection_photos(cid)
-    assert len(photos) == 2
+    # A precise-instant upper ``2024-06-15T23:59:59`` is treated as
+    # exactly that instant — a photo at ``23:59:59.500000`` is strictly
+    # after it and must be excluded, matching the semantics of ``<=``
+    # on precise instants.
+    precise_rules = [{"field": "timestamp", "op": "between",
+                      "value": ["2024-06-15", "2024-06-15T23:59:59"]}]
+    cid_precise = db.add_collection('June 15 precise', json.dumps(precise_rules))
+    matched = {p['filename'] for p in db.get_collection_photos(cid_precise)}
+    assert matched == {'b.jpg'}
 
 
 def test_collection_timestamp_rules_match_ui_shape(tmp_path):
@@ -1386,6 +1400,60 @@ def test_has_subject_rule_ignores_legacy_is_species_when_taxonomy_excluded(tmp_p
         "When 'taxonomy' is excluded from subject_types, an is_species=1 "
         "keyword must not satisfy has_subject — only the configured types do."
     )
+
+
+def test_has_subject_rule_rejects_invalid_op_when_subject_types_empty(tmp_path, monkeypatch):
+    """When subject_types is empty, a malformed has_subject rule (e.g.
+    ``op='contains'``) must still surface as a ValueError so the API
+    layer returns 400 — not silently drop the rule with ``None, []``.
+    Mirrors the operator guard the other advertised boolean fields get
+    via ``_boolean_predicate``.
+    """
+    import config as cfg
+    import pytest
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": []})
+
+    with pytest.raises(ValueError):
+        db._build_query_from_rules(
+            [{"field": "has_subject", "op": "contains", "value": 1}]
+        )
+
+
+def test_has_subject_rule_empty_subject_types_value_zero_matches_all(tmp_path, monkeypatch):
+    """When subject_types is empty, ``has_subject is false`` should match
+    every photo (nothing counts as identifying, so nothing has a subject).
+    Prior implementation returned ``None, []`` here — semantically the
+    same for a lone rule, but the new fail-closed guard routes through
+    ``_boolean_predicate`` so we assert the affirmative-matches-all
+    branch too.
+    """
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": []})
+
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                 file_size=200, file_mtime=2.0)
+
+    cid = db.add_collection(
+        "Missing Subject (empty types)",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
+    )
+    photos = db.get_collection_photos(cid, per_page=999)
+    assert len(photos) == 2
 
 
 def test_add_keyword_is_species(tmp_path):
@@ -20055,3 +20123,1404 @@ def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_p
         "so only one of the two distinct spellings got renamed"
     )
     assert "Sparrow" in remaining_species
+
+
+# ---------------------------------------------------------------------------
+# Universal filter engine (Phase 1) — new fields, ops, and value suggestions.
+# Design: docs/plans/2026-07-19-universal-filters-design.md
+# ---------------------------------------------------------------------------
+
+
+def _filter_db(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    return db, fid
+
+
+def test_universal_filter_numeric_fields_and_between(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    small = db.add_photo(folder_id=fid, filename='small.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    big = db.add_photo(folder_id=fid, filename='big.jpg', extension='.jpg',
+                       file_size=9000, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET width=8640, height=5760, focal_length=600, "
+        "iso=3200, aperture=6.3, shutter_speed=0.0004 WHERE id=?", (big,))
+    db.conn.execute(
+        "UPDATE photos SET width=4000, height=3000, focal_length=300, "
+        "iso=200, aperture=2.8, shutter_speed=0.008 WHERE id=?", (small,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "file_size", "op": ">", "value": 500}]) == 1
+    assert count([{"field": "width", "op": ">=", "value": 8000}]) == 1
+    assert count([{"field": "height", "op": "<", "value": 4000}]) == 1
+    assert count([{"field": "iso", "op": "between", "value": [100, 400]}]) == 1
+    assert count([{"field": "focal_length", "op": "between", "value": [200, 700]}]) == 2
+    assert count([{"field": "aperture", "op": "is", "value": 2.8}]) == 1
+    assert count([{"field": "shutter_speed", "op": "<", "value": 0.001}]) == 1
+    # rating between rides the same generalized numeric path
+    db.update_photo_rating(small, 2)
+    db.update_photo_rating(big, 5)
+    assert count([{"field": "rating", "op": "between", "value": [4, 5]}]) == 1
+
+
+def test_universal_filter_filename_text_ops(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    db.add_photo(folder_id=fid, filename='Owl_2101.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='eagle_2102.cr3', extension='.cr3',
+                 file_size=100, file_mtime=1.0)
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "filename", "op": "contains", "value": "owl"}]) == 1
+    assert count([{"field": "filename", "op": "contains", "value": "owl",
+                   "case": True}]) == 0
+    assert count([{"field": "filename", "op": "contains", "value": "Owl",
+                   "case": True}]) == 1
+    assert count([{"field": "filename", "op": "not_contains", "value": "owl"}]) == 1
+    assert count([{"field": "filename", "op": "starts_with", "value": "eagle"}]) == 1
+    assert count([{"field": "filename", "op": "ends_with", "value": ".cr3"}]) == 1
+    assert count([{"field": "filename", "op": "is", "value": "owl_2101.jpg"}]) == 1
+    assert count([{"field": "filename", "op": "is", "value": "owl_2101.jpg",
+                   "case": True}]) == 0
+    # LIKE wildcards in user input must be literal
+    assert count([{"field": "filename", "op": "contains", "value": "%"}]) == 0
+
+
+def test_universal_filter_flag_null_is_unflagged(tmp_path):
+    """Legacy rows store NULL for unflagged; the Unflagged chip must still
+    return them (plan step 4 regression guard)."""
+    db, fid = _filter_db(tmp_path)
+    null_flag = db.add_photo(folder_id=fid, filename='legacy.jpg', extension='.jpg',
+                             file_size=100, file_mtime=1.0)
+    picked = db.add_photo(folder_id=fid, filename='picked.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET flag=NULL WHERE id=?", (null_flag,))
+    db.conn.execute("UPDATE photos SET flag='flagged' WHERE id=?", (picked,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "flag", "op": "is", "value": "none"}]) == 1
+    assert count([{"field": "flag", "op": "is not", "value": "none"}]) == 1
+    assert count([{"field": "flag", "op": "in", "value": ["none", "flagged"]}]) == 2
+    assert count([{"field": "flag", "op": "in", "value": ["rejected"]}]) == 0
+    assert count([{"field": "flag", "op": "not_in", "value": ["flagged"]}]) == 1
+
+
+def test_universal_filter_in_not_in_enums(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    red = db.add_photo(folder_id=fid, filename='red.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    yellow = db.add_photo(folder_id=fid, filename='yellow.cr3', extension='.cr3',
+                          file_size=100, file_mtime=1.0)
+    plain = db.add_photo(folder_id=fid, filename='plain.nef', extension='.nef',
+                         file_size=100, file_mtime=1.0)
+    ws = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO photo_color_labels(photo_id, workspace_id, color) VALUES (?,?,?)",
+        (red, ws, 'red'))
+    db.conn.execute(
+        "INSERT INTO photo_color_labels(photo_id, workspace_id, color) VALUES (?,?,?)",
+        (yellow, ws, 'yellow'))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "color_label", "op": "in", "value": ["red", "yellow"]}]) == 2
+    assert count([{"field": "color_label", "op": "in", "value": ["green"]}]) == 0
+    # not_in: photos without any label from the set — unlabeled photos match
+    assert count([{"field": "color_label", "op": "not_in", "value": ["red"]}]) == 2
+    assert count([{"field": "extension", "op": "in", "value": [".jpg", ".NEF"]}]) == 2
+    assert count([{"field": "extension", "op": "not_in", "value": [".cr3"]}]) == 2
+    # empty selections: in [] matches nothing, not_in [] excludes nothing
+    assert count([{"field": "flag", "op": "in", "value": []}]) == 0
+    assert count([{"field": "flag", "op": "not_in", "value": []}]) == 3
+
+
+def test_universal_filter_empty_in_preserves_any_none_semantics(tmp_path):
+    """Constant-true/false leaves must stay in their group; dropping them
+    would invert any/none semantics (prototype review regression)."""
+    db, fid = _filter_db(tmp_path)
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+    db.update_photo_rating(p, 5)
+
+    count = db.count_photos_for_rules
+    # any(in [], rating >= 4): first clause false, second true -> matches
+    assert count({"mode": "any", "rules": [
+        {"field": "flag", "op": "in", "value": []},
+        {"field": "rating", "op": ">=", "value": 4},
+    ]}) == 1
+    # none(not_in []): the clause is always true -> none-group matches nothing
+    assert count({"mode": "none", "rules": [
+        {"field": "flag", "op": "not_in", "value": []},
+    ]}) == 0
+
+
+def test_universal_filter_timestamp_recent_and_comparisons(tmp_path):
+    from datetime import UTC, datetime, timedelta
+    db, fid = _filter_db(tmp_path)
+    fresh = db.add_photo(folder_id=fid, filename='fresh.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    old = db.add_photo(folder_id=fid, filename='old.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    now = datetime.now(UTC)
+    # Scanner writes ``datetime.isoformat()``, so timestamps carry the ``T``
+    # separator in real DBs. The recent-cutoff must be formatted to match;
+    # a space-separated cutoff against a T-separated timestamp is a lexical
+    # mismatch where every photo on the cutoff day slips past ``>=`` (``T``
+    # sorts after space), regressing "last N days" by nearly a day.
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ((now - timedelta(days=2)).isoformat(timespec='seconds'), fresh))
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2020-06-01T12:00:00', old))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 7, "unit": "days"}}]) == 1
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 1, "unit": "days"}}]) == 0
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 10, "unit": "years"}}]) == 2
+    assert count([{"field": "timestamp", "op": ">=", "value": "2021-01-01"}]) == 1
+    assert count([{"field": "timestamp", "op": "<", "value": "2021-01-01"}]) == 1
+    # <= is inclusive of the named day
+    assert count([{"field": "timestamp", "op": "<=", "value": "2020-06-01"}]) == 1
+
+
+def test_universal_filter_timestamp_precise_upper_bounds_stay_exact(tmp_path):
+    """``<=`` and ``between`` upper bounds only pad bare ``YYYY-MM-DD``.
+
+    A precise-instant upper ``2024-01-01T12:00:00`` means exactly that
+    instant, not the whole clock second — padding it to ``.999999``
+    would spuriously include ``12:00:00.500000`` photos that are strictly
+    after the requested instant. Bare-date bounds still cover the full
+    named day so the UI's ``<input type="date">`` output stays inclusive.
+    """
+    db, fid = _filter_db(tmp_path)
+    early = db.add_photo(folder_id=fid, filename='early.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    on_second = db.add_photo(folder_id=fid, filename='on.jpg', extension='.jpg',
+                             file_size=100, file_mtime=1.0)
+    subsec = db.add_photo(folder_id=fid, filename='subsec.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2024-01-01T11:59:59', early))
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2024-01-01T12:00:00', on_second))
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2024-01-01T12:00:00.500000', subsec))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # ``<=`` on a precise instant is exact: matches the pre-instant photo
+    # and the instant itself, excludes ``.500000`` which is strictly after.
+    assert count([{"field": "timestamp", "op": "<=",
+                   "value": "2024-01-01T12:00:00"}]) == 2
+    # Same for ``between`` — precise upper excludes sub-second photos
+    # in the same clock second.
+    assert count([{"field": "timestamp", "op": "between",
+                   "value": ["2024-01-01T00:00:00",
+                             "2024-01-01T12:00:00"]}]) == 2
+    # Bare-date upper still covers the whole day.
+    assert count([{"field": "timestamp", "op": "<=",
+                   "value": "2024-01-01"}]) == 3
+    assert count([{"field": "timestamp", "op": "between",
+                   "value": ["2024-01-01", "2024-01-01"]}]) == 3
+
+
+def test_universal_filter_recent_cutoff_matches_iso_separator(tmp_path):
+    """Regression: the ``recent`` cutoff must use the same ``T`` separator
+    as stored timestamps. Before the fix the cutoff came from SQLite's
+    ``datetime('now', ?)`` which returns ``YYYY-MM-DD HH:MM:SS`` (space
+    separator); a lexical ``>=`` against ``YYYY-MM-DDTHH:MM:SS`` treated
+    every photo on the cutoff day as recent because ``T`` (0x54) sorts
+    after ``' '`` (0x20). Place the photo on the cutoff day *before* the
+    cutoff clock time so the mismatch flips the answer.
+    """
+    from datetime import UTC, datetime, timedelta
+    db, fid = _filter_db(tmp_path)
+    boundary = db.add_photo(folder_id=fid, filename='boundary.jpg',
+                            extension='.jpg', file_size=100, file_mtime=1.0)
+    # 5-days-ago at 00:05 UTC. The ``recent 5 days`` cutoff lands 5 days
+    # ago at the *current* clock time — so the photo is on the cutoff day
+    # but strictly earlier than the cutoff, and its true age is > 5 days.
+    # Correct answer: excluded. Bug behavior: the T/space mismatch makes
+    # the photo lexically sort after the space-separated cutoff and the
+    # rule wrongly includes it. Skip if the test happens to run in the
+    # first minute of a UTC day (where cutoff clock time is <= 00:05 and
+    # the boundary is legitimately within the window).
+    now = datetime.now(UTC)
+    if now.hour == 0 and now.minute <= 5:
+        pytest.skip("cutoff clock time <= photo time — inconclusive boundary")
+    boundary_ts = (
+        (now - timedelta(days=5))
+        .replace(hour=0, minute=5, second=0, microsecond=0)
+        .isoformat(timespec='seconds')
+    )
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    (boundary_ts, boundary))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # A photo whose true age is > 5 days must not match "recent 5 days".
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 5, "unit": "days"}}]) == 0
+    # ``recent_days`` shares the cutoff formatting — guard it too.
+    assert count([{"field": "timestamp", "op": "recent_days",
+                   "value": 5}]) == 0
+    # A wider window still matches, sanity-check.
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 30, "unit": "days"}}]) == 1
+
+
+def test_universal_filter_species_any_match(tmp_path):
+    """A multi-species photo matches when ANY of its species matches."""
+    db, fid = _filter_db(tmp_path)
+    multi = db.add_photo(folder_id=fid, filename='multi.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    single = db.add_photo(folder_id=fid, filename='single.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    heron = db.add_keyword('Great Blue Heron', is_species=True)
+    egret = db.add_keyword('Snowy Egret', is_species=True)
+    plain = db.add_keyword('wetlands')
+    db.tag_photo(multi, heron)
+    db.tag_photo(multi, egret)
+    db.tag_photo(single, heron)
+    db.tag_photo(single, plain)
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "species", "op": "is", "value": "Snowy Egret"}]) == 1
+    assert count([{"field": "species", "op": "is", "value": "Great Blue Heron"}]) == 2
+    assert count([{"field": "species", "op": "contains", "value": "egret"}]) == 1
+    assert count([{"field": "species", "op": "is not", "value": "Snowy Egret"}]) == 1
+    # non-species keywords never match the species field
+    assert count([{"field": "species", "op": "contains", "value": "wetlands"}]) == 0
+
+
+def test_universal_filter_species_contains_escapes_like_metacharacters(tmp_path):
+    """``contains``/``not_contains`` on species must treat ``%``/``_`` in the
+    value as literal characters — otherwise a rule like
+    ``{"field":"species","op":"contains","value":"%"}`` matches every
+    species-tagged photo instead of only species whose name literally
+    contains ``%``. The other text/folder filters already escape LIKE
+    metacharacters; species did not, so a client could bypass the filter
+    by passing a wildcard."""
+    db, fid = _filter_db(tmp_path)
+    only = db.add_photo(folder_id=fid, filename='only.jpg', extension='.jpg',
+                        file_size=100, file_mtime=1.0)
+    heron = db.add_keyword('Great Blue Heron', is_species=True)
+    db.tag_photo(only, heron)
+
+    count = db.count_photos_for_rules
+    # A bare ``%`` used to match every species-tagged photo; after the fix
+    # it matches only species whose name literally contains ``%``.
+    assert count([{"field": "species", "op": "contains", "value": "%"}]) == 0
+    assert count([{"field": "species", "op": "contains", "value": "_"}]) == 0
+    # ``not_contains`` with a wildcard used to exclude every species-tagged
+    # photo; the escaped form leaves them included (nothing literally
+    # contains ``%``).
+    assert count([{"field": "species", "op": "not_contains", "value": "%"}]) == 1
+    # Sanity: normal literal substring still works.
+    assert count([{"field": "species", "op": "contains", "value": "Heron"}]) == 1
+
+
+def test_universal_filter_keyword_contains_escapes_like_metacharacters(tmp_path):
+    """``keyword contains`` must treat ``%``/``_`` in the value as literal
+    characters, matching the species/filename/camera text rules. Otherwise a
+    request like ``{"field":"keyword","op":"contains","value":"%"}`` matches
+    every keyworded photo — the exact wildcard-bypass hole the registry now
+    advertises to clients through ``/api/filters/fields``."""
+    db, fid = _filter_db(tmp_path)
+    tagged = db.add_photo(folder_id=fid, filename='tagged.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    untagged = db.add_photo(folder_id=fid, filename='untagged.jpg', extension='.jpg',
+                            file_size=100, file_mtime=1.0)
+    k = db.add_keyword('Red-tailed hawk')
+    db.tag_photo(tagged, k)
+
+    count = db.count_photos_for_rules
+    # A bare ``%``/``_`` used to match every keyworded photo; after the fix
+    # they only match keywords literally containing the metacharacter.
+    assert count([{"field": "keyword", "op": "contains", "value": "%"}]) == 0
+    assert count([{"field": "keyword", "op": "contains", "value": "_"}]) == 0
+    # ``not_contains`` with a bare wildcard used to exclude every keyworded
+    # photo; escaped, it leaves them included and excludes only the
+    # untagged photo (no keyword row exists to match).
+    assert count([{"field": "keyword", "op": "not_contains", "value": "%"}]) == 2
+    # Sanity: literal substrings still match normally.
+    assert count([{"field": "keyword", "op": "contains", "value": "hawk"}]) == 1
+    assert count([{"field": "keyword", "op": "contains", "value": "sparrow"}]) == 0
+
+
+def test_universal_filter_species_matches_root_via_taxon_of_hierarchy_leaf(tmp_path):
+    """Species rules resolve through taxon identity — a photo tagged only
+    with a hierarchy leaf whose linked taxon has a same-taxon top-level root
+    still matches the root's name. Mirrors how
+    ``get_species_keywords_for_photos`` canonicalizes to the root spelling,
+    so the universal filter agrees with the species names shown in Browse,
+    Compare, and life-list views."""
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    pid = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    other = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    # A photo tagged only with a hierarchy leaf whose taxon links to the
+    # top-level root "Verdin". Leaf spelling ("Auriparus flaviceps") is
+    # distinct from root ("Verdin"), so a raw ``k.name`` predicate cannot
+    # rescue the match — canonicalization through ``taxon_id`` is required.
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Auriparus flaviceps", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.add_keyword("Verdin", is_species=True)  # auto-links taxon_id
+    db.conn.commit()
+    db.tag_photo(pid, leaf)
+
+    # Sanity check: the canonical species surfaced elsewhere is "Verdin".
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+
+    count = db.count_photos_for_rules
+    # `is`/`equals` on the root name matches the taxon-linked leaf.
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 1
+    assert count([{"field": "species", "op": "equals", "value": "Verdin"}]) == 1
+    # `contains` also follows the root-name canonicalization: the leaf name
+    # does not contain "erdi", but the root name does.
+    assert count([{"field": "species", "op": "contains", "value": "erdi"}]) == 1
+    # A non-matching species stays non-matching.
+    assert count([{"field": "species", "op": "is", "value": "Nope"}]) == 0
+    # `is not` / `not_contains` correctly exclude the taxon-matched photo
+    # and include the untagged one (2 photos - 1 match = 1).
+    assert count([{"field": "species", "op": "is not", "value": "Verdin"}]) == 1
+    assert count([{"field": "species", "op": "not_contains", "value": "erdi"}]) == 1
+    _ = other  # keep the second photo alive for the negative assertions.
+
+
+def test_universal_filter_workflow_fields(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    edited = db.add_photo(folder_id=fid, filename='edited.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    indexed = db.add_photo(folder_id=fid, filename='indexed.jpg', extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+    burst = db.add_photo(folder_id=fid, filename='burst.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    db.set_photo_edit_recipe(edited, {"rotation": 90})
+    db.conn.execute(
+        "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+        "VALUES (?,?,?,?)", (indexed, 'clip-vit', '', b'\x01'))
+    db.conn.execute("UPDATE photos SET burst_id='B42' WHERE id=?", (burst,))
+    db.conn.execute("UPDATE photos SET file_hash='abc123' WHERE id=?", (burst,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "has_edits", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "has_edits", "op": "is", "value": 0}]) == 2
+    assert count([{"field": "has_visual_index", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "clip-vit"}]) == 1
+    assert count([{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "other-model"}]) == 0
+    # An unsupported op on a boolean field must raise, not silently return
+    # a truthy predicate — the API layer catches ValueError → 400 so
+    # malformed requests surface as validation errors instead of a 200
+    # with unfiltered rows. Every registry-advertised boolean field must
+    # fail-closed the same way, not just ``has_visual_index``.
+    for bad in (
+        {"field": "has_visual_index", "op": "contains", "value": 1},
+        {"field": "has_edits", "op": "contains", "value": 1},
+        {"field": "in_burst", "op": "starts_with", "value": 1},
+        {"field": "has_gps", "op": "between", "value": [0, 1]},
+        {"field": "has_location_keyword", "op": "contains", "value": 1},
+        {"field": "is_duplicate", "op": ">=", "value": 1},
+    ):
+        with pytest.raises(ValueError):
+            count([bad])
+    # A non-boolean value must also fail-closed: without this guard, values
+    # outside ``_truthy``'s whitelist (True/1/"1"/"true") silently fall to
+    # the negative branch, so ``has_gps is "yes"`` would quietly return the
+    # ``is false`` set instead of the reject-as-400 the other malformed
+    # boolean rules get.
+    for bad in (
+        {"field": "has_edits", "op": "is", "value": "yes"},
+        {"field": "has_gps", "op": "is", "value": "maybe"},
+        {"field": "has_visual_index", "op": "is not", "value": "sometimes"},
+        {"field": "in_burst", "op": "equals", "value": 2},
+    ):
+        with pytest.raises(ValueError):
+            count([bad])
+    assert count([{"field": "in_burst", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "burst_id", "op": "is", "value": "B42"}]) == 1
+    assert count([{"field": "duplicate_group", "op": "is", "value": "abc123"}]) == 1
+
+
+def test_is_duplicate_sees_cross_workspace_partners(tmp_path):
+    """``is_duplicate`` must match a photo whose only duplicate lives in
+    another workspace — otherwise Browse hides members that the Duplicates
+    workflow (``find_duplicate_groups``, which is catalog-wide by
+    ``file_hash``) will still act on.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+
+    active_folder = db.add_folder('/active', name='active')
+    other_folder = db.add_folder('/other', name='other')
+    db.remove_workspace_folder(active_ws, other_folder)
+    db.add_workspace_folder(other_ws, other_folder)
+
+    here = db.add_photo(folder_id=active_folder, filename='here.jpg',
+                        extension='.jpg', file_size=100, file_mtime=1.0)
+    there = db.add_photo(folder_id=other_folder, filename='there.jpg',
+                         extension='.jpg', file_size=100, file_mtime=2.0)
+    lone = db.add_photo(folder_id=active_folder, filename='lone.jpg',
+                        extension='.jpg', file_size=100, file_mtime=3.0)
+    db.conn.execute("UPDATE photos SET file_hash='shared' WHERE id IN (?, ?)",
+                    (here, there))
+    db.conn.execute("UPDATE photos SET file_hash='unique' WHERE id=?", (lone,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # ``here`` is only visible in the active workspace; ``there`` sits in the
+    # other workspace. Under the old workspace-scoped subquery, ``here`` would
+    # count as 0 duplicates. Catalog-wide, it must show as a duplicate member.
+    assert count([{"field": "is_duplicate", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "is_duplicate", "op": "is", "value": 0}]) == 1
+
+    # Rejecting the cross-workspace partner drops the pair, matching
+    # find_duplicate_groups' rejected-flag filter.
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (there,))
+    db.conn.commit()
+    assert count([{"field": "is_duplicate", "op": "is", "value": 1}]) == 0
+    assert count([{"field": "is_duplicate", "op": "is", "value": 0}]) == 2
+
+
+def test_universal_filter_prediction_rules_pin_current_fingerprint(tmp_path):
+    """Universal-filter rules that consult ``predictions`` (prediction_status,
+    prediction_confidence, classifier_model, taxonomy_*) must only match the
+    most recent ``labels_fingerprint`` per (detection, classifier_model) —
+    matching how the dashboard and review UI decide which prediction row is
+    "current". Without pinning, an older accepted row keeps the photo in
+    ``prediction_status is accepted`` after a rerun classifier writes a new
+    fingerprint with a different (still-pending) verdict.
+    """
+    db, fid = _filter_db(tmp_path)
+    ws_id = db._ws_id()
+    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    det = db.save_detections(photo, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    # Stale-fingerprint prediction accepted under an old label set.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Robin', 0.9, '2026-01-01')",
+        (det,),
+    )
+    stale_pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=? AND labels_fingerprint='fp-old'",
+        (det,),
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status, reviewed_at) "
+        "VALUES (?, ?, 'accepted', '2026-01-02')",
+        (stale_pred, ws_id),
+    )
+    # Current-fingerprint prediction — still pending.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Finch', 0.55, '2026-04-24')",
+        (det,),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # Accept lives only on the stale fingerprint → filter must exclude it.
+    assert count([{"field": "prediction_status", "op": "is",
+                   "value": "accepted"}]) == 0
+    # Current fingerprint is pending → visible.
+    assert count([{"field": "prediction_status", "op": "is",
+                   "value": "pending"}]) == 1
+    # Confidence + classifier_model + taxonomy filters read pred.* so all
+    # ride the same pin: the stale 0.9 must not satisfy a >=0.8 rule.
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.8}]) == 0
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.5}]) == 1
+
+
+def test_universal_filter_prediction_rules_gate_by_detector_confidence(tmp_path, monkeypatch):
+    """Universal-filter rules that consult ``predictions`` (prediction_status,
+    prediction_confidence, classifier_model, taxonomy_*) must apply the
+    workspace-effective ``detector_confidence`` floor so a prediction on a
+    below-threshold hidden detection can't satisfy a rule that Browse would
+    show no detection context for. Mirrors get_detections_for_photos() and
+    the dashboard prediction counters, which both filter by the threshold.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({"detector_confidence": 0.5})
+
+    db, fid = _filter_db(tmp_path)
+    # Photo A: above-threshold detection carrying a current prediction —
+    # should match every advertised prediction rule.
+    a = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+    det_a = db.save_detections(a, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Robin', 0.85, '2026-01-01')",
+        (det_a,),
+    )
+    # Photo B: ONLY a below-threshold detection with an otherwise-matching
+    # prediction — Browse hides the detection at threshold=0.5, so the
+    # prediction filters must hide the photo too.
+    b = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+    det_b = db.save_detections(b, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Robin', 0.85, '2026-01-01')",
+        (det_b,),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # prediction_confidence, classifier_model, and prediction_status all
+    # route through the shared _prediction_exists helper — one gate covers
+    # them all. Photo A qualifies; Photo B is hidden by the threshold.
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.8}]) == 1
+    assert count([{"field": "classifier_model", "op": "is",
+                   "value": "bioclip-2"}]) == 1
+    assert count([{"field": "prediction_status", "op": "is",
+                   "value": "pending"}]) == 1
+
+
+def test_universal_filter_prediction_rules_ignore_alternative_rows(tmp_path):
+    """Filters that represent the displayed prediction — prediction_confidence,
+    classifier_model, taxonomy_* — must ignore runner-up predictions stored
+    with ``prediction_review.status = 'alternative'``. /api/predictions drops
+    alternatives from top-level results (app.py:12386-12388) and Compare
+    hides them, so a top pick at 0.95 with an alternative at 0.10 must not
+    satisfy ``prediction_confidence <= 0.2``.
+    """
+    db, fid = _filter_db(tmp_path)
+    ws_id = db._ws_id()
+    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    det = db.save_detections(photo, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    # Displayed top prediction — high confidence.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Robin', 0.95, '2026-01-01')",
+        (det,),
+    )
+    # Runner-up alternative — low confidence, marked alternative in review.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Sparrow', 0.10, '2026-01-01')",
+        (det,),
+    )
+    alt_pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=? AND species='Sparrow'",
+        (det,),
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status, reviewed_at) "
+        "VALUES (?, ?, 'alternative', '2026-01-02')",
+        (alt_pred, ws_id),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # The alternative sits at 0.10 but must not drag the photo into a
+    # <=0.2 confidence bucket — the displayed 0.95 pick is what matters.
+    assert count([{"field": "prediction_confidence", "op": "<=",
+                   "value": 0.2}]) == 0
+    # The displayed pick still passes a >=0.9 rule.
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.9}]) == 1
+    # classifier_model still resolves via the top pick (still present, not
+    # excluded — alternative sits under the same model).
+    assert count([{"field": "classifier_model", "op": "is",
+                   "value": "bioclip-2"}]) == 1
+
+
+def test_universal_filter_classifier_model_contains_escapes_like_metacharacters(tmp_path):
+    """``classifier_model contains`` must treat ``%`` / ``_`` in the value as
+    literal characters, matching the other advertised text contains rules.
+    Otherwise ``{"field":"classifier_model","op":"contains","value":"%"}``
+    would match every classified photo — the wildcard-bypass hole the
+    registry now advertises to clients through ``/api/filters/fields``."""
+    db, fid = _filter_db(tmp_path)
+    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    det = db.save_detections(photo, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp1', 'Robin', 0.9, '2026-01-01')",
+        (det,),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # A bare ``%`` / ``_`` used to match every classified photo; escaped,
+    # they only match model strings that literally contain the metacharacter.
+    assert count([{"field": "classifier_model", "op": "contains",
+                   "value": "%"}]) == 0
+    assert count([{"field": "classifier_model", "op": "contains",
+                   "value": "_"}]) == 0
+    # Sanity: a literal substring still matches.
+    assert count([{"field": "classifier_model", "op": "contains",
+                   "value": "bioclip"}]) == 1
+
+
+def test_universal_filter_validation_errors(tmp_path):
+    import pytest
+    db, _ = _filter_db(tmp_path)
+    count = db.count_photos_for_rules
+
+    with pytest.raises(ValueError):
+        count([{"field": "flag", "op": "in", "value": "none"}])  # not a list
+    with pytest.raises(ValueError):
+        count([{"field": "iso", "op": "between", "value": [100]}])  # wrong arity
+    with pytest.raises(ValueError):
+        count([{"field": "timestamp", "op": "recent", "value": 30}])  # not a dict
+    with pytest.raises(ValueError):
+        count([{"field": "timestamp", "op": "recent",
+                "value": {"n": 0, "unit": "days"}}])
+    with pytest.raises(ValueError):
+        count([{"field": "timestamp", "op": "recent",
+                "value": {"n": 3, "unit": "fortnights"}}])
+    with pytest.raises(ValueError):
+        count([{"field": "no_such_field", "op": "is", "value": 1}])
+
+
+def test_registry_ops_all_compile(tmp_path):
+    """Every field/op combination the registry advertises must build SQL —
+    the registry and the engine share this test so they cannot drift."""
+    from filter_fields import FILTER_FIELDS
+    db, _ = _filter_db(tmp_path)
+
+    sample_values = {
+        "text": "x", "number": 1, "rating": 3, "date": "2024-01-01",
+        "boolean": 1, "enum": None, "folder": "/photos",
+    }
+    for key, spec in FILTER_FIELDS.items():
+        for op in spec["ops"]:
+            value = sample_values[spec["type"]]
+            if spec["type"] == "enum":
+                value = (spec.get("values") or [".jpg"])[0]
+            if op in ("in", "not_in"):
+                value = [value]
+            elif op == "between":
+                value = ["2024-01-01", "2024-12-31"] if spec["type"] == "date" else [0, 5]
+            elif op == "recent":
+                value = {"n": 7, "unit": "days"}
+            rule = {"field": key, "op": op, "value": value}
+            count = db.count_photos_for_rules([rule])
+            assert isinstance(count, int), f"{key}/{op} failed"
+
+
+def test_exif_backfill_migration_and_idempotence(tmp_path):
+    import json as _json
+
+    from db import Database
+    path = str(tmp_path / "test.db")
+    db, fid = _filter_db(tmp_path)
+    pid = db.add_photo(folder_id=fid, filename='sony.arw', extension='.arw',
+                       file_size=100, file_mtime=1.0)
+    exif = {
+        "EXIF": {"Make": "Sony", "Model": "ILCE-1", "FNumber": 6.3,
+                 "ExposureTime": 0.0004, "ISO": 800},
+        "Composite": {"LensID": "FE 200-600mm F5.6-6.3 G OSS"},
+    }
+    db.conn.execute(
+        "UPDATE photos SET exif_data=?, camera_make=NULL, camera_model=NULL, "
+        "lens=NULL, aperture=NULL, shutter_speed=NULL, iso=NULL WHERE id=?",
+        (_json.dumps(exif), pid))
+    # Simulate a pre-backfill database so reopening runs the migration.
+    db.conn.execute("DELETE FROM db_meta WHERE key='exif_summary_backfill_v1'")
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(path)
+    row = db2.conn.execute(
+        "SELECT camera_make, camera_model, lens, aperture, shutter_speed, iso "
+        "FROM photos WHERE id=?", (pid,)).fetchone()
+    assert row["camera_make"] == "Sony"
+    assert row["camera_model"] == "ILCE-1"
+    assert row["lens"] == "FE 200-600mm F5.6-6.3 G OSS"
+    assert row["aperture"] == 6.3
+    assert row["shutter_speed"] == 0.0004
+    assert row["iso"] == 800
+    # The promoted columns are filterable.
+    ws_id = db2.ensure_default_workspace()
+    db2.set_active_workspace(ws_id)
+    assert db2.count_photos_for_rules(
+        [{"field": "camera_model", "op": "contains", "value": "ilce"}]) == 1
+
+    # Idempotence: with the marker set, reopening must not overwrite.
+    db2.conn.execute("UPDATE photos SET camera_make='UserEdited' WHERE id=?", (pid,))
+    db2.conn.commit()
+    db2.close()
+    db3 = Database(path)
+    row = db3.conn.execute(
+        "SELECT camera_make FROM photos WHERE id=?", (pid,)).fetchone()
+    assert row["camera_make"] == "UserEdited"
+    db3.close()
+
+
+def test_query_photos_sort_and_paging(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    for i, (name, rating) in enumerate([('a.jpg', 1), ('b.jpg', 5), ('c.jpg', 3)]):
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0,
+                           timestamp=f'2024-01-0{i + 1} 10:00:00')
+        db.update_photo_rating(pid, rating)
+
+    rows = db.query_photos([], sort="rating")
+    assert [r["filename"] for r in rows] == ['b.jpg', 'c.jpg', 'a.jpg']
+    rows = db.query_photos([], sort="name", page=2, per_page=2)
+    assert [r["filename"] for r in rows] == ['c.jpg']
+    rows = db.query_photos([{"field": "rating", "op": ">=", "value": 3}], sort="name")
+    assert [r["filename"] for r in rows] == ['b.jpg', 'c.jpg']
+
+
+def test_get_filter_field_values_counts_respect_rules(tmp_path):
+    import pytest
+    db, fid = _filter_db(tmp_path)
+    ids = []
+    for name, model, rating in [
+        ('a.jpg', 'Sony A1', 5), ('b.jpg', 'Sony A1', 1),
+        ('c.jpg', 'Canon R5', 5), ('d.jpg', None, 5),
+    ]:
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        db.update_photo_rating(pid, rating)
+        if model:
+            db.conn.execute("UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
+        ids.append(pid)
+    db.conn.commit()
+
+    # Unfiltered: counts over the whole workspace, NULLs excluded.
+    values = db.get_filter_field_values("camera_model")
+    assert values == [
+        {"value": "Sony A1", "count": 2},
+        {"value": "Canon R5", "count": 1},
+    ]
+    # Sibling rules constrain the counts (facet semantics).
+    values = db.get_filter_field_values(
+        "camera_model", rules=[{"field": "rating", "op": ">=", "value": 4}])
+    assert values == [
+        {"value": "Canon R5", "count": 1},
+        {"value": "Sony A1", "count": 1},
+    ]
+    # Typeahead narrowing.
+    values = db.get_filter_field_values("camera_model", q="son")
+    assert values == [{"value": "Sony A1", "count": 2}]
+    # Keyword and species values come from the keyword tables.
+    heron = db.add_keyword('Great Blue Heron', is_species=True)
+    db.tag_photo(ids[0], heron)
+    assert db.get_filter_field_values("species") == [
+        {"value": "Great Blue Heron", "count": 1}]
+    # Non-suggest fields are rejected.
+    with pytest.raises(ValueError):
+        db.get_filter_field_values("rating")
+
+
+def test_get_filter_field_values_counts_wrap_or_rules(tmp_path):
+    """Facet counts under a top-level ``any`` (OR) rule group must not leak
+    rows that satisfy the first OR branch but fail the facet's own predicate.
+
+    ``_build_query_from_rules`` returns ``WHERE (A) OR (B)`` for
+    ``{mode: any}``; appending ``AND {facet}`` would bind to the last OR
+    branch by SQL precedence (``(A) OR ((B) AND facet)``), letting
+    branch-A rows with a NULL/non-matching facet field still inflate the
+    suggestion count. The facet must wrap the existing rule condition so
+    every matched row also satisfies the ``value IS NOT NULL``/typeahead
+    predicates the suggestion helper appends.
+    """
+    db, fid = _filter_db(tmp_path)
+    # Two-branch tree: rating >= 5  OR  camera_model = "Nikon Z9".
+    # Sony has rating 5 (matches branch A) but a distinct model. Under the
+    # buggy binding, Sony would leak into the Nikon-branch AND camera_model
+    # facet — but only Nikon should count under "Nikon Z9".
+    for name, model, rating in [
+        ('sony_hi.jpg', 'Sony A1', 5),      # matches branch A only
+        ('nikon_lo.jpg', 'Nikon Z9', 1),    # matches branch B only
+        ('nikon_hi.jpg', 'Nikon Z9', 5),    # matches both branches
+        ('nomodel.jpg', None, 5),           # matches branch A, NULL camera
+    ]:
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        db.update_photo_rating(pid, rating)
+        if model:
+            db.conn.execute(
+                "UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
+    db.conn.commit()
+
+    rules = {"mode": "any", "rules": [
+        {"field": "rating", "op": ">=", "value": 5},
+        {"field": "camera_model", "op": "is", "value": "Nikon Z9"},
+    ]}
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values("camera_model", rules=rules)}
+    # Three photos total match the OR tree (sony_hi, nikon_lo, nikon_hi);
+    # the NULL-camera one is excluded by the facet's IS NOT NULL guard.
+    # Counts must match what ``camera_model is <val>`` would return when
+    # combined with the sibling OR tree — one Sony, two Nikon.
+    assert values == {"Sony A1": 1, "Nikon Z9": 2}
+    # Typeahead ``son`` combined with the OR tree must also stay honest —
+    # the ``AND LIKE ?`` clause the helper appends must apply to every
+    # matched row, not just the last OR branch.
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values(
+                  "camera_model", rules=rules, q="son")}
+    assert values == {"Sony A1": 1}
+
+
+def test_get_filter_field_values_folder_counts_over_subtree(tmp_path):
+    """Folder suggestions must aggregate over subtrees so counts match the
+    ``folder under=<path>`` operator the rule engine implements. A parent
+    folder with no direct photos but matching descendants must still be
+    suggested with its subtree count; a folder mixing direct and nested
+    photos must not undercount."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    root = db.add_folder('/photos', name='photos')
+    year = db.add_folder('/photos/2024', name='2024', parent_id=root)
+    month = db.add_folder('/photos/2024/01', name='01', parent_id=year)
+    other = db.add_folder('/vacation', name='vacation')
+    # /photos itself has NO direct photos; only descendants.
+    db.add_photo(folder_id=year, filename='y1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=month, filename='m1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=month, filename='m2.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=other, filename='v1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values("folder")}
+    # Parent with only descendants is still suggestable with subtree count.
+    assert values.get('/photos') == 3
+    # /photos/2024: 1 direct + 2 in /01 subtree.
+    assert values.get('/photos/2024') == 3
+    # /photos/2024/01: 2 direct.
+    assert values.get('/photos/2024/01') == 2
+    # Separate subtree counts independently.
+    assert values.get('/vacation') == 1
+    # Cross-check: each suggestion's count matches what a `folder under`
+    # rule would return.
+    for path, count in values.items():
+        rule_count = db.count_photos_for_rules(
+            [{"field": "folder", "op": "under", "value": path}])
+        assert rule_count == count, f"mismatch for {path!r}: rule={rule_count} suggest={count}"
+
+    # Typeahead narrows to matching folder paths.
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values("folder", q="2024")}
+    assert set(values) == {'/photos/2024', '/photos/2024/01'}
+
+    # Sibling rules constrain the counts (facet semantics preserved).
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values(
+        "folder",
+        rules=[{"field": "filename", "op": "starts_with", "value": "m"}],
+    )}
+    # Only m1.jpg / m2.jpg match; they live under /photos/2024/01.
+    assert values.get('/photos') == 2
+    assert values.get('/photos/2024') == 2
+    assert values.get('/photos/2024/01') == 2
+    assert '/vacation' not in values
+
+
+def test_get_filter_field_values_species_canonicalizes_hierarchy_leaf(tmp_path):
+    """Species typeahead resolves hierarchy leaves through ``taxon_id`` to
+    the same-taxon top-level root's name, so suggestions match the values
+    ``get_species_keywords_for_photos`` shows in Browse, Compare, and
+    life-list views. Otherwise a user editing a Species rule would see the
+    raw leaf spelling (``Desert Verdin``) that never appears elsewhere."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    # Photo p_leaf: tagged only with a hierarchy leaf linked to Verdin taxon.
+    p_leaf = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    # Photo p_root: tagged with the top-level root directly (auto-links).
+    p_root = db.add_photo(folder_id=fid, filename='root.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    root_kid = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(p_leaf, leaf)
+    db.tag_photo(p_root, root_kid)
+    db.conn.commit()
+
+    # Suggestions canonicalize the leaf to the root spelling; both photos
+    # count under the single canonical name.
+    assert db.get_filter_field_values("species") == [
+        {"value": "Verdin", "count": 2}]
+    # The raw leaf spelling is never suggested — the canonical root wins.
+    assert db.get_filter_field_values("species", q="Desert") == []
+    # Typeahead on the root name returns the canonical suggestion.
+    assert db.get_filter_field_values("species", q="Verd") == [
+        {"value": "Verdin", "count": 2}]
+    # Cross-check: the suggested value works with the `species is` rule
+    # that the UI would fire off — both photos are matched (rule engine
+    # already canonicalizes through taxon).
+    assert db.count_photos_for_rules(
+        [{"field": "species", "op": "is", "value": "Verdin"}]) == 2
+
+
+def test_get_filter_field_values_species_preserves_attached_root_spelling(tmp_path):
+    """When a taxon has multiple top-level species roots and a photo is
+    tagged with the non-MIN(id) root, ``get_species_keywords_for_photos``
+    intentionally keeps the attached root's stored spelling (its
+    ``is_root`` guard). The typeahead must agree — if it always rewrites
+    to the MIN(id) root, the species name Browse shows would disappear
+    from suggestions and a typeahead query for that displayed root would
+    return nothing."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    taxa = _seed_taxa(db, [(9999, "Corvus brachyrhynchos", "American Crow")])
+    # Two top-level roots for the same taxon: one earlier, one later.
+    root_early = db.add_keyword("American Crow", is_species=True)
+    root_late = db.add_keyword("crow (american)", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id=? WHERE id=?",
+        (taxa["American Crow"], root_late),
+    )
+    # Photo tagged with the LATE (non-MIN-id) root only.
+    p_late = db.add_photo(folder_id=fid, filename='late.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.tag_photo(p_late, root_late)
+    # Photo tagged with a hierarchy leaf under the same taxon — still
+    # canonicalizes to the MIN(id) root (existing behavior).
+    p_leaf = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Corvids")
+    leaf = db.add_keyword("Northeastern Crow", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["American Crow"], leaf))
+    db.tag_photo(p_leaf, leaf)
+    db.conn.commit()
+
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values("species")}
+    # The attached late-root spelling must survive as its own suggestion —
+    # matches what ``get_species_keywords_for_photos`` reports for p_late
+    # (Browse shows ``crow (american)``, so the typeahead must offer it).
+    assert values.get("crow (american)") == 1
+    # The hierarchy-leaf photo still canonicalizes to the MIN(id) root
+    # (``American Crow``), matching the leaf-only test above.
+    assert values.get("American Crow") == 1
+    assert "Northeastern Crow" not in values
+    # Typeahead on the attached root spelling finds the photo instead of
+    # returning nothing.
+    late_hits = db.get_filter_field_values("species", q="crow (")
+    assert {v["value"] for v in late_hits} == {"crow (american)"}
+
+
+def test_get_filter_field_values_folder_escapes_like_metacharacters(tmp_path):
+    """Folder suggestion counts must not treat stored folder paths as LIKE
+    patterns. A folder such as ``/photos/my_dir`` uses ``_`` — a single-char
+    LIKE wildcard — so an unescaped subtree join would also match photos in
+    ``/photos/myXdir`` and overcount what selecting the suggestion actually
+    filters to."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    literal = db.add_folder('/photos/my_dir', name='my_dir')
+    look_alike = db.add_folder('/photos/myXdir', name='myXdir')
+    db.add_photo(folder_id=literal, filename='a.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=look_alike, filename='b.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values("folder")}
+    # ``/photos/my_dir`` covers only its own direct photo — the ``_`` in the
+    # stored path must not act as a LIKE wildcard against ``myXdir``. Cross-
+    # check with what the ``folder under`` rule engine returns.
+    assert values.get('/photos/my_dir') == 1
+    assert values.get('/photos/myXdir') == 1
+    for path in ('/photos/my_dir', '/photos/myXdir'):
+        rule_count = db.count_photos_for_rules(
+            [{"field": "folder", "op": "under", "value": path}])
+        assert rule_count == values.get(path), (
+            f"mismatch for {path!r}: rule={rule_count} suggest={values.get(path)}"
+        )
+
+
+def test_get_filter_field_values_folder_root_with_trailing_separator(tmp_path):
+    """A workspace root stored with a trailing separator (Windows drive root
+    ``D:\\`` or POSIX ``/``) must still count its subtree correctly. The
+    rule engine's ``folder under`` op strips trailing separators via
+    ``_path_for_subtree_match``, so the facet must do the same on both
+    sides — otherwise concatenating the LIKE prefix produces ``D://%`` /
+    ``//%`` which matches nothing, and the suggested root counts 0 while
+    ``folder under=<root>`` actually returns every photo on the drive."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    # POSIX root stored with trailing '/', descendants without.
+    root = db.add_folder('/', name='root')
+    child = db.add_folder('/dcim', name='dcim', parent_id=root)
+    db.add_photo(folder_id=root, filename='at_root.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=child, filename='d1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=child, filename='d2.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values("folder")}
+    # ``/`` covers the direct photo plus both descendants.
+    assert values.get('/') == 3
+    assert values.get('/dcim') == 2
+    # Cross-check: the suggested count matches what ``folder under`` returns.
+    for path, count in values.items():
+        rule_count = db.count_photos_for_rules(
+            [{"field": "folder", "op": "under", "value": path}])
+        assert rule_count == count, (
+            f"mismatch for {path!r}: rule={rule_count} suggest={count}"
+        )
+
+
+def test_get_filter_field_values_camera_folds_case(tmp_path):
+    """Camera-field suggestions must fold by case: the corresponding rule
+    engine text ops use ``LOWER(column) = LOWER(?)`` for camera_make/
+    camera_model/lens (no ``case_toggle`` on the registry), so raw
+    value-splitting facet counts would show ``Sony A1`` and ``sony a1`` as
+    two 1-count entries while selecting either fires a case-insensitive
+    filter that returns both photos. The suggestion count must equal the
+    rule count for the value it becomes."""
+    db, fid = _filter_db(tmp_path)
+    ids = []
+    for name, model in [
+        ('a.jpg', 'Sony A1'), ('b.jpg', 'sony a1'), ('c.jpg', 'SONY A1'),
+        ('d.jpg', 'Canon R5'),
+    ]:
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        db.conn.execute("UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
+        ids.append(pid)
+    db.conn.commit()
+
+    values = db.get_filter_field_values("camera_model")
+    # One row per case-folded model, count aggregates all case variants.
+    by_lower = {v["value"].lower(): v["count"] for v in values}
+    assert by_lower == {"sony a1": 3, "canon r5": 1}
+    # Cross-check: the suggested count matches what a ``camera_model is <suggested>``
+    # rule would return for the case-insensitive engine.
+    for entry in values:
+        rule_count = db.count_photos_for_rules(
+            [{"field": "camera_model", "op": "is", "value": entry["value"]}])
+        assert rule_count == entry["count"], (
+            f"mismatch for {entry['value']!r}: rule={rule_count} "
+            f"suggest={entry['count']}"
+        )
+    # Typeahead narrowing still works case-insensitively.
+    values = db.get_filter_field_values("camera_model", q="SONY")
+    assert len(values) == 1
+    assert values[0]["value"].lower() == "sony a1"
+    assert values[0]["count"] == 3
+
+
+def test_universal_filter_species_matches_by_displayed_root_name(tmp_path):
+    """Species rules match a photo by the species name shown in the UI —
+    the canonical root spelling from ``get_species_keywords_for_photos``
+    (and ``/api/filters/values``) — never by a same-taxon hierarchy leaf
+    that never surfaces there.
+
+    A photo tagged only with the root ``Verdin`` is displayed as
+    ``Verdin``. A rule ``species is "Auriparus flaviceps"`` (or
+    ``contains "flaviceps"``) targets the leaf spelling and must not
+    pull the root-tagged photo in just because that leaf exists for the
+    same taxon — otherwise the filter contradicts what
+    ``get_species_keywords_for_photos`` and the values typeahead
+    advertise, and the ``is not`` / ``not_contains`` inverses exclude
+    the photo unexpectedly.
+    """
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    pid = db.add_photo(folder_id=fid, filename='v.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    root_kw = db.add_keyword("Verdin", is_species=True)
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Auriparus flaviceps", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.conn.commit()
+    db.tag_photo(pid, root_kw)
+
+    # Sanity check: displayed species is the root spelling ``Verdin``,
+    # not the leaf ``Auriparus flaviceps``.
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+
+    count = db.count_photos_for_rules
+    # The displayed name matches.
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 1
+    # A same-taxon hierarchy leaf that never surfaces in the UI does not.
+    assert count([{"field": "species", "op": "is",
+                   "value": "Auriparus flaviceps"}]) == 0
+    assert count([{"field": "species", "op": "contains",
+                   "value": "flaviceps"}]) == 0
+    # The ``is not`` / ``not_contains`` inverses correctly keep the
+    # root-tagged photo included when the query targets a leaf spelling
+    # the photo is not displayed under.
+    assert count([{"field": "species", "op": "is not",
+                   "value": "Auriparus flaviceps"}]) == 1
+    assert count([{"field": "species", "op": "not_contains",
+                   "value": "flaviceps"}]) == 1
+
+
+def test_universal_filter_species_matches_rootless_hierarchy_leaf(tmp_path):
+    """When a hierarchy leaf's taxon has no top-level root row in
+    ``keywords`` (repair detached the ``Verdin`` root and left only the
+    ``Desert Verdin`` leaf), ``get_species_keywords_for_photos`` and the
+    values typeahead both fall back to the leaf's own ``k.name``. The
+    species filter must fall back the same way — otherwise
+    ``species is "Desert Verdin"`` silently excludes the photo (and
+    ``is not`` silently includes it) even though the leaf name is what
+    the rest of the app surfaces.
+    """
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    pid = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    other = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.conn.commit()
+    db.tag_photo(pid, leaf)
+    # No top-level ``Verdin`` root exists — this is the rootless-leaf
+    # shape the repair pass leaves behind.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords "
+        "WHERE parent_id IS NULL AND taxon_id=?", (taxa["Verdin"],)
+    ).fetchone()[0] == 0
+
+    # The displayed species falls back to the leaf's own spelling.
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Desert Verdin"]}
+
+    count = db.count_photos_for_rules
+    # The leaf name matches ``is`` / ``equals`` / ``contains``.
+    assert count([{"field": "species", "op": "is",
+                   "value": "Desert Verdin"}]) == 1
+    assert count([{"field": "species", "op": "equals",
+                   "value": "Desert Verdin"}]) == 1
+    assert count([{"field": "species", "op": "contains",
+                   "value": "Verdin"}]) == 1
+    # And the inverses correctly exclude the leaf-tagged photo.
+    assert count([{"field": "species", "op": "is not",
+                   "value": "Desert Verdin"}]) == 1
+    assert count([{"field": "species", "op": "not_contains",
+                   "value": "Verdin"}]) == 1
+    _ = other
+
+
+def test_universal_filter_species_multi_root_isolates_attached_spelling(tmp_path):
+    """When a taxon has multiple top-level roots (say ``Verdin`` and the
+    sibling alias ``Auriparus flaviceps``), a photo tagged only with one
+    of them must match rules for that spelling only — never for the
+    sibling root's spelling. ``/api/filters/values`` groups attached
+    roots by their own ``kv.name`` (its ``kv.parent_id IS NULL`` branch),
+    so if the filter matched any same-taxon root, selecting one
+    suggestion would return photos the count advertises under the other.
+
+    A hierarchy leaf photo for the same taxon must still match the
+    canonical MIN(id) root spelling — that's what
+    ``get_species_keywords_for_photos`` and the typeahead surface for
+    leaves — but not the sibling root spelling.
+    """
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    # Create ``Verdin`` first so it wins MIN(id) — the sibling root
+    # ``Auriparus flaviceps`` gets a higher id.
+    verdin_root = db.add_keyword("Verdin", is_species=True)
+    sci_root = db.add_keyword("Auriparus flaviceps", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], sci_root))
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.conn.commit()
+
+    p_verdin = db.add_photo(folder_id=fid, filename='v.jpg', extension='.jpg',
+                            file_size=100, file_mtime=1.0)
+    p_sci = db.add_photo(folder_id=fid, filename='s.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    p_leaf = db.add_photo(folder_id=fid, filename='l.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.tag_photo(p_verdin, verdin_root)
+    db.tag_photo(p_sci, sci_root)
+    db.tag_photo(p_leaf, leaf)
+
+    # Sanity: display keeps each attached root's own spelling and
+    # canonicalizes the hierarchy leaf to MIN(id) root.
+    displayed = db.get_species_keywords_for_photos([p_verdin, p_sci, p_leaf])
+    assert displayed[p_verdin] == ["Verdin"]
+    assert displayed[p_sci] == ["Auriparus flaviceps"]
+    assert displayed[p_leaf] == ["Verdin"]
+
+    count = db.count_photos_for_rules
+    # ``species is "Verdin"`` matches only the photos surfaced as
+    # ``Verdin`` — the attached-``Verdin`` photo and the canonicalized
+    # leaf — never the sibling-root-tagged photo.
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 2
+    # ``species is "Auriparus flaviceps"`` matches only the attached
+    # sibling root, not the ``Verdin``-tagged nor the leaf-tagged photos
+    # (the leaf displays as ``Verdin`` via MIN(id) canonicalization).
+    assert count([{"field": "species", "op": "is",
+                   "value": "Auriparus flaviceps"}]) == 1
+
+
+def test_exif_backfill_migration_clears_empty_marker_for_rescan(tmp_path):
+    """Rows whose ``exif_data`` is the ``'{}'`` marker were scanned with
+    ``extract_full_metadata=False`` before the promoted EXIF columns
+    existed, so there is nothing to backfill from JSON. The scanner's
+    incremental pre-pass treats any non-NULL ``exif_data`` as already
+    extracted, so leaving the marker in place would keep camera/lens/iso
+    NULL until a user manually forces a full non-incremental scan. The
+    migration must clear those rows back to NULL so the next incremental
+    scan re-runs ExifTool and populates the promoted columns.
+    """
+    from db import Database
+    path = str(tmp_path / "test.db")
+    db, fid = _filter_db(tmp_path)
+    empty = db.add_photo(folder_id=fid, filename='empty.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    populated = db.add_photo(folder_id=fid, filename='sony.arw', extension='.arw',
+                             file_size=100, file_mtime=1.0)
+    import json as _json
+    exif = {"EXIF": {"Make": "Sony", "Model": "ILCE-1"}}
+    db.conn.execute(
+        "UPDATE photos SET exif_data='{}', camera_make=NULL, "
+        "camera_model=NULL WHERE id=?", (empty,))
+    db.conn.execute(
+        "UPDATE photos SET exif_data=?, camera_make=NULL, "
+        "camera_model=NULL WHERE id=?", (_json.dumps(exif), populated))
+    # Simulate pre-backfill.
+    db.conn.execute("DELETE FROM db_meta WHERE key='exif_summary_backfill_v1'")
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(path)
+    # Populated row is backfilled from its stored JSON.
+    row = db2.conn.execute(
+        "SELECT exif_data, camera_make, camera_model FROM photos WHERE id=?",
+        (populated,)).fetchone()
+    assert row["camera_make"] == "Sony"
+    assert row["camera_model"] == "ILCE-1"
+    # Empty-marker row is cleared so the next incremental scan re-extracts
+    # ExifTool for it (the pre-pass keys on ``exif_data IS NOT NULL``).
+    row = db2.conn.execute(
+        "SELECT exif_data, camera_make, camera_model FROM photos WHERE id=?",
+        (empty,)).fetchone()
+    assert row["exif_data"] is None
+    assert row["camera_make"] is None
+    assert row["camera_model"] is None
+    db2.close()
+
+    # Second re-open is a no-op (marker set): a fresh '{}' written after
+    # the migration ran must not be cleared on subsequent opens —
+    # otherwise the scanner's own ``COALESCE(exif_data, '{}')`` write
+    # would bounce right back to NULL every time.
+    db3 = Database(path)
+    db3.conn.execute(
+        "UPDATE photos SET exif_data='{}' WHERE id=?", (empty,))
+    db3.conn.commit()
+    db3.close()
+    db4 = Database(path)
+    row = db4.conn.execute(
+        "SELECT exif_data FROM photos WHERE id=?", (empty,)).fetchone()
+    assert row["exif_data"] == '{}'
+    db4.close()
+
+
+def test_universal_filter_has_species_matches_taxonomy_type_keyword(tmp_path):
+    """``has_species`` must accept species stored as
+    ``type='taxonomy'`` with ``is_species=0`` — the shape upgraded/legacy
+    photos carry and that the species filter,
+    ``get_species_keywords_for_photos``, and Browse all treat as species.
+    A plain ``k.is_species = 1`` check disagreed: the same photo would
+    appear under ``species is Verdin`` yet fail ``has_species is true``.
+    Also validates the newer ``is_species=1`` flag path so both storage
+    shapes count toward the "Has species" chip.
+    """
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    p_legacy = db.add_photo(folder_id=fid, filename='legacy.jpg', extension='.jpg',
+                            file_size=100, file_mtime=1.0)
+    p_flag = db.add_photo(folder_id=fid, filename='flag.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    p_none = db.add_photo(folder_id=fid, filename='none.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    # Legacy shape: type='taxonomy', is_species=0, taxon linked to a species.
+    legacy_kw = db.add_keyword("Verdin")
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=0, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], legacy_kw))
+    db.conn.commit()
+    db.tag_photo(p_legacy, legacy_kw)
+    # Newer shape: is_species=1 flag.
+    flag_kw = db.add_keyword("Great Blue Heron", is_species=True)
+    db.tag_photo(p_flag, flag_kw)
+
+    count = db.count_photos_for_rules
+    # Sanity: the species filter already accepts the legacy shape.
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 1
+    # Both storage shapes count toward has_species=true; only p_none
+    # (untagged) matches has_species=false.
+    assert count([{"field": "has_species", "op": "is", "value": 1}]) == 2
+    assert count([{"field": "has_species", "op": "is", "value": 0}]) == 1
+    _ = p_none  # keep the untagged photo alive for the negative branch.

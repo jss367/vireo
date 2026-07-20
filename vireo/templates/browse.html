@@ -8188,6 +8188,10 @@ async function copyFolderPath(fid) {
   }
 }
 
+function moveFolder(fid) {
+  window.location.href = '/move?folder_id=' + encodeURIComponent(fid);
+}
+
 async function rescanFolder(fid) {
   showToast('Starting folder rescan...', 'info');
   try {
@@ -8218,6 +8222,7 @@ document.addEventListener('contextmenu', function(e) {
     { label: window.VIREO_REVEAL_LABEL, onClick: function() { revealFolder(fid); } },
     { label: 'Copy Path', onClick: function() { copyFolderPath(fid); } },
     { separator: true },
+    { label: 'Move\u2026', onClick: function() { moveFolder(fid); } },
     { label: 'Rescan this Folder', onClick: function() { rescanFolder(fid); } },
   ]);
 });

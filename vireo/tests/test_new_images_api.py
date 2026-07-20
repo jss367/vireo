@@ -130,6 +130,50 @@ def test_api_new_images_returns_pending_when_walk_is_slow(app_and_db, monkeypatc
         release.set()
 
 
+def test_api_new_images_defers_walk_during_folder_move(app_and_db):
+    """The automatic navbar probe must not walk the NAS while rsync is moving
+    a folder on the same library."""
+    import threading
+    import time
+
+    app, db, ws_id, tmp_path = app_and_db
+    root = tmp_path / "shoot"
+    _touch_image(str(root / "IMG.JPG"))
+    db.add_folder(str(root), name="shoot")
+
+    release = threading.Event()
+    move_id = app._job_runner.start(
+        "move-folder",
+        lambda _job: release.wait(timeout=5),
+        workspace_id=ws_id,
+    )
+    client = app.test_client()
+    try:
+        resp = client.get("/api/workspaces/active/new-images")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["pending"] is True
+        assert data["deferred_reason"] == "storage_move_active"
+        assert not any(
+            job["type"] == "new_images_walk" and job["status"] == "running"
+            for job in app._job_runner.list_jobs()
+        )
+
+        snapshot = client.post(
+            "/api/workspaces/active/new-images/snapshot",
+        )
+        assert snapshot.status_code == 202
+        assert snapshot.get_json()["deferred_reason"] == "storage_move_active"
+    finally:
+        release.set()
+
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if app._job_runner.get(move_id)["status"] != "running":
+            break
+        time.sleep(0.01)
+
+
 def test_api_new_images_returns_cached_after_background_compute_finishes(app_and_db):
     """Once the background walk finishes, the cache is populated and the next
     request returns the real count instantly — no second walk."""

@@ -378,6 +378,32 @@
   cursor: default;
 }
 .encounter-footer:hover { background: var(--bg-tertiary); }
+.group-reject-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--danger) 65%, var(--border-primary));
+  border-radius: 5px;
+  padding: 4px 8px;
+  background: transparent;
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+.group-reject-btn:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: var(--danger);
+}
+.group-reject-btn.all-rejected {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+.group-reject-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
 
 /* Burst strip */
 .burst-strip {
@@ -396,6 +422,13 @@
   writing-mode: vertical-lr;
   text-orientation: mixed;
   padding: 4px 0;
+  flex-shrink: 0;
+}
+.burst-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
   flex-shrink: 0;
 }
 
@@ -700,6 +733,10 @@ input[type="range"]::-moz-range-thumb {
   /* Detector ran and found no subject — this isn't a "go embed it" prompt
      like trace-component-missing, it's signal that justified a low score. */
   color: rgba(180, 180, 180, 0.85);
+  font-style: italic;
+}
+.algo-trace .trace-component-uncertain {
+  color: rgba(90, 170, 220, 0.95);
   font-style: italic;
 }
 .algo-trace .trace-empty {
@@ -2612,6 +2649,9 @@ function renderAlgorithmTrace() {
     if (typeof thr.species_hard_cut_margin === 'number') {
       thrParts.push('species_margin=' + thr.species_hard_cut_margin.toFixed(2));
     }
+    if (typeof thr.weak_detection_confidence === 'number') {
+      thrParts.push('weak_detection=' + thr.weak_detection_confidence.toFixed(2));
+    }
     if (typeof thr.hard_cut_time === 'number') thrParts.push('hard_cut_time=' + thr.hard_cut_time + 's');
     if (thrParts.length) {
       html += '<div class="trace-thresholds">cut if: ' + thrParts.join(' · ') + '</div>';
@@ -2624,7 +2664,10 @@ function renderAlgorithmTrace() {
     else rowCls += ' kept';
     var dt = (t.dt_seconds === null || t.dt_seconds === undefined) ? '∞' : t.dt_seconds.toFixed(1) + 's';
     var score = (typeof t.score === 'number') ? t.score.toFixed(3) : '-';
-    var decision = t.decision || '?';
+    var decisionLabels = {
+      kept_weak_detection: 'kept · weak detection rescued'
+    };
+    var decision = decisionLabels[t.decision] || t.decision || '?';
     html += '<div class="' + rowCls + '">';
     html += '<span>pair ' + (i + 1) + ' · ' + dt + '</span>';
     html += '<span>S=' + score + '</span>';
@@ -2671,6 +2714,14 @@ function renderAlgorithmTrace() {
             // don't go re-embed photos that legitimately have no subject.
             parts.push('<span class="trace-component-absent">' + escapeHtml(k)
               + '=neutral (no subject on both, w=' + w + ')</span>');
+          } else if (c.uncertain_a || c.uncertain_b) {
+            var uncertainWho;
+            if (c.uncertain_a && c.uncertain_b) uncertainWho = 'both';
+            else if (c.uncertain_a) uncertainWho = nameA;
+            else uncertainWho = nameB;
+            parts.push('<span class="trace-component-uncertain">'
+              + escapeHtml(k) + '=context-rescued weak detection on '
+              + escapeHtml(uncertainWho) + ' (w=' + w + ')</span>');
           } else {
             var who;
             if (c.missing_a && c.missing_b) who = 'both';
@@ -3033,6 +3084,9 @@ function renderResults() {
   // management below can pick a *visible* encounter (not one that was
   // filtered out by species filter, hide-confirmed, or label filter).
   var renderedIndices = [];
+  // Reset the click-time target cache; it's rebuilt below to mirror the exact
+  // set of photos each Reject/Clear button represents on screen.
+  pipelineReviewVisibleTargets = {};
   encounterSortOrder().forEach(function(ei) {
     var enc = pipelineResults.encounters[ei];
     var timeRange = '';
@@ -3045,23 +3099,21 @@ function renderResults() {
     // Check if the encounter passes the species/filename search.
     if (!encounterMatchesSearch(enc, photoMap)) return;
 
-    // Hide confirmed: skip the whole encounter if every one of its photos is hidden
+    // Build the set of photos this encounter will actually draw: skip
+    // hide-confirmed photos and photos filtered out by the active label /
+    // species-conflict filter. The encounter card is rendered only if this
+    // set is non-empty, and the encounter-level Reject/Clear button targets
+    // exactly this set so it can never flip flags on photos the user can't
+    // see.
     var encPhotoIds = enc.photo_ids || [];
-    if (hideConfirmed) {
-      var anyVisible = encPhotoIds.some(function(pid) {
-        return !confirmedHiddenIds.has(pid);
-      });
-      if (!anyVisible) return;
-    }
-
-    // Check if any photo in this encounter passes the label filter
-    var hasVisible = encPhotoIds.some(function(pid) {
+    var visibleEncIds = encPhotoIds.filter(function(pid) {
       var p = photoMap[pid];
       if (!p) return false;
       if (confirmedHiddenIds && confirmedHiddenIds.has(pid)) return false;
       return photoMatchesPipelineFilter(p, speciesConflictEvidence[pid]);
     });
-    if (!hasVisible) return;
+    if (!visibleEncIds.length) return;
+    pipelineReviewVisibleTargets['encounter:' + ei] = visibleEncIds;
 
     renderedIndices.push(ei);
 
@@ -3078,15 +3130,26 @@ function renderResults() {
     if (timeRange) html += '<span>' + timeRange + '</span>';
     html += missingTimestampBadge(enc);
     html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
-    html += '</span></div>';
+    html += '</span>';
+    html += renderGroupRejectButton('encounter', ei, null, visibleEncIds, photoMap);
+    html += '</div>';
     html += '<div class="encounter-body" id="encBody' + ei + '"' + (isCollapsed ? ' style="display:none;"' : '') + '>';
 
     if (enc.bursts && enc.bursts.length > 0) {
       enc.bursts.forEach(function(burst, bi) {
         if (hideConfirmed && isBurstConfirmed(enc, burst)) return;
         var burstIds = burst.photo_ids || burst;
+        // Narrow the burst's Reject/Clear target to photos that actually
+        // render — the active label / species-conflict filter can hide
+        // frames inside a burst even though the burst strip itself is drawn.
+        var visibleBurstIds = burstIds.filter(function(pid) {
+          var p = photoMap[pid];
+          if (!p) return false;
+          return photoMatchesPipelineFilter(p, speciesConflictEvidence[pid]);
+        });
+        pipelineReviewVisibleTargets['burst:' + ei + ':' + bi] = visibleBurstIds;
         html += '<div class="burst-strip">';
-        html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">';
+        html += '<div class="burst-controls">';
         if (enc.bursts.length > 1) {
           html += '<span class="burst-label">B' + (bi+1) + '</span>';
         }
@@ -3098,6 +3161,7 @@ function renderResults() {
           html += '<span class="burst-species-edit" onclick="toggleSpeciesDropdown(event,' + ei + ',' + bi + ',\'top\')">&#9998;</span>';
         }
         html += renderBurstSpeciesConflict(enc, ei, burst, bi, speciesConflictEvidence);
+        html += renderGroupRejectButton('burst', ei, bi, visibleBurstIds, photoMap);
         html += '<button class="detach-btn" onclick="detachBurst(' + ei + ',' + bi + ')" title="Detach burst">&times;</button>';
         html += '</div>';
         burstIds.forEach(function(pid) {
@@ -3247,6 +3311,25 @@ function isBurstConfirmed(enc, burst) {
   var ovr = burst && burst.species_override;
   if (ovr) return !!ovr.confirmed;
   return !!(enc && enc.species_confirmed);
+}
+
+// Photo IDs the user currently sees inside this encounter's body. When
+// "Hide confirmed" is off, this is every photo in the encounter. When on,
+// photos belonging to confirmed bursts (or a confirmed no-burst encounter)
+// are excluded so encounter-level actions only touch what's on screen.
+function visibleEncounterPhotoIds(enc) {
+  var ids = (enc && enc.photo_ids) || [];
+  if (!hideConfirmed) return ids.slice();
+  if (enc.bursts && enc.bursts.length > 0) {
+    var hidden = new Set();
+    enc.bursts.forEach(function(burst) {
+      if (isBurstConfirmed(enc, burst)) {
+        (burst.photo_ids || burst || []).forEach(function(pid) { hidden.add(pid); });
+      }
+    });
+    return ids.filter(function(pid) { return !hidden.has(pid); });
+  }
+  return enc.species_confirmed ? [] : ids.slice();
 }
 
 function toggleHideConfirmed() {
@@ -3636,9 +3719,288 @@ function findEncounterForPhoto(photoId) {
 }
 
 var inspectPhotoId = null;
+var pipelineReviewGroupFlagInFlight = {};
+// Photo IDs that any in-flight bulk reject/clear is currently mutating. We
+// check for overlap in setPipelineReviewGroupFlag so an encounter-level
+// action and one of its burst-level actions can't run concurrently: each
+// snapshots previousFlags from its own /api/pipeline/group/state read, so
+// two overlapping writes would let the later Undo restore shared photos to
+// the pre-first-action state, silently rolling back part of the earlier
+// action. Non-overlapping bulk actions (different bursts, different
+// encounters) still proceed in parallel.
+var pipelineReviewGroupFlagInFlightPhotoIds = new Set();
+// Photo IDs each rendered bulk-reject button actually represents, keyed by the
+// same 'encounter:ei' / 'burst:ei:bi' strings that group flag targets use.
+// renderResults() rebuilds this every render so hide-confirmed AND the label /
+// species-conflict filter both narrow the target to what the user can see.
+// groupFlagTarget() reads from here so the click applies to the visible set,
+// not the raw underlying photo list.
+var pipelineReviewVisibleTargets = {};
 
 function pipelineReviewBareKey(e, key) {
   return !e.ctrlKey && !e.metaKey && !e.altKey && e.key && e.key.toLowerCase() === key;
+}
+
+function normalizedPipelineReviewFlag(flag) {
+  return flag === 'flagged' || flag === 'rejected' ? flag : 'none';
+}
+
+function updatePipelineReviewPhotoFlag(photo, flag) {
+  if (!photo) return;
+  photo.flag = flag;
+  // Rejected photos lose representative eligibility server-side
+  // (get_species_representatives(eligible_only=True) filters them out), so
+  // mirror that in the review cache immediately.
+  if (flag === 'rejected') {
+    if (photo.is_species_representative) photo.is_species_representative = false;
+    if (Array.isArray(photo.life_list)) {
+      photo.life_list.forEach(function(entry) {
+        if (!entry) return;
+        if (entry.is_current_photo) entry.is_current_photo = false;
+        if (entry.is_species_representative) entry.is_species_representative = false;
+      });
+    }
+  }
+}
+
+function renderGroupRejectButton(kind, encIdx, burstIdx, photoIds, photoMap) {
+  photoIds = Array.isArray(photoIds) ? photoIds : [];
+  var allRejected = photoIds.length > 0 && photoIds.every(function(pid) {
+    return photoMap[pid] && photoMap[pid].flag === 'rejected';
+  });
+  var noun = kind === 'burst' ? 'burst' : 'encounter';
+  var label = allRejected ? 'Clear rejects' : 'Reject ' + noun;
+  var title = allRejected
+    ? 'Clear the rejected flag from every photo in this ' + noun
+    : 'Mark every photo in this ' + noun + ' as rejected';
+  var handler = kind === 'burst'
+    ? 'toggleBurstRejected(event,' + encIdx + ',' + burstIdx + ')'
+    : 'toggleEncounterRejected(event,' + encIdx + ')';
+  var testId = kind === 'burst' ? 'reject-burst' : 'reject-encounter';
+  return '<button type="button" class="group-reject-btn' + (allRejected ? ' all-rejected' : '') +
+    '" data-testid="' + testId + '" onclick="' + handler + '" title="' + escapeAttr(title) +
+    '" aria-label="' + escapeAttr(label) + '"><span aria-hidden="true">&times;</span>' +
+    escapeHtml(label) + '</button>';
+}
+
+function groupFlagTarget(encIdx, burstIdx) {
+  if (!pipelineResults || !pipelineResults.encounters) return null;
+  var enc = pipelineResults.encounters[encIdx];
+  if (!enc) return null;
+  if (burstIdx == null) {
+    // Read the exact set of photos the encounter button represents on
+    // screen: renderResults() cached it under this key, and it already
+    // excludes photos hidden by Hide confirmed or by the active label /
+    // species-conflict filter so a click can't flip flags on photos the
+    // user can't see. Fall back to the hide-confirmed-only set only when
+    // the cache is missing (e.g. no render has happened yet).
+    var encKey = 'encounter:' + encIdx;
+    var encIds = pipelineReviewVisibleTargets[encKey];
+    if (!encIds) encIds = visibleEncounterPhotoIds(enc);
+    return {key: encKey, noun: 'encounter', photoIds: encIds};
+  }
+  var burst = enc.bursts && enc.bursts[burstIdx];
+  if (!burst) return null;
+  var burstKey = 'burst:' + encIdx + ':' + burstIdx;
+  var burstIds = pipelineReviewVisibleTargets[burstKey];
+  if (!burstIds) burstIds = burst.photo_ids || burst || [];
+  return {
+    key: burstKey,
+    noun: 'burst',
+    photoIds: burstIds,
+  };
+}
+
+function restorePipelineReviewFlags(previousFlags, noun) {
+  var byFlag = {none: [], flagged: [], rejected: []};
+  Object.keys(previousFlags).forEach(function(pid) {
+    var flag = normalizedPipelineReviewFlag(previousFlags[pid]);
+    byFlag[flag].push(parseInt(pid, 10));
+  });
+  var ids = Object.keys(previousFlags).map(function(pid) { return parseInt(pid, 10); });
+  // Undo is another bulk flag write and must hold the same photo-ID lock as
+  // the forward action. Otherwise a pick/reject started while these restore
+  // requests are running can be overwritten by the older snapshot.
+  var overlaps = ids.some(function(pid) {
+    return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+  });
+  if (overlaps) {
+    showToast('Another flag change is still finishing — try Undo again in a moment', 'error');
+    return Promise.resolve();
+  }
+  ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.add(pid); });
+  var sequence = Promise.resolve();
+  ['none', 'flagged', 'rejected'].forEach(function(flag) {
+    if (!byFlag[flag].length) return;
+    sequence = sequence.then(function() {
+      return safeFetch('/api/batch/flag', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: byFlag[flag], flag: flag}),
+      }).then(function() {
+        byFlag[flag].forEach(function(pid) {
+          updatePipelineReviewPhotoFlag(findPhotoInResults(pid), flag);
+        });
+      });
+    });
+  });
+  return sequence.then(function() {
+    renderResults();
+    showToast('Restored previous flags for ' + noun, 'success');
+    refreshLatestScopeSnapshotIfCurrent();
+  }).finally(function() {
+    ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.delete(pid); });
+  });
+}
+
+function setPipelineReviewGroupFlag(target, flag) {
+  if (!target || pipelineReviewGroupFlagInFlight[target.key]) return Promise.resolve();
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return Promise.resolve();
+  }
+  var ids = Array.from(new Set((target.photoIds || []).map(function(pid) {
+    return parseInt(pid, 10);
+  }).filter(function(pid) { return !!pid && !!findPhotoInResults(pid); })));
+  if (!ids.length) return Promise.resolve();
+
+  // Block bulk actions whose photos overlap an in-flight bulk action — e.g.,
+  // clicking Reject burst while the parent encounter's Reject is still
+  // running. Both requests would snapshot previousFlags from the pre-first
+  // DB read, and the later Undo could restore the shared photos to 'none',
+  // silently reverting part of the earlier action.
+  var overlaps = ids.some(function(pid) {
+    return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+  });
+  if (overlaps) {
+    showToast('Another bulk reject is still finishing — try again in a moment', 'error');
+    return Promise.resolve();
+  }
+
+  pipelineReviewGroupFlagInFlight[target.key] = true;
+  ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.add(pid); });
+  // pipelineResults.photos[].flag is a cache written when the pipeline ran;
+  // GET /api/pipeline/results serves it as-is without refreshing from the DB
+  // (unlike the GRM, which fetches /api/pipeline/group/state on open). If the
+  // user picked a photo in Browse after the cache was written, the cache can
+  // still read 'rejected' for it. Deriving changedIds and previousFlags from
+  // the stale cache would post flag: 'none' for that live pick on "Clear
+  // rejects", and Undo would restore the cached 'rejected' rather than the
+  // pick. Read live DB flags first and drive the decision off those.
+  return safeFetch('/api/pipeline/group/state', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_ids: ids, species: ''}),
+  }).then(function(data) {
+    var live = (data && data.photos) || {};
+    var liveFlagFor = function(pid) {
+      return normalizedPipelineReviewFlag(live[pid] && live[pid].flag);
+    };
+    // Sync the review cache to the live snapshot so subsequent button
+    // labels and card badges reflect truth, not the cache's opening value.
+    ids.forEach(function(pid) {
+      var liveFlag = liveFlagFor(pid);
+      var photo = findPhotoInResults(pid);
+      if (photo && normalizedPipelineReviewFlag(photo.flag) !== liveFlag) {
+        updatePipelineReviewPhotoFlag(photo, liveFlag);
+      }
+    });
+    // "Reject" applies the reject flag to anything not already rejected —
+    // including live picks — because the user explicitly asked to reject the
+    // group. "Clear rejects" only touches photos that are actually rejected;
+    // it must never overwrite a live pick or an unflagged photo to 'none'.
+    var changedIds = ids.filter(function(pid) {
+      var liveFlag = liveFlagFor(pid);
+      if (flag === 'none') return liveFlag === 'rejected';
+      return liveFlag !== flag;
+    });
+    if (!changedIds.length) {
+      renderResults();
+      return;
+    }
+    var previousFlags = {};
+    changedIds.forEach(function(pid) {
+      previousFlags[pid] = liveFlagFor(pid);
+    });
+    return safeFetch('/api/batch/flag', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: changedIds, flag: flag}),
+    }).then(function() {
+      changedIds.forEach(function(pid) {
+        updatePipelineReviewPhotoFlag(findPhotoInResults(pid), flag);
+      });
+      renderResults();
+      refreshLatestScopeSnapshotIfCurrent();
+      var count = changedIds.length;
+      var message = flag === 'rejected'
+        ? 'Rejected ' + count + ' photo' + (count === 1 ? '' : 's') + ' in ' + target.noun
+        : 'Cleared rejects from ' + count + ' photo' + (count === 1 ? '' : 's') + ' in ' + target.noun;
+      showUndo(message, function() {
+        restorePipelineReviewFlags(previousFlags, target.noun);
+      });
+    });
+  }).finally(function() {
+    delete pipelineReviewGroupFlagInFlight[target.key];
+    ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.delete(pid); });
+  });
+}
+
+function toggleEncounterRejected(event, encIdx) {
+  if (event && event.stopPropagation) event.stopPropagation();
+  var target = groupFlagTarget(encIdx, null);
+  if (!target) return;
+  var allRejected = target.photoIds.length > 0 && target.photoIds.every(function(pid) {
+    var photo = findPhotoInResults(pid);
+    return photo && photo.flag === 'rejected';
+  });
+  setPipelineReviewGroupFlag(target, allRejected ? 'none' : 'rejected');
+}
+
+function toggleBurstRejected(event, encIdx, burstIdx) {
+  if (event && event.stopPropagation) event.stopPropagation();
+  var target = groupFlagTarget(encIdx, burstIdx);
+  if (!target) return;
+  var allRejected = target.photoIds.length > 0 && target.photoIds.every(function(pid) {
+    var photo = findPhotoInResults(pid);
+    return photo && photo.flag === 'rejected';
+  });
+  setPipelineReviewGroupFlag(target, allRejected ? 'none' : 'rejected');
+}
+
+// Native Photo menu commands prefer a page-level batchSetFlag helper. In the
+// burst modal, route those commands through the modal's pending zones (the
+// same behavior as its P/X/Space shortcuts) rather than writing directly to
+// /api/batch/flag behind the modal's Apply workflow.
+function batchSetFlag(flag) {
+  if (flag !== 'flagged' && flag !== 'rejected' && flag !== 'none') {
+    return Promise.resolve(false);
+  }
+  var overlay = document.getElementById('grmOverlay');
+  if (overlay && overlay.classList.contains('open') && grmState) {
+    var ids = _grmActionTargetIds();
+    var overlapsBulkFlagWrite = ids.some(function(pid) {
+      return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+    });
+    if (overlapsBulkFlagWrite) {
+      showToast('A bulk reject for the selected photos is still finishing — try again in a moment', 'error');
+      return Promise.resolve(false);
+    }
+    if (flag === 'flagged') grmMovePick();
+    else if (flag === 'rejected') grmMoveReject();
+    else grmMoveCandidate();
+    return Promise.resolve(true);
+  }
+
+  var activeIds = typeof nativeMenuActivePhotoIds === 'function'
+    ? nativeMenuActivePhotoIds()
+    : [];
+  if (!activeIds.length) return Promise.resolve(false);
+  return Promise.all(activeIds.map(function(pid) {
+    return setPipelineReviewFlag(pid, flag);
+  })).then(function(results) {
+    return results.every(function(result) { return result !== false; });
+  });
 }
 
 function setPipelineReviewFlag(photoId, flag) {
@@ -3649,6 +4011,18 @@ function setPipelineReviewFlag(photoId, flag) {
     notifyReadOnlyScopedView();
     return Promise.resolve();
   }
+  // A group action snapshots live flags before writing its batch. Allowing a
+  // per-photo pick/reject for one of those same IDs before the batch finishes
+  // would let the batch overwrite the newer choice, while its Undo would
+  // restore the older snapshot. Honor the group lock here as well as in the
+  // bulk path so every overlapping flag write is serialized.
+  if (pipelineReviewGroupFlagInFlightPhotoIds.has(photoId)) {
+    showToast('A bulk reject for this photo is still finishing — try again in a moment', 'error');
+    // The shared lightbox treats every resolved value except false as a
+    // successful write and updates its own cache/event listeners. Return an
+    // explicit failure so its UI stays on the last confirmed database flag.
+    return Promise.resolve(false);
+  }
 
   return safeFetch('/api/photos/' + photoId + '/flag', {
     method: 'POST',
@@ -3657,23 +4031,7 @@ function setPipelineReviewFlag(photoId, flag) {
   }).then(function() {
     var photo = findPhotoInResults(photoId);
     if (photo) {
-      photo.flag = flag;
-      // Rejected photos lose representative eligibility server-side
-      // (get_species_representatives(eligible_only=True) filters them out),
-      // so drop the cached representative fields — the pipeline grid renders
-      // the Representative badge from photo.is_species_representative and
-      // would otherwise keep displaying it on a photo that's just been
-      // rejected via the inspect shortcut or the shared lightbox reject.
-      if (flag === 'rejected') {
-        if (photo.is_species_representative) photo.is_species_representative = false;
-        if (Array.isArray(photo.life_list)) {
-          photo.life_list.forEach(function(entry) {
-            if (!entry) return;
-            if (entry.is_current_photo) entry.is_current_photo = false;
-            if (entry.is_species_representative) entry.is_species_representative = false;
-          });
-        }
-      }
+      updatePipelineReviewPhotoFlag(photo, flag);
     }
     renderResults();
     if (inspectPhotoId === photoId && document.getElementById('inspectOverlay').classList.contains('open')) {
@@ -6980,11 +7338,33 @@ async function grmApply() {
   }
   if (grmState.applying) return;
   grmSetApplying(true);
+  var grmFlagLockIds = [];
 
   try {
     var diff = grmComputeDiff();
     var checks = grmResolveChecks(diff);
     var species = document.getElementById('grmSpecies').value.trim();
+
+    // GRM pick/reject writes use /api/pipeline/group/apply rather than the
+    // per-photo helper, so serialize them explicitly with bulk Reject/Clear
+    // and Undo. Holding the lock through the full apply also blocks a bulk
+    // action from starting after the modal write has begun.
+    if (checks.flags) {
+      var candidateFlagLockIds = grmState.items
+        .filter(function(p) { return !grmState.removed.has(p.id); })
+        .map(function(p) { return p.id; });
+      var overlapsBulkFlagWrite = candidateFlagLockIds.some(function(pid) {
+        return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+      });
+      if (overlapsBulkFlagWrite) {
+        showToast('A bulk reject for this group is still finishing — try Apply again in a moment', 'error');
+        return;
+      }
+      grmFlagLockIds = candidateFlagLockIds;
+      grmFlagLockIds.forEach(function(pid) {
+        pipelineReviewGroupFlagInFlightPhotoIds.add(pid);
+      });
+    }
 
     // --- Flags side (picks/rejects/candidates + removed→detach) ---
     // Only committed when the "Apply picks/rejects" box is checked. Removals are
@@ -7220,6 +7600,9 @@ async function grmApply() {
       }, 0);
     });
   } finally {
+    grmFlagLockIds.forEach(function(pid) {
+      pipelineReviewGroupFlagInFlightPhotoIds.delete(pid);
+    });
     var overlay = document.getElementById('grmOverlay');
     if (overlay && overlay.classList.contains('open')) {
       grmSetApplying(false);

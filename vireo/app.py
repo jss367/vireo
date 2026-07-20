@@ -39,6 +39,7 @@ from db import (
     commit_with_retry,
     text_search_match,
 )
+from filter_fields import SUGGEST_FIELDS, fields_for_api
 from flask import (
     Flask,
     Response,
@@ -2128,6 +2129,98 @@ def _build_explorer_species(db, genus_id):
     return {"genus_id": genus_id, "species": species}
 
 
+# strftime directives grouped by what they can render. Used by
+# ``_strftime_template_can_render`` so the NAS-mount overlap guard does not
+# treat every ``%``-bearing template component as matching whatever the mount
+# has at that depth — ``%Y`` renders only 4 digits and can never equal a
+# letter-only mount leaf like ``NAS``. Missing tokens fall back to ``.*`` so
+# unknown/exotic directives keep the pre-fix conservative wildcard behavior.
+_STRFTIME_TOKEN_RE = {
+    "Y": r"\d{4}",
+    "y": r"\d{2}",
+    "C": r"\d{2}",
+    "m": r"\d{1,2}",
+    "d": r"\d{1,2}",
+    "e": r"[ \d]{1,2}",
+    "H": r"\d{1,2}",
+    "k": r"[ \d]{1,2}",
+    "I": r"\d{1,2}",
+    "l": r"[ \d]{1,2}",
+    "M": r"\d{2}",
+    "S": r"\d{2}",
+    "j": r"\d{3}",
+    "U": r"\d{2}",
+    "W": r"\d{2}",
+    "V": r"\d{2}",
+    "G": r"\d{4}",
+    "g": r"\d{2}",
+    "u": r"\d",
+    "w": r"\d",
+    "s": r"\d+",
+    "f": r"\d{6}",
+    "z": r"[+\-]\d{4}(?:\d{2})?",
+    "%": r"%",
+    "n": r"\s",
+    "t": r"\s",
+    # Locale-dependent renders are unknowable at request time — keep them
+    # wildcard-matching so the guard stays at least as strict as the
+    # pre-fix behavior for these directives.
+    "A": r".+", "a": r".+",
+    "B": r".+", "b": r".+", "h": r".+",
+    "p": r".*", "P": r".*",
+    "Z": r".*",
+    "c": r".+", "x": r".+", "X": r".+",
+    "D": r".+", "F": r".+", "T": r".+", "R": r".+", "r": r".+",
+    "+": r".+",
+}
+
+
+def _strftime_template_can_render(template_component, target):
+    """Return True if a strftime render of ``template_component`` could
+    equal ``target`` (case-insensitively, to match case-alias filesystems).
+
+    Compile the template component into a regex whose token character
+    classes are the strftime directives' actual output shapes, then match
+    ``target`` against it. A template component without ``%`` is a pure
+    literal and only equals a case-folded copy of itself.
+
+    Unknown or locale-varying directives fall back to ``.*``/``.+`` so the
+    guard remains conservative — never LESS strict than the pre-fix
+    wildcard behavior for those tokens.
+    """
+    if "%" not in template_component:
+        return template_component.casefold() == target.casefold()
+    parts = []
+    i = 0
+    n = len(template_component)
+    while i < n:
+        c = template_component[i]
+        if c == "%" and i + 1 < n:
+            j = i + 1
+            # Skip glibc pad / case / E / O modifiers before the directive
+            # letter: %_d, %-d, %0d, %^d, %#d, %Ed, %Od.
+            while j < n and template_component[j] in "_-0^#EO":
+                j += 1
+            if j < n:
+                parts.append(
+                    _STRFTIME_TOKEN_RE.get(template_component[j], r".*"))
+                i = j + 1
+            else:
+                # Trailing "%" with no directive — treat as literal.
+                parts.append(re.escape(c))
+                i += 1
+        else:
+            parts.append(re.escape(c))
+            i += 1
+    pattern = "".join(parts)
+    try:
+        return re.fullmatch(pattern, target, re.IGNORECASE) is not None
+    except re.error:
+        # Malformed pattern — be conservative and treat as renderable so
+        # the guard errs on rejection rather than silently accepting.
+        return True
+
+
 def create_app(db_path, thumb_cache_dir=None, api_token=None):
     """Create the Flask app for the Vireo photo browser.
 
@@ -2152,6 +2245,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     app.config["BROWSER_SESSION_TOKEN"] = secrets.token_urlsafe(32)
     app.config["BROWSER_AUTH_ENABLED"] = (
         os.environ.get("VIREO_DISABLE_BROWSER_AUTH") != "1"
+    )
+    app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"] = (
+        os.environ.get("VIREO_REQUIRE_EXIFTOOL_FOR_IMPORT", "1") != "0"
     )
 
     # Schema creation and migrations are startup work, never request work.
@@ -4541,7 +4637,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 return True
         return False
 
-    def _pending_local_workspace_transition(workspace_id):
+    def _pending_local_workspace_transition(workspace_id, db=None):
+        """Return the queued/running local-workspace transition job, or None.
+
+        ``db``: pass an explicit Database when calling off the request
+        thread (job threads have no request context); defaults to the
+        request-scoped db via ``_get_db()``.
+        """
         # ``has_local_workspace`` only observes the ``local_workspaces`` row
         # a stage worker inserts once it actually runs; a stage/sync/discard
         # that has been enqueued but not yet reached that insert would leave
@@ -4566,7 +4668,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     return job
                 config = job.get("config") or {}
                 root_ids = (config.get("root_folder_ids") or []) if isinstance(config, dict) else []
-                db = _get_db()
+                if db is None:
+                    db = _get_db()
                 if any(
                     workspace_id in workspace_ids_for_folder_tree(db, int(root_id))
                     for root_id in root_ids
@@ -5320,6 +5423,156 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "per_page": per_page,
             }
         )
+
+    def _inject_active_visual_model(rules):
+        """Fill in the active visual model on ``has_visual_index`` leaves
+        that don't name one.
+
+        ``/api/filters/fields`` advertises ``Has visual index`` as a plain
+        boolean field, so the UI-emitted rule has no ``model`` key. The
+        rule engine's fallback then matches any ``photo_embeddings`` row,
+        so a photo with only stale embeddings from a previously-active
+        model satisfies ``has_visual_index is true`` even though visual
+        search (which only loads embeddings for the active model — see
+        ``api_photo_text_search``) can't use it. Inject the current active
+        model here so the filter and visual search agree on what "has an
+        index" means; smart-collection storage paths keep the rule
+        verbatim so a saved collection stays portable across model
+        switches.
+
+        When no active model is configured (fresh library, or every
+        installed model was removed while cached embeddings remain), the
+        UI-emitted rule must fail closed instead of falling through to
+        "any embedding row" — otherwise ``/api/photos/query`` would
+        report photos as visually indexed while ``/api/photos/search``
+        returns ``no_model``. Inject a sentinel model name that can never
+        match a stored ``photo_embeddings.model`` value, so
+        ``has_visual_index is true`` matches nothing and
+        ``has_visual_index is false`` matches everything — both correct
+        for "there is no usable visual index right now".
+        """
+        try:
+            from models import get_active_model
+            active = get_active_model()
+        except Exception:
+            active = None
+        model_name = active.get("name") if active else None
+        injected_model = model_name or "__no_active_visual_model__"
+
+        def _walk(node):
+            if isinstance(node, dict):
+                if "rules" in node and "field" not in node:
+                    inner = node.get("rules")
+                    # Malformed group (e.g. ``{"mode":"all","rules":null}``):
+                    # leave it untouched so ``Database._validate_node`` can
+                    # raise a ``ValueError`` that the route turns into a 400.
+                    # Iterating ``None`` here would raise ``TypeError`` and
+                    # bypass the 400 handler.
+                    if not isinstance(inner, list):
+                        return node
+                    return {**node, "rules": [_walk(r) for r in inner]}
+                if node.get("field") == "has_visual_index" and "model" not in node:
+                    return {**node, "model": injected_model}
+                return node
+            if isinstance(node, list):
+                return [_walk(r) for r in node]
+            return node
+
+        return _walk(rules)
+
+    @app.route("/api/photos/query", methods=["POST"])
+    def api_photos_query():
+        """Universal-filter photo query: a smart-collection rule tree plus
+        sort and paging. Response shape matches /api/photos so pages can
+        switch fetch paths without re-plumbing their renderers.
+
+        Design: docs/plans/2026-07-19-universal-filters-design.md.
+        """
+        db = _get_db()
+        payload = request.get_json(silent=True)
+        if payload is None or not isinstance(payload, dict):
+            return json_error("request body must be a JSON object", 400)
+        rules = payload.get("rules")
+        if rules is None:
+            rules = []
+        page = payload.get("page", 1)
+        per_page = payload.get("per_page", 50)
+        sort = payload.get("sort", "date")
+        if not isinstance(page, int) or isinstance(page, bool) or page < 1:
+            return json_error("page must be a positive integer", 400)
+        if not isinstance(per_page, int) or isinstance(per_page, bool) or per_page < 1:
+            return json_error("per_page must be a positive integer", 400)
+        # sort feeds an unhashable-unsafe ``sort_map.get(sort, ...)`` in
+        # ``query_photos``; a JSON array/object here would raise TypeError
+        # (not ValueError) and bypass the 400 handler below.
+        if not isinstance(sort, str):
+            return json_error("sort must be a string", 400)
+        per_page = min(per_page, _MAX_PER_PAGE)
+        rules = _inject_active_visual_model(rules)
+        try:
+            photos = db.query_photos(rules, sort=sort, page=page, per_page=per_page)
+            total = db.count_photos_for_rules(rules)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+
+        photo_dicts = [dict(p) for p in photos]
+        _attach_location_statuses(db, photo_dicts)
+        _attach_species(db, photo_dicts)
+        _attach_species_representatives(db, photo_dicts)
+        _attach_detections(db, photo_dicts)
+        _attach_edit_recipes(db, photo_dicts)
+
+        return jsonify(
+            {
+                "photos": photo_dicts,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+            }
+        )
+
+    @app.route("/api/filters/fields")
+    def api_filter_fields():
+        """The filter field registry: one source of truth for the UI picker
+        (labels, categories, types, operators, enum values, suggest flags).
+        """
+        return jsonify({"fields": fields_for_api()})
+
+    @app.route("/api/filters/values")
+    def api_filter_values():
+        """Typeahead values with live counts for a suggest-capable field.
+
+        ``rules`` (JSON, optional) is the active expression minus the rule
+        being edited, so counts answer "how many results would I get" under
+        the user's other selections — never a global COUNT(*).
+        """
+        db = _get_db()
+        field = request.args.get("field", "")
+        if field not in SUGGEST_FIELDS:
+            return json_error(f"field {field!r} does not support value suggestions", 400)
+        raw_rules = request.args.get("rules")
+        rules = []
+        if raw_rules:
+            try:
+                rules = json.loads(raw_rules)
+            except ValueError:
+                return json_error("rules must be valid JSON", 400)
+        q = request.args.get("q") or None
+        # Clamp ``limit`` to a positive bounded range. Werkzeug's ``type=int``
+        # cheerfully parses ``?limit=0``/``?limit=-5`` (SQLite treats a
+        # negative ``LIMIT`` as "no limit" and returns everything), and
+        # ``?limit=999999`` on a large library would load an unbounded
+        # suggestions list. Fallback to the 20-default when parsing fails.
+        limit_raw = request.args.get("limit", 20, type=int)
+        if limit_raw is None:
+            limit_raw = 20
+        limit = max(1, min(limit_raw, 500))
+        rules = _inject_active_visual_model(rules)
+        try:
+            values = db.get_filter_field_values(field, rules=rules, q=q, limit=limit)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        return jsonify({"field": field, "values": values})
 
     @app.route("/api/photos/ids")
     def api_photo_ids():
@@ -11993,6 +12246,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "new_count_so_far": progress.get("found", 0),
         }
 
+    def _new_images_walk_blocked_by_move():
+        """True while a storage move owns the source/archive filesystem.
+
+        The navbar probe is automatic and can otherwise start a whole-library
+        walk seconds after a move begins.  On SMB/NAS libraries that doubles
+        metadata/read pressure at exactly the point rsync is building its
+        file list.  Return a deferred pending response instead; the existing
+        client poll starts the walk after the move reaches a terminal state.
+        """
+        for job in app._job_runner.list_jobs():
+            if job.get("status") not in (
+                "queued", "running", "pausing", "paused",
+            ):
+                continue
+            if job.get("type") in ("move-folder", "move-photos"):
+                return True
+        return False
+
     @app.route("/api/workspaces/active/new-images")
     def api_workspace_new_images():
         db = _get_db()
@@ -12027,6 +12298,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "per_root": [],
                 "sample": [],
                 "error": recent_err,
+            })
+
+        if _new_images_walk_blocked_by_move():
+            return jsonify({
+                "workspace_id": ws_id,
+                "new_count": None,
+                "per_root": [],
+                "sample": [],
+                "pending": True,
+                "deferred_reason": "storage_move_active",
             })
 
         # Cache cold: run the filesystem walk in a background thread so the
@@ -12098,6 +12379,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         recent_err = cache.get_recent_error(db_path, ws_id)
         if recent_err is not None:
             return jsonify({"error": recent_err}), 500
+
+        if _new_images_walk_blocked_by_move():
+            return jsonify({
+                "pending": True,
+                "deferred_reason": "storage_move_active",
+                **_new_images_walk_progress_fields(db_path, ws_id),
+            }), 202
 
         # Cache cold (e.g. a scan just invalidated it): kick off — or
         # coalesce onto — a background walk. ``kickoff_compute`` reuses an
@@ -13248,18 +13536,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             model_source.startswith("hf-hub:") or model_source == "timm"
         )
 
-        import shutil
-
         from metadata import exiftool_status as get_exiftool_status
+        from metadata import find_homebrew
 
         exiftool_probe = get_exiftool_status()
         exiftool_status = {
             "installed": exiftool_probe["available"],
             "version": exiftool_probe["version"],
             "bundled": bool(
-                sys.platform.startswith("win") and exiftool_probe["available"]
+                getattr(sys, "_MEIPASS", None) and exiftool_probe["available"]
             ),
-            "brew_available": shutil.which("brew") is not None,
+            "brew_available": find_homebrew() is not None,
         }
 
         # timm models have a fixed class set — no labels needed
@@ -13389,8 +13676,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Install ExifTool where Vireo can safely automate installation."""
         import subprocess
 
-        from metadata import exiftool_status
+        from metadata import clear_exiftool_cache, exiftool_status, find_homebrew
 
+        # Reprobe: a broken bundled copy may have cached True previously,
+        # or the caller may be retrying after a failed install.
+        clear_exiftool_cache()
         status = exiftool_status()
         if status["available"]:
             return jsonify({"success": True, "message": "exiftool is already installed"})
@@ -13409,8 +13699,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "error": "Install ExifTool with your Linux package manager, then restart Vireo.",
             })
 
-        import shutil
-        if not shutil.which("brew"):
+        brew = find_homebrew()
+        if not brew:
             return jsonify({
                 "success": False,
                 "error": "Homebrew is not installed. Install it from https://brew.sh, then run: brew install exiftool",
@@ -13418,12 +13708,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         try:
             result = subprocess.run(
-                ["brew", "install", "exiftool"],
+                [brew, "install", "exiftool"],
                 capture_output=True, text=True, timeout=300,
                 **no_window_kwargs(),
             )
             if result.returncode == 0:
-                return jsonify({"success": True, "message": "exiftool installed successfully"})
+                # A GUI-launched app may not inherit Homebrew's bin directory
+                # on PATH. Re-resolve and probe the installed tool before
+                # claiming Repair succeeded; ``find_exiftool`` also checks
+                # Homebrew's standard off-PATH locations on macOS.
+                clear_exiftool_cache()
+                installed = exiftool_status()
+                if installed["available"]:
+                    return jsonify({
+                        "success": True,
+                        "message": "exiftool installed successfully",
+                        "exiftool": installed,
+                    })
+                return jsonify({
+                    "success": False,
+                    "error": (
+                        "Homebrew finished, but Vireo could not run ExifTool. "
+                        "Run 'brew install exiftool' in Terminal, then retry."
+                    ),
+                    "exiftool": installed,
+                })
             else:
                 return jsonify({
                     "success": False,
@@ -17468,7 +17777,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     # -- Job API routes --
 
-    def _build_scan_work(roots, incremental, active_ws):
+    def _build_scan_work(
+        roots, incremental, active_ws, repair_missing_metadata=False,
+    ):
         """Build the background work function for a scan job.
 
         Shared by ``POST /api/jobs/scan`` and
@@ -17619,6 +17930,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         vireo_dir=vireo_dir,
                         thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
                         cancel_check=cancel_check,
+                        repair_missing_metadata=repair_missing_metadata,
                     )
                 except Exception as exc:
                     if isinstance(exc, ScanCancelled) and cancel_check():
@@ -18001,6 +18313,200 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             pausable=True,
         )
         return jsonify({"job_id": job_id, "roots": existing, "skipped": skipped})
+
+    def _metadata_repair_count(db, workspace_id, root_paths=None):
+        # Don't filter by ``folders.status``: that column is only refreshed
+        # by ``check_folder_health`` (10-minute loop or the manual
+        # "check missing folders" flow), so a workspace whose drive was
+        # unplugged and is now reconnected still reads as ``status='missing'``
+        # until then. The readiness endpoint fires as soon as the Import
+        # page opens; if we filtered by ``status``, users would see 0
+        # repairable photos and the repair route would 409 with "no
+        # photos need metadata repair" even though ``os.path.isdir`` would
+        # let the repair job scan them.
+        #
+        # ``root_paths`` scopes the count to real-time reachable roots
+        # (based on ``os.path.isdir``). When a workspace mixes an offline
+        # drive with photos missing EXIF and a separate reachable drive
+        # with no repairable rows, an unscoped count combined with a
+        # non-empty ``reachable_roots`` list would enable the Repair
+        # button and start a job that finishes without ever touching the
+        # offline photos — Codex's "repeating repair job" pathology. The
+        # scoped count reflects only what the repair pass would actually
+        # process. ``None`` preserves the unscoped legacy shape for any
+        # future caller that wants a workspace-wide figure.
+        params = [workspace_id]
+        where_extra = ""
+        if root_paths is not None:
+            if not root_paths:
+                return 0
+            normalized_roots = [
+                r.replace("\\", "/").rstrip("/") for r in root_paths if r
+            ]
+            if not normalized_roots:
+                return 0
+            clauses = []
+            for norm in normalized_roots:
+                prefix = norm + "/"
+                # Match ``f.path`` normalized to forward slashes either
+                # exactly against the root or as a boundary-preserving
+                # prefix. ``substr(...)=prefix`` avoids the wildcard
+                # collision LIKE would introduce (e.g. a folder called
+                # ``photos_backup`` incorrectly matching a reachable
+                # ``photos`` root because ``_`` matches any character
+                # in LIKE without ESCAPE).
+                clauses.append(
+                    "(REPLACE(f.path, '\\', '/') = ? "
+                    "OR substr(REPLACE(f.path, '\\', '/'), 1, ?) = ?)"
+                )
+                params.extend([norm, len(prefix), prefix])
+            where_extra = " AND (" + " OR ".join(clauses) + ")"
+        rows = db.conn.execute(
+            "SELECT DISTINCT p.id, p.filename, "
+            "f.id AS folder_id, f.path AS folder_path "
+            "FROM photos p "
+            "JOIN folders f ON f.id = p.folder_id "
+            "JOIN workspace_folders wf ON wf.folder_id = f.id "
+            "WHERE wf.workspace_id = ? "
+            "AND p.exif_data IS NULL"
+            + where_extra
+            + " ORDER BY f.path, p.filename",
+            params,
+        ).fetchall()
+
+        # A database row is only repairable when its original still exists.
+        # The incremental repair scan discovers files from disk, so counting
+        # a deleted/moved original here would leave the Repair button enabled
+        # forever for a job that can never visit that row. Enumerate each
+        # candidate folder once instead of statting every photo individually;
+        # this keeps readiness responsive for large degraded imports.
+        from image_loader import is_excluded_scan_path
+
+        folder_files = {}
+        repairable = 0
+        for row in rows:
+            folder_id = row["folder_id"]
+            folder_path = row["folder_path"]
+            if folder_id not in folder_files:
+                if is_excluded_scan_path(folder_path):
+                    folder_files[folder_id] = None
+                else:
+                    try:
+                        with os.scandir(folder_path) as entries:
+                            folder_files[folder_id] = {
+                                entry.name for entry in entries if entry.is_file()
+                            }
+                    except OSError:
+                        # The folder disappeared or became unreadable after
+                        # root reachability was checked. Treat its rows as
+                        # unavailable rather than offering a no-op repair.
+                        folder_files[folder_id] = None
+
+            names = folder_files[folder_id]
+            if names is None:
+                continue
+            filename = row["filename"]
+            if filename in names:
+                repairable += 1
+                continue
+            # Preserve the filesystem's own case and Unicode matching rules
+            # for a catalog name that did not compare byte-for-byte with the
+            # directory entry (notably default APFS and NTFS volumes).
+            if os.path.isfile(os.path.join(folder_path, filename)):
+                repairable += 1
+        return repairable
+
+    @app.route("/api/import/readiness")
+    def api_import_readiness():
+        """Report metadata tooling and repairable degraded-import rows."""
+        from image_loader import is_excluded_scan_path
+        from metadata import exiftool_status
+
+        db = _get_db()
+        active_ws = db._active_workspace_id
+        status = exiftool_status()
+        roots = [r["path"] for r in db.get_workspace_folder_roots(active_ws)]
+        # Filter macOS app-managed library bundles before ``os.path.isdir``:
+        # stat-ing a ``.photoslibrary`` root (or a symlink into one) itself
+        # trips the "access data from other apps" TCC prompt, and this
+        # readiness call fires automatically as soon as the Import page
+        # opens. See ``api_job_scan`` for the same guard on user-supplied
+        # roots; legacy workspace roots need the same treatment.
+        reachable_roots = [
+            root for root in roots
+            if not is_excluded_scan_path(root) and os.path.isdir(root)
+        ]
+        # Scope the count to reachable roots so an offline drive can't
+        # inflate ``metadata_repair_count`` and enable a Repair button
+        # for a job that would immediately no-op on the photos it can't
+        # touch. When there are no reachable roots the scoped count is
+        # 0, which itself gates ``metadata_repair_available`` — no need
+        # for the previous explicit ``reachable_roots`` conjunction.
+        repair_count = _metadata_repair_count(db, active_ws, reachable_roots)
+        return jsonify({
+            "exiftool": status,
+            "requires_exiftool": app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"],
+            "metadata_repair_count": repair_count,
+            "metadata_repair_available": bool(
+                status["available"] and repair_count
+            ),
+            "reachable_root_count": len(reachable_roots),
+        })
+
+    @app.route("/api/jobs/repair-metadata", methods=["POST"])
+    def api_job_repair_metadata():
+        """Incrementally rescan reachable roots that contain missing EXIF."""
+        from image_loader import is_excluded_scan_path
+        from metadata import exiftool_status
+
+        status = exiftool_status()
+        if not status["available"]:
+            return jsonify({
+                "error": "Repair ExifTool before repairing photo metadata.",
+                "code": "exiftool_required",
+                "exiftool": status,
+            }), 409
+
+        db = _get_db()
+        active_ws = db._active_workspace_id
+        roots = [r["path"] for r in db.get_workspace_folder_roots(active_ws)]
+        # See api_import_readiness for why excluded bundles must be filtered
+        # before os.path.isdir here (macOS TCC prompt on Photos Library).
+        existing = [
+            root for root in roots
+            if not is_excluded_scan_path(root) and os.path.isdir(root)
+        ]
+        if not existing:
+            return json_error("no metadata-repair folders are currently on disk")
+        # Count against the actually-reachable roots so the response's
+        # ``photo_count`` matches what the job will process. An unscoped
+        # count could report photos under an offline sibling root that
+        # this job will never touch.
+        repair_count = _metadata_repair_count(db, active_ws, existing)
+        if not repair_count:
+            return json_error("no photos need metadata repair", 409)
+
+        runner = app._job_runner
+        work = _build_scan_work(
+            existing, True, active_ws, repair_missing_metadata=True,
+        )
+        job_config = {
+            "roots": existing,
+            "incremental": True,
+            "repair_metadata": True,
+            "repair_photo_count": repair_count,
+        }
+        if len(existing) == 1:
+            job_config["root"] = existing[0]
+        job_id = runner.start(
+            "metadata-repair", work, config=job_config,
+            workspace_id=active_ws, pausable=True,
+        )
+        return jsonify({
+            "job_id": job_id,
+            "photo_count": repair_count,
+            "roots": existing,
+        })
 
     @app.route("/api/jobs/thumbnails", methods=["POST"])
     def api_job_thumbnails():
@@ -19463,6 +19969,271 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         return jsonify({"job_id": job_id, "total": len(photo_ids)})
 
+    def _move_folder_guard_error(guard_db, folder_id):
+        """Return the error message blocking a folder move, or None.
+
+        Context-free on purpose: takes the db explicitly and touches no
+        Flask request/app context, so the chained completion hook can run
+        it from a job thread with a thread db.
+        """
+        # A folder covered by any workspace's local_workspace_folders row has
+        # its folders.path rebased into that workspace's managed copy; a
+        # concurrent workspace-membership guard would refuse to touch the
+        # folders row for exactly this reason. Moving it here (via
+        # db.move_folder_path) would move or delete the managed copy and
+        # rewrite the catalog while local_workspace_folders and the manifest
+        # still expect the pre-move layout, so the owning workspace's next
+        # status falls into missing-local recovery and sync/discard can no
+        # longer restore. Reject the job before enqueue.
+        with stage_boundary_lock():
+            local_root_id = local_root_for_folder(guard_db, folder_id)
+            if local_root_id is not None:
+                return (
+                    "Cannot move this folder while it has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first."
+                )
+            # A descendant local copy has already had its folders.path rebased
+            # under local-folders/, so a folders.path subtree walk from this
+            # ancestor no longer sees it — but local_folder_mappings.source_path
+            # still records the original location. Without this check the move
+            # job would move/delete the original source directory out from
+            # under the manifest, leaving sync/discard unable to restore.
+            descendant_root_id = local_root_under_folder(guard_db, folder_id)
+            if descendant_root_id is not None:
+                return (
+                    "Cannot move this folder while a subfolder has a shared local copy. "
+                    "Sync or discard the local copy from any linked workspace first."
+                )
+            staged_here, staged_owner_ws = folder_has_local_workspace(
+                guard_db, folder_id,
+            )
+            if staged_here:
+                return (
+                    f"Cannot move this folder — workspace {staged_owner_ws} has it "
+                    "staged locally. Switch to that workspace and sync or discard the "
+                    "local copy first."
+                )
+            # ``folder_has_local_workspace`` only sees a completed stage
+            # claim. A stage/sync/discard queued or running against a
+            # workspace that contains this folder hasn't yet written
+            # local_workspace_folders, so the read-only guard above passes
+            # even though the transition worker is about to rebase this
+            # folder's paths. Enqueueing the move now would rewrite the
+            # ``folders`` row out from under the pending transition —
+            # missing-local recovery on the next status. Refuse until the
+            # transition finishes.
+            row = guard_db.conn.execute(
+                "SELECT workspace_id FROM workspace_folders WHERE folder_id = ?",
+                (folder_id,),
+            ).fetchall()
+            for ws_row in row:
+                pending = _pending_local_workspace_transition(
+                    int(ws_row["workspace_id"]), db=guard_db)
+                if pending:
+                    return (
+                        f"Wait for the {pending['type']} job on workspace "
+                        f"{int(ws_row['workspace_id'])} to finish before moving this "
+                        "folder; otherwise the move would run on paths that workspace "
+                        "is about to claim."
+                    )
+        return None
+
+    def _start_move_folder_job(runner, workspace_id, *, folder_id,
+                               destination, display_dest, destination_name,
+                               merge, remote, developed_dir, folder_template="",
+                               chained_from=None, serialize_lock=None,
+                               allow_tracked_merge=False):
+        """Enqueue a move-folder job and return its job id.
+
+        Shared by the move-folder endpoint and the chained
+        process-completion hook (which runs on a job thread, so this
+        must not touch Flask request/app context).
+
+        ``serialize_lock``: optional ``threading.Lock`` shared by a batch
+        of chained moves; when given, the transfer itself runs under the
+        lock so batch-mates execute one at a time (see the why-comment at
+        the acquire site). The job still enqueues — and its id exists —
+        immediately.
+
+        ``allow_tracked_merge``: passed through to ``move_folder``. The
+        chained import→process→move hook opts in (see the why-comment in
+        ``_enqueue_move_folder_job``); the manual move endpoint keeps the
+        default refusal of tracked destinations.
+        """
+        def work(job):
+            from move import move_folder, move_folder_by_date
+
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+
+            job["_start_time"] = time.time()
+
+            last_phase = {"value": None}
+
+            def progress_cb(current, total, filename, phase="Moving folder"):
+                # Only update keys JobRunner pre-seeds in job["progress"]
+                # (current/total/current_file). Do NOT insert "phase" here:
+                # this runs on the worker thread outside the runner lock, and
+                # adding a new key races _snapshot_job's locked dict() copy
+                # ("dictionary changed size during iteration"). push_event
+                # below mirrors phase onto job["progress"] under the lock.
+                job["progress"]["current"] = current
+                job["progress"]["total"] = total
+                job["progress"]["current_file"] = filename
+                # The copy phase fires once per file; on a large folder that
+                # would flood the SSE stream and tie up Flask threads. Throttle
+                # to every 10th file, but always emit on a phase change and on
+                # the first/last file so the panel never looks stalled.
+                phase_changed = phase != last_phase["value"]
+                last_phase["value"] = phase
+                if not phase_changed and current % 10 != 0 \
+                        and current not in (1, total):
+                    return
+                runner.push_event(job["id"], "progress", {
+                    "current": current,
+                    "total": total,
+                    "current_file": filename,
+                    "phase": phase,
+                })
+
+            # The chained moves from one import all rsync to the same NAS,
+            # and runner.start gives each its own thread immediately — so
+            # N folders would mean N concurrent rsyncs, each honoring
+            # --bwlimit individually and together consuming N× the
+            # configured bandwidth budget. The chain hands every job in
+            # the batch one shared lock so the transfers run one at a
+            # time while all N jobs (and their ids) still enqueue up
+            # front.
+            if serialize_lock is not None and not serialize_lock.acquire(blocking=False):
+                # UI transparency: a job blocked on the batch lock
+                # must say why it isn't moving anything yet.
+                runner.push_event(job["id"], "progress", {
+                    "current": 0,
+                    "total": 0,
+                    "current_file": "",
+                    "phase": (
+                        "Waiting for an earlier chained move to finish"
+                    ),
+                })
+                # Poll instead of blocking outright: this wait is the
+                # one boundary where Cancel can be honored without
+                # touching mid-transfer semantics — a blocking acquire
+                # would run the whole transfer anyway after the user
+                # pressed Stop.
+                while not serialize_lock.acquire(timeout=0.5):
+                    if runner.is_cancelled(job["id"]):
+                        # Returning with the lock NOT held, before the
+                        # try below — so the release in its finally
+                        # never fires on this path.
+                        return {
+                            "ok": False, "moved": 0, "errors": [],
+                            "summary": (
+                                "Cancelled before transfer started"
+                            ),
+                        }
+            # Cancel check with the lock held, covering two paths:
+            # (1) the waiter's ``acquire(timeout=0.5)`` returned True in
+            # the same 0.5s window a cancel landed in, exiting the loop
+            # without the in-loop check running; (2) a chained move whose
+            # thread started AFTER the earlier holder already released
+            # the batch lock — its non-blocking acquire succeeds so it
+            # never enters the wait loop, but its ``/cancel`` may have
+            # already been accepted while the thread was still queued.
+            # Either way, don't start the transfer.
+            if serialize_lock is not None and runner.is_cancelled(job["id"]):
+                serialize_lock.release()
+                return {
+                    "ok": False, "moved": 0, "errors": [],
+                    "summary": (
+                        "Cancelled before transfer started"
+                    ),
+                }
+            try:
+                if folder_template:
+                    result = move_folder_by_date(
+                        db=thread_db,
+                        folder_id=folder_id,
+                        destination=destination,
+                        folder_template=folder_template,
+                        progress_cb=progress_cb,
+                        developed_dir=developed_dir,
+                    )
+                else:
+                    result = move_folder(
+                        db=thread_db,
+                        folder_id=folder_id,
+                        destination=destination,
+                        progress_cb=progress_cb,
+                        developed_dir=developed_dir,
+                        merge=merge,
+                        remote=remote,
+                        destination_name=destination_name,
+                        allow_tracked_merge=allow_tracked_merge,
+                    )
+            finally:
+                if serialize_lock is not None:
+                    serialize_lock.release()
+
+            # Tell the JobRunner whether the move actually succeeded. Without
+            # this the runner marks any normal return "completed" — so a move
+            # that copied nothing because rsync timed out used to read as
+            # "completed, 0 errors" in the history. A `needs_merge` return is
+            # NOT a failure: it's a soft signal that the destination already
+            # exists and the UI should re-prompt for a merge/resume, so leave
+            # it for the caller without flagging the job failed.
+            if not result.get("needs_merge"):
+                errors = result.get("errors") or []
+                moved = result.get("moved", 0)
+                if errors and moved == 0:
+                    result["ok"] = False
+                    result["summary"] = f"Move failed — {errors[0]}"
+                else:
+                    cleanup_error = result.get("cleanup_error")
+                    result["ok"] = True
+                    result["summary"] = (
+                        f"Moved {moved} photo{'s' if moved != 1 else ''}"
+                        + (f", {len(errors)} error(s)" if errors else "")
+                        + (
+                            f"; cleanup failed: {cleanup_error}"
+                            if cleanup_error else ""
+                        )
+                    )
+            if result.get("ok"):
+                try:
+                    _invalidate_missing_originals_cache()
+                except Exception:
+                    log.exception(
+                        "Failed to invalidate missing-originals cache "
+                        "after move-folder job",
+                    )
+            return result
+
+        job_config = {
+            "folder_id": folder_id, "destination": display_dest, "merge": merge,
+        }
+        if folder_template:
+            job_config["folder_template"] = folder_template
+        if destination_name:
+            job_config["destination_name"] = destination_name
+        if remote:
+            # Surface that this is an SSH transfer (and to where) so the job
+            # panel can show it, per the UI-transparency rule.
+            job_config["remote"] = {
+                "host": remote["host"], "user": remote["user"],
+                "ssh_dest_base": remote["ssh_dest_base"],
+                "mount_dest_base": remote["mount_dest_base"],
+                "bwlimit_kbps": remote["bwlimit_kbps"],
+            }
+        if chained_from:
+            # Provenance for the jobs panel: this move was started by a
+            # chained process run's completion hook, not by hand.
+            job_config["chained_from"] = chained_from
+        return runner.start(
+            "move-folder", work,
+            config=job_config,
+            workspace_id=workspace_id,
+        )
+
     @app.route("/api/jobs/move-folder", methods=["POST"])
     def api_job_move_folder():
         """Move an entire folder to a destination."""
@@ -19490,70 +20261,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "destination_name cannot be combined with folder_template"
             )
 
-        # A folder covered by any workspace's local_workspace_folders row has
-        # its folders.path rebased into that workspace's managed copy; a
-        # concurrent workspace-membership guard would refuse to touch the
-        # folders row for exactly this reason. Moving it here (via
-        # db.move_folder_path) would move or delete the managed copy and
-        # rewrite the catalog while local_workspace_folders and the manifest
-        # still expect the pre-move layout, so the owning workspace's next
-        # status falls into missing-local recovery and sync/discard can no
-        # longer restore. Reject the job before enqueue.
-        db_for_guard = _get_db()
-        with stage_boundary_lock():
-            local_root_id = local_root_for_folder(db_for_guard, folder_id)
-            if local_root_id is not None:
-                return json_error(
-                    "Cannot move this folder while it has a shared local copy. "
-                    "Sync or discard the local copy from any linked workspace first.",
-                    409,
-                )
-            # A descendant local copy has already had its folders.path rebased
-            # under local-folders/, so a folders.path subtree walk from this
-            # ancestor no longer sees it — but local_folder_mappings.source_path
-            # still records the original location. Without this check the move
-            # job would move/delete the original source directory out from
-            # under the manifest, leaving sync/discard unable to restore.
-            descendant_root_id = local_root_under_folder(db_for_guard, folder_id)
-            if descendant_root_id is not None:
-                return json_error(
-                    "Cannot move this folder while a subfolder has a shared local copy. "
-                    "Sync or discard the local copy from any linked workspace first.",
-                    409,
-                )
-            staged_here, staged_owner_ws = folder_has_local_workspace(
-                db_for_guard, folder_id,
-            )
-            if staged_here:
-                return json_error(
-                    f"Cannot move this folder — workspace {staged_owner_ws} has it "
-                    "staged locally. Switch to that workspace and sync or discard the "
-                    "local copy first.",
-                    409,
-                )
-            # ``folder_has_local_workspace`` only sees a completed stage
-            # claim. A stage/sync/discard queued or running against a
-            # workspace that contains this folder hasn't yet written
-            # local_workspace_folders, so the read-only guard above passes
-            # even though the transition worker is about to rebase this
-            # folder's paths. Enqueueing the move now would rewrite the
-            # ``folders`` row out from under the pending transition —
-            # missing-local recovery on the next status. Refuse until the
-            # transition finishes.
-            row = db_for_guard.conn.execute(
-                "SELECT workspace_id FROM workspace_folders WHERE folder_id = ?",
-                (folder_id,),
-            ).fetchall()
-            for ws_row in row:
-                pending = _pending_local_workspace_transition(int(ws_row["workspace_id"]))
-                if pending:
-                    return json_error(
-                        f"Wait for the {pending['type']} job on workspace "
-                        f"{int(ws_row['workspace_id'])} to finish before moving this "
-                        "folder; otherwise the move would run on paths that workspace "
-                        "is about to claim.",
-                        409,
-                    )
+        guard_err = _move_folder_guard_error(_get_db(), folder_id)
+        if guard_err is not None:
+            return json_error(guard_err, 409)
 
         import config as cfg
         import move as move_mod
@@ -19644,118 +20354,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         runner = app._job_runner
         active_ws = _get_db()._active_workspace_id
-
-        def work(job):
-            from move import move_folder, move_folder_by_date
-
-            thread_db = Database(db_path)
-            thread_db.set_active_workspace(active_ws)
-
-            job["_start_time"] = time.time()
-
-            last_phase = {"value": None}
-
-            def progress_cb(current, total, filename, phase="Moving folder"):
-                # Only update keys JobRunner pre-seeds in job["progress"]
-                # (current/total/current_file). Do NOT insert "phase" here:
-                # this runs on the worker thread outside the runner lock, and
-                # adding a new key races _snapshot_job's locked dict() copy
-                # ("dictionary changed size during iteration"). push_event
-                # below mirrors phase onto job["progress"] under the lock.
-                job["progress"]["current"] = current
-                job["progress"]["total"] = total
-                job["progress"]["current_file"] = filename
-                # The copy phase fires once per file; on a large folder that
-                # would flood the SSE stream and tie up Flask threads. Throttle
-                # to every 10th file, but always emit on a phase change and on
-                # the first/last file so the panel never looks stalled.
-                phase_changed = phase != last_phase["value"]
-                last_phase["value"] = phase
-                if not phase_changed and current % 10 != 0 \
-                        and current not in (1, total):
-                    return
-                runner.push_event(job["id"], "progress", {
-                    "current": current,
-                    "total": total,
-                    "current_file": filename,
-                    "phase": phase,
-                })
-
-            if folder_template:
-                result = move_folder_by_date(
-                    db=thread_db,
-                    folder_id=folder_id,
-                    destination=destination,
-                    folder_template=folder_template,
-                    progress_cb=progress_cb,
-                    developed_dir=developed_dir,
-                )
-            else:
-                result = move_folder(
-                    db=thread_db,
-                    folder_id=folder_id,
-                    destination=destination,
-                    progress_cb=progress_cb,
-                    developed_dir=developed_dir,
-                    merge=merge,
-                    remote=remote,
-                    destination_name=destination_name,
-                )
-
-            # Tell the JobRunner whether the move actually succeeded. Without
-            # this the runner marks any normal return "completed" — so a move
-            # that copied nothing because rsync timed out used to read as
-            # "completed, 0 errors" in the history. A `needs_merge` return is
-            # NOT a failure: it's a soft signal that the destination already
-            # exists and the UI should re-prompt for a merge/resume, so leave
-            # it for the caller without flagging the job failed.
-            if not result.get("needs_merge"):
-                errors = result.get("errors") or []
-                moved = result.get("moved", 0)
-                if errors and moved == 0:
-                    result["ok"] = False
-                    result["summary"] = f"Move failed — {errors[0]}"
-                else:
-                    cleanup_error = result.get("cleanup_error")
-                    result["ok"] = True
-                    result["summary"] = (
-                        f"Moved {moved} photo{'s' if moved != 1 else ''}"
-                        + (f", {len(errors)} error(s)" if errors else "")
-                        + (
-                            f"; cleanup failed: {cleanup_error}"
-                            if cleanup_error else ""
-                        )
-                    )
-            if result.get("ok"):
-                try:
-                    _invalidate_missing_originals_cache()
-                except Exception:
-                    log.exception(
-                        "Failed to invalidate missing-originals cache "
-                        "after move-folder job",
-                    )
-            return result
-
-        job_config = {
-            "folder_id": folder_id, "destination": display_dest, "merge": merge,
-        }
-        if folder_template:
-            job_config["folder_template"] = folder_template
-        if destination_name:
-            job_config["destination_name"] = destination_name
-        if remote:
-            # Surface that this is an SSH transfer (and to where) so the job
-            # panel can show it, per the UI-transparency rule.
-            job_config["remote"] = {
-                "host": remote["host"], "user": remote["user"],
-                "ssh_dest_base": remote["ssh_dest_base"],
-                "mount_dest_base": remote["mount_dest_base"],
-                "bwlimit_kbps": remote["bwlimit_kbps"],
-            }
-        job_id = runner.start(
-            "move-folder", work,
-            config=job_config,
-            workspace_id=active_ws,
+        job_id = _start_move_folder_job(
+            runner, active_ws,
+            folder_id=folder_id,
+            destination=destination,
+            display_dest=display_dest,
+            destination_name=destination_name,
+            merge=merge,
+            remote=remote,
+            developed_dir=developed_dir,
+            folder_template=folder_template,
         )
         return jsonify({"job_id": job_id})
 
@@ -20425,6 +21033,301 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error(f"unknown process id: {value}")
         return None
 
+    def _validate_after_process_move(
+        value, after_import, destination, folder_template,
+    ):
+        """Validate an after_process_move spec; return (target_snapshot, error).
+
+        ``None`` value → (None, None). Otherwise the value must name a saved
+        remote target that has a local_archive_root containing ``destination``,
+        and the run must chain a process (the move fires from the process
+        job's completion hook — an import-only move is just the Move page).
+        The returned target dict is the enqueue-time snapshot: a Settings
+        edit mid-chain must not redirect the move (same rationale as
+        remote_target_snapshot).
+        """
+        if value is None:
+            return None, None
+        if not isinstance(value, dict):
+            return None, json_error(
+                "after_process_move must be an object or null, got "
+                f"{type(value).__name__}")
+        raw = value.get("remote_target_id")
+        if raw is not None and not isinstance(raw, str):
+            return None, json_error(
+                "after_process_move.remote_target_id must be a string, got "
+                f"{type(raw).__name__}")
+        target_id = (raw or "").strip()
+        if not target_id:
+            return None, json_error(
+                "after_process_move.remote_target_id required")
+        if after_import is None:
+            return None, json_error(
+                "after_process_move requires after_import — the move chains "
+                "off the processing run; for a move without processing use "
+                "the Move page")
+        import config as cfg
+        target = cfg.get_remote_target(target_id)
+        if target is None:
+            return None, json_error(f"unknown remote target: {target_id}")
+        root = (target.get("local_archive_root") or "").strip()
+        if not root:
+            return None, json_error(
+                "this remote target has no local archive root — set one "
+                "under Settings → Remote targets")
+        # The move-folder endpoint rejects a missing/relative mount_path
+        # (see api_job_move_folder), but only when the move job is created —
+        # for a chained run that's after the import and processing have
+        # already finished, so the photos would sit in the local archive
+        # despite the accepted chain. The move target is snapshotted here,
+        # so a Settings edit mid-run can't repair it either. Reject up front
+        # alongside the archive-root check.
+        mount = (target.get("mount_path") or "").strip()
+        if not mount:
+            return None, json_error(
+                "this remote target has no local mount path — the chained "
+                "move would have nowhere to land photos. Set one under "
+                "Settings → Remote targets")
+        if not os.path.isabs(mount):
+            return None, json_error(
+                "this remote target's local mount path isn't absolute "
+                f"(\"{mount}\") — the chained move would be repointed to a "
+                "path relative to the server's working directory and photos "
+                "would appear missing. Set an absolute mount path under "
+                "Settings → Remote targets")
+        # Containment goes through move.py's alias-folding helper, not a raw
+        # commonpath: on the default case-insensitive macOS/Windows volumes a
+        # destination typed with different casing than the saved root (e.g.
+        # "/volumes/photos/…" vs "/Volumes/Photos") is the same directory,
+        # and realpath does not fold case on POSIX — a byte compare would
+        # falsely reject it.
+        from move import _path_equal_or_descends
+        dest_real = os.path.realpath(destination)
+        root_real = os.path.realpath(root)
+        if not _path_equal_or_descends(destination, root):
+            return None, json_error(
+                "destination is not inside the remote target's local "
+                f"archive root ({root})")
+        # A local_archive_root broader than the target's mount_path (mount
+        # nested inside the root) can put a destination inside BOTH: the
+        # import would land straight on the NAS mount, and the chained move
+        # would then treat "<mount leaf>/…" as an archive-relative subpath
+        # and re-copy the already-on-NAS files under
+        # remote_path/<mount leaf>/… — nesting duplicates instead of moving
+        # local staging. The chain stages locally and moves TO the mount, so
+        # a destination on the mount is never valid for it.
+        if _path_equal_or_descends(destination, mount):
+            return None, json_error(
+                "destination is inside the target's NAS mount "
+                f"({mount}) — the import would land directly on the NAS and "
+                "the chained move would duplicate it under the remote path; "
+                "pick a local archive folder outside the mount")
+        # The rendered template can still put the import folder in the same
+        # tree as the mount even when ``destination`` itself is safely
+        # outside. Two overlapping failure modes:
+        #   (a) The render lands AT or UNDER the mount — e.g.
+        #       destination=/Users/me/Photos, folder_template="NAS/%Y",
+        #       mount=/Users/me/Photos/NAS. The import lands directly on
+        #       the NAS mount and the chained move duplicates it under
+        #       remote_path.
+        #   (b) The render lands ABOVE the mount so the mount ends up
+        #       INSIDE the import source tree — e.g. destination=/Photos,
+        #       folder_template="%Y", mount=/Photos/2026/07. The %Y render
+        #       creates ``/Photos/2026`` as the import folder; the chained
+        #       move then computes the NAS-side destination as
+        #       ``mount_path/2026`` = ``/Photos/2026/07/2026``, which is
+        #       INSIDE the source ``/Photos/2026`` so ``move_folder``
+        #       rejects mid-run and the photos sit in the local archive.
+        # strftime tokens make the exact render unknowable at request time,
+        # but the tokens themselves narrow what strftime can produce —
+        # ``%Y`` renders only 4 digits, ``%m`` only 2, and so on. Use
+        # ``_strftime_template_can_render`` to ask, per overlap position,
+        # whether the template component can actually produce the mount's
+        # component: an earlier guard treated every ``%``-bearing component
+        # as an unconditional wildcard and rejected the default
+        # ``%Y/%Y-%m-%d`` template against a mount leaf like ``NAS`` even
+        # though ``%Y`` can never render letters. If every overlap position
+        # can render, SOME real strftime output overlaps the mount in one
+        # of the two directions above and the request must be rejected.
+        # Locale-dependent directives (``%B``, ``%A``, ``%Z``, …) whose
+        # renders are truly unknowable fall back to a wildcard pattern, so
+        # the guard stays at least as strict as before for those tokens.
+        #
+        # Normalize the template with ``os.path.normpath`` before splitting
+        # so ``.`` components collapse the same way the import path does
+        # when it joins the render under ``destination`` — otherwise a
+        # template like ``./NAS/%Y`` would raw-split to
+        # ``[".", "NAS", "%Y"]`` and the leading ``.`` would misalign with
+        # the mount's ``["NAS"]``, letting the guard miss even though the
+        # rendered ``./NAS/2026`` lands directly on the mount. ``..`` is
+        # already rejected upstream by ``_is_unsafe_path``, so normpath
+        # can only collapse ``.``/empties here.
+        normalized_template = os.path.normpath(folder_template or ".")
+        template_components = [
+            c for c in normalized_template.split(os.sep)
+            if c and c != "."
+        ]
+        # Test the template's reach against the mount via
+        # ``_path_equal_or_descends`` on a constructed candidate path,
+        # not a byte-wise ``os.path.normcase`` compare of the leaf
+        # components. On default case-insensitive POSIX volumes (macOS
+        # APFS) ``normcase`` is a no-op, so ``normcase("nas") !=
+        # normcase("NAS")`` and a template ``nas/%Y`` against mount leaf
+        # ``NAS`` slips past the guard — the import then resolves onto
+        # the existing NAS alias and the chained move re-copies the
+        # on-mount files under ``remote_path/nas/…``. ``samefile`` folds
+        # by device+inode on any case-insensitive volume regardless of
+        # platform, and ``_path_equal_or_descends`` also carries the
+        # case-fold string fallback for the missing-leaves subtree that
+        # ``os.path.normcase`` skips on POSIX.
+        mount_real = os.path.realpath(mount)
+        if _path_equal_or_descends(mount_real, dest_real) \
+                and not _path_equal_or_descends(dest_real, mount_real):
+            try:
+                mount_rel = os.path.relpath(mount_real, dest_real)
+            except ValueError:
+                mount_rel = ""
+            mount_rel_parts = [
+                c for c in mount_rel.split(os.sep) if c and c != ".."
+            ]
+            if mount_rel_parts:
+                # For each ``%``-bearing overlap position, ask whether the
+                # template component can ACTUALLY produce the mount's
+                # component. ``%Y`` renders four digits only, so it cannot
+                # equal a letter-only mount leaf like ``NAS``; treating
+                # every ``%``-bearing component as an unconditional wildcard
+                # (the pre-fix behavior) falsely rejected the default
+                # ``%Y/%Y-%m-%d`` template against such mounts. Locale-
+                # dependent directives (``%B``, ``%A``, ``%Z``, …) whose
+                # renders are truly unknowable fall back to a ``.+`` pattern
+                # so the guard stays at least as strict as the wildcard
+                # behavior for those tokens. Literal template components
+                # are excluded from the renderability filter — filesystem
+                # case-alias awareness for those goes through the
+                # ``_path_equal_or_descends`` check on the built candidate
+                # path below, which honours the volume's real case
+                # sensitivity via inode/samefile.
+                overlap = min(
+                    len(template_components), len(mount_rel_parts))
+                all_percent_reachable = all(
+                    _strftime_template_can_render(tc, mc)
+                    for tc, mc in zip(
+                        template_components[:overlap],
+                        mount_rel_parts[:overlap],
+                        strict=True,
+                    )
+                    if "%" in tc
+                )
+                # Substitute the mount's actual component at ``%``-bearing
+                # positions — we just verified strftime CAN produce that
+                # value there, so the candidate is an honest example
+                # render. Keep literals as-is; extend past the mount depth
+                # with a placeholder for ``%``-bearing tails so the
+                # candidate stays inside the mount subtree for case (a).
+                # An empty ``template_components`` (folder_template = "" /
+                # ".") produces ``candidate = dest_real``, which the outer
+                # condition already says wraps the mount — case (b).
+                candidate_parts = [
+                    mc if "%" in tc else tc
+                    for tc, mc in zip(
+                        template_components[:overlap],
+                        mount_rel_parts[:overlap],
+                        strict=True,
+                    )
+                ]
+                for tc in template_components[overlap:]:
+                    candidate_parts.append("x" if "%" in tc else tc)
+                candidate = os.path.join(dest_real, *candidate_parts)
+                # Reject if the candidate lands AT/UNDER the mount (case
+                # a) OR wraps the mount (case b). ``_path_equal_or_descends``
+                # is alias-aware in both directions, so literal template
+                # components that differ from a mount component only by
+                # case on a case-insensitive volume still trigger rejection.
+                if all_percent_reachable and (
+                        _path_equal_or_descends(candidate, mount_real)
+                        or _path_equal_or_descends(mount_real, candidate)):
+                    if template_components:
+                        detail = (
+                            f"the components in \"{folder_template}\" can "
+                            f"produce a path matching \"{mount_rel}\" under "
+                            "the destination, so some renders would land on "
+                            "the NAS or wrap the mount"
+                        )
+                    else:
+                        detail = (
+                            f"the folder template (\"{folder_template}\") "
+                            "leaves the import at the destination itself, "
+                            f"and the mount sits at \"{mount_rel}\" under "
+                            "it — the mount ends up inside the import "
+                            "source tree"
+                        )
+                    return None, json_error(
+                        "folder_template can render the import into the "
+                        f"same tree as the target's NAS mount ({mount}) — "
+                        f"{detail} and the chained move would either "
+                        "duplicate them under the remote path or be refused "
+                        "as a destination inside the source; pick a "
+                        "template or destination that stays outside the "
+                        "mount")
+        dest_is_root = _path_equal_or_descends(root, destination)
+        # Root-level import with a folder template that resolves to "." lands
+        # photos on the local_archive_root itself. The chained move
+        # deliberately skips the root (moving it would sweep unrelated shoots
+        # into the transfer), so the chain would accept the request and later
+        # silently move nothing. Reject up front instead. Empty and "." both
+        # produce a rel of "." in the import job's ``or "."`` fallback.
+        template_stripped = (folder_template or "").strip()
+        if dest_is_root and template_stripped in ("", "."):
+            return None, json_error(
+                "after_process_move requires a folder_template when the "
+                "destination is the target's local archive root — a template "
+                "that resolves to \".\" would land photos on the root itself, "
+                "which the chained move deliberately skips")
+        if not (dest_real == root_real
+                or dest_real.startswith(root_real.rstrip(os.sep) + os.sep)):
+            # The destination reaches the root only via an alias (case fold
+            # on a case-insensitive volume). The catalog folders this import
+            # creates will be spelled like the DESTINATION, and
+            # minimal_move_set compares them byte-wise against the snapshot
+            # root at chain time — so respell the snapshot root as the
+            # destination's own prefix (same component count; realpath has
+            # already folded symlinks on both sides, leaving case as the
+            # only difference).
+            n = len(root_real.rstrip(os.sep).split(os.sep))
+            target = dict(target)
+            target["local_archive_root"] = os.sep.join(
+                dest_real.split(os.sep)[:n])
+        return target, None
+
+    def _validate_import_metadata_dependency(body):
+        """Require working metadata extraction unless explicitly overridden.
+
+        Import can be repaired later, but proceeding silently loses capture
+        dates, GPS, camera data, and date-based archive placement.  Keep an
+        advanced escape hatch for unusual recovery workflows while making the
+        safe behavior the API default (not merely a client-side convention).
+        """
+        allow_missing = body.get("allow_missing_exiftool", False)
+        if not isinstance(allow_missing, bool):
+            return json_error("allow_missing_exiftool must be a boolean")
+        if not app.config["REQUIRE_EXIFTOOL_FOR_IMPORT"] or allow_missing:
+            return None
+
+        from metadata import exiftool_status
+
+        status = exiftool_status()
+        if status["available"]:
+            return None
+        return jsonify({
+            "error": (
+                "ExifTool is required for import so Vireo can preserve "
+                "capture dates, GPS, and camera metadata. Repair ExifTool "
+                "or explicitly choose Import without metadata in Advanced."
+            ),
+            "code": "exiftool_required",
+            "exiftool": status,
+        }), 409
+
     def _create_import_collection(thread_db, photo_ids):
         """Create the static collection that records one completed import.
 
@@ -20471,6 +21374,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from image_loader import is_excluded_scan_path
 
         body = request.get_json(silent=True) or {}
+        if body.get("after_process_move") is not None:
+            return json_error(
+                "after_process_move is not supported for import-in-place — "
+                "photos stay where they are; use Copy to archive"
+            )
+        dependency_error = _validate_import_metadata_dependency(body)
+        if dependency_error is not None:
+            return dependency_error
         sources = body.get("sources")
         if isinstance(sources, str):
             sources = [sources]
@@ -20564,13 +21475,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 return
             try:
-                process_job_id, model_warning = _enqueue_process_job(
+                process_job_id, model_warning, process_blocker = _enqueue_process_job(
                     thread_db, runner, active_ws,
                     collection_id=col_id,
                     process_id=after_import,
                     chained_from=job["id"],
                     expanded=after_import_snapshot,
                 )
+                if process_blocker:
+                    result["after_import_skipped"] = process_blocker
+                    return
                 result["process_job_id"] = process_job_id
                 if model_warning:
                     result["model_warning"] = model_warning
@@ -20774,6 +21688,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "after_import": after_import,
             "tags": import_tags,
             "location_from_gps": location_from_gps,
+            "allow_missing_exiftool": bool(
+                body.get("allow_missing_exiftool", False)
+            ),
             "mode": "in_place",
             "workspace_id": active_ws,
             "created_workspace": created_workspace,
@@ -20801,6 +21718,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         from ingest import _is_unsafe_path
 
         body = request.get_json(silent=True) or {}
+        dependency_error = _validate_import_metadata_dependency(body)
+        if dependency_error is not None:
+            return dependency_error
 
         sources = body.get("sources")
         if isinstance(sources, str):
@@ -20839,6 +21759,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
         if remote_subpath and not remote_target_id:
             return json_error("remote_subpath requires remote_target_id")
+        after_process_move = body.get("after_process_move")
+        if after_process_move is not None and remote_target_id:
+            return json_error(
+                "after_process_move requires a local archive destination — "
+                "a remote-destination import already lands on the NAS"
+            )
         if remote_target_id:
             # Refuse at request time when no GNU rsync exists or the
             # target is unknown/unsafe — starting a job guaranteed to
@@ -20983,14 +21909,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # omitted -> default from the workspace's pipeline.default_process_id
         # (nullable, same vocabulary). Stored in the job config for the
         # PR 3 chaining hook; the import job itself never reads it.
-        # Preflight an explicit value before creating a workspace so a bad
-        # string doesn't leave an orphan Archive Import behind.
+        # Resolve and validate BEFORE creating any new workspace so a bad
+        # value doesn't leave an orphan Archive Import behind. When the
+        # request omits the key and asks to create a new workspace, we can't
+        # read the workspace-scoped default (the workspace doesn't exist yet,
+        # and reading get_effective_config off the previously-active
+        # workspace would leak its override into the new-workspace import).
+        # A brand-new workspace has no config_overrides, so the effective
+        # default is just the global config value — read that directly.
+        import config as cfg
+
         explicit_after_import = "after_import" in body
         if explicit_after_import:
             after_import = body.get("after_import")
-            err = _validate_after_import(after_import, db)
-            if err is not None:
-                return err
+        elif "new_workspace_name" in body:
+            after_import = (
+                cfg.load().get("pipeline", {}).get("default_process_id")
+            )
+        else:
+            effective_cfg = db.get_effective_config(cfg.load())
+            after_import = (
+                effective_cfg.get("pipeline", {}).get("default_process_id")
+            )
+        err = _validate_after_import(after_import, db)
+        if err is not None:
+            return err
 
         file_types = body.get("file_types", "both")
         skip_duplicates = bool(body.get("skip_duplicates", True))
@@ -21005,26 +21948,6 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if tag_options_err is not None:
             return tag_options_err
 
-        active_ws, created_workspace, workspace_err = (
-            _prepare_import_workspace(db, body)
-        )
-        if workspace_err is not None:
-            return workspace_err
-
-        # Resolve the omitted-default AFTER the workspace switch. Reading
-        # pipeline.default_process_id off the previously-active workspace
-        # would leak that workspace's override into a new-workspace import.
-        if not explicit_after_import:
-            import config as cfg
-
-            effective_cfg = db.get_effective_config(cfg.load())
-            after_import = (
-                effective_cfg.get("pipeline", {}).get("default_process_id")
-            )
-            err = _validate_after_import(after_import, db)
-            if err is not None:
-                return err
-
         # Snapshot the chosen saved process's stage flags at enqueue time
         # so a mid-import edit or delete can't silently change (or void)
         # the after-import run the user already accepted. An archive-copy
@@ -21038,6 +21961,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 after_import_snapshot = db.resolve_process(after_import)
             except ValueError as e:
                 return json_error(str(e), 404)
+
+        # Validate the optional NAS move that chains after processing
+        # completes. Requires after_import (the move fires from the process
+        # job's completion hook) and a destination inside the target's
+        # local archive root; snapshotted now so a mid-chain Settings edit
+        # can't redirect the move. Runs before workspace creation so a bad
+        # target/root/destination doesn't leave an orphan workspace behind.
+        move_target_snapshot, move_err = _validate_after_process_move(
+            after_process_move, after_import, destination, folder_template,
+        )
+        if move_err is not None:
+            return move_err
+
+        active_ws, created_workspace, workspace_err = (
+            _prepare_import_workspace(db, body)
+        )
+        if workspace_err is not None:
+            return workspace_err
 
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
@@ -21075,11 +22016,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "after_import": after_import,
             "tags": import_tags,
             "location_from_gps": location_from_gps,
+            "allow_missing_exiftool": bool(
+                body.get("allow_missing_exiftool", False)
+            ),
             "remote_target_id": remote_target_id or None,
             "remote_subpath": remote_subpath or None,
             "workspace_id": active_ws,
             "created_workspace": created_workspace,
         }
+        if move_target_snapshot is not None:
+            job_config["after_process_move"] = {
+                "remote_target_id": move_target_snapshot["id"],
+                "target_name": move_target_snapshot["name"],
+            }
 
         def _chain_after_import(job, result):
             """Create the import collection and optionally enqueue processing.
@@ -21110,14 +22059,98 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 return
             try:
-                process_job_id, model_warning = _enqueue_process_job(
-                    thread_db, runner, active_ws,
-                    collection_id=col_id,
-                    process_id=after_import,
-                    chained_from=job["id"],
-                    expanded=after_import_snapshot,
+                # Which imported folders must the chained NAS move relocate?
+                # Computed here — not at request time — because the archive
+                # folder rows only exist once the copy has landed. Minimal
+                # non-nested set: moving an ancestor also moves its
+                # descendants. The target itself is the enqueue-time
+                # snapshot, so a Settings edit mid-chain can't redirect the
+                # move.
+                after_move = None
+                if move_target_snapshot is not None:
+                    from import_chain import minimal_move_set
+                    folder_rows = []
+                    for i in range(0, len(photo_ids), 500):
+                        chunk = photo_ids[i:i + 500]
+                        ph = ",".join("?" * len(chunk))
+                        folder_rows.extend(thread_db.conn.execute(
+                            "SELECT DISTINCT f.id, f.path FROM photos p "
+                            "JOIN folders f ON f.id = p.folder_id "
+                            f"WHERE p.id IN ({ph})", chunk).fetchall())
+                    root = move_target_snapshot["local_archive_root"]
+                    moves, move_skips = minimal_move_set(
+                        root, [(r["id"], r["path"]) for r in folder_rows])
+                    after_move = {
+                        "target": move_target_snapshot,
+                        "folders": moves,
+                    }
+                    if move_skips:
+                        # Importing straight into the archive root with a
+                        # template that renders empty catalogs photos ON
+                        # the root folder itself; minimal_move_set refuses
+                        # to move the root (it would sweep unrelated
+                        # shoots into the transfer). Say so instead of a
+                        # bare "no folders to move" — the user accepted a
+                        # chain that ends on the NAS, and these photos
+                        # won't get there.
+                        prefix = "photos" if not moves else "some photos"
+                        if any(s["reason"] == "root" for s in move_skips):
+                            after_move["skip_note"] = (
+                                prefix + " landed directly in the archive "
+                                "root — moving the root would sweep "
+                                "unrelated shoots into the transfer, so "
+                                "they stay local; move them from the Move "
+                                "page")
+                        else:
+                            after_move["skip_note"] = (
+                                prefix + " landed outside the archive "
+                                "root, so they stay local; move them from "
+                                "the Move page")
+                process_job_id, model_warning, process_blocker = (
+                    _enqueue_process_job(
+                        thread_db, runner, active_ws,
+                        collection_id=col_id,
+                        process_id=after_import,
+                        chained_from=job["id"],
+                        expanded=after_import_snapshot,
+                        after_move=after_move,
+                    )
                 )
+                if process_blocker:
+                    result["after_import_skipped"] = process_blocker
+                    if after_move:
+                        # Processing is paused before any pipeline job was
+                        # enqueued (e.g. Classify needs a species list the
+                        # user hasn't downloaded yet), so the finally-hook
+                        # that normally fires the chained NAS move never
+                        # runs. But the user accepted a chain that ends on
+                        # the NAS — leaving these photos in the local
+                        # archive without saying so would break the promise
+                        # and hide the outcome behind an "after_import
+                        # skipped" pill that doesn't mention the move. Fire
+                        # the move here off the import job itself, so the
+                        # "photos end on the NAS" invariant holds the same
+                        # way it does for a runtime process failure. The
+                        # hook writes move_job_ids / after_move_errors on
+                        # the import result and adds a "Move to NAS" step
+                        # to the import job's tree, so the outcome is
+                        # visible either way.
+                        _chain_after_move(
+                            job, result, after_move, active_ws)
+                    return
                 result["process_job_id"] = process_job_id
+                if after_move is not None:
+                    # Surface the planned move on the import's result card so
+                    # the user can see what will happen before it fires —
+                    # including, honestly, that nothing (or not everything)
+                    # will move when folders were skipped.
+                    result["after_process_move_planned"] = {
+                        "target_name": move_target_snapshot["name"],
+                        "folders": after_move["folders"],
+                    }
+                    if after_move.get("skip_note"):
+                        result["after_process_move_planned"]["note"] = (
+                            after_move["skip_note"])
                 if model_warning:
                     result["model_warning"] = model_warning
             except Exception as e:
@@ -23173,9 +24206,213 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             "Download a model in Settings to enable species identification."
         )
 
+    def _enqueue_move_folder_job(thread_db, runner, workspace_id, *,
+                                 folder_id, subpath, target,
+                                 chained_from=None, serialize_lock=None):
+        """Enqueue a chained remote move for one imported folder.
+
+        Job-thread path into move-folder (no request context). ``target`` is
+        the snapshot captured when the import was enqueued — deliberately NOT
+        re-resolved from Settings here, so a mid-chain edit cannot redirect
+        the move. Raises on any precondition failure — the caller records the
+        failure per folder rather than aborting the batch.
+        """
+        import posixpath
+
+        import config as cfg
+        import move as move_mod
+
+        mount_path = (target.get("mount_path") or "").strip()
+        if not mount_path:
+            raise RuntimeError(
+                "remote target has no local mount path, so moved photos "
+                "couldn't stay in your library — add one under Settings → "
+                "Remote targets")
+        if not os.path.isabs(mount_path):
+            raise RuntimeError(
+                f"remote target's local mount path isn't absolute "
+                f"(\"{mount_path}\") — fix it under Settings → Remote targets")
+        guard = _move_folder_guard_error(thread_db, folder_id)
+        if guard:
+            raise RuntimeError(guard)
+        effective_cfg = thread_db.get_effective_config(cfg.load())
+        rsync_bin = move_mod.resolve_rsync_bin(
+            effective_cfg.get("rsync_bin", "") or "")
+        if not rsync_bin:
+            raise RuntimeError("no usable GNU rsync for remote moves")
+        ssh_bin = move_mod.resolve_ssh_bin(
+            effective_cfg.get("ssh_bin", "") or "")
+        if not ssh_bin:
+            raise RuntimeError("OpenSSH client not found")
+        # ``move_folder`` lands the source folder INSIDE the destination,
+        # keeping the folder's own name — so to mirror the archive layout
+        # (``<local_archive_root>/2026/trip`` → ``<remote_path>/2026/trip``)
+        # the spec's subpath must be the folder's PARENT ("2026"), not the
+        # full archive-relative subpath, or the leaf would double up
+        # ("2026/trip/trip").
+        remote = move_mod.build_remote_move_spec(
+            target, posixpath.dirname(subpath), rsync_bin, ssh_bin)
+        return _start_move_folder_job(
+            runner, workspace_id,
+            folder_id=folder_id,
+            destination=remote["mount_dest_base"],
+            display_dest=move_mod.rsync_dest_spec(
+                target, remote["ssh_dest_base"]),
+            destination_name="",
+            merge=True,
+            remote=remote,
+            developed_dir=effective_cfg.get("darktable_output_dir", "") or "",
+            chained_from=chained_from,
+            serialize_lock=serialize_lock,
+            # Re-importing more photos into an existing shoot folder is the
+            # NORMAL flow, and its chained move lands exactly on the tracked
+            # NAS copy created by the previous chain run. Without tracked-
+            # merge the move would refuse ("Destination overlaps a folder
+            # Vireo already manages") and strand the new photos locally.
+            # Opting in uses move_folder's exact-overlap reconciliation
+            # (fold the new rows into the existing archive rows); the
+            # pre-copy content-conflict scan still refuses any same-name
+            # file whose bytes differ, and manual moves keep the default
+            # refusal.
+            allow_tracked_merge=True,
+        )
+
+    def _chain_after_move(job, result, after_move, workspace_id):
+        """Enqueue the chained NAS moves when a chained process run ends.
+
+        Decision table (spec §4): fires on success AND failure; skips only on
+        an explicit cancel. ``result`` is None when run_pipeline_job raised.
+        """
+        try:
+            runner = app._job_runner
+            skip = None
+            # Best-effort by design: a cancel landing in the microsecond
+            # window between this check and the runner's locked terminal-
+            # status decision still lets the moves enqueue.
+            if runner.is_cancelled(job["id"]) or (
+                    isinstance(result, dict) and result.get("cancelled")):
+                skip = "process cancelled"
+            elif not after_move.get("folders"):
+                # skip_note carries the real reason when the import found
+                # folders but every one was unmovable (photos cataloged on
+                # the archive root itself) — "no folders to move" alone
+                # would hide that those photos silently stay local.
+                skip = after_move.get("skip_note") or "no folders to move"
+            if skip:
+                if isinstance(result, dict):
+                    result["after_move_skipped"] = skip
+                if skip != "process cancelled":
+                    # Stepped pipeline jobs render ONLY the step tree, so a
+                    # skip recorded just on the result would be invisible —
+                    # and a skip_note means photos the user expected on the
+                    # NAS stay local. Surface it as a warning step.
+                    runner.append_step(
+                        job["id"], "after-move", "Move to NAS",
+                        summary="Skipped",
+                        error=skip, error_count=1,
+                    )
+                log.info("after-process move skipped: %s", skip)
+                return
+            thread_db = Database(db_path)
+            thread_db.set_active_workspace(workspace_id)
+            # One shared lock per batch: the move jobs all enqueue now (so
+            # move_job_ids is complete immediately) but their transfers run
+            # one at a time — see the why-comment in _start_move_folder_job.
+            serialize_lock = threading.Lock()
+            move_ids, failures = [], []
+            for entry in after_move["folders"]:
+                try:
+                    move_ids.append(_enqueue_move_folder_job(
+                        thread_db, runner, workspace_id,
+                        folder_id=entry["folder_id"],
+                        subpath=entry["subpath"],
+                        target=after_move["target"],
+                        chained_from=job["id"],
+                        serialize_lock=serialize_lock,
+                    ))
+                except Exception as e:
+                    log.exception(
+                        "after-process move enqueue failed for folder %s",
+                        entry["folder_id"])
+                    failures.append(f"{entry['subpath']}: {e}")
+            if isinstance(result, dict):
+                if move_ids:
+                    result["move_job_ids"] = move_ids
+                if after_move.get("skip_note"):
+                    # Partial skip: some folders moved but others (e.g.
+                    # photos cataloged on the archive root) stayed local.
+                    result["after_move_note"] = after_move["skip_note"]
+                if failures:
+                    result["after_move_errors"] = failures
+            elif failures:
+                # run_pipeline_job raised, so there is no result dict to
+                # carry after_move_errors — fold the failures into the
+                # job's own error tally so they reach the persisted
+                # history and jobs panel instead of dying in the log.
+                # Safe: same thread, before _run_job's except handler
+                # takes the lock, and that handler dedups before
+                # appending.
+                job["errors"].extend(failures)
+            # Stepped pipeline jobs render ONLY the step tree, so the
+            # handoff outcome must live there too: a completed process job
+            # whose chained move never started (missing rsync/ssh, folder
+            # guard, bad mount) would otherwise look clean while the photos
+            # silently stay in the local archive.
+            target_name = (after_move.get("target") or {}).get("name") or "NAS"
+            if failures and not move_ids:
+                runner.append_step(
+                    job["id"], "after-move", "Move to NAS",
+                    status="failed",
+                    summary="Failed to start the chained move",
+                    error="; ".join(failures), error_count=len(failures),
+                )
+            else:
+                n = len(move_ids)
+                warn_bits = list(failures)
+                if after_move.get("skip_note"):
+                    warn_bits.append(after_move["skip_note"])
+                runner.append_step(
+                    job["id"], "after-move", "Move to NAS",
+                    summary=(
+                        f"{n} move job{'s' if n != 1 else ''} started → "
+                        f"{target_name}"
+                    ),
+                    error="; ".join(warn_bits) or None,
+                    error_count=len(warn_bits),
+                )
+        except Exception as e:
+            # This hook runs in the process job's ``finally`` — raising
+            # here would mask a run_pipeline_job failure with a chaining
+            # bug, so log and swallow.
+            log.exception("after-process move chaining failed")
+            msg = f"after-process move chaining failed: {e}"
+            try:
+                # Same visibility rule as above: the step tree is the only
+                # surface a stepped job shows, so record the machinery
+                # failure there too. Best-effort — never let step plumbing
+                # mask the original failure being handled here.
+                app._job_runner.append_step(
+                    job["id"], "after-move", "Move to NAS",
+                    status="failed", summary="Chaining failed",
+                    error=msg, error_count=1,
+                )
+            except Exception:
+                pass
+            if isinstance(result, dict):
+                # The pipeline succeeded but the chain machinery itself
+                # failed (e.g. creating the thread Database) — surface it
+                # on the result so the planned move doesn't just silently
+                # never happen.
+                result.setdefault("after_move_errors", []).append(msg)
+            elif msg not in job["errors"]:
+                # Raise path: no result dict to surface the failure on, so
+                # record it on the job itself (see the dedup note above).
+                job["errors"].append(msg)
+
     def _enqueue_process_job(thread_db, runner, workspace_id, *,
                              collection_id, process_id,
-                             chained_from=None, expanded=None):
+                             chained_from=None, expanded=None,
+                             after_move=None):
         """Enqueue a collection-scoped process run for a saved-process id.
 
         The after-import chaining hook's path into the pipeline. Runs on a
@@ -23183,7 +24420,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``Database`` and never touches ``request``/``_get_db``. Applies the
         same process expansion and no-model auto-skip as ``api_job_pipeline``
         so a chained run degrades identically to a manual one. Returns
-        ``(job_id, model_warning)``.
+        ``(job_id, model_warning, process_blocker)``. A non-null blocker
+        means prerequisites are missing and no doomed job was enqueued.
 
         ``expanded`` is the pre-resolved flag snapshot the import endpoint
         captured at enqueue-request time. Pass it through so a saved-process
@@ -23191,6 +24429,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         many minutes) can't silently swap in different toggles — or fail
         the chain outright — after the user has already accepted the choice.
         Falls back to a live resolve for callers that don't pre-capture.
+
+        ``after_move`` — ``{"target": dict, "folders": [{"folder_id",
+        "subpath"}], "skip_note": str (optional)}`` — chains NAS moves off
+        this run's completion via ``_chain_after_move``. The target dict is
+        the import-enqueue-time snapshot (never re-resolved from Settings);
+        ``skip_note`` explains folders the import cataloged but the move
+        must leave local (photos on the archive root itself).
         """
         from pipeline_job import PipelineParams, run_pipeline_job
 
@@ -23216,6 +24461,37 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         )
         model_warning = _apply_no_model_auto_skip(params)
 
+        # Chained imports bypass the Process page's missing-label Start gate.
+        # Resolve the active label mode with the pipeline's own loader before
+        # reserving a queue slot, so missing regional labels pause cleanly
+        # instead of producing a guaranteed model_loader failure.
+        if not params.skip_classify:
+            from classify_job import _load_labels
+            from models import get_active_model
+
+            model = get_active_model()
+            if model is not None:
+                try:
+                    _load_labels(
+                        model.get("model_type", "bioclip"),
+                        model.get("model_str", ""),
+                        None,
+                        None,
+                        db=thread_db,
+                        model_dir=model.get("weights_path"),
+                    )
+                except RuntimeError:
+                    saved_process = thread_db.get_saved_process(process_id)
+                    process_name = (
+                        saved_process["name"] if saved_process
+                        else "the selected process"
+                    )
+                    return None, model_warning, (
+                        "paused — Classify needs a species list. Download one "
+                        "in Settings › Labels, then run "
+                        f"{process_name} on this import collection."
+                    )
+
         work_units = _runtime_warning_work_units(
             "pipeline collection",
             lambda: thread_db.count_collection_photos(collection_id),
@@ -23229,11 +24505,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
 
         def work(job):
-            return run_pipeline_job(
-                job, runner, db_path, workspace_id, params,
-                thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
-                missing_originals_invalidator=_invalidate_missing_originals_cache,
-            )
+            result = None
+            try:
+                result = run_pipeline_job(
+                    job, runner, db_path, workspace_id, params,
+                    thumb_cache_dir=app.config["THUMB_CACHE_DIR"],
+                    missing_originals_invalidator=_invalidate_missing_originals_cache,
+                )
+                return result
+            finally:
+                # The move must fire even when processing FAILS (a processing
+                # failure must not strand photos off the NAS) — hence finally,
+                # not a post-return call. Explicit cancel is the one thing
+                # that stops the chain; _chain_after_move checks it.
+                if after_move:
+                    _chain_after_move(job, result, after_move, workspace_id)
 
         job_config = {
             "source": None,
@@ -23267,7 +24553,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             workspace_id=workspace_id,
             runtime_warning=runtime_warning,
         )
-        return job_id, model_warning
+        return job_id, model_warning, None
 
     @app.route("/api/jobs/pipeline", methods=["POST"])
     def api_job_pipeline():
@@ -27560,7 +28846,22 @@ def main():
         action="store_true",
         help="Download and import the iNaturalist taxonomy, then exit",
     )
+    parser.add_argument(
+        "--check-exiftool",
+        action="store_true",
+        help="Verify the bundled/system ExifTool, print its version, and exit",
+    )
     args = parser.parse_args()
+
+    if args.check_exiftool:
+        from metadata import exiftool_status
+
+        status = exiftool_status()
+        if status["available"]:
+            print(status["version"] or "unknown")
+            raise SystemExit(0)
+        print(status.get("error") or status.get("hint") or "ExifTool unavailable", file=sys.stderr)
+        raise SystemExit(1)
 
     if args.headless:
         args.no_browser = True

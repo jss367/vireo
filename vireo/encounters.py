@@ -47,6 +47,15 @@ DEFAULTS = {
     "merge_score": 0.62,
     "merge_max_gap": 60.0,  # seconds
     "merge_tau": 20.0,  # time constant for merge gap decay
+    # Informational threshold included in grouping traces. Eligibility is
+    # resolved before segmentation by pipeline.load_photo_features.
+    "weak_detection_confidence": 0.12,
+    # Included in the grouping fingerprint so toggling weak-detection rescue
+    # in workspace settings invalidates cached results. load_photo_features
+    # gates rescue on this flag — flipping it re-labels the bracketed frames
+    # subject_uncertain vs subject_absent, which changes encounter membership
+    # and burst scoring. Not consumed by encounter segmentation directly.
+    "weak_detection_rescue_enabled": True,
 }
 
 
@@ -155,6 +164,7 @@ def _has_similarity_signal(photo):
         or bool(photo.get("species_top5"))
         or bool(photo.get("subject_absent"))
         or bool(photo.get("subject_present"))
+        or bool(photo.get("subject_uncertain"))
         or has_focal
         or has_gps
     )
@@ -340,8 +350,10 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     # Detector-state encoding from load_photo_features (mutually exclusive,
     # so at most one is True per photo):
     #   subject_absent  = detector ran, no qualifying detection (real signal)
-    #   subject_present = detector ran, has a qualifying detection
-    #   both False      = detector hasn't run yet — STATE IS UNKNOWN
+    #   subject_present   = detector ran, has a qualifying detection
+    #   subject_uncertain = weaker detection in a short sequence bracketed by
+    #                       matching-species strong detections
+    #   all False         = detector hasn't run yet — STATE IS UNKNOWN
     #
     # Three cases drive the subj/species treatment:
     #   - asymmetric (one absent, one *present*): contribute active 0 with
@@ -361,6 +373,8 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     absent_b = bool(photo_b.get("subject_absent"))
     present_a = bool(photo_a.get("subject_present"))
     present_b = bool(photo_b.get("subject_present"))
+    uncertain_a = bool(photo_a.get("subject_uncertain"))
+    uncertain_b = bool(photo_b.get("subject_uncertain"))
     asymmetric_subject = (absent_a and present_b) or (absent_b and present_a)
     both_absent = absent_a and absent_b
 
@@ -392,9 +406,15 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
     # the encounter cut.
     missing = {
         "time": (not has_time_a, not has_time_b),
-        "subj": (not has_subj_a and not absent_a, not has_subj_b and not absent_b),
+        "subj": (
+            not has_subj_a and not absent_a and not uncertain_a,
+            not has_subj_b and not absent_b and not uncertain_b,
+        ),
         "global": (not has_global_a, not has_global_b),
-        "species": (not has_species_a and not absent_a, not has_species_b and not absent_b),
+        "species": (
+            not has_species_a and not absent_a and not uncertain_a,
+            not has_species_b and not absent_b and not uncertain_b,
+        ),
         "meta": (False, False),
     }
     absent = {
@@ -448,6 +468,8 @@ def compute_s_enc(photo_a, photo_b, config=None, return_components=False):
             "missing_b": bool(missing[k][1]),
             "absent_a": bool(absent[k][0]),
             "absent_b": bool(absent[k][1]),
+            "uncertain_a": bool(uncertain_a) if k in ("subj", "species") else False,
+            "uncertain_b": bool(uncertain_b) if k in ("subj", "species") else False,
         }
         for k in values
     }
@@ -600,7 +622,13 @@ def cut_microsegments(photos, config=None, emit_trace=False):
                     recent_scores = []
                     decision = "cut_soft"
             if decision is None:
-                decision = "kept"
+                if (
+                    sorted_photos[i].get("subject_uncertain")
+                    or sorted_photos[i + 1].get("subject_uncertain")
+                ):
+                    decision = "kept_weak_detection"
+                else:
+                    decision = "kept"
 
         if emit_trace:
             trace.append({
@@ -631,6 +659,7 @@ def cut_microsegments(photos, config=None, emit_trace=False):
                     "soft_cut_score": cfg["soft_cut_score"],
                     "species_hard_cut_confidence": cfg["species_hard_cut_confidence"],
                     "species_hard_cut_margin": cfg["species_hard_cut_margin"],
+                    "weak_detection_confidence": cfg["weak_detection_confidence"],
                 },
             })
 

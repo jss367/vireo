@@ -396,6 +396,20 @@ def _inclusive_date_to(date_to):
     return date_to
 
 
+def _rule_upper_bound(value):
+    """Pad only bare ``YYYY-MM-DD`` values for universal-filter upper bounds.
+
+    A precise instant like ``2024-01-01T12:00:00`` is what the caller meant;
+    padding it to ``.999999`` would spuriously include sub-second photos in
+    that same clock second (e.g. ``12:00:00.5``) on a strict ``>`` or match
+    them on a ``<=``. Only bare dates need to be advanced to end-of-day so
+    ``<= 2024-01-01`` covers the whole named day.
+    """
+    if isinstance(value, str) and len(value) == 10:
+        return _inclusive_date_to(value)
+    return value
+
+
 _PHOTO_DATE_ASC_ORDER = "p.timestamp IS NULL, p.timestamp ASC, p.filename ASC, p.id ASC"
 _PHOTO_DATE_DESC_ORDER = "p.timestamp IS NULL, p.timestamp DESC, p.filename ASC, p.id ASC"
 
@@ -1428,6 +1442,88 @@ class Database:
         except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN hash_status TEXT"
+            )
+
+        # Migration: promote EXIF camera fields out of the exif_data JSON
+        # blob into real columns so the universal filter engine can query
+        # them with indexes and plain SQL (design:
+        # docs/plans/2026-07-19-universal-filters-design.md). Scans populate
+        # these for new/changed files; the one-shot backfill below covers
+        # existing rows.
+        for column, column_type in (
+            ("camera_make", "TEXT"),
+            ("camera_model", "TEXT"),
+            ("lens", "TEXT"),
+            ("aperture", "REAL"),
+            ("shutter_speed", "REAL"),
+            ("iso", "INTEGER"),
+        ):
+            try:
+                self.conn.execute(f"SELECT {column} FROM photos LIMIT 0")
+            except sqlite3.OperationalError:
+                self.conn.execute(
+                    f"ALTER TABLE photos ADD COLUMN {column} {column_type}"
+                )
+        # One-shot backfill from stored exif_data, gated by db_meta (not
+        # user_version, which has drifted on live DBs). Rows whose exif_data
+        # is the minimal "{}" marker were scanned with
+        # ``extract_full_metadata=False`` before the promoted columns
+        # existed — nothing to backfill from the JSON, and the scanner's
+        # incremental pre-pass treats any non-NULL ``exif_data`` as
+        # "already extracted", so leaving the marker in place would keep
+        # camera/lens/iso NULL forever until a user manually forces a full
+        # non-incremental scan. Clear those rows back to NULL so the next
+        # scan re-runs ExifTool and populates the promoted columns
+        # (``scanner._compute_file_features`` writes them whenever
+        # ``file_meta`` is present, independent of the full-JSON flag).
+        marker = self.conn.execute(
+            "SELECT value FROM db_meta WHERE key='exif_summary_backfill_v1'"
+        ).fetchone()
+        if marker is None:
+            from metadata import exif_summary_columns
+            # Probe first: synthetic old-shape DBs in tests can predate the
+            # exif_data column entirely. Nothing to backfill there — just
+            # record the marker so we don't keep probing.
+            try:
+                self.conn.execute("SELECT exif_data FROM photos LIMIT 0")
+            except sqlite3.OperationalError:
+                rows = []
+                exif_column_present = False
+            else:
+                rows = self.conn.execute(
+                    "SELECT id, exif_data FROM photos "
+                    "WHERE exif_data IS NOT NULL AND exif_data != '{}'"
+                ).fetchall()
+                exif_column_present = True
+            for row in rows:
+                try:
+                    grouped = json.loads(row["exif_data"])
+                except (TypeError, ValueError):
+                    continue
+                cols = exif_summary_columns(grouped)
+                if not cols:
+                    continue
+                assignments = ", ".join(f"{col} = ?" for col in cols)
+                self.conn.execute(
+                    f"UPDATE photos SET {assignments} WHERE id = ?",
+                    [*cols.values(), row["id"]],
+                )
+            if exif_column_present:
+                # Clear the minimal ``'{}'`` marker left by older scans that
+                # ran with ``extract_full_metadata=False``. Those rows have
+                # no JSON to backfill from, and the scanner's incremental
+                # pre-pass otherwise skips them forever (their ``exif_data``
+                # is non-NULL, so they're treated as already extracted),
+                # leaving the new camera/lens/aperture/... columns
+                # permanently empty on upgraded libraries. Clearing to NULL
+                # lets the pre-pass's ``summary_needs_extract`` query pick
+                # them up on the next scan and populate the promoted
+                # columns in a single re-extraction.
+                self.conn.execute(
+                    "UPDATE photos SET exif_data = NULL WHERE exif_data = '{}'"
+                )
+            self.conn.execute(
+                "INSERT INTO db_meta(key, value) VALUES ('exif_summary_backfill_v1', '1')"
             )
 
         # Migration: add ON DELETE CASCADE foreign key on
@@ -8374,8 +8470,14 @@ class Database:
 
         # Count photos per folder for decrementing
         folder_counts = {}
+        deleted_stems_by_folder = {}
+        folder_paths = {}
         for row in rows:
             folder_counts[row["folder_id"]] = folder_counts.get(row["folder_id"], 0) + 1
+            deleted_stems_by_folder.setdefault(row["folder_id"], set()).add(
+                os.path.splitext(row["filename"])[0]
+            )
+            folder_paths[row["folder_id"]] = row["folder_path"]
 
         # Collect affected folder ids BEFORE the delete so we can invalidate the
         # new-images cache even if the delete raises. In "Remove from Vireo"
@@ -8439,6 +8541,53 @@ class Database:
             for chunk in id_chunks:
                 ph = ",".join("?" for _ in chunk)
                 self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", chunk)
+
+            # A moved RAW/JPEG sibling stores the source folder path as
+            # provenance so another same-stem sibling can follow it to the
+            # destination without tripping the developed-render collision
+            # guard. Once delete_photos removes the last such sibling from
+            # the source, that proof is no longer valid: a later unrelated
+            # photo imported at the same path must not inherit the old
+            # render. Find source stems drained by this delete and expire
+            # their provenance in the same transaction.
+            drained_stems_by_path = {}
+            for folder_id, deleted_stems in deleted_stems_by_folder.items():
+                remaining_stems = {
+                    os.path.splitext(row["filename"])[0]
+                    for row in self.conn.execute(
+                        "SELECT filename FROM photos WHERE folder_id = ?",
+                        (folder_id,),
+                    )
+                }
+                drained = deleted_stems - remaining_stems
+                if drained:
+                    drained_stems_by_path.setdefault(
+                        folder_paths[folder_id], set()
+                    ).update(drained)
+
+            stale_provenance_ids = []
+            provenance_paths = list(drained_stems_by_path)
+            for path_chunk in _chunks(provenance_paths):
+                path_ph = ",".join("?" for _ in path_chunk)
+                for row in self.conn.execute(
+                    f"SELECT id, filename, last_move_source_folder_path "
+                    f"FROM photos WHERE last_move_source_folder_path "
+                    f"IN ({path_ph})",
+                    path_chunk,
+                ):
+                    stem = os.path.splitext(row["filename"])[0]
+                    if stem in drained_stems_by_path[
+                        row["last_move_source_folder_path"]
+                    ]:
+                        stale_provenance_ids.append(row["id"])
+            for stale_chunk in _chunks(stale_provenance_ids):
+                stale_ph = ",".join("?" for _ in stale_chunk)
+                self.conn.execute(
+                    f"UPDATE photos SET "
+                    f"last_move_source_folder_path = NULL "
+                    f"WHERE id IN ({stale_ph})",
+                    stale_chunk,
+                )
 
             # Update folder counts
             for fid, count in folder_counts.items():
@@ -17765,17 +17914,30 @@ class Database:
             field = node.get("field")
             op = node.get("op")
             value = node.get("value")
+            if op == "recent":
+                if not isinstance(value, dict):
+                    raise ValueError("recent rules take a {n, unit} object value")
+                n = value.get("n")
+                if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+                    raise ValueError("recent n must be a positive integer")
+                if value.get("unit", "days") not in ("days", "weeks", "months", "years"):
+                    raise ValueError("recent unit must be days, weeks, months, or years")
+                return
             list_allowed = (
                 field == "photo_ids"
-                or (field == "timestamp" and op == "between")
+                or op in ("in", "not_in", "between")
             )
             if isinstance(value, list):
                 if not list_allowed:
                     raise ValueError(f"rule field {field!r} does not accept a list value")
+                if op == "between" and len(value) != 2:
+                    raise ValueError("between rules take a [low, high] value")
                 for item in value:
                     if not _is_scalar(item):
                         raise ValueError("rule list values must be scalars")
                 return
+            if op in ("in", "not_in", "between"):
+                raise ValueError(f"rule op {op!r} requires a list value")
             if not _is_scalar(value):
                 raise ValueError("rule value must be a scalar")
 
@@ -17785,17 +17947,111 @@ class Database:
         def _falsey(value):
             return value is False or value == 0 or value == "0" or value == "false"
 
+        # Lazily read the workspace-effective detector_confidence floor —
+        # cfg.load() reads a JSON file, so only pay for it when a prediction
+        # rule actually references it. Cached across every _prediction_exists
+        # call in the same query so a rule tree with multiple prediction
+        # predicates doesn't reread the config per predicate.
+        _conf_cache = {}
+
+        def _min_detector_conf():
+            if "value" not in _conf_cache:
+                import config as cfg
+                _conf_cache["value"] = float(
+                    self.get_effective_config(cfg.load()).get(
+                        "detector_confidence", 0.2
+                    )
+                )
+            return _conf_cache["value"]
+
+        def _boolean_predicate(has_sql, op, value, params=None):
+            """Boolean-typed leaf builder used by every ``BOOLEAN_OPS`` field.
+
+            Guards ``op`` so a malformed rule such as
+            ``{"field":"has_edits","op":"contains","value":1}`` surfaces as a
+            ``ValueError`` (→ 400 at the API layer) instead of the silent
+            match the numeric branch already rejects — otherwise a client
+            can slip past the registry by inventing an op. Also guards
+            ``value``: without this, ``{"field":"has_gps","op":"is",
+            "value":"yes"}`` would fall to the negative branch (``_truthy``
+            only accepts True/1/"1"/"true") and quietly return the ``is
+            false`` predicate, flipping the client's intent.
+            """
+            if op not in ("equals", "is", "is not"):
+                raise ValueError(f"unsupported boolean rule op: {op!r}")
+            if _truthy(value):
+                want_true = True
+            elif _falsey(value):
+                want_true = False
+            else:
+                raise ValueError(
+                    f"boolean rule value must be true/false, got {value!r}"
+                )
+            if op == "is not":
+                want_true = not want_true
+            return (has_sql if want_true else f"NOT ({has_sql})"), list(params or [])
+
         def _numeric_condition(column, op, value, allow_null=False):
             if op == ">=":
                 return f"{column} >= ?", [value]
             if op == "<=":
                 return f"{column} <= ?", [value]
+            if op == ">":
+                return f"{column} > ?", [value]
+            if op == "<":
+                return f"{column} < ?", [value]
+            if op == "between":
+                return f"({column} >= ? AND {column} <= ?)", [value[0], value[1]]
             if op in ("equals", "is"):
                 return f"{column} = ?", [value]
             if op == "is not":
                 prefix = f"{column} IS NULL OR " if allow_null else ""
                 return f"({prefix}{column} != ?)", [value]
-            return "0", []
+            # Reject the op instead of silently emitting a constant-false
+            # predicate — /api/photos/query catches ValueError and returns
+            # 400, so a malformed rule like ``{"field":"file_size","op":
+            # "contains","value":1}`` surfaces as a validation error instead
+            # of a 200 with an empty result set.
+            raise ValueError(f"unsupported numeric rule op: {op!r}")
+
+        def _text_condition(column, op, value, case_sensitive=False):
+            """Text-field predicate. Returns (cond, params) or None for an
+            unrecognized op (caller falls through to the unsupported-rule
+            error). Case-insensitive by default, matching SQLite LIKE; the
+            case-sensitive variants avoid PRAGMA case_sensitive_like, which
+            cannot be scoped to one query.
+            """
+            text = str(value if value is not None else "")
+            if op in ("contains", "not_contains"):
+                if case_sensitive:
+                    cond, params = f"instr({column}, ?) > 0", [text]
+                else:
+                    cond = f"{column} LIKE ? ESCAPE '\\'"
+                    params = [f"%{_escape_like(text)}%"]
+                if op == "not_contains":
+                    return f"({column} IS NULL OR NOT ({cond}))", params
+                return cond, params
+            if op in ("starts_with", "ends_with"):
+                if not text:
+                    return "1", []
+                if case_sensitive:
+                    if op == "starts_with":
+                        return f"substr({column}, 1, {len(text)}) = ?", [text]
+                    return f"substr({column}, -{len(text)}) = ?", [text]
+                pattern = (
+                    _escape_like(text) + "%" if op == "starts_with"
+                    else "%" + _escape_like(text)
+                )
+                return f"{column} LIKE ? ESCAPE '\\'", [pattern]
+            if op in ("equals", "is"):
+                if case_sensitive:
+                    return f"{column} = ?", [text]
+                return f"LOWER({column}) = LOWER(?)", [text]
+            if op == "is not":
+                if case_sensitive:
+                    return f"({column} IS NULL OR {column} != ?)", [text]
+                return f"({column} IS NULL OR LOWER({column}) != LOWER(?))", [text]
+            return None
 
         def _keyword_exists(predicate, predicate_params):
             return (
@@ -17814,16 +18070,62 @@ class Database:
             )
 
         def _prediction_exists(predicate, predicate_params, review_join=False):
+            # Pin to the most recent labels_fingerprint per
+            # (detection_id, classifier_model), matching how the dashboard
+            # (get_top_prediction_for_photo, prediction_status queries)
+            # decides which prediction row is "current". Without this pin,
+            # a rerun classifier with a new fingerprint leaves an older
+            # accepted row around and universal-filter rules
+            # (prediction_status is accepted, prediction_confidence >= X,
+            # classifier_model is Y, taxonomy_* is Z) still match the
+            # stale prediction — disagreeing with the review UI that only
+            # shows the current fingerprint.
+            fingerprint_pin = (
+                " AND pred.labels_fingerprint = ("
+                "SELECT pr2.labels_fingerprint FROM predictions pr2 "
+                "WHERE pr2.detection_id = pred.detection_id "
+                "AND pr2.classifier_model = pred.classifier_model "
+                "ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1)"
+            )
+            # Always join prediction_review so alternatives can be filtered
+            # out below — the review_join parameter is retained for callers
+            # that also read prv.status in their predicate.
             review = (
                 " LEFT JOIN prediction_review prv "
                 "ON prv.prediction_id = pred.id AND prv.workspace_id = ?"
-                if review_join else ""
             )
-            params = ([self._ws_id()] if review_join else []) + list(predicate_params)
+            # Filters that represent the *displayed* prediction (confidence,
+            # classifier_model, taxonomy_*, plus the status predicates that
+            # already read prv.status) must ignore runner-up rows stored
+            # with prv.status = 'alternative'. Otherwise a top prediction
+            # at 0.95 with an alternative at 0.10 would satisfy
+            # prediction_confidence <= 0.2 even though /api/predictions
+            # (app.py:12386-12388) drops alternatives from top-level results.
+            not_alternative = (
+                " AND COALESCE(prv.status, 'pending') != 'alternative'"
+            )
+            # Gate by the workspace-effective detector_confidence floor.
+            # /api/photos/query's response goes through
+            # get_detections_for_photos() (which applies this threshold),
+            # and the dashboard prediction counters + query_move_rule_matches
+            # apply it too. Without gating here, a below-threshold hidden
+            # detection whose accepted/high-confidence prediction is stale
+            # from a previous run would still satisfy prediction_status,
+            # prediction_confidence, classifier_model, and taxonomy_* rules,
+            # so the universal filter would include a photo the Browse view
+            # shows with no visible detection context.
+            conf_filter = " AND det.detector_confidence >= ?"
+            params = (
+                [self._ws_id()]
+                + [_min_detector_conf()]
+                + list(predicate_params)
+            )
             return (
                 "EXISTS (SELECT 1 FROM detections det "
                 "JOIN predictions pred ON pred.detection_id = det.id"
-                f"{review} WHERE det.photo_id = p.id AND {predicate})",
+                f"{review} WHERE det.photo_id = p.id{conf_filter}"
+                f"{not_alternative} "
+                f"AND {predicate}{fingerprint_pin})",
                 params,
             )
 
@@ -17877,9 +18179,16 @@ class Database:
                 return _numeric_condition(column, op, value, allow_null=True)
             if field == "keyword":
                 if op == "contains":
-                    return _keyword_exists("k.name LIKE ?", [f"%{value}%"])
+                    # Escape LIKE metacharacters so ``%``/``_`` in the value
+                    # stay literal — otherwise ``keyword contains "%"`` would
+                    # match every keyworded photo, breaking parity with the
+                    # escaped filename/camera/species text rules and the
+                    # escaped folder/keyword typeahead paths.
+                    like = f"%{_escape_like(str(value or ''))}%"
+                    return _keyword_exists("k.name LIKE ? ESCAPE '\\'", [like])
                 if op == "not_contains":
-                    return _keyword_not_exists("k.name LIKE ?", [f"%{value}%"])
+                    like = f"%{_escape_like(str(value or ''))}%"
+                    return _keyword_not_exists("k.name LIKE ? ESCAPE '\\'", [like])
                 if op in ("equals", "is"):
                     return _keyword_exists("k.name = ?", [value])
                 if op == "is not":
@@ -17911,40 +18220,88 @@ class Database:
                         subtree_params,
                     )
             if field == "flag":
+                # NULL means unflagged for legacy rows (older ingests, undo
+                # paths). Browse's inline filter already COALESCEs; the rule
+                # engine must agree or the Unflagged chip silently drops
+                # those rows once Browse moves onto this path.
+                col = "COALESCE(p.flag, 'none')"
                 if op in ("equals", "is"):
-                    return "p.flag = ?", [value]
+                    return f"{col} = ?", [value]
                 if op == "is not":
-                    return "p.flag != ?", [value]
+                    return f"{col} != ?", [value]
+                if op in ("in", "not_in"):
+                    values = list(value or [])
+                    if not values:
+                        # in [] matches nothing; not_in [] excludes nothing.
+                        # Emit constants (not None) so any/none group
+                        # semantics stay exact.
+                        return ("0" if op == "in" else "1"), []
+                    placeholders = ",".join("?" * len(values))
+                    negate = "NOT " if op == "not_in" else ""
+                    return f"{col} {negate}IN ({placeholders})", values
             if field == "color_label":
-                exists = (
-                    "EXISTS (SELECT 1 FROM photo_color_labels pcl "
-                    "WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? "
-                    "AND pcl.color = ?)"
-                )
-                params = [self._ws_id(), value]
+                def _color_exists(colors):
+                    placeholders = ",".join("?" * len(colors))
+                    return (
+                        "EXISTS (SELECT 1 FROM photo_color_labels pcl "
+                        "WHERE pcl.photo_id = p.id AND pcl.workspace_id = ? "
+                        f"AND pcl.color IN ({placeholders}))",
+                        [self._ws_id(), *colors],
+                    )
                 if op in ("equals", "is"):
-                    return exists, params
+                    return _color_exists([value])
                 if op == "is not":
-                    return f"NOT {exists}", params
+                    cond, params = _color_exists([value])
+                    return f"NOT {cond}", params
+                if op in ("in", "not_in"):
+                    values = list(value or [])
+                    if not values:
+                        return ("0" if op == "in" else "1"), []
+                    cond, params = _color_exists(values)
+                    if op == "not_in":
+                        # "is not one of" = carries no label from the set;
+                        # unlabeled photos match, mirroring "is not".
+                        return f"NOT {cond}", params
+                    return cond, params
             if field == "has_species":
-                if op == "equals" and _falsey(value):
-                    return _keyword_not_exists("k.is_species = 1", [])
-                if op == "equals" and _truthy(value):
-                    return _keyword_exists("k.is_species = 1", [])
+                # Mirror the species-filter / get_species_keywords_for_photos
+                # eligibility: a keyword counts as a species when either the
+                # legacy ``is_species`` flag is set OR it is a taxonomy row,
+                # AND its linked taxon (if any) has rank ``species``. Falling
+                # back to ``k.is_species = 1`` would exclude photos whose
+                # species is a ``type='taxonomy', is_species=0`` row —
+                # exactly the shape upgraded libraries store — so the "Has
+                # species" chip would disagree with everywhere the species
+                # is actually shown.
+                has_species_exists = (
+                    "EXISTS (SELECT 1 FROM photo_keywords pk "
+                    "JOIN keywords k ON k.id = pk.keyword_id "
+                    "LEFT JOIN taxa t ON t.id = k.taxon_id "
+                    "WHERE pk.photo_id = p.id "
+                    "AND (k.is_species = 1 OR k.type = 'taxonomy') "
+                    "AND (t.rank = 'species' OR t.rank IS NULL))"
+                )
+                if op in ("equals", "is") and _falsey(value):
+                    return f"NOT {has_species_exists}", []
+                if op in ("equals", "is") and _truthy(value):
+                    return has_species_exists, []
             if field == "has_subject":
                 subject_types = sorted(self.get_subject_types())
                 if not subject_types:
-                    if op == "equals" and _truthy(value):
-                        return "0", []
-                    return None, []
+                    # No subject types configured → no photo can have a
+                    # subject. Route through ``_boolean_predicate`` so a
+                    # malformed rule like
+                    # ``{"field":"has_subject","op":"contains","value":1}``
+                    # raises ValueError (→ 400) in this configuration too,
+                    # instead of silently dropping the rule via
+                    # ``return None, []``.
+                    return _boolean_predicate("0", op, value)
                 placeholders = ",".join("?" * len(subject_types))
                 type_clause = f"k.type IN ({placeholders})"
                 if "taxonomy" in subject_types:
                     type_clause = f"({type_clause} OR k.is_species = 1)"
-                if op == "equals" and _falsey(value):
-                    return _keyword_not_exists(type_clause, subject_types)
-                if op == "equals" and _truthy(value):
-                    return _keyword_exists(type_clause, subject_types)
+                exists, params = _keyword_exists(type_clause, subject_types)
+                return _boolean_predicate(exists, op, value, params)
             if field == "wildlife_excluded":
                 excluded = "p.wildlife_excluded = 1"
                 if op in ("equals", "is"):
@@ -17958,15 +18315,71 @@ class Database:
                 if op == "between" and isinstance(value, list) and len(value) == 2:
                     return "p.timestamp >= ? AND p.timestamp <= ?", [
                         value[0],
-                        _inclusive_date_to(value[1]),
+                        _rule_upper_bound(value[1]),
                     ]
                 if op == "recent_days":
-                    return "p.timestamp >= datetime('now', ?)", [f"-{value} days"]
+                    # ``strftime`` with an explicit ``T`` separator so the
+                    # cutoff format matches the scanner's ``dt.isoformat()``
+                    # storage. SQLite's plain ``datetime('now', ?)`` returns
+                    # ``YYYY-MM-DD HH:MM:SS`` (space separator); comparing a
+                    # T-separated timestamp against a space-separated cutoff
+                    # is a lexical mismatch where ``T`` (0x54) sorts after
+                    # ``' '`` (0x20), so any photo on the cutoff day would
+                    # spuriously satisfy ``>=`` even when its clock time is
+                    # earlier than the cutoff's clock time.
+                    return (
+                        "p.timestamp >= strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)",
+                        [f"-{value} days"],
+                    )
+                if op == "recent":
+                    n = value["n"]
+                    unit = value.get("unit", "days")
+                    modifier = {
+                        "days": f"-{n} days",
+                        "weeks": f"-{n * 7} days",
+                        "months": f"-{n} months",
+                        "years": f"-{n} years",
+                    }[unit]
+                    return (
+                        "p.timestamp >= strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)",
+                        [modifier],
+                    )
+                # Comparison ops for "on or after / before" style rules.
+                # Timestamps are ISO strings, so lexical compare is correct;
+                # date-only bounds are inclusive of the named day on the
+                # upper side, matching the Browse date_to behavior.
+                if op == ">=":
+                    return "p.timestamp >= ?", [value]
+                if op == ">":
+                    # Only advance a bare ``YYYY-MM-DD`` to end-of-day —
+                    # ``> 2024-01-01`` means "strictly after that day".
+                    # Padding an already-precise timestamp
+                    # (``2024-01-01T12:00:00``) would spuriously exclude
+                    # sub-second photos in the same clock second
+                    # (``12:00:00.5``) that ARE strictly greater than the
+                    # requested instant.
+                    return "p.timestamp > ?", [_rule_upper_bound(value)]
+                if op == "<=":
+                    # Symmetric to ``>`` above: only pad bare dates. A
+                    # precise ``<= 2024-01-01T12:00:00`` request means the
+                    # exact instant, not the whole clock second — padding
+                    # would spuriously *include* ``12:00:00.5`` photos
+                    # that are after the requested instant.
+                    return "p.timestamp <= ?", [_rule_upper_bound(value)]
+                if op == "<":
+                    return "p.timestamp < ?", [value]
             if field == "extension":
                 if op in ("equals", "is"):
                     return "LOWER(p.extension) = LOWER(?)", [value]
                 if op == "is not":
                     return "LOWER(p.extension) != LOWER(?)", [value]
+                if op in ("in", "not_in"):
+                    values = list(value or [])
+                    if not values:
+                        return ("0" if op == "in" else "1"), []
+                    placeholders = ",".join("LOWER(?)" for _ in values)
+                    negate = "NOT " if op == "not_in" else ""
+                    return f"LOWER(p.extension) {negate}IN ({placeholders})", values
             if field in (
                 "taxonomy_kingdom",
                 "taxonomy_phylum",
@@ -17979,10 +18392,8 @@ class Database:
                 if op in ("equals", "is"):
                     return _prediction_exists(f"{col} = ?", [value])
                 if op == "is not":
-                    return (
-                        "NOT " + _prediction_exists(f"{col} = ?", [value])[0],
-                        [value],
-                    )
+                    exists, params = _prediction_exists(f"{col} = ?", [value])
+                    return "NOT " + exists, params
                 if op == "contains":
                     return _prediction_exists(f"{col} LIKE ?", [f"%{value}%"])
             if field == "prediction_confidence":
@@ -17992,12 +18403,20 @@ class Database:
                 if op in ("equals", "is"):
                     return _prediction_exists("pred.classifier_model = ?", [value])
                 if op == "is not":
-                    return (
-                        "NOT " + _prediction_exists("pred.classifier_model = ?", [value])[0],
-                        [value],
+                    exists, params = _prediction_exists(
+                        "pred.classifier_model = ?", [value],
                     )
+                    return "NOT " + exists, params
                 if op == "contains":
-                    return _prediction_exists("pred.classifier_model LIKE ?", [f"%{value}%"])
+                    # Escape LIKE metacharacters so a value like ``%`` or ``_``
+                    # stays literal — matches the other advertised text
+                    # contains predicates (filename, camera fields, keyword,
+                    # species) and blocks ``value="%"`` from matching every
+                    # classified photo.
+                    like = f"%{_escape_like(str(value or ''))}%"
+                    return _prediction_exists(
+                        "pred.classifier_model LIKE ? ESCAPE '\\'", [like]
+                    )
             if field == "prediction_status":
                 if op in ("equals", "is"):
                     return _prediction_exists(
@@ -18012,6 +18431,19 @@ class Database:
                         review_join=True,
                     )
                     return "NOT " + exists, params
+                if op in ("in", "not_in"):
+                    values = list(value or [])
+                    if not values:
+                        return ("0" if op == "in" else "1"), []
+                    placeholders = ",".join("?" * len(values))
+                    exists, params = _prediction_exists(
+                        f"COALESCE(prv.status, 'pending') IN ({placeholders})",
+                        values,
+                        review_join=True,
+                    )
+                    if op == "not_in":
+                        return "NOT " + exists, params
+                    return exists, params
             if field == "needs_review":
                 exists, params = _prediction_exists(
                     "COALESCE(prv.status, 'pending') = 'pending'",
@@ -18040,14 +18472,14 @@ class Database:
                     return "p.active_mask_variant LIKE ?", [f"%{value}%"]
             if field == "has_gps":
                 has = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
-                return (has if _truthy(value) else f"NOT ({has})"), []
+                return _boolean_predicate(has, op, value)
             if field == "has_location_keyword":
                 has = (
                     "EXISTS (SELECT 1 FROM photo_keywords pk "
                     "JOIN keywords k ON k.id = pk.keyword_id "
                     "WHERE pk.photo_id = p.id AND k.type = 'location')"
                 )
-                return (has if _truthy(value) else f"NOT {has}"), []
+                return _boolean_predicate(has, op, value)
             if field == "location_keyword_missing":
                 gps = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
                 no_loc = (
@@ -18061,15 +18493,176 @@ class Database:
                 has = "EXISTS (SELECT 1 FROM inat_submissions ins WHERE ins.photo_id = p.id)"
                 return (has if _truthy(value) else f"NOT {has}"), []
             if field == "is_duplicate":
+                # Catalog-wide by file_hash to match find_duplicate_groups()
+                # and apply_duplicate_resolution — a photo whose only duplicate
+                # lives in another workspace is still a duplicate here (the
+                # Duplicates workflow will act on it), so Browse must not hide
+                # that membership behind a workspace_folders join.
                 has = (
                     "p.file_hash IS NOT NULL AND EXISTS ("
                     "SELECT 1 FROM photos p2 "
-                    "JOIN workspace_folders wf2 ON wf2.folder_id = p2.folder_id "
-                    "AND wf2.workspace_id = ? "
                     "WHERE p2.id != p.id AND p2.file_hash = p.file_hash "
                     "AND (p2.flag IS NULL OR p2.flag != 'rejected'))"
                 )
-                return (has if _truthy(value) else f"NOT ({has})"), [self._ws_id()]
+                return _boolean_predicate(has, op, value)
+            if field in ("file_size", "width", "height", "focal_length",
+                         "aperture", "shutter_speed", "iso"):
+                return _numeric_condition(f"p.{field}", op, value, allow_null=True)
+            if field == "gps_lat":
+                return _numeric_condition("p.latitude", op, value, allow_null=True)
+            if field == "gps_lng":
+                return _numeric_condition("p.longitude", op, value, allow_null=True)
+            if field in ("filename", "camera_make", "camera_model", "lens"):
+                result = _text_condition(
+                    f"p.{field}", op, value,
+                    case_sensitive=bool(rule.get("case")),
+                )
+                if result is not None:
+                    return result
+            if field == "burst_id":
+                if op in ("equals", "is"):
+                    return "p.burst_id = ?", [value]
+                if op == "is not":
+                    return "(p.burst_id IS NULL OR p.burst_id != ?)", [value]
+            if field == "in_burst":
+                has = "p.burst_id IS NOT NULL"
+                return _boolean_predicate(has, op, value)
+            if field == "duplicate_group":
+                # Duplicate groups have no id table; membership is identity
+                # on file_hash (see find_duplicate_groups).
+                if op in ("equals", "is"):
+                    return "p.file_hash = ?", [value]
+                if op == "is not":
+                    return "(p.file_hash IS NULL OR p.file_hash != ?)", [value]
+            if field == "has_edits":
+                has = ("EXISTS (SELECT 1 FROM photo_edit_recipes per "
+                       "WHERE per.photo_id = p.id)")
+                return _boolean_predicate(has, op, value)
+            if field == "has_visual_index":
+                # Optional rule key "model" narrows to one embedding model.
+                # The universal-filter API layer injects the active visual
+                # model onto UI-emitted rules missing this key so the
+                # filter agrees with visual search (which only loads
+                # embeddings for the active model). Saved smart
+                # collections without a ``model`` keep matching any row —
+                # a portable "some embedding exists" check.
+                model = rule.get("model")
+                if model:
+                    has = ("EXISTS (SELECT 1 FROM photo_embeddings pe "
+                           "WHERE pe.photo_id = p.id AND pe.model = ?)")
+                    params = [model]
+                else:
+                    has = ("EXISTS (SELECT 1 FROM photo_embeddings pe "
+                           "WHERE pe.photo_id = p.id)")
+                    params = []
+                return _boolean_predicate(has, op, value, params)
+            if field == "species":
+                # Confirmed species ride photo_keywords→keywords(→taxa);
+                # a photo with several species matches when ANY matches
+                # (multi-species model). Match by taxon identity for
+                # linked rows so any keyword whose canonical name matches
+                # the value pulls in every photo tagged with that same
+                # taxon — a photo tagged only with a hierarchy leaf
+                # (``Desert Verdin``) still matches the canonical species
+                # (``Verdin``) that ``get_species_keywords_for_photos`` —
+                # and therefore Browse, life list, and species_representative
+                # lookups — report for it. Falls back to raw ``k.name`` for
+                # taxonomy-less legacy rows so user-created/offline species
+                # tags continue to filter.
+                def _species_exists(name_op):
+                    # ``name_op`` is a SQL fragment with ``{name_col}`` for
+                    # the column reference — e.g. ``{name_col} = ?`` or
+                    # ``{name_col} LIKE ?``. Formatted four times, once per
+                    # branch below; parameter order below must match this
+                    # ordering.
+                    legacy_pred = name_op.format(name_col="k.name")
+                    # An attached root (``k.parent_id IS NULL``) surfaces
+                    # under its own stored spelling everywhere else:
+                    # ``get_species_keywords_for_photos`` keeps it (its
+                    # ``is_root`` guard) and ``/api/filters/values``
+                    # groups by ``kv.name``. Match only that spelling —
+                    # never a same-taxon sibling root — so a taxon with
+                    # multiple roots (say ``American Crow`` MIN(id) and
+                    # ``crow (american)``) doesn't cross-match: selecting
+                    # the ``American Crow`` suggestion must not return
+                    # photos the typeahead counts under ``crow (american)``.
+                    self_pred = name_op.format(name_col="k.name")
+                    # A hierarchy leaf (``k.parent_id IS NOT NULL``) is
+                    # displayed as the canonical MIN(id) root spelling of
+                    # its taxon — that's what
+                    # ``get_species_keywords_for_photos``'s
+                    # ``canonical_roots`` and ``/api/filters/values``'s
+                    # ``root_kv.id = MIN(id)`` both surface. Match only
+                    # that MIN(id) root's name so the filter agrees with
+                    # what typeahead offers and Browse shows; any-root
+                    # matching would let a leaf photo satisfy a rule for
+                    # a sibling-root spelling that never appears in the
+                    # UI.
+                    root_pred = name_op.format(name_col="root.name")
+                    # A hierarchy leaf whose taxon has no top-level root row
+                    # in ``keywords`` (repair detached the ``Verdin`` root
+                    # and left only the ``Desert Verdin`` leaf) is shown as
+                    # its own leaf spelling by
+                    # ``get_species_keywords_for_photos`` and by
+                    # ``/api/filters/values`` (``COALESCE(root.name, k.name)``).
+                    # Fall back to matching the leaf's own ``k.name`` so a
+                    # ``species is "Desert Verdin"`` rule matches those
+                    # photos — otherwise the filter would silently exclude
+                    # them (and ``is not`` would silently include them).
+                    leaf_no_root_pred = name_op.format(name_col="k.name")
+                    return (
+                        "EXISTS (SELECT 1 FROM photo_keywords pk "
+                        "JOIN keywords k ON k.id = pk.keyword_id "
+                        "LEFT JOIN taxa t ON t.id = k.taxon_id "
+                        "WHERE pk.photo_id = p.id "
+                        "AND (k.is_species = 1 OR k.type = 'taxonomy') "
+                        "AND (t.rank = 'species' OR t.rank IS NULL) "
+                        "AND ("
+                        f"(k.taxon_id IS NULL AND {legacy_pred})"
+                        " OR (k.taxon_id IS NOT NULL AND ("
+                        f"(k.parent_id IS NULL AND {self_pred})"
+                        " OR (k.parent_id IS NOT NULL AND ("
+                        "EXISTS ("
+                        "SELECT 1 FROM keywords root "
+                        "WHERE root.taxon_id = k.taxon_id "
+                        "AND root.parent_id IS NULL "
+                        "AND (root.is_species = 1 OR root.type = 'taxonomy') "
+                        "AND root.id = ("
+                        "SELECT MIN(id) FROM keywords "
+                        "WHERE taxon_id = k.taxon_id "
+                        "AND parent_id IS NULL "
+                        "AND (is_species = 1 OR type = 'taxonomy')) "
+                        f"AND {root_pred})"
+                        " OR (NOT EXISTS ("
+                        "SELECT 1 FROM keywords rootless "
+                        "WHERE rootless.taxon_id = k.taxon_id "
+                        "AND rootless.parent_id IS NULL "
+                        "AND (rootless.is_species = 1 OR rootless.type = 'taxonomy')"
+                        f") AND {leaf_no_root_pred})"
+                        "))))))"
+                    )
+                if op == "contains":
+                    # Escape user LIKE metacharacters so ``%``/``_`` in the
+                    # value stay literal — matches the other text/folder
+                    # rules and blocks a ``value="%"`` request from matching
+                    # every species-tagged photo. One param each for the
+                    # legacy no-taxon branch, the attached-root branch, the
+                    # same-taxon root lookup, and the rootless-leaf fallback.
+                    like = f"%{_escape_like(str(value or ''))}%"
+                    return (
+                        _species_exists("{name_col} LIKE ? ESCAPE '\\'"),
+                        [like, like, like, like],
+                    )
+                if op == "not_contains":
+                    like = f"%{_escape_like(str(value or ''))}%"
+                    return (
+                        "NOT " + _species_exists("{name_col} LIKE ? ESCAPE '\\'"),
+                        [like, like, like, like],
+                    )
+                if op in ("equals", "is"):
+                    return _species_exists("{name_col} = ?"), [value, value, value, value]
+                if op == "is not":
+                    return "NOT " + _species_exists("{name_col} = ?"), [value, value, value, value]
             raise ValueError(f"unsupported collection rule field/op: {field}/{op}")
 
         def _build_node(node):
@@ -18196,6 +18789,231 @@ class Database:
             {where}
         """
         return self.conn.execute(query, params).fetchone()[0]
+
+    def query_photos(self, rules, sort="date", page=1, per_page=50):
+        """Return paginated photos matching a universal-filter rule tree.
+
+        The rules format is the smart-collection tree (see
+        ``_build_query_from_rules``); ``count_photos_for_rules`` gives the
+        matching total. Raises ValueError on malformed rules.
+        """
+        folder_join, join_clause, where, params = self._build_query_from_rules(rules)
+        sort_map = {
+            "date": _PHOTO_DATE_ASC_ORDER,
+            "date_desc": _PHOTO_DATE_DESC_ORDER,
+            "name": "p.filename ASC, p.id ASC",
+            "name_desc": "p.filename DESC, p.id ASC",
+            "rating": "p.rating DESC, p.filename ASC, p.id ASC",
+            "sharpness": "p.sharpness DESC, p.filename ASC, p.id ASC",
+            "sharpness_asc": "p.sharpness ASC, p.filename ASC, p.id ASC",
+            "quality": "p.quality_score DESC, p.filename ASC, p.id ASC",
+        }
+        order = sort_map.get(sort, _PHOTO_DATE_ASC_ORDER)
+        page = max(1, page)
+        offset = (page - 1) * per_page
+        pcols = ", ".join(f"p.{c.strip()}" for c in self.PHOTO_COLS.split(","))
+        query = f"""
+            SELECT DISTINCT {pcols} FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+            ORDER BY {order}
+            LIMIT ? OFFSET ?
+        """
+        return self.conn.execute(query, [*params, per_page, offset]).fetchall()
+
+    # (display_expr, group_expr) for suggest-capable columns.
+    # ``group_expr`` folds the value the same way the corresponding filter
+    # matches it — camera/lens rules use ``LOWER(col) = LOWER(?)`` so their
+    # facets must group case-insensitively, or ``Sony A1`` and ``sony a1``
+    # would split into two 1-count suggestions while selecting either would
+    # match both photos. ``display_expr`` is what the picker shows; using
+    # ``MIN(col)`` picks a stable representative spelling within each
+    # case-insensitive bucket instead of always lower-casing the label.
+    _SUGGEST_VALUE_EXPRS = {
+        "camera_make": ("MIN(p.camera_make)", "LOWER(p.camera_make)"),
+        "camera_model": ("MIN(p.camera_model)", "LOWER(p.camera_model)"),
+        "lens": ("MIN(p.lens)", "LOWER(p.lens)"),
+        "extension": ("LOWER(p.extension)", "LOWER(p.extension)"),
+    }
+
+    def get_filter_field_values(self, field, rules=None, q=None, limit=20):
+        """Distinct values (with photo counts) for a suggest-capable field.
+
+        Counts respect the supplied rule tree, so the caller can pass the
+        active expression minus the rule being edited and get live facet
+        counts (design requirement: counts answer "how many results would I
+        get", never a global COUNT(*)). Raises ValueError for fields without
+        value suggestions or malformed rules.
+        """
+        folder_join, join_clause, where, params = self._build_query_from_rules(
+            rules if rules is not None else []
+        )
+        limit = max(1, min(int(limit or 20), 50))
+        if field == "folder":
+            return self._folder_filter_values(
+                folder_join, join_clause, where, params, q=q, limit=limit
+            )
+        conditions = []
+        extra_joins = ""
+        extra_params = []
+        if field in self._SUGGEST_VALUE_EXPRS:
+            display_expr, group_expr = self._SUGGEST_VALUE_EXPRS[field]
+        elif field in ("keyword", "species"):
+            extra_joins = (
+                " JOIN photo_keywords pkv ON pkv.photo_id = p.id"
+                " JOIN keywords kv ON kv.id = pkv.keyword_id"
+            )
+            if field == "species":
+                # Canonicalize hierarchy leaves (e.g. ``Desert Verdin``) to
+                # the same-taxon top-level root (``Verdin``) that
+                # ``get_species_keywords_for_photos`` — and therefore Browse,
+                # life-list, and species_representative lookups — report.
+                # Otherwise the typeahead would suggest the raw leaf spelling
+                # for a photo whose species is displayed as ``Verdin`` in
+                # every other view. Deterministic root pick (MIN(id)) mirrors
+                # the ``setdefault`` in ``get_species_keywords_for_photos``.
+                #
+                # BUT: only rewrite hierarchy leaves. When ``kv`` is itself
+                # a top-level root (``parent_id IS NULL``),
+                # ``get_species_keywords_for_photos`` deliberately keeps the
+                # attached root's stored spelling (see its ``is_root`` guard)
+                # so curation lookups keyed on that name still resolve. If a
+                # taxon has multiple species roots and a photo is tagged
+                # with the non-MIN(id) root, rewriting to MIN(id) here would
+                # drop the species name Browse shows and make the typeahead
+                # return nothing for that root.
+                extra_joins += (
+                    " LEFT JOIN taxa tv ON tv.id = kv.taxon_id"
+                    " LEFT JOIN keywords root_kv"
+                    " ON kv.taxon_id IS NOT NULL"
+                    " AND kv.parent_id IS NOT NULL"
+                    " AND root_kv.taxon_id = kv.taxon_id"
+                    " AND root_kv.parent_id IS NULL"
+                    " AND (root_kv.is_species = 1 OR root_kv.type = 'taxonomy')"
+                    " AND root_kv.id = ("
+                    "SELECT MIN(id) FROM keywords"
+                    " WHERE taxon_id = kv.taxon_id"
+                    " AND parent_id IS NULL"
+                    " AND (is_species = 1 OR type = 'taxonomy'))"
+                )
+                conditions.append("(kv.is_species = 1 OR kv.type = 'taxonomy')")
+                conditions.append("(tv.rank = 'species' OR tv.rank IS NULL)")
+                display_expr = (
+                    "CASE WHEN kv.parent_id IS NULL THEN kv.name"
+                    " ELSE COALESCE(root_kv.name, kv.name) END"
+                )
+                group_expr = display_expr
+            else:
+                display_expr = "kv.name"
+                group_expr = display_expr
+        else:
+            raise ValueError(f"field {field!r} does not support value suggestions")
+        # IS NOT NULL and the typeahead LIKE compare against ``group_expr``
+        # so a facet grouped case-insensitively (camera fields, extension)
+        # also matches case-insensitively — otherwise ``camera_model``
+        # would list a single ``Sony A1`` bucket but drop it as soon as the
+        # user typed ``sony``.
+        conditions.append(f"{group_expr} IS NOT NULL")
+        if q:
+            conditions.append(f"{group_expr} LIKE ? ESCAPE '\\'")
+            q_norm = str(q).lower() if group_expr.startswith("LOWER(") else str(q)
+            extra_params.append(f"%{_escape_like(q_norm)}%")
+        joined = " AND ".join(conditions)
+        # ``where`` from ``_build_query_from_rules`` is ``WHERE (A) OR (B)``
+        # for a top-level ``any`` group. Appending ``AND {joined}`` without
+        # wrapping would bind to the last OR branch (AND binds tighter than
+        # OR in SQL) and let first-branch rows leak through even when the
+        # facet field is NULL or the typeahead doesn't match — so the count
+        # no longer answers "how many results would selecting this suggestion
+        # return".
+        if where:
+            where_full = f"WHERE ({where[len('WHERE '):]}) AND {joined}"
+        else:
+            where_full = f"WHERE {joined}"
+        query = f"""
+            SELECT {display_expr} AS value, COUNT(DISTINCT p.id) AS count
+            FROM photos p
+            {folder_join}
+            {join_clause}
+            {extra_joins}
+            {where_full}
+            GROUP BY {group_expr}
+            ORDER BY count DESC, value ASC
+            LIMIT ?
+        """
+        rows = self.conn.execute(query, [*params, *extra_params, limit]).fetchall()
+        return [{"value": row["value"], "count": row["count"]} for row in rows]
+
+    def _folder_filter_values(self, folder_join, join_clause, where, params, q, limit):
+        """Folder suggestions with subtree-aware counts.
+
+        The ``folder`` field's engine operators are ``under``/``not_under``,
+        which match a folder and every descendant. A count grouped by each
+        photo's immediate ``f.path`` therefore misreports what selecting a
+        suggested folder would return — a parent with no direct photos but
+        matching descendants would be omitted entirely, and any folder with
+        both direct and nested photos would undercount. Aggregate over each
+        workspace folder's subtree so the facet answers "how many photos
+        would ``folder under=<path>`` return" (design requirement: counts
+        never lie about the rule they preview).
+        """
+        q_condition = ""
+        q_params = []
+        if q:
+            q_condition = " AND ff.path LIKE ? ESCAPE '\\'"
+            q_params.append(f"%{_escape_like(str(q))}%")
+        # Inner select: photos matching sibling rules with their folder
+        # path. Reused verbatim so every rule-engine feature (workspace
+        # scope, status filter, sibling predicates) applies unchanged.
+        inner = f"""
+            SELECT DISTINCT p.id AS pid, f.path AS ppath
+            FROM photos p
+            {folder_join}
+            {join_clause}
+            {where}
+        """
+        # Path normalization matches ``_build_query_from_rules`` for the
+        # ``folder``/``under`` op so a Windows library's backslash paths
+        # aggregate the same way here as they filter there. Both sides
+        # collapse ``\`` to ``/`` and strip trailing separators — the
+        # engine feeds its value through ``_path_for_subtree_match`` which
+        # ``rstrip("/")``s, so folder roots stored with a trailing separator
+        # (Windows drive root ``D:\`` normalizes to ``D:/``, POSIX root
+        # ``/`` normalizes to ``/``) would otherwise concat to a LIKE
+        # pattern with a doubled slash (``D://%`` / ``//%``) that never
+        # matches real descendant paths — the suggested root would count 0
+        # while ``folder under D:\`` actually returns every photo on the
+        # drive. ``norm_folder_like`` additionally escapes SQL LIKE
+        # metacharacters (``%`` / ``_``) so a folder like ``/pics/my_dir``
+        # only aggregates its own subtree and does not double-count photos
+        # under a sibling ``/pics/myXdir``; the engine's ``folder under``
+        # op escapes the same characters via ``_escape_like``. The ``\\``
+        # escape char is safe to introduce here because path normalization
+        # above has already collapsed every literal ``\`` to ``/``.
+        norm_photo = "RTRIM(REPLACE(matched.ppath, '\\', '/'), '/')"
+        norm_folder = "RTRIM(REPLACE(ff.path, '\\', '/'), '/')"
+        norm_folder_like = (
+            f"REPLACE(REPLACE({norm_folder}, '%', '\\%'), '_', '\\_')"
+        )
+        query = f"""
+            SELECT ff.path AS value, COUNT(DISTINCT matched.pid) AS count
+            FROM folders ff
+            JOIN workspace_folders ff_wf
+              ON ff_wf.folder_id = ff.id AND ff_wf.workspace_id = ?
+            JOIN ({inner}) matched ON (
+                {norm_photo} = {norm_folder}
+                OR {norm_photo} LIKE {norm_folder_like} || '/%' ESCAPE '\\'
+            )
+            WHERE ff.path IS NOT NULL{q_condition}
+            GROUP BY ff.path
+            ORDER BY count DESC, value ASC
+            LIMIT ?
+        """
+        rows = self.conn.execute(
+            query, [self._ws_id(), *params, *q_params, limit]
+        ).fetchall()
+        return [{"value": row["value"], "count": row["count"]} for row in rows]
 
     def collection_photo_ids(self, collection_id):
         """Return the set of photo IDs in the collection, workspace-scoped.

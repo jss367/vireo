@@ -58,6 +58,10 @@ input[type=text], input[type=date], select, .path-input, .text-input, .model-sel
 .navbar a[data-nav-id].dragging {
   opacity: 0.4;
 }
+.navbar a[data-nav-id] {
+  -webkit-user-drag: none;
+  user-select: none;
+}
 .navbar .nav-drop-indicator {
   width: 2px;
   height: 24px;
@@ -2415,6 +2419,7 @@ window.NAV_ALL_PAGES = [
   function buildTabAnchor(page, opts) {
     const a = document.createElement('a');
     a.href = page.href;
+    a.draggable = false;
     a.className = 'nav-tab';
     if (opts && opts.ephemeral) a.classList.add('is-ephemeral');
     a.dataset.navId = page.id;
@@ -2683,7 +2688,7 @@ window.NAV_ALL_PAGES = [
 </script>
 
 <script>
-/* ---------- Drag-reorder over the unified strip ---------- */
+/* ---------- Pointer drag-reorder over the unified strip ---------- */
 (function() {
   function strip() { return document.getElementById('navTabStrip'); }
   function tabAnchors() {
@@ -2692,20 +2697,13 @@ window.NAV_ALL_PAGES = [
   }
 
   let draggedEl = null;
+  let pressedEl = null;
+  let pointerId = null;
+  let startX = 0;
+  let startY = 0;
   let indicator = null;
-  // Last pointer X seen while the drag was over the strip, and a guard so
-  // the reorder is committed exactly once per drag. We commit on `dragend`
-  // (which fires reliably on the source element across engines, including
-  // the macOS WKWebView the desktop app runs in) rather than relying solely
-  // on the `drop` event — WKWebView frequently never fires `drop` for HTML5
-  // drag-and-drop, which left the dragged tab snapping back to its original
-  // position. `drop`, when it does fire, is a fast-path.
-  //
-  // `lastClientX` is cleared when the pointer leaves the strip so an
-  // aborted drag (release outside the navbar) can't commit a reorder from
-  // the last in-strip position.
-  let lastClientX = null;
-  let committed = false;
+  let suppressClick = false;
+  const DRAG_THRESHOLD = 4;
 
   function createIndicator() {
     const el = document.createElement('span');
@@ -2739,96 +2737,79 @@ window.NAV_ALL_PAGES = [
     const newOrder = tabAnchors().map(a => a.dataset.navId);
     if (window._navTabs) window._navTabs.setTabs(newOrder);
   }
-  // Move the dragged tab to wherever `clientX` points and persist the new
-  // order. Guarded by `committed` so a drag that fires both `drop` and
-  // `dragend` only reorders/persists once.
-  function commitReorder(clientX) {
-    if (committed || !draggedEl || clientX == null) return;
+  function pointInsideStrip(clientX, clientY) {
     const s = strip();
-    if (!s) return;
-    committed = true;
+    if (!s) return false;
+    const rect = s.getBoundingClientRect();
+    return clientX >= rect.left && clientX <= rect.right &&
+      clientY >= rect.top && clientY <= rect.bottom;
+  }
+  function commitReorder(clientX) {
+    const s = strip();
+    if (!s || !draggedEl) return;
     removeIndicator();
     s.insertBefore(draggedEl, dropReference(clientX));
     persistCurrentOrder();
   }
-
-  function bindDragHandlers() {
-    tabAnchors().forEach(link => {
-      // Idempotent: ensure draggable=true (re-render replaces nodes).
-      link.draggable = true;
-      if (link.dataset.dragBound) return;
-      link.dataset.dragBound = '1';
-      link.addEventListener('dragstart', function(e) {
-        draggedEl = this;
-        lastClientX = null;
-        committed = false;
-        this.classList.add('dragging');
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', this.dataset.navId);
-      });
-      link.addEventListener('dragend', function() {
-        // Primary commit path: `dragend` always fires on the source, even
-        // in WKWebView where `drop` may not. No-op if `drop` already
-        // committed this drag.
-        commitReorder(lastClientX);
-        this.classList.remove('dragging');
-        removeIndicator();
-        draggedEl = null;
-        lastClientX = null;
-        committed = false;
-      });
-      link.addEventListener('dragover', function(e) {
-        if (!draggedEl || draggedEl === this) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        lastClientX = e.clientX;
-        showDropIndicator(e.clientX);
-      });
-      link.addEventListener('drop', function(e) {
-        // Fast-path when the engine delivers `drop`. `dragend` still fires
-        // afterward but `committed` makes it a no-op.
-        e.preventDefault();
-        e.stopPropagation();
-        commitReorder(e.clientX);
-      });
-    });
+  function finishDrag() {
+    if (draggedEl) draggedEl.classList.remove('dragging');
+    removeIndicator();
+    draggedEl = null;
+    pressedEl = null;
+    pointerId = null;
   }
 
-  // Re-bind every time the strip re-renders. We do that by hooking into
-  // _navTabs.fetchAndRender via a small wrapper — but simpler: a
-  // MutationObserver on the strip.
   function init() {
     const s = strip();
     if (!s) return;
-    // Strip-level dragleave is bound exactly once; re-running
-    // bindDragHandlers() on every MutationObserver tick would otherwise
-    // accumulate duplicate listeners.
-    s.addEventListener('dragleave', function(e) {
-      // When the drag exits the strip entirely, clear both the visual
-      // indicator and the pending drop position. Otherwise a subsequent
-      // `dragend` fired after the user releases outside the navbar would
-      // commit a reorder from the stale in-strip pointer X.
-      if (!s.contains(e.relatedTarget)) {
-        removeIndicator();
-        lastClientX = null;
+    // Native HTML drag-and-drop is unreliable in macOS WKWebView: depending
+    // on the release position it can omit `drop`, `dragover`, or report a
+    // spurious `dragleave`. Pointer capture gives us one dependable stream
+    // through release, including when the pointer leaves the navbar.
+    s.addEventListener('pointerdown', function(e) {
+      if (e.button !== 0 || !e.isPrimary) return;
+      if (e.target.closest('.nav-tab-close, .nav-tab-pin')) return;
+      const link = e.target.closest('.nav-tab:not(.is-ephemeral)');
+      if (!link || !s.contains(link)) return;
+      pressedEl = link;
+      pointerId = e.pointerId;
+      startX = e.clientX;
+      startY = e.clientY;
+      if (link.setPointerCapture) link.setPointerCapture(e.pointerId);
+    });
+
+    document.addEventListener('pointermove', function(e) {
+      if (!pressedEl || e.pointerId !== pointerId) return;
+      if (!draggedEl && Math.hypot(e.clientX - startX, e.clientY - startY) < DRAG_THRESHOLD) return;
+      if (!draggedEl) {
+        draggedEl = pressedEl;
+        draggedEl.classList.add('dragging');
       }
-    });
-    s.addEventListener('dragover', function(e) {
-      if (!draggedEl) return;
       e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      lastClientX = e.clientX;
-      showDropIndicator(e.clientX);
+      if (pointInsideStrip(e.clientX, e.clientY)) showDropIndicator(e.clientX);
+      else removeIndicator();
     });
-    s.addEventListener('drop', function(e) {
-      if (!draggedEl) return;
+
+    document.addEventListener('pointerup', function(e) {
+      if (!pressedEl || e.pointerId !== pointerId) return;
+      if (!draggedEl) {
+        finishDrag();
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
-      commitReorder(e.clientX);
+      suppressClick = true;
+      if (pointInsideStrip(e.clientX, e.clientY)) commitReorder(e.clientX);
+      finishDrag();
+      setTimeout(function() { suppressClick = false; }, 0);
     });
-    bindDragHandlers();
-    const mo = new MutationObserver(() => bindDragHandlers());
-    mo.observe(s, {childList: true});
+
+    document.addEventListener('pointercancel', finishDrag);
+    s.addEventListener('click', function(e) {
+      if (!suppressClick) return;
+      e.preventDefault();
+      e.stopPropagation();
+    }, true);
   }
 
   if (document.readyState === 'loading') {

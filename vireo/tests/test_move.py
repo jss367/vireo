@@ -355,6 +355,47 @@ def test_move_photos_rejects_stale_default_developed_render_at_destination(
     assert db.get_photo(pid)["folder_id"] == fid_src
 
 
+def test_move_photos_rejects_case_folded_stale_developed_render(
+    tmp_path, monkeypatch,
+):
+    """A case-only stale render blocks moves on case-folding volumes."""
+    import move as move_module
+    from move import move_photos
+
+    monkeypatch.setattr(
+        move_module, "_is_case_insensitive_path", lambda _: True,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    fid_src = db.add_folder(str(src), name="src")
+    db.add_folder(str(dst), name="dst")
+
+    incoming = src / "img.cr3"
+    incoming.write_bytes(b"raw")
+    pid = db.add_photo(
+        folder_id=fid_src, filename=incoming.name, extension=".cr3",
+        file_size=3, file_mtime=1.0,
+    )
+    stale_dev_dir = dst / "developed"
+    stale_dev_dir.mkdir()
+    (stale_dev_dir / "IMG.jpg").write_bytes(b"stale-dev")
+
+    result = move_photos(db, [pid], str(dst))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render" in result["errors"][0]
+    assert incoming.exists()
+    assert not (dst / incoming.name).exists()
+    assert db.get_photo(pid)["folder_id"] == fid_src
+
+
 def test_move_photos_stale_check_allows_same_source_shared_stem(tmp_path):
     """A same-source RAW+JPEG pair legitimately shares its render. When
     the earlier sibling has already relocated the render, the later
@@ -1758,6 +1799,68 @@ def test_move_photos_provenance_cleared_when_source_stem_drained(tmp_path):
     assert len(result["errors"]) == 1
     assert "developed render stem" in result["errors"][0]
     assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == src_fid
+
+
+def test_delete_photos_expires_provenance_when_source_stem_drains(tmp_path):
+    """Deleting the final source sibling expires moved-row provenance."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    source_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    source_path.mkdir()
+    src_fid = db.add_folder(str(source_path), name="CARD")
+    db.add_workspace_folder(ws_id, src_fid)
+
+    raw = source_path / "IMG.CR3"
+    jpeg = source_path / "IMG.JPG"
+    raw.write_bytes(b"raw")
+    jpeg.write_bytes(b"jpeg")
+    raw_pid = db.add_photo(
+        folder_id=src_fid, filename=raw.name, extension=".cr3",
+        file_size=3, file_mtime=1.0,
+    )
+    jpeg_pid = db.add_photo(
+        folder_id=src_fid, filename=jpeg.name, extension=".jpg",
+        file_size=4, file_mtime=2.0,
+    )
+
+    first = move_photos(db, [raw_pid], str(destination))
+    assert first["moved"] == 1
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (raw_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(source_path)
+    )
+
+    deleted = db.delete_photos([jpeg_pid])
+    assert deleted["deleted"] == 1
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (raw_pid,),
+        ).fetchone()["last_move_source_folder_path"] is None
+    )
+
+    jpeg.unlink()
+    incoming = source_path / "IMG.NEF"
+    incoming.write_bytes(b"replacement")
+    incoming_pid = db.add_photo(
+        folder_id=src_fid, filename=incoming.name, extension=".nef",
+        file_size=incoming.stat().st_size, file_mtime=3.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming.exists()
     assert db.get_photo(incoming_pid)["folder_id"] == src_fid
 
 
@@ -4567,6 +4670,86 @@ def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):
     copy_calls = [c for c in calls if c[3] == "Copying files" and c[0] > 0]
     assert copy_calls, "shutil fallback reported no per-file progress"
     assert copy_calls[-1][1] == 3  # same 3-file denominator
+
+
+def test_move_folder_prefers_discovered_gnu_rsync(move_env, monkeypatch):
+    """Local NAS moves use discovered GNU rsync instead of a Finder app's
+    bare ``rsync`` resolving to macOS openrsync."""
+    import move as move_mod
+
+    env = move_env
+    captured = {}
+    monkeypatch.setattr(move_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": "/gnu/rsync",
+    )
+
+    def fake_run(*args, **kwargs):
+        captured["rsync_bin"] = kwargs.get("rsync_bin")
+        return 1, "simulated failure", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_run)
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+    )
+
+    assert captured["rsync_bin"] == "/gnu/rsync"
+    assert result["moved"] == 0
+
+
+def test_move_folder_windows_skips_discovered_rsync(move_env, monkeypatch):
+    """Native Windows paths must not be passed to auto-discovered POSIX rsync."""
+    import move as move_mod
+
+    env = move_env
+    captured = {}
+    monkeypatch.setattr(move_mod.sys, "platform", "win32")
+
+    def unexpected_resolve(configured=""):
+        raise AssertionError("Windows local moves must not discover rsync")
+
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", unexpected_resolve)
+
+    def fake_run(*args, **kwargs):
+        captured["rsync_bin"] = kwargs.get("rsync_bin")
+        return 1, "simulated failure", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_run)
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+    )
+
+    assert captured["rsync_bin"] == "rsync"
+    assert result["moved"] == 0
+
+
+def test_move_folder_stall_preserves_rsync_diagnostic(move_env, monkeypatch):
+    """A watchdog timeout includes stderr's filename/root cause instead of
+    replacing it with a generic 30-minute stall message."""
+    import move as move_mod
+
+    env = move_env
+    monkeypatch.setattr(
+        move_mod,
+        "_run_rsync_streamed",
+        lambda *args, **kwargs: (
+            -9,
+            "rsync: DSC_2042.NEF: file truncated while hashing\n",
+            True,
+        ),
+    )
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 0
+    assert "stalled" in result["errors"][0]
+    assert "DSC_2042.NEF" in result["errors"][0]
+    assert "file truncated while hashing" in result["errors"][0]
 
 
 def test_move_folder_shutil_fallback_preserves_dir_symlink(move_env, monkeypatch):
