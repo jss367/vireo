@@ -674,6 +674,41 @@ def test_taxonomic_rank_and_class_attached(life_app):
     assert cardinal["taxonomic_class"] is None
 
 
+def test_higher_rank_taxonomy_identification_is_listed(life_app):
+    app, db, ids = life_app
+    aves = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
+        ("Aves", "Birds", "class"),
+    ).lastrowid
+    accipiter = db.conn.execute(
+        "INSERT INTO taxa (name, rank, parent_id) VALUES (?, ?, ?)",
+        ("Accipiter", "genus", aves),
+    ).lastrowid
+    keyword_id = db.add_keyword("Accipiter", kw_type="taxonomy")
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (accipiter, keyword_id),
+    )
+    photo_id = db.add_photo(
+        folder_id=ids["folder"],
+        filename="accipiter.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=6.0,
+        timestamp="2024-06-01T12:00:00",
+    )
+    db.tag_photo(photo_id, keyword_id)
+    db.conn.commit()
+
+    entry = _entry(_get_life_list(app), "Accipiter")
+    assert entry["taxon_rank"] == "genus"
+    assert entry["taxonomic_class"] == {
+        "id": aves,
+        "name": "Aves",
+        "common_name": "Birds",
+    }
+
+
 def test_locations_from_location_keywords(life_app):
     app, _, _ = life_app
     data = _get_life_list(app)

@@ -12856,12 +12856,16 @@ class Database:
         return rows
 
     def get_life_list_candidates(self, species=None):
-        """Return (photo x accepted-species-keyword) rows for the life list.
+        """Return (photo x accepted-identification-keyword) life-list rows.
 
         Every non-rejected photo in a workspace-visible folder carrying an
-        accepted species keyword (``is_species = 1`` or ``type = 'taxonomy'``)
-        produces one row per species keyword. Taxonomy names ride along from
-        ``taxa`` when the keyword is linked.
+        accepted identification keyword (``is_species = 1`` or
+        ``type = 'taxonomy'``) produces one row per keyword. Taxonomy names
+        and ranks ride along from ``taxa`` when the keyword is linked. Linked
+        higher-rank identifications are included so the Life List can show and
+        filter genus-, family-, and other non-species-level observations; the
+        Explorer continues to count only species-rank taxa through
+        :meth:`get_life_list_taxon_ids`.
 
         Unlike :meth:`get_highlights_candidates`, photos without a
         ``quality_score`` are included — a species the user confirmed but
@@ -12923,7 +12927,6 @@ class Database:
                 AND f.status IN ('ok', 'partial')
                LEFT JOIN taxa t ON t.id = k.taxon_id
                WHERE COALESCE(p.flag, 'none') != 'rejected'
-                 AND (t.rank = 'species' OR t.rank IS NULL)
                  {species_filter}
                ORDER BY k.name, p.timestamp""",
             params,
