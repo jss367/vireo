@@ -4391,6 +4391,88 @@ def test_chain_cancel_while_waiting_for_serialize_lock(app_and_db, tmp_path, mon
     assert len(calls) == 1, calls
 
 
+def test_chain_cancel_landing_between_lock_release_and_post_check(
+        app_and_db, tmp_path, monkeypatch):
+    """Codex race: cancel arrives during ``acquire(timeout=0.5)`` and the
+    holder releases the lock in that same interval. ``acquire`` returns
+    True and the wait loop exits WITHOUT hitting its in-loop
+    ``is_cancelled`` check — so the transfer would start regardless
+    without a cancel check taken with the lock now held. The test forces
+    the ordering by cancelling the waiter first and only then letting the
+    holder return, which releases the lock and makes the waiter's next
+    ``acquire`` succeed."""
+    import move as move_mod
+
+    release_holder = threading.Event()
+    holder_running = threading.Event()
+    calls = []
+
+    def fake_move_folder(db, folder_id, destination, progress_cb=None,
+                         developed_dir="", merge=False, remote=None,
+                         destination_name="", allow_tracked_merge=False):
+        calls.append(folder_id)
+        if len(calls) == 1:
+            holder_running.set()
+            assert release_holder.wait(timeout=30), (
+                "test never released the holder")
+        return {"moved": 1, "errors": []}
+
+    monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+
+    card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(os.path.join(card, "DSC_0002.jpg"))
+    os.utime(os.path.join(card, "DSC_0001.jpg"), (1577880000, 1577880000))
+    os.utime(os.path.join(card, "DSC_0002.jpg"), (1609502400, 1609502400))
+    dest = str(tmp_path / "archive")
+    _save_nas_target(tmp_path, local_root=dest)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    move_ids = process_job["result"]["move_job_ids"]
+    assert len(move_ids) == 2, process_job["result"]
+
+    try:
+        assert holder_running.wait(timeout=10), (
+            "holder never entered fake_move_folder")
+        assert len(calls) == 1, calls
+        waiting = [mid for mid in move_ids
+                   if _job_config(client, mid)["folder_id"] != calls[0]]
+        assert len(waiting) == 1
+        # Cancel the waiter BEFORE releasing the holder. The waiter is
+        # blocked in ``acquire(timeout=0.5)``; once we release the
+        # holder its acquire returns True, the loop exits, and the
+        # cancel here is only caught by the post-acquire check with the
+        # lock in hand.
+        resp = client.post(f"/api/jobs/{waiting[0]}/cancel")
+        assert resp.status_code == 200, resp.get_json()
+    finally:
+        release_holder.set()
+
+    cancelled = wait_for_job_via_client(client, waiting[0])
+    assert cancelled["status"] == "cancelled", cancelled
+    assert cancelled["result"]["summary"] == "Cancelled before transfer started"
+    holder = next(mid for mid in move_ids if mid != waiting[0])
+    held = wait_for_job_via_client(client, holder)
+    assert held["status"] == "completed", held
+    # move_folder for the waiter must never run — that's the whole point
+    # of the post-acquire cancel check.
+    assert len(calls) == 1, calls
+
+
 def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
