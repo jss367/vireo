@@ -13304,24 +13304,25 @@ class Database:
         eligibility_filter = ""
         if eligible_only:
             # Accept a hierarchy leaf whose taxon links back to a root
-            # species with the curation-keyed name. After
+            # identification with the curation-keyed name. After
             # repair_duplicate_photo_species detaches a redundant root but
             # leaves the hierarchical leaf attached, the leaf's stored
             # spelling may differ from the root ("verdin" vs "Verdin"), yet
-            # the photo still represents the same species via a shared
-            # taxon_id. An exact k.name = sr.species compare would then
-            # silently drop that photo from Life List / Representative
+            # the photo still represents the same identification via a
+            # shared taxon_id. An exact k.name = sr.species compare would
+            # then silently drop that photo from Life List / Representative
             # eligibility even though curation was intentionally preserved
             # on the root key.
-            # Restrict the eligibility EXISTS to species-rank taxonomy rows.
-            # `mark_species_keywords` stamps `is_species=1`/`type='taxonomy'`
-            # regardless of the linked taxon's rank, so a genus/family
-            # keyword whose display name happens to match a species curation
-            # key (e.g. a genus row named `Puma`) would otherwise satisfy
-            # eligibility for the `Puma` species representative even though
-            # sibling queries (get_life_list_candidates, get_species_keywords_for_photos,
-            # etc.) exclude the photo from the species bucket via the same
-            # `(t.rank = 'species' OR t.rank IS NULL)` guard.
+            # Eligibility mirrors :meth:`get_life_list_candidates`,
+            # :meth:`get_photo_life_list_species`, and
+            # ``_photo_can_be_life_list_preference`` — all admit linked
+            # higher-rank taxonomy identifications (genus, family, class,
+            # …). Without this, a just-saved representative for a
+            # higher-rank Life List entry would be dropped by the
+            # eligible-only reader that ``GET /api/photos/<id>`` uses to
+            # decide ``is_current_photo``, so the shared Set Representative
+            # affordance would keep offering the write even after it had
+            # already succeeded.
             eligibility_filter = """
                  AND COALESCE(p.flag, 'none') != 'rejected'
                  AND f.status IN ('ok', 'partial')
@@ -13330,9 +13331,7 @@ class Database:
                      FROM photo_keywords pk
                      JOIN keywords k ON k.id = pk.keyword_id
                       AND (k.is_species = 1 OR k.type = 'taxonomy')
-                     LEFT JOIN taxa t ON t.id = k.taxon_id
                      WHERE pk.photo_id = sr.photo_id
-                       AND (t.rank = 'species' OR t.rank IS NULL)
                        AND (
                            k.name = sr.species
                            OR (

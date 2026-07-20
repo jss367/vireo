@@ -759,6 +759,23 @@ def test_higher_rank_photo_can_be_life_list_representative(life_app):
     assert entry["best"]["is_species_representative"] is True
     assert entry["has_preferred_photo"] is True
 
+    # The just-saved representative must survive
+    # ``get_species_representative_lists(eligible_only=True)`` — which is
+    # what the lightbox / context menu re-reads via
+    # ``GET /api/photos/<id>`` to decide whether the button is current.
+    # Without the broadened eligibility EXISTS, the higher-rank row would
+    # be dropped and ``is_current_photo`` would come back false, so the
+    # UI would keep offering "Set Representative" for a save that
+    # already succeeded.
+    assert db.get_species_representative_lists(eligible_only=True) == {
+        "Accipiter": [seed["photo"]],
+    }
+    detail_after = client.get(f"/api/photos/{seed['photo']}").get_json()
+    accipiter_entry = next(
+        e for e in detail_after["life_list"] if e["species"] == "Accipiter"
+    )
+    assert accipiter_entry["is_current_photo"] is True
+
 
 def test_locations_from_location_keywords(life_app):
     app, _, _ = life_app

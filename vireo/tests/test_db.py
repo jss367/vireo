@@ -19944,18 +19944,21 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
     )
 
 
-def test_curation_eligibility_rejects_higher_rank_taxonomy_homonym(tmp_path):
+def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
     """A linked higher-rank taxonomy keyword (e.g. a genus row named
-    ``Puma``) must not satisfy species-curation eligibility for the
-    matching species highlight or representative.
+    ``Puma``) is eligible for the identification-name-keyed
+    representative curation row that shares its stored spelling, but
+    not for the species-only ordered-highlights row keyed on the same
+    name.
 
-    ``mark_species_keywords`` stamps ``is_species=1``/``type='taxonomy'``
-    regardless of the linked taxon's rank, so without the same
-    ``(t.rank = 'species' OR t.rank IS NULL)`` guard used by sibling
-    species queries (``get_life_list_candidates``,
-    ``get_species_keywords_for_photos`` etc.), a genus-linked keyword
-    named ``Puma`` would keep a species ``Puma`` curation row eligible
-    for a photo that is no longer in the species bucket.
+    Representative eligibility mirrors the widened
+    :meth:`get_life_list_candidates`, :meth:`get_photo_life_list_species`,
+    and ``_photo_can_be_life_list_preference`` write path — the Life
+    List renders higher-rank identifications so their photos must
+    survive the ``eligible_only=True`` read that ``GET /api/photos/<id>``
+    uses to decide whether the shared Set-Representative button is
+    current. ``get_species_highlights`` remains species-only, because
+    the Highlights page still only surfaces species buckets.
     """
     from db import Database
 
@@ -19991,23 +19994,24 @@ def test_curation_eligibility_rejects_higher_rank_taxonomy_homonym(tmp_path):
     )
     db.tag_photo(pid, kid)
 
-    # Curation rows stored under the canonical "Puma" species key.
+    # Curation rows stored under the "Puma" identification key.
     db.set_species_representative("Puma", pid)
     db.add_species_highlight("Puma", pid)
     db.conn.commit()
 
-    # Sibling species queries already exclude the photo from the "Puma"
-    # species bucket because of the (t.rank='species' OR NULL) guard.
-    # The curation eligibility EXISTS must exclude it too — otherwise
-    # the representative/highlight remains eligible for a photo that
-    # nothing else considers a Puma species record.
+    # Representative eligibility matches the widened Life List siblings:
+    # the higher-rank homonym is a valid representative for the "Puma"
+    # entry the user actually renders under on the Life List.
     reps = db.get_species_representative_lists(eligible_only=True)
-    assert reps.get("Puma") in (None, []), (
-        "genus-rank taxonomy row named 'Puma' must not satisfy species "
-        "'Puma' representative eligibility"
+    assert reps.get("Puma") == [pid], (
+        "higher-rank homonym 'Puma' must satisfy 'Puma' representative "
+        "eligibility, matching the widened life-list write path"
     )
-    assert db.get_species_representatives(eligible_only=True) == {}
+    assert db.get_species_representatives(eligible_only=True) == {"Puma": pid}
 
+    # Highlights remain species-only. The Highlights page surfaces
+    # species buckets, so a genus-rank keyword named 'Puma' must not
+    # keep the species 'Puma' highlight eligible.
     highlights = db.get_species_highlights(eligible_only=True)
     assert pid not in highlights.get("Puma", {}), (
         "genus-rank taxonomy row named 'Puma' must not satisfy species "
@@ -20017,8 +20021,7 @@ def test_curation_eligibility_rejects_higher_rank_taxonomy_homonym(tmp_path):
     assert pid not in single.get("Puma", {})
 
     # Sanity check: when the row is rebound to the species-rank taxon,
-    # eligibility flips back on. Confirms the guard, not something
-    # else, is what excludes the row.
+    # even the species-only highlight eligibility flips on.
     species_taxon = db.conn.execute(
         "SELECT id FROM taxa WHERE rank = 'species'"
     ).fetchone()["id"]
