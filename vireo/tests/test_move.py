@@ -1820,8 +1820,8 @@ def test_move_photos_rejects_case_folded_stem_collision(tmp_path, monkeypatch):
     the stem to the destination filesystem's case sensitivity before
     consulting the origin map, so this collision is refused up front.
     """
-    from move import move_photos
     import move as move_module
+    from move import move_photos
 
     monkeypatch.setattr(
         move_module, "_is_case_insensitive_path", lambda _: True,
@@ -1875,8 +1875,8 @@ def test_move_photos_allows_case_folded_stem_on_case_sensitive_destination(
     where ``IMG.CR3`` and ``img.NEF`` legitimately coexist as distinct
     files with distinct renders. Both photos should move successfully.
     """
-    from move import move_photos
     import move as move_module
+    from move import move_photos
 
     monkeypatch.setattr(
         move_module, "_is_case_insensitive_path", lambda _: False,
