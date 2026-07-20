@@ -81,7 +81,7 @@ expression, rendered as a locked chip:
 |---|---|
 | Browse | workspace folders (status ok/partial) — the implicit baseline |
 | Map | has GPS or a location keyword (today's `get_geolocated_photos` predicate) |
-| Review | photos with predictions whose `prediction_review.status = 'pending'` |
+| Review | photos with predictions whose effective review status is `pending` — i.e. `COALESCE(prediction_review.status, 'pending') = 'pending'`, so the many predictions that have no `prediction_review` row (the default-pending storage model — see the `COALESCE(pr_rev.status, 'pending')` predicates already used across `db.py`) are included, not dropped |
 | Duplicates | photos whose `file_hash` groups ≥2; a matching member reveals its whole group |
 
 "Open results in…" hands the user expression to another page; the destination
@@ -134,7 +134,21 @@ Behavioral requirements carried from the prototype and its review cycle
 
 Active filter per page per workspace in `workspaces.ui_state` JSON
 (written via existing `PUT /api/workspaces/<id>`), including the `muted`
-flag. Saved filters are collections.
+flag.
+
+Saved filters are collections, but because the visual clause is
+intentionally not part of the rule tree, `collections.rules` alone can't
+represent an expression with a visual component — a collection saved from
+such an expression would silently reopen as metadata-only. To avoid that,
+the collections schema gains a sibling `visual_json` column (nullable
+JSON: the same `{prompt, strength}` payload as the query envelope), and
+both the save-as-collection endpoint and the collection-open flow round-
+trip the pair `{rules, visual}` together. `_build_query_from_rules` keeps
+reading `rules`; the visual clause is applied by the same query pipeline
+that handles the live filter bar, so an opened collection with a visual
+clause behaves identically to the expression that produced it. Collection
+listings surface a visible marker (e.g. a small "visual" chip) so users
+know the clause is active before running it.
 
 ## Species and multi-species
 

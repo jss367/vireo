@@ -92,10 +92,21 @@ Nothing user-visible changes in this phase.
 
 ## Phase 5 — Save-as-collection + legacy cleanup (PR 5)
 
-1. Save the current expression as a collection (rules JSON is already the
-   collection format). Save preview shows the post-save count (paused state
-   never inflates it). Opening a collection loads its rules into the filter
-   bar as editable chips.
+1. Save the current expression as a collection. The rule tree still goes
+   into `collections.rules`; the visual clause (which by design lives
+   outside the rule tree) goes into a new nullable `collections.visual_json`
+   column added in a `db_meta`-marker migration (same migration pattern as
+   the EXIF promotion in Phase 1). Both the save endpoint and the
+   collection-open flow must round-trip `{rules, visual}` together — saving
+   an expression with a visual clause and reopening it must reproduce the
+   same result set, not silently drop to metadata-only. Save preview shows
+   the post-save count (paused state never inflates it) and reflects the
+   visual clause when one is present. Opening a collection loads its rules
+   into the filter bar as editable chips and rehydrates the visual clause
+   into the visual input; a small "visual" marker on the collection row
+   makes the presence of the clause visible before running it. Tests cover
+   the round-trip explicitly (save → reload → identical result set) and
+   the metadata-only case (`visual_json IS NULL` → unchanged behavior).
 2. Delete the duplicated Browse-param filter blocks (`get_photos`,
    `get_photo_ids`, `count_filtered_photos`, `get_browse_summary`,
    `get_geolocated_photos` variant) once all callers use the rule path;
