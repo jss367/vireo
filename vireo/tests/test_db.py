@@ -20538,6 +20538,39 @@ def test_universal_filter_prediction_rules_pin_current_fingerprint(tmp_path):
                    "value": 0.5}]) == 1
 
 
+def test_universal_filter_classifier_model_contains_escapes_like_metacharacters(tmp_path):
+    """``classifier_model contains`` must treat ``%`` / ``_`` in the value as
+    literal characters, matching the other advertised text contains rules.
+    Otherwise ``{"field":"classifier_model","op":"contains","value":"%"}``
+    would match every classified photo — the wildcard-bypass hole the
+    registry now advertises to clients through ``/api/filters/fields``."""
+    db, fid = _filter_db(tmp_path)
+    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    det = db.save_detections(photo, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp1', 'Robin', 0.9, '2026-01-01')",
+        (det,),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # A bare ``%`` / ``_`` used to match every classified photo; escaped,
+    # they only match model strings that literally contain the metacharacter.
+    assert count([{"field": "classifier_model", "op": "contains",
+                   "value": "%"}]) == 0
+    assert count([{"field": "classifier_model", "op": "contains",
+                   "value": "_"}]) == 0
+    # Sanity: a literal substring still matches.
+    assert count([{"field": "classifier_model", "op": "contains",
+                   "value": "bioclip"}]) == 1
+
+
 def test_universal_filter_validation_errors(tmp_path):
     import pytest
     db, _ = _filter_db(tmp_path)
@@ -20952,19 +20985,23 @@ def test_get_filter_field_values_camera_folds_case(tmp_path):
     assert values[0]["count"] == 3
 
 
-def test_universal_filter_species_matches_by_taxon_identity_across_leaves(tmp_path):
-    """Species rules resolve through taxon identity: a photo tagged only
-    with hierarchy leaf A whose linked taxon also has a sibling keyword B
-    (root or leaf) that matches the query value must match. Exercises the
-    taxon-id-equivalence path against a leaf-matching value where the
-    fallback would need to find a same-taxon keyword by name that is
-    *not* the top-level root."""
+def test_universal_filter_species_matches_by_displayed_root_name(tmp_path):
+    """Species rules match a photo by the species name shown in the UI —
+    the canonical root spelling from ``get_species_keywords_for_photos``
+    (and ``/api/filters/values``) — never by a same-taxon hierarchy leaf
+    that never surfaces there.
+
+    A photo tagged only with the root ``Verdin`` is displayed as
+    ``Verdin``. A rule ``species is "Auriparus flaviceps"`` (or
+    ``contains "flaviceps"``) targets the leaf spelling and must not
+    pull the root-tagged photo in just because that leaf exists for the
+    same taxon — otherwise the filter contradicts what
+    ``get_species_keywords_for_photos`` and the values typeahead
+    advertise, and the ``is not`` / ``not_contains`` inverses exclude
+    the photo unexpectedly.
+    """
     db, fid = _filter_db(tmp_path)
     taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
-    # Photo tagged with root "Verdin"; search value is the leaf spelling
-    # "Auriparus flaviceps" (also linked to the same taxon). A pure
-    # ``k.name = ?`` OR ``root.name = ?`` predicate would miss the match
-    # because the root is named "Verdin" not "Auriparus flaviceps".
     pid = db.add_photo(folder_id=fid, filename='v.jpg', extension='.jpg',
                        file_size=100, file_mtime=1.0)
     root_kw = db.add_keyword("Verdin", is_species=True)
@@ -20976,13 +21013,25 @@ def test_universal_filter_species_matches_by_taxon_identity_across_leaves(tmp_pa
     db.conn.commit()
     db.tag_photo(pid, root_kw)
 
+    # Sanity check: displayed species is the root spelling ``Verdin``,
+    # not the leaf ``Auriparus flaviceps``.
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+
     count = db.count_photos_for_rules
-    # Query by the leaf name still matches the photo tagged with root,
-    # via the same taxon_id.
-    assert count([{"field": "species", "op": "is",
-                   "value": "Auriparus flaviceps"}]) == 1
-    # And by the root name (existing behavior).
+    # The displayed name matches.
     assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 1
+    # A same-taxon hierarchy leaf that never surfaces in the UI does not.
+    assert count([{"field": "species", "op": "is",
+                   "value": "Auriparus flaviceps"}]) == 0
+    assert count([{"field": "species", "op": "contains",
+                   "value": "flaviceps"}]) == 0
+    # The ``is not`` / ``not_contains`` inverses correctly keep the
+    # root-tagged photo included when the query targets a leaf spelling
+    # the photo is not displayed under.
+    assert count([{"field": "species", "op": "is not",
+                   "value": "Auriparus flaviceps"}]) == 1
+    assert count([{"field": "species", "op": "not_contains",
+                   "value": "flaviceps"}]) == 1
 
 
 def test_exif_backfill_migration_clears_empty_marker_for_rescan(tmp_path):

@@ -18177,7 +18177,15 @@ class Database:
                         [value],
                     )
                 if op == "contains":
-                    return _prediction_exists("pred.classifier_model LIKE ?", [f"%{value}%"])
+                    # Escape LIKE metacharacters so a value like ``%`` or ``_``
+                    # stays literal — matches the other advertised text
+                    # contains predicates (filename, camera fields, keyword,
+                    # species) and blocks ``value="%"`` from matching every
+                    # classified photo.
+                    like = f"%{_escape_like(str(value or ''))}%"
+                    return _prediction_exists(
+                        "pred.classifier_model LIKE ? ESCAPE '\\'", [like]
+                    )
             if field == "prediction_status":
                 if op in ("equals", "is"):
                     return _prediction_exists(
@@ -18334,10 +18342,22 @@ class Database:
                     # ``name_op`` is a SQL fragment with ``{name_col}`` for
                     # the column reference — e.g. ``{name_col} = ?`` or
                     # ``{name_col} LIKE ?``. Named twice: once as
-                    # ``k.name`` for legacy no-taxon rows and once as
-                    # ``sib.name`` for any same-taxon sibling keyword.
+                    # ``k.name`` for legacy no-taxon rows and once for the
+                    # same-taxon root branch.
                     legacy_pred = name_op.format(name_col="k.name")
-                    sibling_pred = name_op.format(name_col="sib.name")
+                    # A hierarchy leaf (``parent_id IS NOT NULL``) is displayed
+                    # as its same-taxon root in Browse / life list /
+                    # ``get_species_keywords_for_photos`` and enumerated as
+                    # the root by ``/api/filters/values``. Match through the
+                    # root spelling for leaves — ``root.name`` — and through
+                    # ``k.name`` itself when the attached row is already a
+                    # root, so a photo tagged only with ``Verdin`` is not
+                    # pulled in by an ``is "Desert Verdin"`` rule just
+                    # because a hierarchy leaf by that name exists for the
+                    # same taxon. Multiple roots per taxon (from prior data
+                    # merges) still match any of their root spellings.
+                    root_pred = name_op.format(name_col="root.name")
+                    self_pred = name_op.format(name_col="k.name")
                     return (
                         "EXISTS (SELECT 1 FROM photo_keywords pk "
                         "JOIN keywords k ON k.id = pk.keyword_id "
@@ -18347,33 +18367,37 @@ class Database:
                         "AND (t.rank = 'species' OR t.rank IS NULL) "
                         "AND ("
                         f"(k.taxon_id IS NULL AND {legacy_pred})"
-                        " OR (k.taxon_id IS NOT NULL AND EXISTS ("
-                        "SELECT 1 FROM keywords sib "
-                        "WHERE sib.taxon_id = k.taxon_id "
-                        "AND (sib.is_species = 1 OR sib.type = 'taxonomy') "
-                        f"AND {sibling_pred}))))"
+                        " OR (k.taxon_id IS NOT NULL AND ("
+                        f"(k.parent_id IS NULL AND {self_pred})"
+                        " OR EXISTS ("
+                        "SELECT 1 FROM keywords root "
+                        "WHERE root.taxon_id = k.taxon_id "
+                        "AND root.parent_id IS NULL "
+                        "AND (root.is_species = 1 OR root.type = 'taxonomy') "
+                        f"AND {root_pred})))))"
                     )
                 if op == "contains":
                     # Escape user LIKE metacharacters so ``%``/``_`` in the
                     # value stay literal — matches the other text/folder
                     # rules and blocks a ``value="%"`` request from matching
-                    # every species-tagged photo. Applied to both the
-                    # legacy ``k.name`` and same-taxon ``sib.name`` branches.
+                    # every species-tagged photo. One param each for the
+                    # legacy no-taxon branch, the attached-root branch, and
+                    # the same-taxon root lookup.
                     like = f"%{_escape_like(str(value or ''))}%"
                     return (
                         _species_exists("{name_col} LIKE ? ESCAPE '\\'"),
-                        [like, like],
+                        [like, like, like],
                     )
                 if op == "not_contains":
                     like = f"%{_escape_like(str(value or ''))}%"
                     return (
                         "NOT " + _species_exists("{name_col} LIKE ? ESCAPE '\\'"),
-                        [like, like],
+                        [like, like, like],
                     )
                 if op in ("equals", "is"):
-                    return _species_exists("{name_col} = ?"), [value, value]
+                    return _species_exists("{name_col} = ?"), [value, value, value]
                 if op == "is not":
-                    return "NOT " + _species_exists("{name_col} = ?"), [value, value]
+                    return "NOT " + _species_exists("{name_col} = ?"), [value, value, value]
             raise ValueError(f"unsupported collection rule field/op: {field}/{op}")
 
         def _build_node(node):
