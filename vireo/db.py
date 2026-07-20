@@ -15442,9 +15442,22 @@ class Database:
         if photo_ids is not None:
             if not photo_ids:
                 return []
-            placeholders = ",".join("?" * len(photo_ids))
-            sql += f" AND pe.photo_id IN ({placeholders})"
-            params.extend(photo_ids)
+            # Chunk the id restriction: a broad universal-filter rule tree
+            # passes every photo id in the library here, which would blow
+            # past SQLITE_MAX_VARIABLE_NUMBER (999 on legacy builds) as a
+            # single IN (?,...) clause and fail before scoring runs.
+            results = []
+            for start in range(0, len(photo_ids), 900):
+                chunk = list(photo_ids)[start:start + 900]
+                placeholders = ",".join("?" * len(chunk))
+                rows = self.conn.execute(
+                    sql + f" AND pe.photo_id IN ({placeholders})",
+                    params + chunk,
+                ).fetchall()
+                results.extend(
+                    (row["photo_id"], row["embedding"]) for row in rows
+                )
+            return results
         rows = self.conn.execute(sql, params).fetchall()
         return [(row["photo_id"], row["embedding"]) for row in rows]
 

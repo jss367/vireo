@@ -1531,15 +1531,6 @@ body.sidebar-resizing {
     <div class="filter-bar browse-filter-shell">
       {% include '_filterbar.html' %}
       <div class="browse-view-controls">
-        <input type="text" id="clipSearchInput" placeholder="CLIP search: describe what you see..."
-               onkeydown="if(event.key==='Enter')runClipSearch()">
-        <button id="clipSearchBtn" onclick="runClipSearch()"
-                style="background:var(--bg-tertiary);color:var(--accent);border:1px solid var(--accent);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer;white-space:nowrap;">
-          Search
-        </button>
-        <button id="clipClearBtn" onclick="clearClipSearch()" style="display:none;background:none;color:var(--text-faint);border:none;padding:4px 8px;font-size:12px;cursor:pointer;">
-          Clear
-        </button>
         <select id="sortSelect" onchange="applyFilters()" title="Sort order">
           <option value="date">Capture date (oldest)</option>
           <option value="date_desc">Capture date (newest)</option>
@@ -2006,8 +1997,7 @@ var timelineMode = false;
 var calendarYear = new Date().getFullYear();
 var selectedDay = null;
 var calendarData = null;
-var clipSearchActive = false;
-var clipSearchSeq = 0;
+// CLIP search is now the filter bar's visual clause (VireoFilter.getVisual).
 
 var bestBatchData = null;
 var keywordAutocompleteCache = null;
@@ -2428,7 +2418,6 @@ function hasActiveBrowseFilter() {
     activeFolderId ||
     activeKeyword ||
     activeCollectionId ||
-    clipSearchActive ||
     (window.VireoFilter && VireoFilter.hasFilters())
   );
 }
@@ -2670,7 +2659,7 @@ var SKEL_POOL = 300;
 function updateGridTail() {
   var grid = document.getElementById('grid');
   var tail = document.getElementById('gridTail');
-  var remaining = (allLoaded || clipSearchActive) ? 0 : totalPhotos - photos.length;
+  var remaining = allLoaded ? 0 : totalPhotos - photos.length;
   var cards = grid.getElementsByClassName('grid-card');
   var lastCard = cards.length ? cards[cards.length - 1] : null;
   if (remaining <= 0 || !lastCard) {
@@ -3303,17 +3292,6 @@ async function filterByCollection(id, options) {
   activeKeyword = null;
   activeCollectionId = id;
   dashboardCollectionScope = false;
-  if (clipSearchActive && getClipSearchQuery()) {
-    selectedPhotos.clear();
-    selectedPhotoId = null;
-    selectedIndex = -1;
-    closeDetail();
-    refreshCardSelectionVisuals();
-    updateBatchBar();
-    document.getElementById('gridContainer').scrollTop = 0;
-    await runClipSearch();
-    return;
-  }
   photos = [];
   currentPage = 1;
   allLoaded = false;
@@ -3919,11 +3897,6 @@ async function resetAndLoad(options) {
   var preserveAnchor = !!(options && options.preserveAnchor);
   var anchor = preserveAnchor ? captureSelectedPhotoAnchor() : null;
   var restoreEpoch = anchor ? ++anchorRestoreEpoch : null;
-  if (clipSearchActive) {
-    clipSearchActive = false;
-    document.getElementById('clipSearchInput').value = '';
-    document.getElementById('clipClearBtn').style.display = 'none';
-  }
   photos = [];
   currentPage = 1;
   allLoaded = false;
@@ -4054,6 +4027,8 @@ async function loadPhotos(options) {
       page: reqPage,
       per_page: reqPerPage,
     };
+    var loadVisual = window.VireoFilter && VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+    if (loadVisual) body.visual = loadVisual;
     if (activeFolderId) body.folder_id = activeFolderId;
     if (activeCollectionId && dashboardCollectionScope) body.collection_id = activeCollectionId;
     fetchOptions = {
@@ -4068,6 +4043,12 @@ async function loadPhotos(options) {
     if (epoch !== loadEpoch) return;  // grid was reset mid-flight; drop stale response
     totalPhotos = data.total;
     if (window.VireoFilter && VireoFilter.setResultTotal) VireoFilter.setResultTotal(totalPhotos);
+    if (window.VireoFilter && VireoFilter.setVisualInfo) {
+      VireoFilter.setVisualInfo(data.visual || null);
+    }
+    (data.photos || []).forEach(function(p) {
+      if (p.similarity != null) p._similarity = p.similarity;
+    });
     var firstNewIdx = photos.length;
 
     if (data.photos.length === 0) {
@@ -4155,6 +4136,7 @@ async function loadCalendarData() {
   // filters (the visible grid still applies the date rule).
   var rules = getBrowseRulesWithoutTimestamp();
   if (rules) params.set('rules', JSON.stringify(rules));
+  appendVisualScopeParams(params);
 
   calendarData = await safeFetch('/api/photos/calendar?' + params.toString());
   renderCalendar();
@@ -4359,120 +4341,19 @@ function toggleDetectionBoxes() {
   renderGrid();
 }
 
-function getClipSearchQuery() {
-  var input = document.getElementById('clipSearchInput');
-  return input ? input.value.trim() : '';
-}
-
-function appendClipSearchScopeParams(params) {
-  if (activeCollectionId) {
-    params.set('collection_id', activeCollectionId);
-    // Dashboard-scoped collection Browse composes the collection with the
-    // active rules/folder in the grid — CLIP/select-all search must match
-    // that scope. Backend intersects collection_id with rules/folder_id.
-    // Legacy collection view (activeCollectionId && !dashboardCollectionScope)
-    // clears activeCollectionId as soon as a filter is applied (see
-    // VireoFilter.init.onChange), so composing here is a no-op in that path.
-    if (!dashboardCollectionScope) return;
-  }
-  if (activeFolderId) params.set('folder_id', activeFolderId);
-  var rules = getBrowseRules();
-  if (rules) params.set('rules', JSON.stringify(rules));
+function appendVisualScopeParams(params) {
+  // Summary/calendar/typeahead counts must describe the same photos the
+  // visually-filtered grid shows; the backend narrows to the matched set
+  // when the clause is healthy and leaves rules untouched otherwise.
+  var visual = window.VireoFilter && VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+  if (visual) params.set('visual', JSON.stringify(visual));
 }
 
 function reloadBrowseResults(options) {
-  if (clipSearchActive && getClipSearchQuery()) {
-    runClipSearch();
-  } else {
-    resetAndLoad(options);
-  }
-}
-
-async function runClipSearch() {
-  var query = getClipSearchQuery();
-  if (!query) {
-    if (clipSearchActive) clearClipSearch();
-    return;
-  }
-
-  var searchSeq = ++clipSearchSeq;
-  loadEpoch++;
-  selectAllRequestSeq++;
-  var epoch = loadEpoch;
-  loading = false;
-  photos = [];
-  allLoaded = true;
-  selectedPhotos.clear();
-  selectedPhotoId = null;
-  selectedIndex = -1;
-  closeDetail();
-  document.getElementById('grid').innerHTML = '';
-  document.getElementById('loadingState').style.display = 'block';
-  document.getElementById('loadingState').textContent = 'Searching...';
-  clipSearchActive = true;
-  document.getElementById('clipClearBtn').style.display = '';
-  var keepLoadingMessage = false;
-
-  try {
-    var params = new URLSearchParams();
-    params.set('q', query);
-    params.set('limit', 100);
-    params.set('threshold', 0.15);
-    appendClipSearchScopeParams(params);
-    var data = await safeFetch('/api/photos/search?' + params.toString());
-    if (searchSeq !== clipSearchSeq || epoch !== loadEpoch) return;
-
-    if (data.reason) {
-      var msg = {
-        'model_no_text_search': 'Text search is not supported by ' + (data.model_used || 'this model') + '. Switch to a BioCLIP model in Settings.',
-        'no_embeddings': 'No search index found for ' + (data.model_used || 'this model') + '. Run classification first to enable text search.',
-        'no_model': 'No model available. Download one in Settings.'
-      }[data.reason] || 'Search returned no results.';
-      document.getElementById('loadingState').textContent = msg;
-      keepLoadingMessage = true;
-      return;
-    }
-
-    photos = data.results.map(function(r) {
-      var p = r.photo;
-      p._similarity = r.similarity;
-      return p;
-    });
-    totalPhotos = data.total_matches;
-    allLoaded = true;
-
-    renderGrid();
-    var refreshIds = photos.map(function(p) { return p.id; });
-    loadInatStatus(refreshIds).then(function() {
-      if (searchSeq === clipSearchSeq && epoch === loadEpoch) refreshGridCards(refreshIds);
-    });
-    fetchColorLabels(refreshIds).then(function() {
-      if (searchSeq === clipSearchSeq && epoch === loadEpoch) refreshGridCards(refreshIds);
-    });
-    var summary = document.getElementById('filterSummary');
-    summary.textContent = data.total_matches + ' matches' + (data.model_used ? ' (' + data.model_used + ')' : '');
-  } catch(e) {
-    if (searchSeq !== clipSearchSeq || epoch !== loadEpoch) return;
-    document.getElementById('loadingState').textContent = 'Search failed: ' + (e.message || e);
-    keepLoadingMessage = true;
-    return;
-  } finally {
-    if (searchSeq === clipSearchSeq && epoch === loadEpoch && !keepLoadingMessage) {
-      document.getElementById('loadingState').style.display = 'none';
-    }
-  }
-}
-
-function clearClipSearch() {
-  clipSearchSeq++;
-  clipSearchActive = false;
-  document.getElementById('clipSearchInput').value = '';
-  document.getElementById('clipClearBtn').style.display = 'none';
-  resetAndLoad();
+  resetAndLoad(options);
 }
 
 function updateScrollPosition() {
-  if (clipSearchActive) return;
   var el = document.getElementById('filterSummary');
   if (photos.length === 0) {
     el.textContent = totalPhotos + ' photos';
@@ -4656,7 +4537,7 @@ function rearmInfiniteScrollObserver() {
    successful page load until the viewport is covered by real cards. */
 function ensureViewportHydrated() {
   if (infiniteScrollObserverDisconnected || !infiniteScrollObserverIsNative) return;
-  if (loading || allLoaded || clipSearchActive || anchorScanDepth > 0) return;
+  if (loading || allLoaded || anchorScanDepth > 0) return;
   if (photos.length === 0) return;
   var tail = document.getElementById('gridTail');
   if (!tail || !tail.firstElementChild) return;
@@ -4774,28 +4655,6 @@ async function selectAllMatchingPhotos() {
   var requestSeq = ++selectAllRequestSeq;
   var requestEpoch = loadEpoch;
 
-  if (clipSearchActive) {
-    var query = document.getElementById('clipSearchInput').value.trim();
-    if (!query) return;
-    var searchParams = new URLSearchParams();
-    searchParams.set('q', query);
-    searchParams.set('threshold', 0.15);
-    searchParams.set('ids_only', '1');
-    appendClipSearchScopeParams(searchParams);
-    showToast('Selecting all matching search results...');
-    try {
-      var searchData = await safeFetch('/api/photos/search?' + searchParams.toString(), {}, { toast: false });
-      if (requestSeq !== selectAllRequestSeq || requestEpoch !== loadEpoch) return;
-      selectedPhotos.clear();
-      (searchData.photo_ids || []).forEach(function(id) { selectedPhotos.add(id); });
-      renderGrid();
-      updateBatchBar();
-      showToast('Selected ' + selectedPhotos.size.toLocaleString() + ' search result' + (selectedPhotos.size === 1 ? '' : 's'));
-    } catch(e) {
-      showToast('Could not select all search results: ' + (e.message || e), 'error');
-    }
-    return;
-  }
 
   var url;
   var fetchOpts = {};
@@ -4808,6 +4667,8 @@ async function selectAllMatchingPhotos() {
       sort: document.getElementById('sortSelect').value,
       ids_only: true,
     };
+    var idsVisual = window.VireoFilter && VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+    if (idsVisual) idsBody.visual = idsVisual;
     if (activeFolderId) idsBody.folder_id = activeFolderId;
     if (activeCollectionId && dashboardCollectionScope) idsBody.collection_id = activeCollectionId;
     fetchOpts = {
@@ -6599,6 +6460,7 @@ async function loadSummary() {
   if (activeFolderId) params.set('folder_id', activeFolderId);
   var rules = getBrowseRules();
   if (rules) params.set('rules', JSON.stringify(rules));
+  appendVisualScopeParams(params);
   if (activeCollectionId) params.set('collection_id', activeCollectionId);
 
   try {

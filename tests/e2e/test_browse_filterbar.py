@@ -146,3 +146,63 @@ def test_select_all_matches_filtered_grid(live_server, page):
     page.wait_for_function(
         "window.selectedPhotos && selectedPhotos.size === 3", timeout=8000,
     )
+
+
+def test_visual_search_error_state_is_honest(live_server, page):
+    """A visual clause that cannot run (no embeddings indexed) must show an
+    error chip + explanation and keep applying metadata filters — never
+    silently return zero results (Phase 3 hard requirement)."""
+    _open_browse(page, live_server)
+    search = page.locator(".vf-search input")
+    search.fill("an owl at dusk")
+    page.wait_for_selector(".vf-search-suggest button", timeout=8000)
+    page.locator('.vf-search-suggest [data-search-kind="visual"]').click()
+
+    # Visual chip appears in an error state, results stay metadata-only (5).
+    page.wait_for_selector(".vf-chip.visual", timeout=8000)
+    _wait_total(page, 5)
+    page.wait_for_function(
+        "document.querySelector('.vf-visual-note') && "
+        "!document.querySelector('.vf-visual-note').hidden",
+        timeout=8000,
+    )
+    note = page.inner_text(".vf-visual-note")
+    assert "metadata filters shown only" in note
+    assert page.locator(".vf-chip.visual.error").count() == 1
+
+    # Metadata rules still apply alongside the broken visual clause.
+    page.click(".vf-filters-btn")
+    page.click('.vf-quick-rating .vf-star[data-rating="4"]')
+    _wait_total(page, 1)
+    page.click(".vf-done")
+
+    # The clause persists across reload and stays honestly marked.
+    page.wait_for_timeout(1200)
+    page.reload()
+    page.wait_for_selector("#vireoFilterBar", timeout=15000)
+    _wait_total(page, 1, timeout=15000)
+    page.wait_for_selector(".vf-chip.visual", timeout=8000)
+    chips = page.evaluate("document.querySelector('.vf-chips').textContent")
+    assert "Visually similar" in chips and "an owl at dusk" in chips
+
+    # Removing the visual chip keeps the metadata filter.
+    page.evaluate("document.querySelector('.vf-chip.visual .vf-chip-x').click()")
+    page.wait_for_function(
+        "!document.querySelector('.vf-chip.visual')", timeout=8000,
+    )
+    _wait_total(page, 1)
+
+
+def test_visual_strength_control_and_popover_row(live_server, page):
+    _open_browse(page, live_server)
+    page.evaluate("VireoFilter.visualSearch('a hawk in flight')")
+    page.wait_for_selector(".vf-chip.visual", timeout=8000)
+    page.click(".vf-filters-btn")
+    row = page.locator(".vf-visual-row")
+    assert row.is_visible()
+    assert "a hawk in flight" in row.inner_text()
+    page.click('.vf-visual-strength [data-strength="strict"]')
+    page.wait_for_timeout(400)
+    assert page.evaluate("VireoFilter.getVisual().strength") == "strict"
+    page.click('.vf-visual-row [data-action="visual-remove"]')
+    page.wait_for_function("!VireoFilter.getVisual()", timeout=8000)

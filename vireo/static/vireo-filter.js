@@ -46,6 +46,8 @@
     page: 'browse',
     root: { mode: 'all', rules: [] },
     muted: false,
+    visual: null,       // {prompt, strength} — the CLIP clause, outside the tree
+    visualInfo: null,   // last server-reported visual status/coverage
     scopeLabel: '',
     scopeLocked: true,
     fields: null,          // registry from /api/filters/fields (key -> spec)
@@ -229,6 +231,14 @@
 
   function chipEntries() {
     const entries = [];
+    if (state.visual) {
+      const status = state.visualInfo && state.visualInfo.status;
+      entries.push({
+        visual: true,
+        error: Boolean(status && status !== 'ok'),
+        label: `✦ Visually similar · “${state.visual.prompt}”`,
+      });
+    }
     state.root.rules.forEach((node) => {
       if (isGroup(node) && node._qs) {
         entries.push({ node, label: `Search: “${node._qs_text}”`, qs: true });
@@ -253,13 +263,13 @@
   }
 
   function hasUserFilters() {
-    return state.root.rules.length > 0;
+    return state.root.rules.length > 0 || Boolean(state.visual);
   }
 
   // ---- mutation + change plumbing --------------------------------------
 
   function snapshot() {
-    snapshots.push(clone({ root: state.root, muted: state.muted }));
+    snapshots.push(clone({ root: state.root, muted: state.muted, visual: state.visual }));
     if (snapshots.length > 20) snapshots.shift();
   }
 
@@ -293,6 +303,7 @@
     if (!prev) return;
     state.root = prev.root;
     state.muted = prev.muted;
+    state.visual = prev.visual || null;
     render();
     schedulePersist();
     if (state.onChange) state.onChange({ reason: null });
@@ -315,7 +326,7 @@
     fetchJson('/api/photos/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rules, per_page: 1 }),
+      body: JSON.stringify({ rules, per_page: 1, visual: state.visual || undefined }),
     }).then((data) => {
       if (epoch !== wouldMatchEpoch || !state.muted) return;
       state.wouldMatch = data.total;
@@ -338,7 +349,9 @@
       if (ws.id !== state.workspaceId) return;
       const uiState = parseUiState(ws.ui_state);
       if (!uiState.universal_filters) uiState.universal_filters = {};
-      uiState.universal_filters[state.page] = { root: state.root, muted: state.muted };
+      uiState.universal_filters[state.page] = {
+        root: state.root, muted: state.muted, visual: state.visual,
+      };
       // The server JSON-encodes ui_state itself — send the object, or the
       // stored value ends up double-encoded and unreadable on restore.
       return fetch(`/api/workspaces/${state.workspaceId}`, {
@@ -368,6 +381,12 @@
       if (saved && saved.root && Array.isArray(saved.root.rules)) {
         state.root = saved.root;
         state.muted = Boolean(saved.muted);
+        state.visual = (
+          saved.visual && typeof saved.visual.prompt === 'string' && saved.visual.prompt
+        ) ? { prompt: saved.visual.prompt,
+              strength: ['broad', 'balanced', 'strict'].includes(saved.visual.strength)
+                ? saved.visual.strength : 'balanced' }
+          : null;
         return true;
       }
       return false;
@@ -455,11 +474,46 @@
     }, cleared ? { reason: 'quickSearchCleared' } : undefined);
   }
 
+  function applyVisualSearch(text) {
+    const value = String(text || '').trim();
+    mutate(() => {
+      // The visual clause and the quick-search clause are alternatives for
+      // the top bar: setting one replaces the other (prototype behavior).
+      state.root.rules = state.root.rules.filter((n) => !(isGroup(n) && n._qs));
+      state.visual = value
+        ? { prompt: value, strength: (state.visual && state.visual.strength) || 'balanced' }
+        : null;
+      if (!value) state.visualInfo = null;
+    });
+  }
+
+  function clearVisual() {
+    if (!state.visual) return;
+    mutate(() => { state.visual = null; state.visualInfo = null; });
+  }
+
+  function hideSearchSuggest() {
+    const drop = $('.vf-search-suggest');
+    if (drop) drop.hidden = true;
+  }
+
+  function showSearchSuggest() {
+    const drop = $('.vf-search-suggest');
+    const input = $('.vf-search input');
+    const q = input.value.trim();
+    if (!drop) return;
+    if (!q) { drop.hidden = true; return; }
+    drop.innerHTML = `
+      <button type="button" data-search-kind="text"><span>⌕</span><span>Search text for “${esc(q)}”</span><em>Enter</em></button>
+      <button type="button" data-search-kind="visual" class="vf-suggest-visual"><span>✦</span><span>Visually similar to “${esc(q)}”</span><em></em></button>`;
+    drop.hidden = false;
+  }
+
   function syncQuickSearchInput() {
     const input = $('.vf-search input');
     if (!input || document.activeElement === input) return;
     const group = quickSearchGroup();
-    input.value = group ? group._qs_text : '';
+    input.value = group ? group._qs_text : (state.visual ? state.visual.prompt : '');
   }
 
   // ---- rendering --------------------------------------------------------
@@ -482,7 +536,35 @@
     badge.hidden = count === 0;
     $('.vf-clear').hidden = !hasUserFilters();
     $('.vf-mute').hidden = !hasUserFilters() && !state.muted;
+    renderVisualNote();
     requestAnimationFrame(updateChipOverflow);
+  }
+
+  const VISUAL_STATUS_MESSAGES = {
+    no_model: 'No active model — visual search unavailable',
+    model_no_text_search: 'The active model does not support text search',
+    no_embeddings: 'No visual index for these photos',
+    encoding_failed: 'Visual search failed',
+  };
+
+  function renderVisualNote() {
+    const note = $('.vf-visual-note');
+    if (!note) return;
+    const info = state.visualInfo;
+    if (!state.visual || state.muted || !info) { note.hidden = true; return; }
+    if (info.status !== 'ok') {
+      note.textContent = `✦ ${VISUAL_STATUS_MESSAGES[info.status] || info.status} — metadata filters shown only`;
+      note.classList.add('error');
+      note.hidden = false;
+      return;
+    }
+    note.classList.remove('error');
+    if (info.indexed != null && info.candidates != null && info.indexed < info.candidates) {
+      note.textContent = `✦ Visual index covers ${info.indexed} of ${info.candidates} photos in scope`;
+      note.hidden = false;
+    } else {
+      note.hidden = true;
+    }
   }
 
   function renderMuteState() {
@@ -513,7 +595,7 @@
     const list = $('.vf-chips');
     $('.vf-scope-chip span').textContent = state.scopeLabel;
     list.innerHTML = chipEntries().map((entry, idx) =>
-      `<button class="vf-chip" data-chip="${idx}" type="button" title="Edit filters">
+      `<button class="vf-chip${entry.visual ? ' visual' : ''}${entry.error ? ' error' : ''}" data-chip="${idx}" type="button" title="Edit filters">
         <span>${esc(entry.label)}</span>
         <span class="vf-chip-x" data-chip-x="${idx}" role="button" aria-label="Remove ${esc(entry.label)}">×</span>
       </button>`).join('');
@@ -597,9 +679,17 @@
           suggest: Boolean(active.dataset.suggest),
         }
       : null;
-    tree.innerHTML = state.root.rules.length
+    const visualRow = state.visual ? `<div class="vf-rule-row vf-visual-row">
+      <span class="vf-visual-label">✦ Visually similar to “${esc(state.visual.prompt)}”</span>
+      <div class="vf-segmented vf-visual-strength">
+        ${['broad', 'balanced', 'strict'].map((s) =>
+          `<button type="button" data-action="visual-strength" data-strength="${s}" class="${state.visual.strength === s ? 'active' : ''}">${s}</button>`).join('')}
+      </div>
+      <button class="vf-remove" data-action="visual-remove" type="button" aria-label="Remove visual search">×</button>
+    </div>` : '';
+    tree.innerHTML = visualRow + (state.root.rules.length
       ? state.root.rules.map((node, i) => renderNode(node, String(i), 0)).join('')
-      : '<div class="vf-empty-rules">No rules yet. Use a quick filter or add any metadata field.</div>';
+      : (visualRow ? '' : '<div class="vf-empty-rules">No rules yet. Use a quick filter or add any metadata field.</div>'));
     if (restore) {
       const el = tree.querySelector(`[data-action="${restore.action}"][data-path="${restore.path}"]`);
       if (el) {
@@ -707,6 +797,9 @@
     const params = new URLSearchParams({ field: node.field, limit: '8' });
     if (q) params.set('q', q);
     params.set('rules', JSON.stringify(rules));
+    // A healthy visual clause narrows the count set server-side, so facet
+    // counts keep describing the visually-filtered grid.
+    if (state.visual && !state.muted) params.set('visual', JSON.stringify(state.visual));
     // Page scope (folder / dashboard-scoped collection) is passed as
     // separate params to /api/photos/query, so the visible grid is
     // restricted to that scope. Mirror it here or the counts advertised
@@ -814,14 +907,35 @@
   function installEvents() {
     const searchInput = $('.vf-search input');
     searchInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); applyQuickSearch(searchInput.value); }
-      else if (e.key === 'Escape') { searchInput.blur(); }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        hideSearchSuggest();
+        applyQuickSearch(searchInput.value);
+      } else if (e.key === 'Escape') { hideSearchSuggest(); searchInput.blur(); }
     });
+    searchInput.addEventListener('input', showSearchSuggest);
+    searchInput.addEventListener('focus', showSearchSuggest);
     searchInput.addEventListener('blur', () => {
-      // Blur with a cleared box removes the quick-search clause.
+      setTimeout(hideSearchSuggest, 150);
+      // Blur with a cleared box removes the quick-search clause (a visual
+      // clause set from this box clears the same way).
       if (!searchInput.value.trim() && quickSearchGroup()) applyQuickSearch('');
+      else if (!searchInput.value.trim() && state.visual) applyVisualSearch('');
       else syncQuickSearchInput();
     });
+    const searchSuggest = $('.vf-search-suggest');
+    if (searchSuggest) {
+      // mousedown beats the input's blur, so the pick is never lost.
+      searchSuggest.addEventListener('mousedown', (e) => {
+        const btn = e.target.closest('[data-search-kind]');
+        if (!btn) return;
+        e.preventDefault();
+        const value = searchInput.value;
+        hideSearchSuggest();
+        if (btn.dataset.searchKind === 'visual') applyVisualSearch(value);
+        else applyQuickSearch(value);
+      });
+    }
 
     $('.vf-filters-btn').addEventListener('click', () => openPopover());
     $('.vf-popover-close').addEventListener('click', () => openPopover(false));
@@ -829,11 +943,21 @@
     $('.vf-overflow').addEventListener('click', () => openPopover(true));
     $('.vf-mute').addEventListener('click', toggleMute);
     $('.vf-clear').addEventListener('click', () => {
-      mutate(() => { state.root = { mode: 'all', rules: [] }; state.muted = false; });
+      mutate(() => {
+        state.root = { mode: 'all', rules: [] };
+        state.muted = false;
+        state.visual = null;
+        state.visualInfo = null;
+      });
       toast('Filters cleared', true);
     });
     $('.vf-clear-rules').addEventListener('click', () => {
-      mutate(() => { state.root = { mode: 'all', rules: [] }; state.muted = false; });
+      mutate(() => {
+        state.root = { mode: 'all', rules: [] };
+        state.muted = false;
+        state.visual = null;
+        state.visualInfo = null;
+      });
       toast('Filters cleared', true);
     });
     $('.vf-toast button').addEventListener('click', () => { undo(); $('.vf-toast').hidden = true; });
@@ -845,7 +969,10 @@
         const entry = chipEntries()[Number(x.dataset.chipX)];
         if (entry) {
           mutate(() => {
-            if (isGroup(entry.node)) {
+            if (entry.visual) {
+              state.visual = null;
+              state.visualInfo = null;
+            } else if (isGroup(entry.node)) {
               state.root.rules = state.root.rules.filter((n) => n !== entry.node);
             } else removeByReference(state.root, entry.node);
           });
@@ -953,6 +1080,15 @@
       if (!target) return;
       const action = target.dataset.action;
       const path = target.dataset.path;
+      if (action === 'visual-strength') {
+        mutate(() => { if (state.visual) state.visual.strength = target.dataset.strength; });
+        return;
+      }
+      if (action === 'visual-remove') {
+        clearVisual();
+        toast('Visual search removed', true);
+        return;
+      }
       if (action === 'multi') {
         mutate(() => {
           const node = getNodeAtPath(path);
@@ -1048,6 +1184,15 @@
       });
     },
     getRules() { return effectiveRules(); },
+    getVisual() {
+      // Pause disables the visual clause with the rest of the user filters.
+      return (state.muted || !state.visual) ? null : clone(state.visual);
+    },
+    setVisualInfo(info) {
+      state.visualInfo = info || null;
+      if (state.ready) renderLight();
+    },
+    visualSearch(text) { applyVisualSearch(text); },
     getUserRules() { return userRules(); },
     addRule(field, op, value) {
       mutate(() => {

@@ -3893,6 +3893,126 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             raise ValueError("rules must be valid JSON") from exc
         return _inject_active_visual_model(rules)
 
+    _VISUAL_STRENGTH_THRESHOLDS = {"broad": 0.10, "balanced": 0.15, "strict": 0.22}
+    # Query-text embeddings keyed by (model, prompt): the ONNX text encode is
+    # the expensive step and the same prompt is re-resolved by every surface
+    # (grid, summary, calendar, facet counts) plus each typeahead keystroke.
+    _text_query_cache = {}
+
+    def _validate_visual_arg(visual):
+        """Normalize a visual clause payload or raise ValueError."""
+        if visual is None:
+            return None
+        if not isinstance(visual, dict):
+            raise ValueError("visual must be an object")
+        prompt = visual.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("visual.prompt must be a non-empty string")
+        strength = visual.get("strength", "balanced")
+        if strength not in _VISUAL_STRENGTH_THRESHOLDS:
+            raise ValueError("visual.strength must be broad, balanced, or strict")
+        return {"prompt": prompt.strip(), "strength": strength}
+
+    def _request_visual_arg():
+        """Parse the optional ``visual`` query param (JSON clause)."""
+        raw = request.args.get("visual")
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError("visual must be valid JSON") from exc
+        return _validate_visual_arg(parsed)
+
+    def _resolve_visual(db, rules, visual, collection_id=None, folder_id=None):
+        """Run a visual clause over the rule tree's candidate photos.
+
+        Returns ``(info, ordered_ids, sims_by_pid)``. ``info["status"]`` is
+        ``ok`` with ids ordered by similarity, or an unhealthy state
+        (``no_model`` / ``model_no_text_search`` / ``no_embeddings`` /
+        ``encoding_failed``) with ``ordered_ids is None`` — callers then
+        apply metadata rules only and surface the state. Never silently
+        zero results (design hard requirement).
+        """
+        import numpy as np
+        from models import get_active_model
+        base = {"prompt": visual["prompt"], "strength": visual["strength"]}
+        active = get_active_model()
+        if not active:
+            return {**base, "status": "no_model", "model": None}, None, None
+        model_name = active["name"]
+        base["model"] = model_name
+        if active.get("model_type", "bioclip") == "timm":
+            return {**base, "status": "model_no_text_search"}, None, None
+        candidates = db.query_photo_ids(
+            rules, collection_id=collection_id, folder_id=folder_id,
+        )
+        emb_pairs = db.get_photos_with_embedding(model_name, photo_ids=candidates)
+        if not emb_pairs:
+            return (
+                {**base, "status": "no_embeddings",
+                 "candidates": len(candidates), "indexed": 0},
+                None, None,
+            )
+        cache_key = (model_name, visual["prompt"])
+        query_vec = _text_query_cache.get(cache_key)
+        if query_vec is None:
+            from text_encoder import encode_text
+            try:
+                query_vec = encode_text(
+                    visual["prompt"],
+                    model_str=active["model_str"],
+                    pretrained_str=active.get("weights_path", ""),
+                )
+            except Exception as exc:
+                log.exception("Visual clause text encoding failed: %r", visual["prompt"])
+                return (
+                    {**base, "status": "encoding_failed", "error": str(exc)},
+                    None, None,
+                )
+            if len(_text_query_cache) > 64:
+                _text_query_cache.clear()
+            _text_query_cache[cache_key] = query_vec
+        pids = [pid for pid, _ in emb_pairs]
+        emb_matrix = np.stack(
+            [np.frombuffer(blob, dtype=np.float32) for _, blob in emb_pairs]
+        )
+        sims = emb_matrix @ query_vec
+        threshold = _VISUAL_STRENGTH_THRESHOLDS[visual["strength"]]
+        ordered_ids = []
+        sims_by_pid = {}
+        for i in np.argsort(sims)[::-1]:
+            if sims[i] < threshold:
+                break
+            pid = pids[int(i)]
+            ordered_ids.append(pid)
+            sims_by_pid[pid] = round(float(sims[i]), 4)
+        info = {**base, "status": "ok", "matched": len(ordered_ids),
+                "candidates": len(candidates), "indexed": len(emb_pairs)}
+        return info, ordered_ids, sims_by_pid
+
+    def _apply_visual_to_rules(db, rules, visual, collection_id=None, folder_id=None):
+        """For GET consumers (summary/calendar/values): when the visual
+        clause is healthy, restrict the rules to the matched ids (inlined
+        photo_ids — no bound-parameter cap) so counts describe the same
+        photos the visually-filtered grid shows. Unhealthy → rules
+        unchanged, matching the grid's metadata-only fallback.
+        """
+        if visual is None:
+            return rules
+        base_rules = rules if rules is not None else []
+        _info, ordered_ids, _sims = _resolve_visual(
+            db, base_rules, visual,
+            collection_id=collection_id, folder_id=folder_id,
+        )
+        if ordered_ids is None:
+            return rules
+        rules_list = (
+            [] if rules is None
+            else ([rules] if isinstance(rules, dict) else list(rules))
+        )
+        return rules_list + [{"field": "photo_ids", "value": ordered_ids}]
+
     def _request_location_status_filter():
         value = (request.args.get("location_status") or "").strip().lower()
         if not value:
@@ -5536,6 +5656,51 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ):
             return json_error("folder_id must be an integer", 400)
         rules = _inject_active_visual_model(rules)
+        try:
+            visual = _validate_visual_arg(payload.get("visual"))
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+
+        visual_info = None
+        if visual is not None:
+            try:
+                visual_info, ordered_ids, sims_by_pid = _resolve_visual(
+                    db, rules, visual,
+                    collection_id=collection_id, folder_id=folder_id,
+                )
+            except ValueError as exc:
+                return json_error(str(exc), 400)
+            if ordered_ids is not None:
+                # Healthy visual clause: results are the similarity-ranked
+                # matches; sort is relevance by design while it is active.
+                if payload.get("ids_only"):
+                    return jsonify({"ids": ordered_ids, "total": len(ordered_ids),
+                                    "visual": visual_info})
+                start = (page - 1) * per_page
+                page_ids = ordered_ids[start:start + per_page]
+                photos_map = db.get_photos_by_ids(page_ids)
+                photo_dicts = [
+                    dict(photos_map[pid]) for pid in page_ids if pid in photos_map
+                ]
+                for entry in photo_dicts:
+                    entry["similarity"] = sims_by_pid.get(entry["id"])
+                _attach_location_statuses(db, photo_dicts)
+                _attach_species(db, photo_dicts)
+                _attach_species_representatives(db, photo_dicts)
+                _attach_detections(db, photo_dicts)
+                _attach_edit_recipes(db, photo_dicts)
+                return jsonify(
+                    {
+                        "photos": photo_dicts,
+                        "total": len(ordered_ids),
+                        "page": page,
+                        "per_page": per_page,
+                        "visual": visual_info,
+                    }
+                )
+            # Unhealthy: fall through to metadata-only results with the
+            # status attached so the UI can say why — never silently zero.
+
         if payload.get("ids_only"):
             # Select-all and other bulk flows need the complete matching id
             # set; it must resolve exactly the photos the filtered grid
@@ -5545,7 +5710,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                          folder_id=folder_id)
             except ValueError as exc:
                 return json_error(str(exc), 400)
-            return jsonify({"ids": ids, "total": len(ids)})
+            payload_out = {"ids": ids, "total": len(ids)}
+            if visual_info is not None:
+                payload_out["visual"] = visual_info
+            return jsonify(payload_out)
         try:
             photos = db.query_photos(rules, sort=sort, page=page, per_page=per_page,
                                      collection_id=collection_id, folder_id=folder_id)
@@ -5561,14 +5729,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         _attach_detections(db, photo_dicts)
         _attach_edit_recipes(db, photo_dicts)
 
-        return jsonify(
-            {
-                "photos": photo_dicts,
-                "total": total,
-                "page": page,
-                "per_page": per_page,
-            }
-        )
+        response = {
+            "photos": photo_dicts,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+        }
+        if visual_info is not None:
+            response["visual"] = visual_info
+        return jsonify(response)
 
     @app.route("/api/filters/fields")
     def api_filter_fields():
@@ -5614,6 +5783,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             limit_raw = 20
         limit = max(1, min(limit_raw, 500))
         rules = _inject_active_visual_model(rules)
+        try:
+            visual = _request_visual_arg()
+            rules = _apply_visual_to_rules(
+                db, rules, visual,
+                collection_id=collection_id, folder_id=folder_id,
+            )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
         try:
             values = db.get_filter_field_values(
                 field, rules=rules, q=q, limit=limit,
@@ -5679,6 +5856,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             flag = _request_flag_filter()
             location_status = _request_location_status_filter()
             rules = _request_rules_arg()
+            visual = _request_visual_arg()
+            rules = _apply_visual_to_rules(db, rules, visual, folder_id=folder_id)
         except ValueError as e:
             return json_error(str(e), 400)
         try:
@@ -5711,6 +5890,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             flag = _request_flag_filter()
             location_status = _request_location_status_filter()
             rules = _request_rules_arg()
+            visual = _request_visual_arg()
+            rules = _apply_visual_to_rules(
+                db, rules, visual,
+                collection_id=collection_id, folder_id=folder_id,
+            )
         except ValueError as e:
             return json_error(str(e), 400)
         try:
