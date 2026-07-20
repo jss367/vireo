@@ -692,11 +692,24 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None,
                     listing_cache.setdefault(relocation_key, dst_file)
             else:
                 # Date-organized moves commonly cross from local storage to a
-                # mounted archive. shutil.move keeps the fast atomic rename on
-                # a single filesystem and falls back to copy+remove on EXDEV,
-                # while the existence check above preserves our no-overwrite
-                # policy.
-                shutil.move(src_file, dst_file)
+                # mounted archive. Keep the fast atomic rename on one
+                # filesystem, then explicitly copy+unlink when rename fails.
+                # Handling unlink separately matters: the destination copy is
+                # complete at that point, so a locked/read-only source must
+                # not make the outer failure cleanup delete the only render
+                # the newly-repointed catalog row can resolve.
+                try:
+                    os.rename(src_file, dst_file)
+                except OSError:
+                    shutil.copy2(src_file, dst_file)
+                    try:
+                        os.unlink(src_file)
+                    except OSError as unlink_exc:
+                        log.warning(
+                            "Copied developed file %s -> %s but failed to "
+                            "remove source: %s",
+                            src_file, dst_file, unlink_exc,
+                        )
                 if listing_cache is not None:
                     listing_cache.setdefault(relocation_key, dst_file)
             relocated += 1
@@ -714,33 +727,14 @@ def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None,
             # to exports and full-resolution instead of the intact source
             # render (or a clean fallback to the RAW). Delete the partial
             # so lookup falls back correctly.
-            #
-            # But shutil.move's cross-device path also raises when only the
-            # trailing source unlink failed (locked source, read-only source
-            # dir) — in that case ``dst_file`` is a complete, valid copy we
-            # must keep, or exports miss the render even though we did write
-            # it successfully. Compare sizes to distinguish a complete copy
-            # from a truncated write before cleaning up.
             if os.path.lexists(dst_file):
-                keep_dst = False
                 try:
-                    if os.path.isfile(src_file) and os.path.getsize(src_file) \
-                            == os.path.getsize(dst_file):
-                        keep_dst = True
-                except OSError:
-                    keep_dst = False
-                if keep_dst:
-                    if listing_cache is not None:
-                        listing_cache.setdefault(relocation_key, dst_file)
-                    relocated += 1
-                else:
-                    try:
-                        os.remove(dst_file)
-                    except OSError as cleanup_exc:
-                        log.warning(
-                            "Failed to remove partial developed file %s: %s",
-                            dst_file, cleanup_exc,
-                        )
+                    os.remove(dst_file)
+                except OSError as cleanup_exc:
+                    log.warning(
+                        "Failed to remove partial developed file %s: %s",
+                        dst_file, cleanup_exc,
+                    )
     if relocated:
         try:
             if not os.listdir(old_subdir):

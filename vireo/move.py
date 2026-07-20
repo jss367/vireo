@@ -1819,7 +1819,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     # can't rely on ``os.path.isdir`` alone to catch it. Detect that case
     # here and return a structured error so the caller reports every
     # affected photo instead of a mid-run crash.
-    if os.path.exists(destination) and not os.path.isdir(destination):
+    if os.path.lexists(destination) and not os.path.isdir(destination):
         conflict_msg = (
             f"destination path is not a directory: {destination}"
         )

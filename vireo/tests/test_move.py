@@ -1099,6 +1099,32 @@ def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
     assert blocked.read_bytes() == b"not a directory"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink setup is POSIX-only")
+def test_move_photos_refuses_broken_symlink_destination(tmp_path):
+    """The worker returns structured errors for a dangling destination."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    photo = src / "photo.jpg"
+    photo.write_bytes(b"x")
+    pid = db.add_photo(
+        folder_id=fid, filename=photo.name, extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    blocked = tmp_path / "blocked"
+    blocked.symlink_to(tmp_path / "disconnected-volume", target_is_directory=True)
+
+    result = move_photos(db, [pid], str(blocked))
+
+    assert result["moved"] == 0
+    assert any("not a directory" in error for error in result["errors"])
+    assert photo.read_bytes() == b"x"
+    assert os.path.lexists(blocked)
+
+
 def test_relocate_stem_files_cleans_up_partial_copy_on_failure(
     tmp_path, monkeypatch,
 ):
@@ -1108,8 +1134,6 @@ def test_relocate_stem_files_cleans_up_partial_copy_on_failure(
     truncated render at the new key and serves it to exports/full-res
     instead of falling back to the intact source or the RAW.
     """
-    import shutil
-
     from export import _relocate_stem_files
 
     old_dir = tmp_path / "old"
@@ -1148,25 +1172,29 @@ def test_relocate_stem_files_keeps_complete_copy_when_unlink_fails(
     and must be preserved — otherwise exports miss the render even
     though we did write it successfully.
     """
-    import shutil
-
     from export import _relocate_stem_files
 
     old_dir = tmp_path / "old"
     old_dir.mkdir()
-    (old_dir / "img.jpg").write_bytes(b"payload")
+    source = old_dir / "img.jpg"
+    source.write_bytes(b"payload")
     new_dir = tmp_path / "new"
 
-    real_move = shutil.move
+    real_rename = os.rename
+    real_unlink = os.unlink
 
-    def move_then_fail_unlink(src, dst, *a, **kw):
-        # shutil.move's cross-device path does copy2(src, dst) and then
-        # os.unlink(src). Simulate: copy succeeds, unlink fails.
-        result = shutil.copy2(src, dst)
-        raise OSError("permission denied removing source")
-        return result  # noqa: unreachable — mirrors real shutil.move return
+    def cross_device_rename(src, dst):
+        if os.fspath(src) == str(source):
+            raise OSError("cross-device rename")
+        return real_rename(src, dst)
 
-    monkeypatch.setattr("export.shutil.move", move_then_fail_unlink)
+    def locked_source_unlink(path):
+        if os.fspath(path) == str(source):
+            raise PermissionError("permission denied removing source")
+        return real_unlink(path)
+
+    monkeypatch.setattr(os, "rename", cross_device_rename)
+    monkeypatch.setattr(os, "unlink", locked_source_unlink)
 
     listing_cache = {}
     relocated = _relocate_stem_files(
@@ -1177,6 +1205,7 @@ def test_relocate_stem_files_keeps_complete_copy_when_unlink_fails(
     # The complete destination copy stays in place so
     # _iter_developed_outputs still finds the render at the new key.
     assert (new_dir / "img.jpg").read_bytes() == b"payload"
+    assert source.read_bytes() == b"payload"
     # The listing cache records the successful destination so later
     # same-stem calls can reuse it.
     assert any(v == str(new_dir / "img.jpg")
