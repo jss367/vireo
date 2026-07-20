@@ -269,6 +269,40 @@ def test_pipeline_delete_process_uses_in_page_confirmation(live_server, page):
     assert db.get_saved_process(process_id) is None
 
 
+def test_pipeline_delete_dialog_keeps_original_process_target(live_server, page):
+    """Changing the page selection behind the open modal must not change
+    which process the confirmation deletes."""
+    url = live_server["url"]
+    db = live_server["db"]
+    original_id = db.create_saved_process("Delete this process")
+    other_id = db.create_saved_process("Keep this process")
+    page.goto(f"{url}/pipeline")
+    page.locator("#strategySelect").select_option(str(original_id))
+
+    page.locator("#btnProcessDelete").click()
+    expect(page.locator("#processEditorModalDescription")).to_contain_text(
+        "Delete “Delete this process”?"
+    )
+
+    # Model keyboard/assistive-technology focus escaping the modal and
+    # changing the underlying picker while its confirmation remains open.
+    page.evaluate(
+        """(processId) => {
+          const select = document.getElementById('strategySelect');
+          select.value = String(processId);
+          onProcessSelect();
+        }""",
+        other_id,
+    )
+    page.locator("#processEditorSubmitBtn").click()
+
+    expect(page.locator("#processEditorModal")).not_to_have_class(
+        re.compile(r"\bopen\b")
+    )
+    assert db.get_saved_process(original_id) is None
+    assert db.get_saved_process(other_id)["name"] == "Keep this process"
+
+
 def test_pipeline_process_dialog_validates_name_and_closes_with_escape(
     live_server, page
 ):
