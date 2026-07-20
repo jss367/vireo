@@ -1258,12 +1258,25 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
         extension=".jpg", file_size=original_file.stat().st_size,
         file_mtime=1.0,
     )
+    # Add a same-stem sibling that stays behind so the source stem is not
+    # drained by the move below — otherwise ``move_photos`` correctly
+    # expires the moved row's provenance immediately (covered by
+    # ``test_move_photos_provenance_cleared_when_source_stem_drained``)
+    # and there is nothing left for ``delete_folder``'s cascade to clear.
+    sibling_file = reusable_path / "IMG.NEF"
+    sibling_file.write_bytes(b"sibling-raw")
+    db.add_photo(
+        folder_id=original_fid, filename=sibling_file.name,
+        extension=".nef", file_size=sibling_file.stat().st_size,
+        file_mtime=1.0,
+    )
     db.add_workspace_folder(ws_id, original_fid)
 
     first = move_photos(db, [original_pid], str(destination))
     assert first["moved"] == 1
     assert first["errors"] == []
-    # The destination row records the source path as provenance.
+    # The destination row records the source path as provenance while a
+    # same-stem sibling remains behind.
     assert (
         db.conn.execute(
             "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
@@ -1339,6 +1352,17 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
         extension=".jpg", file_size=original_file.stat().st_size,
         file_mtime=1.0,
     )
+    # Same-stem sibling that stays behind — see analogous note in the
+    # source-folder-deleted test above; without it, ``move_photos``
+    # correctly expires provenance immediately and the cascade under test
+    # has nothing to rebase.
+    sibling_file = reusable_path / "IMG.NEF"
+    sibling_file.write_bytes(b"sibling-raw")
+    db.add_photo(
+        folder_id=original_fid, filename=sibling_file.name,
+        extension=".nef", file_size=sibling_file.stat().st_size,
+        file_mtime=1.0,
+    )
     db.add_workspace_folder(ws_id, original_fid)
 
     first = move_photos(db, [original_pid], str(destination))
@@ -1390,6 +1414,130 @@ def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
     assert "developed render stem" in result["errors"][0]
     assert incoming_file.read_bytes() == b"replacement-raw"
     assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+
+
+def test_move_photos_provenance_cleared_when_source_stem_drained(tmp_path):
+    """When the last same-stem sibling is moved out of a source folder, any
+    destination rows still carrying that source path in
+    ``last_move_source_folder_path`` must have the provenance expired.
+    Otherwise a later rescan/import of an unrelated ``IMG.*`` into the same
+    source path could match ``existing_origin == src_dir`` in the collision
+    guard and slip into the destination, where developed-output lookup is
+    keyed by destination folder + stem only and the incoming photo would
+    display/export the old row's developed render.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    source_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    source_path.mkdir()
+    src_fid = db.add_folder(str(source_path), name="CARD")
+    src_file = source_path / "IMG.JPG"
+    src_file.write_bytes(b"original-jpeg")
+    src_pid = db.add_photo(
+        folder_id=src_fid, filename=src_file.name,
+        extension=".jpg", file_size=src_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, src_fid)
+
+    first = move_photos(db, [src_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+
+    # The source folder is now drained of same-stem photos, so the
+    # destination row must not still claim that source as its provenance
+    # (otherwise a rescan into the same path could inherit its render).
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (src_pid,),
+        ).fetchone()["last_move_source_folder_path"] is None
+    )
+
+    # A brand-new unrelated photo lands in the same source folder path
+    # (imagine a card wiped and re-populated). Its stem happens to match
+    # the earlier row, but they don't share a developed render.
+    incoming_file = source_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=src_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The collision guard now sees an unknown origin for the existing stem
+    # (provenance was expired when the source drained) and rejects rather
+    # than merging unrelated rows into one destination folder+stem.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == src_fid
+
+
+def test_move_photos_provenance_cleared_across_date_fanout(tmp_path):
+    """A single source folder can fan same-stem siblings out to multiple
+    date-organized destinations. When the last sibling drains the source,
+    the provenance on the earlier siblings (moved to a different date
+    destination) must also be expired — otherwise a later unrelated
+    ``IMG.*`` reappearing at the source path could slip into whichever
+    destination still carries the stale claim.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    source_path = tmp_path / "CARD"
+    dest_a = tmp_path / "archive" / "2026-07-19"
+    dest_b = tmp_path / "archive" / "2026-07-20"
+    source_path.mkdir()
+    src_fid = db.add_folder(str(source_path), name="CARD")
+    file_a = source_path / "IMG.JPG"
+    file_a.write_bytes(b"jpeg-bytes")
+    file_b = source_path / "IMG.CR3"
+    file_b.write_bytes(b"raw-bytes")
+    pid_a = db.add_photo(
+        folder_id=src_fid, filename=file_a.name, extension=".jpg",
+        file_size=file_a.stat().st_size, file_mtime=1.0,
+    )
+    pid_b = db.add_photo(
+        folder_id=src_fid, filename=file_b.name, extension=".cr3",
+        file_size=file_b.stat().st_size, file_mtime=2.0,
+    )
+    db.add_workspace_folder(ws_id, src_fid)
+
+    # First sibling moves to date A (source still has the other sibling —
+    # provenance should be preserved on this call).
+    first = move_photos(db, [pid_a], str(dest_a))
+    assert first["moved"] == 1
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (pid_a,),
+        ).fetchone()["last_move_source_folder_path"] == str(source_path)
+    )
+
+    # Second sibling moves to date B and drains the source folder. Both
+    # destination rows now need their provenance expired.
+    second = move_photos(db, [pid_b], str(dest_b))
+    assert second["moved"] == 1
+    for pid in (pid_a, pid_b):
+        assert (
+            db.conn.execute(
+                "SELECT last_move_source_folder_path "
+                "FROM photos WHERE id = ?",
+                (pid,),
+            ).fetchone()["last_move_source_folder_path"] is None
+        )
 
 
 def test_move_photos_refuses_destination_that_is_a_file(tmp_path):

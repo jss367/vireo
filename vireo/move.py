@@ -2052,6 +2052,40 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                 0, source_stem_counts.get(source_stem_key, 1) - 1,
             )
             preserve_source_render = source_stem_counts[source_stem_key] > 0
+            if not preserve_source_render:
+                # No same-stem sibling remains in the source folder now
+                # that this row moved out. Expire the destination
+                # provenance for the stem so a later rescan/import of an
+                # unrelated ``IMG.*`` back into the same source path
+                # can't slip past the same-stem developed-render
+                # collision guard by matching this row's stale origin.
+                # Developed-output lookup at the destination is keyed by
+                # folder + stem only, so a spoofed provenance would let
+                # the new photo display/export this row's edit. Clear
+                # every destination row (across all destinations, in
+                # case fanout by date sent same-source siblings to
+                # different folders) whose stored provenance is this
+                # drained source; the ``os.path.splitext`` filter in
+                # Python keeps ``foo.bar`` and ``foo`` from
+                # collapsing under a naive ``LIKE 'foo.%'``.
+                stale_ids = [
+                    row["id"] for row in db.conn.execute(
+                        "SELECT id, filename FROM photos "
+                        "WHERE last_move_source_folder_path = ?",
+                        (src_dir,),
+                    )
+                    if os.path.splitext(row["filename"])[0] == stem
+                ]
+                if stale_ids:
+                    placeholders = ",".join("?" for _ in stale_ids)
+                    db.conn.execute(
+                        f"UPDATE photos SET "
+                        f"last_move_source_folder_path = NULL "
+                        f"WHERE id IN ({placeholders})",
+                        stale_ids,
+                    )
+                    db.conn.commit()
+                destination_stem_origins[stem] = None
             if developed_dir:
                 relocate_developed_file(
                     developed_dir, src_dir, destination, stem,
