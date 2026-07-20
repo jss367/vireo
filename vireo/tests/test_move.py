@@ -465,6 +465,38 @@ def test_move_photos_rejects_case_folded_stale_developed_render(
     assert db.get_photo(pid)["folder_id"] == fid_src
 
 
+def test_move_photos_out_of_developed_folder_ignores_source_original(
+    tmp_path,
+):
+    """A source folder named developed is not a stale-render directory."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    destination = tmp_path / "archive"
+    source = destination / "developed"
+    source.mkdir(parents=True)
+    destination_id = db.add_folder(str(destination), name="archive")
+    source_id = db.add_folder(
+        str(source), name="developed", parent_id=destination_id,
+    )
+    source_file = source / "bird.jpg"
+    source_file.write_bytes(b"original")
+    pid = db.add_photo(
+        folder_id=source_id, filename=source_file.name, extension=".jpg",
+        file_size=source_file.stat().st_size, file_mtime=1.0,
+    )
+
+    result = move_photos(db, [pid], str(destination))
+
+    assert result["moved"] == 1
+    assert result["errors"] == []
+    assert (destination / "bird.jpg").read_bytes() == b"original"
+    assert not source_file.exists()
+    assert db.get_photo(pid)["folder_id"] == destination_id
+
+
 def test_move_photos_stale_check_allows_same_source_shared_stem(tmp_path):
     """A same-source RAW+JPEG pair legitimately shares its render. When
     the earlier sibling has already relocated the render, the later

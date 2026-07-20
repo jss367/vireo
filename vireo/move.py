@@ -1851,6 +1851,7 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
 
 def _has_untracked_destination_developed(
     destination, stem, developed_dir, case_insensitive=False,
+    source_file=None,
 ):
     """Return True when the destination developed dir(s) already contain
     a same-stem file that no catalog row owns.
@@ -1893,6 +1894,12 @@ def _has_untracked_destination_developed(
             if candidate_stem != expected_stem:
                 continue
             candidate = os.path.join(subdir, name)
+            # A tracked source folder may itself be named ``developed`` and
+            # be moved into its parent. In that shape, the default-layout
+            # probe points straight back at the source original; it is not an
+            # untracked render and will be removed after the verified move.
+            if source_file and _samefile_or_false(candidate, source_file):
+                continue
             if os.path.isfile(candidate):
                 return True
     return False
@@ -2085,6 +2092,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                     _has_untracked_destination_developed(
                         destination, stem, developed_dir,
                         case_insensitive=render_case_insensitive,
+                        source_file=src_file,
                     ):
                 log.warning(
                     "Move skipped for %s: developed render already exists "
