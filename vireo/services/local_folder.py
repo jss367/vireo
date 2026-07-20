@@ -376,7 +376,6 @@ def _catalog_records(
             raise LocalWorkspaceError(
                 f"Local destination overlaps a folder Vireo already manages: {catalog_source}"
             )
-    own_session_dir = folder_dir(vireo_dir, root_folder_id)
     protected_session_roots = [
         Path(vireo_dir) / "local-folders",
         Path(vireo_dir) / "local-workspaces",
@@ -385,10 +384,10 @@ def _catalog_records(
         overlaps = _physical_is_within(
             str(local_root), str(session_root)
         ) or _physical_is_within(str(session_root), str(local_root))
-        belongs_to_current_session = _physical_is_within(
-            str(local_root), str(own_session_dir)
+        belongs_to_current_files = _physical_is_within(
+            str(local_root), str(default_local_base(vireo_dir, root_folder_id))
         )
-        if overlaps and not belongs_to_current_session:
+        if overlaps and not belongs_to_current_files:
             raise LocalWorkspaceError(
                 f"Local destination overlaps Vireo session storage: {session_root}"
             )

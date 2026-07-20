@@ -141,6 +141,31 @@ def test_custom_local_destination_refuses_other_session_directory(tmp_path):
         db.close()
 
 
+def test_custom_local_destination_refuses_session_metadata_directory(tmp_path):
+    source = tmp_path / "nas" / "1"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    vireo_dir.mkdir()
+    db = Database(str(vireo_dir / "vireo.db"))
+    workspace_id = db.create_workspace("Numeric folder")
+    folder_id = db.add_folder(str(source), name="1", link_to_workspace=False)
+    assert folder_id == 1
+    db.add_workspace_folder(workspace_id, folder_id)
+    try:
+        with pytest.raises(LocalWorkspaceError, match="session storage"):
+            stage_folder(
+                db,
+                folder_id,
+                str(vireo_dir),
+                local_base=str(vireo_dir / "local-folders"),
+            )
+        assert not (vireo_dir / "local-folders" / "1").exists()
+        assert db.get_folder(folder_id)["path"] == str(source)
+    finally:
+        db.close()
+
+
 def test_custom_local_cleanup_failure_preserves_session(tmp_path, monkeypatch):
     from services import local_folder as service
 
