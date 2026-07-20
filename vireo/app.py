@@ -19853,20 +19853,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                                 "Cancelled before transfer started"
                             ),
                         }
-                # Cancel can land during the 0.5s acquire window itself,
-                # and if the holder releases in that same interval
-                # `acquire` returns True and skips the loop's cancel
-                # check — so recheck here with the lock held before
-                # starting the transfer, and hand the lock back if the
-                # job was stopped in that gap.
-                if runner.is_cancelled(job["id"]):
-                    serialize_lock.release()
-                    return {
-                        "ok": False, "moved": 0, "errors": [],
-                        "summary": (
-                            "Cancelled before transfer started"
-                        ),
-                    }
+            # Cancel check with the lock held, covering two paths:
+            # (1) the waiter's ``acquire(timeout=0.5)`` returned True in
+            # the same 0.5s window a cancel landed in, exiting the loop
+            # without the in-loop check running; (2) a chained move whose
+            # thread started AFTER the earlier holder already released
+            # the batch lock — its non-blocking acquire succeeds so it
+            # never enters the wait loop, but its ``/cancel`` may have
+            # already been accepted while the thread was still queued.
+            # Either way, don't start the transfer.
+            if serialize_lock is not None and runner.is_cancelled(job["id"]):
+                serialize_lock.release()
+                return {
+                    "ok": False, "moved": 0, "errors": [],
+                    "summary": (
+                        "Cancelled before transfer started"
+                    ),
+                }
             try:
                 result = move_folder(
                     db=thread_db,

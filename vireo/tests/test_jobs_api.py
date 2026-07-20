@@ -4593,6 +4593,126 @@ def test_chain_cancel_landing_between_lock_release_and_post_check(
     assert len(calls) == 1, calls
 
 
+def test_chain_cancel_late_thread_skips_wait_loop_entirely(
+        app_and_db, tmp_path, monkeypatch):
+    """The second chained-move thread can start AFTER the first holder
+    has already run and released the batch lock — under CI load the
+    runner's ``thread.start()`` for the second move-folder job may not
+    schedule for tens of ms while the first job runs to completion.
+    When the second thread finally runs, its non-blocking
+    ``serialize_lock.acquire()`` succeeds immediately, so the wait loop
+    is SKIPPED. If ``/cancel`` was accepted during that gap, the only
+    place left to honor it before the transfer is the post-acquire
+    check — which must fire even on the non-waiter path."""
+    import threading as _t
+
+    import move as move_mod
+
+    calls = []
+    release_second_thread = _t.Event()
+    second_thread_started = _t.Event()
+
+    def fake_move_folder(db, folder_id, destination, progress_cb=None,
+                         developed_dir="", merge=False, remote=None,
+                         destination_name="", allow_tracked_merge=False):
+        calls.append(folder_id)
+        return {"moved": 1, "errors": []}
+
+    monkeypatch.setattr(move_mod, "move_folder", fake_move_folder)
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", lambda v: "/usr/bin/rsync")
+    monkeypatch.setattr(move_mod, "resolve_ssh_bin", lambda v: "/usr/bin/ssh")
+
+    # Deterministic ordering: intercept the SECOND move-folder thread's
+    # ``start()`` and hold its worker at the front of _run_job until the
+    # test signals go. The first move-folder thread runs unimpeded and
+    # releases the batch lock before we let the second thread run — so
+    # the second thread's initial non-blocking acquire will succeed and
+    # it will NEVER enter the wait loop.
+    original_start = _t.Thread.start
+    move_thread_count = [0]
+
+    def wrap_second_move_thread(self):
+        target = getattr(self, "_target", None)
+        args = getattr(self, "_args", ())
+        kwargs = getattr(self, "_kwargs", {})
+        # Only wrap _run_job invocations for move-folder jobs.
+        if target is not None and getattr(target, "__name__", "") == "_run_job":
+            job = args[0] if args else None
+            if isinstance(job, dict) and job.get("type") == "move-folder":
+                move_thread_count[0] += 1
+                if move_thread_count[0] == 2:
+                    original_target = target
+                    original_args = args
+                    original_kwargs = kwargs
+
+                    def waited():
+                        second_thread_started.set()
+                        assert release_second_thread.wait(timeout=30), (
+                            "test never released the second thread")
+                        original_target(*original_args, **original_kwargs)
+
+                    self._target = waited
+                    self._args = ()
+                    self._kwargs = {}
+        return original_start(self)
+
+    monkeypatch.setattr(_t.Thread, "start", wrap_second_move_thread)
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+
+    card = _import_card(tmp_path, ("DSC_0001.jpg", "DSC_0002.jpg"))
+    Image.new("RGB", (16, 16), "blue").save(os.path.join(card, "DSC_0002.jpg"))
+    os.utime(os.path.join(card, "DSC_0001.jpg"), (1577880000, 1577880000))
+    os.utime(os.path.join(card, "DSC_0002.jpg"), (1609502400, 1609502400))
+    dest = str(tmp_path / "archive")
+    _save_nas_target(tmp_path, local_root=dest)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card], "destination": dest,
+        "after_import": cull_ready_id, "trust_likely_duplicates": True,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+    import_job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert import_job["status"] == "completed"
+    process_job = wait_for_job_via_client(
+        client, import_job["result"]["process_job_id"])
+    move_ids = process_job["result"]["move_job_ids"]
+    assert len(move_ids) == 2, process_job["result"]
+
+    try:
+        # Wait until the second thread has entered _run_job and is
+        # blocked in front of the work function.
+        assert second_thread_started.wait(timeout=10), (
+            "second move-folder thread never started")
+        # The first move-folder thread ran to completion (no wait loop,
+        # no contention). Confirm it finished before the second thread
+        # got to run.
+        first_folder_id = calls[0] if calls else None
+        first_move_id = next(
+            mid for mid in move_ids
+            if _job_config(client, mid)["folder_id"] == first_folder_id
+        )
+        first_move = wait_for_job_via_client(client, first_move_id)
+        assert first_move["status"] == "completed", first_move
+        second_id = next(mid for mid in move_ids if mid != first_move_id)
+        # Cancel the second job BEFORE its thread runs. Its non-blocking
+        # acquire will then succeed (lock is free) — the ONLY cancel
+        # check that can catch this is the post-acquire one.
+        resp = client.post(f"/api/jobs/{second_id}/cancel")
+        assert resp.status_code == 200, resp.get_json()
+    finally:
+        release_second_thread.set()
+
+    cancelled = wait_for_job_via_client(client, second_id)
+    assert cancelled["status"] == "cancelled", cancelled
+    assert cancelled["result"]["summary"] == "Cancelled before transfer started"
+    # fake_move_folder ran exactly once — for the first (holder) job.
+    assert len(calls) == 1, calls
+
+
 def test_import_photos_adds_requested_tags(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
