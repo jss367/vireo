@@ -17814,12 +17814,25 @@ class Database:
             ``{"field":"has_edits","op":"contains","value":1}`` surfaces as a
             ``ValueError`` (→ 400 at the API layer) instead of the silent
             match the numeric branch already rejects — otherwise a client
-            can slip past the registry by inventing an op.
+            can slip past the registry by inventing an op. Also guards
+            ``value``: without this, ``{"field":"has_gps","op":"is",
+            "value":"yes"}`` would fall to the negative branch (``_truthy``
+            only accepts True/1/"1"/"true") and quietly return the ``is
+            false`` predicate, flipping the client's intent.
             """
             if op not in ("equals", "is", "is not"):
                 raise ValueError(f"unsupported boolean rule op: {op!r}")
-            affirmative = _truthy(value) if op in ("equals", "is") else not _truthy(value)
-            return (has_sql if affirmative else f"NOT ({has_sql})"), list(params or [])
+            if _truthy(value):
+                want_true = True
+            elif _falsey(value):
+                want_true = False
+            else:
+                raise ValueError(
+                    f"boolean rule value must be true/false, got {value!r}"
+                )
+            if op == "is not":
+                want_true = not want_true
+            return (has_sql if want_true else f"NOT ({has_sql})"), list(params or [])
 
         def _numeric_condition(column, op, value, allow_null=False):
             if op == ">=":

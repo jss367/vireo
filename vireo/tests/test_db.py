@@ -20541,6 +20541,19 @@ def test_universal_filter_workflow_fields(tmp_path):
     ):
         with pytest.raises(ValueError):
             count([bad])
+    # A non-boolean value must also fail-closed: without this guard, values
+    # outside ``_truthy``'s whitelist (True/1/"1"/"true") silently fall to
+    # the negative branch, so ``has_gps is "yes"`` would quietly return the
+    # ``is false`` set instead of the reject-as-400 the other malformed
+    # boolean rules get.
+    for bad in (
+        {"field": "has_edits", "op": "is", "value": "yes"},
+        {"field": "has_gps", "op": "is", "value": "maybe"},
+        {"field": "has_visual_index", "op": "is not", "value": "sometimes"},
+        {"field": "in_burst", "op": "equals", "value": 2},
+    ):
+        with pytest.raises(ValueError):
+            count([bad])
     assert count([{"field": "in_burst", "op": "is", "value": 1}]) == 1
     assert count([{"field": "burst_id", "op": "is", "value": "B42"}]) == 1
     assert count([{"field": "duplicate_group", "op": "is", "value": "abc123"}]) == 1
