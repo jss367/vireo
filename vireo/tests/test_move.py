@@ -267,10 +267,16 @@ def test_move_photos_relocates_developed_output_per_photo(move_env):
     assert (developed / old_key / "bird2.jpg").read_bytes() == b"bird2-dev"
 
 
-def test_move_photos_preserves_existing_developed_at_destination(move_env):
-    """A developed render already at the destination key is preserved (no
-    overwrite), matching the collision policy for the photo itself. The
-    source render stays where it is so it can be recovered manually.
+def test_move_photos_rejects_stale_developed_render_at_destination(move_env):
+    """A pre-existing render at the destination key blocks the move.
+
+    ``_iter_developed_outputs`` resolves developed renders by destination
+    folder + stem alone. An untracked ``<new_key>/bird1.jpg`` left behind
+    from a previously deleted photo, a manually placed file, or a partial
+    copy from an aborted earlier move would silently be served as the
+    moved photo's render if we repointed the row against it. Treat that
+    as a move collision instead so the source photo and its render stay
+    intact for manual reconciliation.
     """
     from export import developed_folder_key
     from move import move_photos
@@ -285,15 +291,118 @@ def test_move_photos_preserves_existing_developed_at_destination(move_env):
     (developed / old_key / "bird1.jpg").write_bytes(b"src-dev")
     (developed / new_key / "bird1.jpg").write_bytes(b"dst-dev")
 
-    move_photos(
+    result = move_photos(
         db=env["db"],
         photo_ids=[env["p1"]],
         destination=str(env["dst"]),
         developed_dir=str(developed),
     )
 
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render" in result["errors"][0]
+    # Both developed files remain exactly where they were.
     assert (developed / new_key / "bird1.jpg").read_bytes() == b"dst-dev"
     assert (developed / old_key / "bird1.jpg").read_bytes() == b"src-dev"
+    # Source photo file and catalog row untouched.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert not (env["dst"] / "bird1.jpg").exists()
+    assert env["db"].get_photo(env["p1"])["folder_id"] == env["fid_src"]
+
+
+def test_move_photos_rejects_stale_default_developed_render_at_destination(
+    tmp_path,
+):
+    """When ``darktable_output_dir`` is unset the develop job writes to
+    ``<folder>/developed/``. A leftover file there for the same stem
+    would be silently picked up as the moved photo's render after the
+    row is repointed, so the pre-move guard must cover this layout too.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    fid_src = db.add_folder(str(src), name="src")
+    db.add_folder(str(dst), name="dst")
+
+    (src / "bird.cr3").write_bytes(b"raw")
+    pid = db.add_photo(
+        folder_id=fid_src, filename="bird.cr3", extension=".cr3",
+        file_size=3, file_mtime=1.0,
+    )
+
+    stale_dev_dir = dst / "developed"
+    stale_dev_dir.mkdir()
+    (stale_dev_dir / "bird.jpg").write_bytes(b"stale-dev")
+
+    result = move_photos(
+        db=db,
+        photo_ids=[pid],
+        destination=str(dst),
+    )
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render" in result["errors"][0]
+    assert (src / "bird.cr3").exists()
+    assert not (dst / "bird.cr3").exists()
+    assert (stale_dev_dir / "bird.jpg").read_bytes() == b"stale-dev"
+    assert db.get_photo(pid)["folder_id"] == fid_src
+
+
+def test_move_photos_stale_check_allows_same_source_shared_stem(tmp_path):
+    """A same-source RAW+JPEG pair legitimately shares its render. When
+    the earlier sibling has already relocated the render, the later
+    sibling must not be tripped up by the stale-render guard -- the
+    catalog origin proves the file belongs to their shared stem, not a
+    stray leftover.
+    """
+    from export import developed_folder_key
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    fid_src = db.add_folder(str(src), name="src")
+    db.add_folder(str(dst), name="dst")
+
+    (src / "IMG.raw").write_bytes(b"raw")
+    (src / "IMG.jpg").write_bytes(b"jpeg")
+    pid_raw = db.add_photo(
+        folder_id=fid_src, filename="IMG.raw", extension=".raw",
+        file_size=3, file_mtime=1.0,
+    )
+    pid_jpg = db.add_photo(
+        folder_id=fid_src, filename="IMG.jpg", extension=".jpg",
+        file_size=4, file_mtime=2.0,
+    )
+
+    developed = tmp_path / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(src))
+    (developed / old_key).mkdir()
+    (developed / old_key / "IMG.jpg").write_bytes(b"shared-dev")
+
+    result = move_photos(
+        db=db,
+        photo_ids=[pid_raw, pid_jpg],
+        destination=str(dst),
+        developed_dir=str(developed),
+    )
+
+    assert result["errors"] == []
+    assert result["moved"] == 2
+    new_key = developed_folder_key(str(dst))
+    assert (developed / new_key / "IMG.jpg").read_bytes() == b"shared-dev"
 
 
 def test_move_photos_keeps_render_for_unselected_same_stem_photo(tmp_path):

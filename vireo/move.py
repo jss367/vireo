@@ -1835,6 +1835,52 @@ def move_folder_by_date(db, folder_id, destination, folder_template,
     }
 
 
+def _has_untracked_destination_developed(destination, stem, developed_dir):
+    """Return True when the destination developed dir(s) already contain
+    a same-stem file that no catalog row owns.
+
+    ``move_photos`` guards the catalog side (rejecting two different
+    source folders that both want the same destination stem), but the
+    developed-render lookup in ``export._iter_developed_outputs``
+    resolves by destination folder + stem alone. A leftover file at
+    ``<destination>/developed/<stem>.*`` or
+    ``<developed_dir>/<developed_folder_key(destination)>/<stem>.*``
+    -- from a previously deleted photo, a manually-placed render, or a
+    partial copy from a prior aborted move -- would silently become the
+    moved photo's developed output. Detect that case so ``move_photos``
+    can refuse the move rather than repoint the row against a mismatched
+    render.
+    """
+    try:
+        from .export import developed_folder_key
+    except ImportError:
+        from export import developed_folder_key
+    if not destination or not stem:
+        return False
+    subdirs = [os.path.join(destination, "developed")]
+    if developed_dir:
+        subdirs.append(
+            os.path.join(developed_dir, developed_folder_key(destination))
+        )
+    for subdir in subdirs:
+        if not subdir or not os.path.isdir(subdir):
+            continue
+        try:
+            names = os.listdir(subdir)
+        except OSError:
+            continue
+        # Case-sensitive stem comparison mirrors ``_DevelopedDirIndex``:
+        # two photos differing only by case must not collapse onto each
+        # other's render on case-sensitive filesystems.
+        for name in names:
+            if os.path.splitext(name)[0] != stem:
+                continue
+            candidate = os.path.join(subdir, name)
+            if os.path.isfile(candidate):
+                return True
+    return False
+
+
 def move_photos(db, photo_ids, destination, progress_cb=None,
                 developed_dir="", developed_listing_cache=None):
     """Move individual photos to a destination directory.
@@ -1993,6 +2039,30 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
                 errors.append(
                     f"{photo['filename']}: developed render stem already "
                     "exists at destination"
+                )
+                continue
+
+            # The catalog-only check above can't see files on disk that no
+            # tracked photo owns: a leftover render from a previously
+            # deleted photo, a manually-placed file, or a partial copy from
+            # an aborted earlier move. ``_iter_developed_outputs`` resolves
+            # developed renders by destination folder + stem alone, so an
+            # untracked ``<destination>/developed/<stem>.*`` or
+            # ``<developed_dir>/<developed_folder_key(destination)>/<stem>.*``
+            # would be silently served as this photo's developed output
+            # after the row is repointed. Treat it as a move collision
+            # before touching the row.
+            if existing_origin is no_destination_stem and \
+                    _has_untracked_destination_developed(
+                        destination, stem, developed_dir,
+                    ):
+                log.warning(
+                    "Move skipped for %s: developed render already exists "
+                    "at destination", photo["filename"],
+                )
+                errors.append(
+                    f"{photo['filename']}: developed render already exists "
+                    "at destination"
                 )
                 continue
 
