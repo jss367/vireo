@@ -1678,6 +1678,20 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
     # traversal that slips past the string-level checks can't escape the
     # chosen root.
     destination_root = os.path.realpath(destination)
+    # Reject a destination root that is itself a regular file or dangling
+    # symlink. The ancestor walk below only checks paths *inside*
+    # ``destination`` (``depth`` starts at 1), so without this hoisted
+    # check a template like ``%Y/%m`` against ``destination='/archive'``
+    # where ``/archive`` is a plain file would pass preflight — the
+    # rendered leaf ``/archive/2026/07`` does not lexist yet — and
+    # ``os.makedirs`` in the worker would then raise
+    # ``NotADirectoryError``/``FileExistsError`` instead of returning
+    # the structured preflight error this guard is meant to provide.
+    if os.path.lexists(destination) and not os.path.isdir(destination):
+        raise ValueError(
+            f"date destination already exists and is not a directory: "
+            f"{destination}"
+        )
     plans = []
     for relative in sorted(groups):
         candidate = os.path.join(destination, *relative.split("/"))

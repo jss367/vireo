@@ -733,6 +733,38 @@ def test_plan_folder_date_moves_rejects_destination_occupied_by_file(tmp_path):
         plan_folder_date_moves(db, fid, str(archive), "%Y-%m-%d")
 
 
+def test_plan_folder_date_moves_rejects_destination_root_regular_file(tmp_path):
+    """The destination root itself must be validated as a directory.
+
+    The ancestor walk only checks paths *inside* ``destination`` (``depth``
+    starts at 1), so a destination path that is itself a regular file (or
+    dangling symlink) would slip past preflight — none of ``destination/2026``,
+    ``destination/2026/07`` lexist yet — and ``os.makedirs`` in the worker
+    would then raise ``NotADirectoryError``/``FileExistsError`` inside the
+    background job. Preflight must reject the destination root itself.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    # ``archive`` is a regular file, not a directory. Any nested template
+    # rendered under it would end up trying to ``makedirs`` a child of a
+    # regular file.
+    archive = tmp_path / "archive"
+    archive.write_bytes(b"blocked")
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(archive), "%Y/%m")
+
+
 def test_plan_folder_date_moves_rejects_ancestor_occupied_by_file(tmp_path):
     """A nested template must reject a plan whose intermediate ancestor is a
     regular file.
