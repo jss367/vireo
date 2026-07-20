@@ -413,11 +413,27 @@
   // ---- quick search -----------------------------------------------------
 
   function buildQuickSearchGroup(text) {
+    // Whitespace tokenizes: "red bill" matches (any field contains "red")
+    // AND (any field contains "bill"), so a filename token plus a keyword
+    // token still hit — pre-Phase 2 Browse search behavior. Single-token
+    // input keeps the original flat any-group shape.
+    const tokens = String(text).trim().split(/\s+/).filter(Boolean);
+    if (tokens.length <= 1) {
+      return {
+        mode: 'any',
+        _qs: true,
+        _qs_text: text,
+        rules: QUICK_SEARCH_FIELDS.map((field) => ({ field, op: 'contains', value: text })),
+      };
+    }
     return {
-      mode: 'any',
+      mode: 'all',
       _qs: true,
       _qs_text: text,
-      rules: QUICK_SEARCH_FIELDS.map((field) => ({ field, op: 'contains', value: text })),
+      rules: tokens.map((tok) => ({
+        mode: 'any',
+        rules: QUICK_SEARCH_FIELDS.map((field) => ({ field, op: 'contains', value: tok })),
+      })),
     };
   }
 

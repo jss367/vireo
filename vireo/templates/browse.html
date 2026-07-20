@@ -4227,9 +4227,18 @@ function selectCalendarDay(dateStr, count) {
 }
 
 function clearCalendarSelection() {
+  // Only drop collection scope when a day was actually selected — that
+  // scope is what selectCalendarDay cleared, and its removal here pairs
+  // with the removeField('timestamp') reload. Toggling the calendar off
+  // (or clearing selection twice) with no day picked hits this path with
+  // nothing to remove: removeField would return early without firing
+  // onChange, so a silent activeCollectionId=null would leave the grid
+  // showing the collection while infinite-scroll/summary/select-all
+  // silently widened to the whole workspace.
+  var hadSelection = selectedDay !== null;
   selectedDay = null;
   document.getElementById('calSelection').classList.remove('active');
-  if (!dashboardCollectionScope) activeCollectionId = null;
+  if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
   if (window.VireoFilter) VireoFilter.removeField('timestamp');
   if (calendarData) renderCalendar();
 }
@@ -4238,9 +4247,14 @@ function calendarChangeYear(delta) {
   if (delta < 0 && calendarData && calendarYear <= calendarData.min_year) return;
   if (delta > 0 && calendarData && calendarYear >= calendarData.max_year) return;
   calendarYear += delta;
+  // Same guard as clearCalendarSelection: only touch collection scope
+  // when a day was actually picked (that day-pick is what dropped it).
+  // Without this, switching year in a collection view before ever
+  // selecting a day silently widens later requests to the workspace.
+  var hadSelection = selectedDay !== null;
   selectedDay = null;
   document.getElementById('calSelection').classList.remove('active');
-  if (!dashboardCollectionScope) activeCollectionId = null;
+  if (hadSelection && !dashboardCollectionScope) activeCollectionId = null;
   if (window.VireoFilter) VireoFilter.removeField('timestamp');
   loadCalendarData();
 }
