@@ -20716,6 +20716,21 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error(
                 "destination is not inside the remote target's local "
                 f"archive root ({root})")
+        # A local_archive_root broader than the target's mount_path (mount
+        # nested inside the root) can put a destination inside BOTH: the
+        # import would land straight on the NAS mount, and the chained move
+        # would then treat "<mount leaf>/…" as an archive-relative subpath
+        # and re-copy the already-on-NAS files under
+        # remote_path/<mount leaf>/… — nesting duplicates instead of moving
+        # local staging. The chain stages locally and moves TO the mount, so
+        # a destination on the mount is never valid for it.
+        mount = (target.get("mount_path") or "").strip()
+        if mount and _path_equal_or_descends(destination, mount):
+            return None, json_error(
+                "destination is inside the target's NAS mount "
+                f"({mount}) — the import would land directly on the NAS and "
+                "the chained move would duplicate it under the remote path; "
+                "pick a local archive folder outside the mount")
         dest_is_root = _path_equal_or_descends(root, destination)
         # Root-level import with a folder template that resolves to "." lands
         # photos on the local_archive_root itself. The chained move
