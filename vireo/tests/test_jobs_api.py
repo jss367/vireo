@@ -4146,6 +4146,62 @@ def test_chain_moves_even_when_process_raises(app_and_db, tmp_path, stub_move, m
         wait_for_job_via_client(client, mid)
 
 
+def test_chain_moves_when_process_preblocked_on_missing_labels(
+        app_and_db, tmp_path, stub_move, monkeypatch):
+    """Missing species labels pre-block the process job (no pipeline job is
+    enqueued), so the pipeline-side ``finally`` hook that normally fires the
+    NAS move never runs. But the user accepted a chain that ends on the NAS —
+    the import hook must fire the move itself so the "photos end on the NAS"
+    invariant holds identically to the runtime-failure case, and the outcome
+    is visible on the import job."""
+    import classify_job
+    import models
+
+    # Pretend a classifier is downloaded (a test env has no models by
+    # default; without an active model _enqueue_process_job skips the
+    # label-check entirely and never hits the pre-block path).
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "id": "bioclip-2", "name": "BioCLIP-2", "downloaded": True,
+        "model_type": "bioclip", "model_str": "hf-hub:imageomics/bioclip-2",
+        "weights_path": str(tmp_path / "bioclip-2"),
+    })
+
+    def boom(*a, **k):
+        raise RuntimeError("no species list configured")
+
+    monkeypatch.setattr(classify_job, "_load_labels", boom)
+
+    app, db = app_and_db
+    client = app.test_client()
+    cull_ready_id = next(p["id"] for p in db.get_saved_processes()
+                         if p["name"] == "Cull-ready")
+    import_job = _run_chained_import(client, tmp_path, cull_ready_id)
+    assert import_job["status"] == "completed"
+    # The pre-block message reaches the user unchanged — it tells them what
+    # to fix (download labels) — and no process job was ever created.
+    assert "process_job_id" not in import_job["result"]
+    assert "species list" in import_job["result"]["after_import_skipped"]
+    # But the promised move fired anyway: photos still end on the NAS.
+    move_ids = import_job["result"]["move_job_ids"]
+    assert move_ids
+    for mid in move_ids:
+        mj = wait_for_job_via_client(client, mid)
+        assert mj["status"] == "completed", mj
+        assert _job_config(client, mid)["chained_from"] == import_job["id"]
+    # move_folder was actually called (via the stub) — the chain didn't
+    # just enqueue placeholder jobs.
+    assert stub_move
+    assert all(c["merge"] is True and c["allow_tracked_merge"] is True
+               and c["remote"] is not None
+               for c in stub_move)
+    # Stepped jobs render only their step tree, so the move outcome MUST
+    # land there — otherwise the import job looks clean while a chain
+    # branch just ran off it.
+    step = next(s for s in import_job["steps"] if s["id"] == "after-move")
+    assert step["status"] == "completed"
+    assert "started" in step["summary"] and "NAS" in step["summary"]
+
+
 def test_chain_skips_move_on_cancelled_process(app_and_db, tmp_path, stub_move, monkeypatch):
     import pipeline_job
     monkeypatch.setattr(pipeline_job, "run_pipeline_job",

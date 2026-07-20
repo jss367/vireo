@@ -21594,6 +21594,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 )
                 if process_blocker:
                     result["after_import_skipped"] = process_blocker
+                    if after_move:
+                        # Processing is paused before any pipeline job was
+                        # enqueued (e.g. Classify needs a species list the
+                        # user hasn't downloaded yet), so the finally-hook
+                        # that normally fires the chained NAS move never
+                        # runs. But the user accepted a chain that ends on
+                        # the NAS — leaving these photos in the local
+                        # archive without saying so would break the promise
+                        # and hide the outcome behind an "after_import
+                        # skipped" pill that doesn't mention the move. Fire
+                        # the move here off the import job itself, so the
+                        # "photos end on the NAS" invariant holds the same
+                        # way it does for a runtime process failure. The
+                        # hook writes move_job_ids / after_move_errors on
+                        # the import result and adds a "Move to NAS" step
+                        # to the import job's tree, so the outcome is
+                        # visible either way.
+                        _chain_after_move(
+                            job, result, after_move, active_ws)
                     return
                 result["process_job_id"] = process_job_id
                 if after_move is not None:
