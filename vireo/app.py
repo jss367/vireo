@@ -5583,6 +5583,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``rules`` (JSON, optional) is the active expression minus the rule
         being edited, so counts answer "how many results would I get" under
         the user's other selections — never a global COUNT(*).
+        ``folder_id``/``collection_id`` (optional) narrow the count set to
+        the page-scope restriction Browse applies to ``/api/photos/query``,
+        so a folder- or dashboard-collection-scoped Browse view shows
+        typeahead counts that match its visible grid instead of the whole
+        workspace.
         """
         db = _get_db()
         field = request.args.get("field", "")
@@ -5596,6 +5601,8 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             except ValueError:
                 return json_error("rules must be valid JSON", 400)
         q = request.args.get("q") or None
+        folder_id = request.args.get("folder_id", None, type=int)
+        collection_id = request.args.get("collection_id", None, type=int)
         # Clamp ``limit`` to a positive bounded range. Werkzeug's ``type=int``
         # cheerfully parses ``?limit=0``/``?limit=-5`` (SQLite treats a
         # negative ``LIMIT`` as "no limit" and returns everything), and
@@ -5607,7 +5614,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         limit = max(1, min(limit_raw, 500))
         rules = _inject_active_visual_model(rules)
         try:
-            values = db.get_filter_field_values(field, rules=rules, q=q, limit=limit)
+            values = db.get_filter_field_values(
+                field, rules=rules, q=q, limit=limit,
+                folder_id=folder_id, collection_id=collection_id,
+            )
         except ValueError as exc:
             return json_error(str(exc), 400)
         return jsonify({"field": field, "values": values})

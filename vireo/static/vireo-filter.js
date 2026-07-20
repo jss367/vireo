@@ -52,6 +52,7 @@
     fieldOrder: [],
     onChange: null,
     getContextRules: null, // page-supplied rules ANDed outside the user tree
+    getScope: null,        // page-supplied {folder_id, collection_id} for /api/filters/values
     workspaceId: null,
     resultTotal: null,
     wouldMatch: null,      // count while paused
@@ -680,6 +681,16 @@
     const params = new URLSearchParams({ field: node.field, limit: '8' });
     if (q) params.set('q', q);
     params.set('rules', JSON.stringify(rules));
+    // Page scope (folder / dashboard-scoped collection) is passed as
+    // separate params to /api/photos/query, so the visible grid is
+    // restricted to that scope. Mirror it here or the counts advertised
+    // beside each suggestion are computed over the whole workspace and a
+    // pick can produce fewer (or zero) grid rows than the badge promised.
+    const scope = state.getScope ? state.getScope() : null;
+    if (scope) {
+      if (scope.folder_id != null) params.set('folder_id', scope.folder_id);
+      if (scope.collection_id != null) params.set('collection_id', scope.collection_id);
+    }
     fetchJson(`/api/filters/values?${params}`).then((data) => {
       if (!document.contains(input)) return;
       if (!data.values.length) { drop.hidden = true; return; }
@@ -987,6 +998,7 @@
       state.scopeLabel = options.scopeLabel || '';
       state.onChange = options.onChange || null;
       state.getContextRules = options.getContextRules || null;
+      state.getScope = options.getScope || null;
       rootEl = typeof options.root === 'string' ? document.querySelector(options.root) : options.root;
       if (!rootEl) return Promise.reject(new Error('VireoFilter: missing root element'));
       return loadRegistry().then(() => {

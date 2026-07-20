@@ -2905,6 +2905,19 @@ async function bootstrapBrowse() {
         // but leaves the summary showing pre-filter numbers.
         loadSummary();
       },
+      // Typeahead counts otherwise ignore the folder/collection restriction
+      // the grid uses via /api/photos/query, so picking a suggestion inside
+      // a folder or dashboard-scoped collection can yield fewer visible
+      // grid results than the advertised count. Dashboard-scoped collection
+      // Browse composes collection + rules; the legacy collection view
+      // clears activeCollectionId on filter apply, so this is a no-op there.
+      getScope: function() {
+        return {
+          folder_id: activeFolderId,
+          collection_id: (activeCollectionId && dashboardCollectionScope)
+            ? activeCollectionId : null,
+        };
+      },
     }).then(function() {
       VireoFilter.setResultTotal(totalPhotos);
       if (VireoFilter.hasFilters()) {
@@ -4203,16 +4216,21 @@ function selectCalendarDay(dateStr, count) {
 
   // Day selection is a capture-date rule in the filter bar (single-day
   // between; the backend pads the upper bound to end-of-day).
+  // Clear the collection scope BEFORE addRule() — its onChange fires the
+  // reload synchronously, so mutating scope after would only take effect
+  // for later requests (infinite scroll, select-all, summary, calendar).
+  // Dashboard-scoped collection Browse composes collection + rules and
+  // must keep activeCollectionId.
+  if (!dashboardCollectionScope) activeCollectionId = null;
   VireoFilter.addRule('timestamp', 'between', [dateStr, dateStr]);
-  activeCollectionId = null;
   renderCalendar(); // update selected state
 }
 
 function clearCalendarSelection() {
   selectedDay = null;
   document.getElementById('calSelection').classList.remove('active');
+  if (!dashboardCollectionScope) activeCollectionId = null;
   if (window.VireoFilter) VireoFilter.removeField('timestamp');
-  activeCollectionId = null;
   if (calendarData) renderCalendar();
 }
 
@@ -4222,14 +4240,14 @@ function calendarChangeYear(delta) {
   calendarYear += delta;
   selectedDay = null;
   document.getElementById('calSelection').classList.remove('active');
+  if (!dashboardCollectionScope) activeCollectionId = null;
   if (window.VireoFilter) VireoFilter.removeField('timestamp');
   loadCalendarData();
-  activeCollectionId = null;
 }
 
 function applyFilters() {
   if (timelineMode) loadCalendarData();
-  activeCollectionId = null;
+  if (!dashboardCollectionScope) activeCollectionId = null;
   reloadBrowseResults();
 }
 

@@ -18804,18 +18804,26 @@ class Database:
         "extension": ("LOWER(p.extension)", "LOWER(p.extension)"),
     }
 
-    def get_filter_field_values(self, field, rules=None, q=None, limit=20):
+    def get_filter_field_values(self, field, rules=None, q=None, limit=20,
+                                 folder_id=None, collection_id=None):
         """Distinct values (with photo counts) for a suggest-capable field.
 
         Counts respect the supplied rule tree, so the caller can pass the
         active expression minus the rule being edited and get live facet
         counts (design requirement: counts answer "how many results would I
-        get", never a global COUNT(*)). Raises ValueError for fields without
-        value suggestions or malformed rules.
+        get", never a global COUNT(*)). ``folder_id``/``collection_id`` AND
+        the same page-scope restrictions Browse applies to
+        ``/api/photos/query``; without them the typeahead advertises counts
+        computed over the whole workspace while the visible grid is
+        folder/collection-scoped, so picking a suggestion can yield fewer
+        (or zero) grid results than the badge promised. Raises ValueError
+        for fields without value suggestions or malformed rules.
         """
         folder_join, join_clause, where, params = self._build_query_from_rules(
             rules if rules is not None else []
         )
+        where, params = self._append_collection_restriction(collection_id, where, params)
+        where, params = self._append_folder_restriction(folder_id, where, params)
         limit = max(1, min(int(limit or 20), 50))
         if field == "folder":
             return self._folder_filter_values(

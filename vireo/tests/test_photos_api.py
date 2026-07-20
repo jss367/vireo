@@ -9901,6 +9901,50 @@ def test_api_filter_values_clamps_limit(app_and_db):
     assert len(resp.get_json()["values"]) <= 500
 
 
+def test_api_filter_values_respects_scope(app_and_db):
+    """Typeahead counts must respect the folder / dashboard-collection scope
+    Browse passes to /api/photos/query; without this the badge beside each
+    suggestion counts photos over the whole workspace while the grid is
+    folder- or collection-restricted, and a pick can produce fewer visible
+    grid rows than the count promised."""
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    folders = db.get_folder_tree()
+    jan = [f for f in folders if f["name"] == "January"][0]
+    db.conn.execute(
+        "UPDATE photos SET camera_model='Sony A1' WHERE id IN (?, ?)",
+        (photos["bird1.jpg"], photos["bird3.jpg"]),
+    )
+    db.conn.execute(
+        "UPDATE photos SET camera_model='Canon R5' WHERE id=?",
+        (photos["bird2.jpg"],),
+    )
+    db.conn.commit()
+
+    client = app.test_client()
+    # Unscoped: sees both models.
+    resp = client.get('/api/filters/values?field=camera_model')
+    assert {v["value"] for v in resp.get_json()["values"]} == {"Sony A1", "Canon R5"}
+    # folder_id narrows to only the January folder (bird2.jpg — Canon R5).
+    resp = client.get(
+        f'/api/filters/values?field=camera_model&folder_id={jan["id"]}'
+    )
+    assert resp.get_json()["values"] == [{"value": "Canon R5", "count": 1}]
+
+    # collection_id narrows to only the two picked photos (bird1 + bird3 — Sony A1).
+    collection_id = db.add_collection(
+        "Two Sonys",
+        json.dumps([{
+            "field": "photo_ids",
+            "value": [photos["bird1.jpg"], photos["bird3.jpg"]],
+        }]),
+    )
+    resp = client.get(
+        f'/api/filters/values?field=camera_model&collection_id={collection_id}'
+    )
+    assert resp.get_json()["values"] == [{"value": "Sony A1", "count": 2}]
+
+
 def test_api_photos_query_ids_only(app_and_db):
     """ids_only returns the complete matching id set in display order —
     select-all must resolve exactly what the filtered grid shows."""
