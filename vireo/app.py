@@ -6222,17 +6222,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         keyword_match_case = _request_bool_arg("keyword_match_case")
         keyword_whole_word = _request_bool_arg("keyword_whole_word")
         species = request.args.get("species", None)
+        try:
+            rules = _request_rules_arg()
+            visual = _request_visual_arg()
+            rules = _apply_visual_to_rules(db, rules, visual, folder_id=folder_id)
+        except ValueError as e:
+            return json_error(str(e), 400)
 
-        photos = db.get_geolocated_photos(
-            folder_id=folder_id,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            species=species,
-        )
+        try:
+            photos = db.get_geolocated_photos(
+                folder_id=folder_id,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
+                species=species,
+                rules=rules,
+            )
+        except ValueError as e:
+            return json_error(str(e), 400)
 
         total_photos = db.count_photos()
         total_without_coordinates = db.count_photos_without_coordinates()
@@ -12685,25 +12695,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         collection_id = request.args.get("collection_id", None, type=int)
         status = request.args.get("status", None)
-        if collection_id:
-            photos = db.get_collection_photos(collection_id, per_page=999999)
-            photo_ids = [p["id"] for p in photos]
-            preds = (
-                db.get_predictions(photo_ids=photo_ids, status=status)
-                if photo_ids
-                else []
-            )
-        else:
-            preds = db.get_predictions(status=status)
-
-        # Fetch alternatives to attach to their parent predictions
-        alt_preds = []
-        if not status or status == "pending":
+        try:
+            rules = _request_rules_arg()
+            visual = _request_visual_arg()
+            rules = _apply_visual_to_rules(db, rules, visual)
+        except ValueError as e:
+            return json_error(str(e), 400)
+        try:
             if collection_id:
-                if photo_ids:
-                    alt_preds = db.get_predictions(photo_ids=photo_ids, status="alternative")
+                photos = db.get_collection_photos(collection_id, per_page=999999)
+                photo_ids = [p["id"] for p in photos]
+                preds = (
+                    db.get_predictions(photo_ids=photo_ids, status=status, rules=rules)
+                    if photo_ids
+                    else []
+                )
             else:
-                alt_preds = db.get_predictions(status="alternative")
+                preds = db.get_predictions(status=status, rules=rules)
+
+            # Fetch alternatives to attach to their parent predictions
+            alt_preds = []
+            if not status or status == "pending":
+                if collection_id:
+                    if photo_ids:
+                        alt_preds = db.get_predictions(
+                            photo_ids=photo_ids, status="alternative", rules=rules,
+                        )
+                else:
+                    alt_preds = db.get_predictions(status="alternative", rules=rules)
+        except ValueError as e:
+            return json_error(str(e), 400)
 
         # Index alternatives by (detection_id, model)
         alts_by_key = {}

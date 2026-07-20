@@ -111,6 +111,13 @@
     text-transform: uppercase; letter-spacing: 0.5px;
     align-self: flex-start;
   }
+
+  .filter-match-badge {
+    position: absolute; top: 8px; right: 8px; padding: 2px 7px;
+    border-radius: 9px; background: var(--accent); color: var(--accent-text, #0a1f2e);
+    font-size: 10px; font-weight: 700;
+  }
+  .dup-card { position: relative; }
   .dup-card.winner .badge {
     background: var(--accent); color: var(--accent-text);
   }
@@ -292,6 +299,10 @@
 
 <div class="content">
 
+  <div class="dup-filterbar" style="margin-bottom: 12px;">
+    {% include '_filterbar.html' %}
+  </div>
+
   <div class="page-header">
     <div>
       <h1>Duplicate Files</h1>
@@ -466,6 +477,47 @@
   // full re-scan to refresh the UI.
   var _lastScanResult = null;
 
+  // Photo ids matching the filter bar's expression (null = no filters).
+  // Groups come from the library-wide scan and are never re-derived from
+  // the filtered set — the filter only decides which MEMBERS match; a
+  // matching member reveals its complete group so cross-workspace
+  // duplicate sets stay resolvable.
+  var _filterMatchedIds = null;
+
+  async function refreshFilterMatches() {
+    var hasFilters = window.VireoFilter && VireoFilter.hasFilters && VireoFilter.hasFilters()
+      && !VireoFilter.isMuted();
+    if (!hasFilters) {
+      _filterMatchedIds = null;
+    } else {
+      try {
+        var body = { rules: VireoFilter.getRules(), ids_only: true };
+        var visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+        if (visual) body.visual = visual;
+        var data = await safeFetch('/api/photos/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }, { toast: false });
+        _filterMatchedIds = new Set(data.ids || []);
+      } catch (e) {
+        _filterMatchedIds = null;
+      }
+    }
+    if (window.VireoFilter && VireoFilter.setResultTotal) {
+      VireoFilter.setResultTotal(_filterMatchedIds ? _filterMatchedIds.size : null);
+    }
+    if (_lastScanResult) renderResults(_lastScanResult);
+  }
+
+  function groupMatchesFilter(group) {
+    if (!_filterMatchedIds) return true;
+    var members = [group.winner].concat(group.losers || []);
+    return members.some(function(p) {
+      return p && p.id != null && _filterMatchedIds.has(p.id);
+    });
+  }
+
   function renderResults(result) {
     hideProgress();
     document.getElementById('scanBtn').disabled = false;
@@ -479,11 +531,20 @@
     // would mislead the apply count and confuse the action affordances.
     var unresolved = [];
     var resolved = [];
+    var hiddenByFilter = 0;
     _proposals.forEach(function(p, gi) {
       p._gi = gi;  // stable index back into _proposals for checkbox lookup
+      if (!groupMatchesFilter(p)) { hiddenByFilter += 1; return; }
       if (p.status === 'resolved') resolved.push(p);
       else unresolved.push(p);
     });
+    if (hiddenByFilter && !unresolved.length && !resolved.length) {
+      setEmptyVisible(false);
+      document.getElementById('results').innerHTML =
+        '<div class="no-results">No duplicate groups match the active filters (' +
+        hiddenByFilter + ' hidden). Clear or pause filters to see them.</div>';
+      return;
+    }
 
     if (_proposals.length === 0) {
       setEmptyVisible(false);
@@ -1125,6 +1186,9 @@
       html += '<div class="thumb-placeholder">No thumbnail</div>';
     }
     html += '<span class="badge">' + badge + '</span>';
+    if (_filterMatchedIds && photo.id != null && _filterMatchedIds.has(photo.id)) {
+      html += '<span class="filter-match-badge" title="This member matches the active filters">Matches filter</span>';
+    }
     if (missing) html += '<span class="missing-tag" title="File is no longer at this path on disk">Missing on disk</span>';
     html += '<div class="filename">' + escapeHtml(photo.filename || '') + '</div>';
     html += '<div class="path">' + escapeHtml(photo.path || '') + '</div>';
@@ -1492,6 +1556,12 @@
   }
 
   document.addEventListener('DOMContentLoaded', tryRestoreLastScan);
+  VireoFilter.init({
+    page: 'duplicates',
+    root: document.getElementById('vireoFilterBar'),
+    scopeLabel: 'Duplicates \u00b7 Grouped matches',
+    onChange: refreshFilterMatches,
+  }).then(refreshFilterMatches).catch(function() {});
 </script>
 </body>
 </html>

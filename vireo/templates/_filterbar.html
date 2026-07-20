@@ -17,6 +17,10 @@
     <div class="vf-total" aria-live="polite"><strong>–</strong> <span>photos</span></div>
     <button class="vf-mute" type="button" hidden>⏸ Pause</button>
     <button class="vf-clear" type="button" hidden>Clear</button>
+    <div class="vf-handoff-wrap">
+      <button class="vf-handoff" type="button" title="Open these results in another page" hidden>⇗</button>
+      <div class="vf-handoff-menu" hidden></div>
+    </div>
   </div>
 
   <div class="vf-chip-row">
@@ -148,6 +152,13 @@
 .vf-visual-row { grid-template-columns: 1fr auto 25px; }
 .vf-visual-label { color: color-mix(in srgb, #a782ff 70%, var(--text-primary)); font-size: 12px; padding-left: 2px; }
 .vf-visual-strength button { text-transform: capitalize; }
+.vf-handoff-wrap { position: relative; }
+.vf-handoff { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-input); color: var(--text-secondary); cursor: pointer; }
+.vf-handoff:hover { border-color: var(--accent); color: var(--text-primary); }
+.vf-handoff-menu { position: absolute; right: 0; top: 38px; z-index: 5010; min-width: 190px; padding: 4px; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-panel); box-shadow: 0 12px 32px rgba(0,0,0,.3); }
+.vf-handoff-menu button { width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer; font-size: 12px; }
+.vf-handoff-menu button:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.vf-handoff-menu button small { color: var(--text-faint); font-size: 10px; }
 .vf-popover { position: absolute; top: calc(100% + 8px); left: 0; z-index: 5000; width: min(680px, 100%); max-height: min(72vh, 640px); overflow-y: auto; border: 1px solid var(--border-secondary); border-radius: 11px; background: var(--bg-panel); box-shadow: 0 18px 50px rgba(0,0,0,.34); }
 .vf-popover-header { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: flex-start; padding: 13px 16px 10px; background: var(--bg-panel); border-bottom: 1px solid var(--border-primary); }
 .vf-popover-header h2 { margin: 0; font-size: 15px; color: var(--text-primary); }

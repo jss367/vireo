@@ -758,6 +758,11 @@
   </div>
 </div>
 
+<!-- Universal filter bar -->
+<div class="review-filterbar" style="padding: 8px 20px 0;">
+  {% include '_filterbar.html' %}
+</div>
+
 <!-- Action Bar -->
 <div class="settings-panel open" id="reviewBar">
   <div class="setting-group">
@@ -949,6 +954,15 @@ async function switchCollection(val) {
 applyReviewQueryParams();
 loadPredictions();
 loadCollectionFilter();
+VireoFilter.init({
+  page: 'review',
+  root: document.getElementById('vireoFilterBar'),
+  scopeLabel: 'Review \u00b7 Pending predictions',
+  onChange: loadPredictions,
+}).then(function() {
+  // Restored/deep-linked filters weren't part of the first fetch above.
+  if (VireoFilter.hasFilters()) loadPredictions();
+}).catch(function() {});
 
 function applyReviewQueryParams() {
   var qs = new URLSearchParams(window.location.search);
@@ -988,7 +1002,21 @@ async function loadPredictions() {
   document.getElementById('empty').style.display = 'none';
 
   try {
-    allPredictions = await safeFetch('/api/predictions', {}, { toast: false });
+    var params = new URLSearchParams();
+    if (window.VireoFilter && VireoFilter.getRules) {
+      var rules = VireoFilter.getRules();
+      var ruleCount = Array.isArray(rules) ? rules.length : (rules.rules || []).length;
+      if (ruleCount) params.set('rules', JSON.stringify(rules));
+      var visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+      if (visual) params.set('visual', JSON.stringify(visual));
+    }
+    var qs = params.toString();
+    allPredictions = await safeFetch('/api/predictions' + (qs ? '?' + qs : ''), {}, { toast: false });
+    if (window.VireoFilter && VireoFilter.setResultTotal) {
+      var uniquePhotos = {};
+      allPredictions.forEach(function(p) { uniquePhotos[p.photo_id] = true; });
+      VireoFilter.setResultTotal(Object.keys(uniquePhotos).length);
+    }
 
     // Re-apply collection filter if active
     if (currentCollection !== 'all' && collectionPhotoIds) {

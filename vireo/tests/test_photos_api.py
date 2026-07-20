@@ -10171,3 +10171,60 @@ def test_embedding_fetch_chunks_over_999_ids(app_and_db):
         db.upsert_photo_embedding(pid, "test-clip", vec)
     pairs = db.get_photos_with_embedding("test-clip", photo_ids=ids)
     assert len(pairs) == 1200
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: rules on /api/photos/geo and /api/predictions.
+# ---------------------------------------------------------------------------
+
+
+def test_api_photos_geo_accepts_rules(app_and_db):
+    import json as _json
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    db.conn.execute(
+        "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id IN (?, ?)",
+        (photos["bird1.jpg"], photos["bird3.jpg"]))
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get('/api/photos/geo')
+    assert resp.status_code == 200
+    assert resp.get_json()["total_filtered"] == 2
+
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/photos/geo?rules={rules}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_filtered"] == 1  # bird3: rating 5 + coordinates
+    assert data["photos"][0]["id"] == photos["bird3.jpg"]
+    assert client.get('/api/photos/geo?rules=notjson').status_code == 400
+
+
+def test_api_predictions_accepts_rules(app_and_db):
+    import json as _json
+    app, db = app_and_db
+    from labels_fingerprint import TOL_SENTINEL
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    for name, species in [("bird1.jpg", "Cardinal"), ("bird3.jpg", "Blue Jay")]:
+        det_ids = db.save_detections(photos[name], [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+             "confidence": 0.9, "category": "animal"},
+        ], detector_model="test-detector")
+        db.add_prediction(
+            detection_id=det_ids[0], species=species, confidence=0.9,
+            model="TestModel", labels_fingerprint=TOL_SENTINEL,
+        )
+
+    client = app.test_client()
+    resp = client.get('/api/predictions')
+    assert resp.status_code == 200
+    assert len(resp.get_json()) == 2
+
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/predictions?rules={rules}')
+    assert resp.status_code == 200
+    preds = resp.get_json()
+    assert len(preds) == 1
+    assert preds[0]["photo_id"] == photos["bird3.jpg"]
+    assert client.get('/api/predictions?rules=notjson').status_code == 400

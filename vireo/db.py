@@ -7930,8 +7930,13 @@ class Database:
         keyword_match_case=False,
         keyword_whole_word=False,
         species=None,
+        rules=None,
     ):
         """Return all geolocated photos with optional species, scoped to active workspace.
+
+        ``rules`` (a universal-filter rule tree) restricts the plottable set
+        exactly like Browse's grid — the Map page passes the shared filter
+        bar's expression here so the full field vocabulary works on Map.
 
         Returns photos that have either non-null EXIF latitude/longitude OR a
         ``type='location'`` keyword link whose keyword has non-null coords. No
@@ -7967,6 +7972,15 @@ class Database:
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
             params.append(_inclusive_date_to(date_to))
+        if rules is not None:
+            r_folder_join, r_join_clause, r_where, r_params = (
+                self._build_query_from_rules(rules)
+            )
+            conditions.append(
+                "p.id IN (SELECT DISTINCT p.id FROM photos p "
+                f"{r_folder_join} {r_join_clause} {r_where})"
+            )
+            params.extend(r_params)
 
         # Pick one location keyword per photo. Ordering: prefer the deepest-
         # in-chain row (parent_id NOT NULL ranks before parent_id IS NULL),
@@ -15042,7 +15056,8 @@ class Database:
             )
         self.conn.commit()
 
-    def get_predictions(self, photo_ids=None, model=None, status=None):
+    def get_predictions(self, photo_ids=None, model=None, status=None,
+                        rules=None):
         """Get predictions with photo, detection and review info.
 
         Workspace scoping is enforced by joining ``workspace_folders``; the
@@ -15058,6 +15073,15 @@ class Database:
         ws = self._ws_id()
         base_conditions = ["wf.workspace_id = ?"]
         base_params = [ws]
+        if rules is not None:
+            r_folder_join, r_join_clause, r_where, r_params = (
+                self._build_query_from_rules(rules)
+            )
+            base_conditions.append(
+                "p.id IN (SELECT DISTINCT p.id FROM photos p "
+                f"{r_folder_join} {r_join_clause} {r_where})"
+            )
+            base_params.extend(r_params)
         if model:
             base_conditions.append("pr.classifier_model = ?")
             base_params.append(model)
