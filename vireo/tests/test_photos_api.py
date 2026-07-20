@@ -10279,6 +10279,49 @@ def test_api_photos_geo_surfaces_visual_status(app_and_db, monkeypatch):
     assert "visual" not in resp.get_json()
 
 
+def test_api_photos_geo_visual_scoped_to_plottable(app_and_db, monkeypatch):
+    """Map visual search must not silently return zero when the only
+    embedded photos are non-plottable. Without scoping the candidate set
+    to plottable ids, ``_resolve_visual`` would return ``status: ok``
+    with non-plottable ids and ``get_geolocated_photos`` would then
+    intersect them away — leaving the user with a "visual match" chip
+    and zero markers, no fallback / no-index warning.
+    """
+    import json as _json
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    # Only bird3 is plottable — and only bird1 and bird2 (both
+    # non-plottable in this test) carry embeddings. Without the
+    # plottable-scoped candidate set, _resolve_visual would happily
+    # return bird1/bird2 as ``ok`` matches and get_geolocated_photos
+    # would then intersect them away.
+    db.conn.execute(
+        "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id = ?",
+        (photos["bird3.jpg"],),
+    )
+    db.conn.commit()
+    _seed_embeddings(db)
+    db.conn.execute(
+        "DELETE FROM photo_embeddings WHERE photo_id = ?",
+        (photos["bird3.jpg"],),
+    )
+    db.conn.commit()
+    _stub_clip(monkeypatch)
+    client = app.test_client()
+
+    visual = _json.dumps({"prompt": "a bird", "strength": "balanced"})
+    resp = client.get(f'/api/photos/geo?visual={visual}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Falls back to metadata-only because no plottable photo has an
+    # embedding — the chip can now warn ("no photos in this scope have
+    # embeddings") instead of showing a bogus zero result.
+    assert data["visual"]["status"] == "no_embeddings"
+    assert data["visual"]["indexed"] == 0
+    assert data["total_filtered"] == 1
+    assert {p["id"] for p in data["photos"]} == {photos["bird3.jpg"]}
+
+
 def test_api_predictions_surfaces_visual_status(app_and_db, monkeypatch):
     """Predictions endpoint must return the visual clause status so the
     Review filter bar can warn on fallback. Without this the visual chip

@@ -3924,7 +3924,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             raise ValueError("visual must be valid JSON") from exc
         return _validate_visual_arg(parsed)
 
-    def _resolve_visual(db, rules, visual, collection_id=None, folder_id=None):
+    def _resolve_visual(
+        db, rules, visual, collection_id=None, folder_id=None,
+        candidate_photo_ids=None,
+    ):
         """Run a visual clause over the rule tree's candidate photos.
 
         Returns ``(info, ordered_ids, sims_by_pid)``. ``info["status"]`` is
@@ -3933,6 +3936,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``encoding_failed``) with ``ordered_ids is None`` — callers then
         apply metadata rules only and surface the state. Never silently
         zero results (design hard requirement).
+
+        ``candidate_photo_ids`` further intersects the rule-derived
+        candidate set. The Map endpoint passes plottable ids so a
+        workspace whose only embeddings sit on non-plottable photos
+        surfaces as ``no_embeddings`` (metadata fallback) instead of
+        returning ``ok`` with ids that ``get_geolocated_photos`` will
+        silently intersect down to zero.
         """
         import numpy as np
         from models import get_active_model
@@ -3947,6 +3957,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         candidates = db.query_photo_ids(
             rules, collection_id=collection_id, folder_id=folder_id,
         )
+        if candidate_photo_ids is not None:
+            restrict = set(candidate_photo_ids)
+            candidates = [pid for pid in candidates if pid in restrict]
         emb_pairs = db.get_photos_with_embedding(model_name, photo_ids=candidates)
         if not emb_pairs:
             return (
@@ -3991,7 +4004,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "candidates": len(candidates), "indexed": len(emb_pairs)}
         return info, ordered_ids, sims_by_pid
 
-    def _apply_visual_to_rules(db, rules, visual, collection_id=None, folder_id=None):
+    def _apply_visual_to_rules(
+        db, rules, visual, collection_id=None, folder_id=None,
+        candidate_photo_ids=None,
+    ):
         """For GET consumers (summary/calendar/values/geo/predictions):
         when the visual clause is healthy, restrict the rules to the
         matched ids (inlined photo_ids — no bound-parameter cap) so
@@ -4007,6 +4023,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         when the clause fell back to metadata-only. Endpoints whose UI
         renders the visual chip (Map, Browse, Review) must surface this
         so the chip does not silently broaden results.
+
+        ``candidate_photo_ids`` narrows the pre-embedding candidate set —
+        used by ``/api/photos/geo`` to keep the visual search inside the
+        Map's plottable scope so a workspace with embeddings only on
+        non-plottable photos surfaces as ``no_embeddings`` instead of
+        returning ``ok`` ids that the endpoint then intersects away.
         """
         if visual is None:
             return rules, None
@@ -4014,6 +4036,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         info, ordered_ids, _sims = _resolve_visual(
             db, base_rules, visual,
             collection_id=collection_id, folder_id=folder_id,
+            candidate_photo_ids=candidate_photo_ids,
         )
         if ordered_ids is None:
             return rules, info
@@ -6235,8 +6258,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()
+            # Restrict the visual candidate set to plottable photos so a
+            # workspace whose only embeddings live on non-plottable photos
+            # doesn't return ``status: ok`` with ids that
+            # ``get_geolocated_photos`` then intersects to zero — the user
+            # would see a "visual match" chip over an empty map with no
+            # fallback / no-index warning.
+            plottable_ids = (
+                db.get_plottable_photo_ids(folder_id=folder_id)
+                if visual is not None else None
+            )
             rules, visual_info = _apply_visual_to_rules(
                 db, rules, visual, folder_id=folder_id,
+                candidate_photo_ids=plottable_ids,
             )
         except ValueError as e:
             return json_error(str(e), 400)

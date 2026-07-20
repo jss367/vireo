@@ -503,7 +503,18 @@
         _filterMatchedIds = new Set(data.ids || []);
         visualInfo = data.visual || null;
       } catch (e) {
-        _filterMatchedIds = null;
+        // Failing the query (400 on a stale/deep-linked rule, transient
+        // network error) must NOT null out _filterMatchedIds — the old
+        // behaviour let ``groupMatchesFilter`` treat null as "no filters
+        // active" and widen the render to the entire scan while the chips
+        // stayed on-screen, silently re-enabling resolve/bulk controls for
+        // groups the user meant to exclude. Empty set instead so every
+        // group correctly fails the filter and the "N hidden" empty-state
+        // renders.
+        _filterMatchedIds = new Set();
+        if (typeof showToast === 'function') {
+          showToast('Filter query failed — check the rules or your connection', 'error');
+        }
       }
     }
     if (window.VireoFilter && VireoFilter.setResultTotal) {

@@ -8249,6 +8249,53 @@ class Database:
         ).fetchone()
         return row[0]
 
+    def get_plottable_photo_ids(self, folder_id=None):
+        """Return ids of every photo the Map endpoint could render.
+
+        A photo is plottable when either its EXIF lat/lng are both present
+        OR it carries a ``type='location'`` keyword whose lat/lng are both
+        present — the same paired-fallback semantics
+        :meth:`get_geolocated_photos` and
+        :meth:`count_photos_without_coordinates` use.
+
+        Callers pass this to ``_apply_visual_to_rules`` for the Map path so
+        the visual candidate set is restricted to plottable photos BEFORE
+        the embedding query runs. Without it, a workspace with embeddings
+        on non-plottable photos but none on plottable ones returns
+        ``status: "ok"`` with non-plottable ids; ``get_geolocated_photos``
+        then intersects them away and the map silently renders zero
+        markers with no fallback / no-index warning.
+        """
+        params = [self._ws_id()]
+        folder_clause = ""
+        if folder_id is not None:
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            folder_clause = f"AND p.folder_id IN ({placeholders})"
+            params.extend(subtree)
+        rows = self.conn.execute(
+            f"""
+            SELECT p.id FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+            WHERE wf.workspace_id = ?
+              {folder_clause}
+              AND (
+                (p.latitude IS NOT NULL AND p.longitude IS NOT NULL)
+                OR EXISTS (
+                  SELECT 1 FROM photo_keywords pk
+                  JOIN keywords k ON k.id = pk.keyword_id
+                  WHERE pk.photo_id = p.id
+                    AND k.type = 'location'
+                    AND k.latitude IS NOT NULL
+                    AND k.longitude IS NOT NULL
+                )
+              )
+            """,
+            params,
+        ).fetchall()
+        return [row[0] for row in rows]
+
     def update_photo_rating(self, photo_id, rating, verify_workspace=True):
         """Set photo rating (0-5).
 

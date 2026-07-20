@@ -997,7 +997,17 @@ function renderFingerprintFilterPill() {
   });
 }
 
+// Bumped by every loadPredictions() invocation; responses whose epoch is
+// no longer current are dropped. The bootstrap kicks a pre-init unfiltered
+// fetch, and VireoFilter.init().then() may kick a post-init filtered
+// fetch — without this token, if the unfiltered fetch resolved LAST
+// (large libraries), it would overwrite allPredictions / the grid / the
+// filter-bar total with unfiltered rows while the filter chips remained
+// active.
+var _loadPredictionsEpoch = 0;
+
 async function loadPredictions() {
+  var myEpoch = ++_loadPredictionsEpoch;
   document.getElementById('loading').style.display = 'block';
   document.getElementById('empty').style.display = 'none';
 
@@ -1012,6 +1022,7 @@ async function loadPredictions() {
     }
     var qs = params.toString();
     var predData = await safeFetch('/api/predictions' + (qs ? '?' + qs : ''), {}, { toast: false });
+    if (myEpoch !== _loadPredictionsEpoch) return;  // superseded — drop
     allPredictions = predData.predictions || [];
     if (window.VireoFilter && VireoFilter.setResultTotal) {
       var uniquePhotos = {};
@@ -1050,6 +1061,7 @@ async function loadPredictions() {
     document.getElementById('loading').style.display = 'none';
     renderAll();
   } catch(err) {
+    if (myEpoch !== _loadPredictionsEpoch) return;  // superseded — drop
     document.getElementById('loading').textContent = 'Error: ' + err.message;
   }
 }
