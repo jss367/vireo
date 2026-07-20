@@ -3965,7 +3965,10 @@ function setPipelineReviewFlag(photoId, flag) {
   // bulk path so every overlapping flag write is serialized.
   if (pipelineReviewGroupFlagInFlightPhotoIds.has(photoId)) {
     showToast('A bulk reject for this photo is still finishing — try again in a moment', 'error');
-    return Promise.resolve();
+    // The shared lightbox treats every resolved value except false as a
+    // successful write and updates its own cache/event listeners. Return an
+    // explicit failure so its UI stays on the last confirmed database flag.
+    return Promise.resolve(false);
   }
 
   return safeFetch('/api/photos/' + photoId + '/flag', {
@@ -7282,11 +7285,33 @@ async function grmApply() {
   }
   if (grmState.applying) return;
   grmSetApplying(true);
+  var grmFlagLockIds = [];
 
   try {
     var diff = grmComputeDiff();
     var checks = grmResolveChecks(diff);
     var species = document.getElementById('grmSpecies').value.trim();
+
+    // GRM pick/reject writes use /api/pipeline/group/apply rather than the
+    // per-photo helper, so serialize them explicitly with bulk Reject/Clear
+    // and Undo. Holding the lock through the full apply also blocks a bulk
+    // action from starting after the modal write has begun.
+    if (checks.flags) {
+      var candidateFlagLockIds = grmState.items
+        .filter(function(p) { return !grmState.removed.has(p.id); })
+        .map(function(p) { return p.id; });
+      var overlapsBulkFlagWrite = candidateFlagLockIds.some(function(pid) {
+        return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+      });
+      if (overlapsBulkFlagWrite) {
+        showToast('A bulk reject for this group is still finishing — try Apply again in a moment', 'error');
+        return;
+      }
+      grmFlagLockIds = candidateFlagLockIds;
+      grmFlagLockIds.forEach(function(pid) {
+        pipelineReviewGroupFlagInFlightPhotoIds.add(pid);
+      });
+    }
 
     // --- Flags side (picks/rejects/candidates + removed→detach) ---
     // Only committed when the "Apply picks/rejects" box is checked. Removals are
@@ -7522,6 +7547,9 @@ async function grmApply() {
       }, 0);
     });
   } finally {
+    grmFlagLockIds.forEach(function(pid) {
+      pipelineReviewGroupFlagInFlightPhotoIds.delete(pid);
+    });
     var overlay = document.getElementById('grmOverlay');
     if (overlay && overlay.classList.contains('open')) {
       grmSetApplying(false);

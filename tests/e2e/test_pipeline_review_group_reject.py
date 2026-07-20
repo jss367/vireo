@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import time
 
 from playwright.sync_api import expect
@@ -446,11 +447,12 @@ def test_single_photo_flag_blocked_while_bulk_reject_pending(live_server, page):
         page.wait_for_timeout(50)
     assert "route" in held, "expected the encounter group-state read to be held"
 
-    page.evaluate(
+    landed = page.evaluate(
         "([photoId]) => window.setFlagFor(photoId, 'flagged')",
         [photo_ids[0]],
     )
 
+    assert landed is False
     expect(
         page.get_by_text(
             "A bulk reject for this photo is still finishing", exact=False
@@ -462,6 +464,64 @@ def test_single_photo_flag_blocked_while_bulk_reject_pending(live_server, page):
 
     expect(page.locator("#undoMsg")).to_have_text("Rejected 4 photos in encounter")
     assert _flags(db, photo_ids) == ["rejected"] * 4
+
+
+def test_burst_modal_apply_blocked_while_bulk_reject_pending(live_server, page):
+    """The burst review modal writes flags through its own group/apply route,
+    so it must consult the shared photo-ID lock independently."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:4]
+    _write_grouped_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    held = {}
+
+    def handle_group_state(route):
+        if "route" not in held:
+            held["route"] = route
+            return
+        route.continue_()
+
+    page.route("**/api/pipeline/group/state", handle_group_state)
+    page.get_by_test_id("reject-burst").first.click()
+
+    deadline = time.time() + 5
+    while "route" not in held and time.time() < deadline:
+        page.wait_for_timeout(50)
+    assert "route" in held, "expected the bulk live-state read to be held"
+
+    # The grid remains interactive while the bulk read is pending. Open the
+    # same burst in the modal, make a reject decision, and try to apply it.
+    page.locator(f'.photo-card[data-photo-id="{photo_ids[0]}"] img').click()
+    expect(page.locator("#grmApplyBtn")).to_be_enabled()
+    page.keyboard.press("x")
+    expect(page.locator("#grmApplyFlagsChk")).to_be_checked()
+
+    apply_requests = []
+    page.on(
+        "request",
+        lambda request: (
+            apply_requests.append(request)
+            if "/api/pipeline/group/apply" in request.url
+            else None
+        ),
+    )
+    page.locator("#grmApplyBtn").click()
+
+    expect(
+        page.get_by_text(
+            "A bulk reject for this group is still finishing", exact=False
+        )
+    ).to_be_visible()
+    expect(page.locator("#grmOverlay")).to_have_class(re.compile(r"\bopen\b"))
+    expect(page.locator("#grmApplyBtn")).to_be_enabled()
+    assert apply_requests == []
+    assert _flags(db, photo_ids) == ["none"] * 4
+
+    held["route"].continue_()
+
+    expect(page.locator("#undoMsg")).to_have_text("Rejected 2 photos in burst")
+    assert _flags(db, photo_ids) == ["rejected", "rejected", "none", "none"]
 
 
 def test_single_photo_flag_blocked_while_bulk_undo_pending(live_server, page):
