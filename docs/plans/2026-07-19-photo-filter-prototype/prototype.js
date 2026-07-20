@@ -389,8 +389,12 @@
   function evaluateNodeExcept(photo, node, skip) {
     if (!node || node === skip) return true;
     if (node.kind !== "group") return evaluateLeaf(photo, node);
-    if (!node.children.length) return true;
-    const values = node.children.map((child) => evaluateNodeExcept(photo, child, skip));
+    // Drop the skipped clause entirely instead of treating it as true, otherwise
+    // an "any" group short-circuits to true and a "none" group short-circuits to
+    // false, and facet counts stop respecting the sibling rules.
+    const remaining = node.children.filter((child) => child !== skip);
+    if (!remaining.length) return true;
+    const values = remaining.map((child) => evaluateNodeExcept(photo, child, skip));
     if (node.match === "any") return values.some(Boolean);
     if (node.match === "none") return !values.some(Boolean);
     return values.every(Boolean);
