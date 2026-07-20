@@ -5353,7 +5353,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         def _walk(node):
             if isinstance(node, dict):
                 if "rules" in node and "field" not in node:
-                    return {**node, "rules": [_walk(r) for r in node.get("rules", [])]}
+                    inner = node.get("rules")
+                    # Malformed group (e.g. ``{"mode":"all","rules":null}``):
+                    # leave it untouched so ``Database._validate_node`` can
+                    # raise a ``ValueError`` that the route turns into a 400.
+                    # Iterating ``None`` here would raise ``TypeError`` and
+                    # bypass the 400 handler.
+                    if not isinstance(inner, list):
+                        return node
+                    return {**node, "rules": [_walk(r) for r in inner]}
                 if node.get("field") == "has_visual_index" and "model" not in node:
                     return {**node, "model": model_name}
                 return node

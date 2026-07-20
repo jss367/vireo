@@ -9614,8 +9614,18 @@ def test_api_photos_query_group_tree_and_paging(app_and_db):
     assert [p["filename"] for p in data["photos"]] == ["bird3.jpg"]
 
 
-def test_api_photos_query_validation(app_and_db):
+def test_api_photos_query_validation(app_and_db, monkeypatch):
     app, _ = app_and_db
+    # Force an active visual model so the active-model injection walker
+    # actually runs — that's the code path that must survive malformed
+    # group rules without raising TypeError. Without a monkeypatch,
+    # ``_inject_active_visual_model`` returns rules verbatim and the
+    # malformed-group asserts below wouldn't exercise the walker at all.
+    import models as models_mod
+    monkeypatch.setattr(
+        models_mod, "get_active_model",
+        lambda: {"name": "some-model", "id": "some-model", "downloaded": True},
+    )
     client = app.test_client()
     assert client.post('/api/photos/query', json={
         "rules": [{"field": "nope", "op": "is", "value": 1}],
@@ -9633,6 +9643,15 @@ def test_api_photos_query_validation(app_and_db):
     }).status_code == 400
     assert client.post('/api/photos/query', json={
         "rules": [], "sort": {"col": "date"},
+    }).status_code == 400
+    # A group whose ``rules`` key is ``null`` (or any non-list) must land as
+    # a 400 from ``_validate_node``. Before the guard, the active-model
+    # walker would iterate ``None`` and raise ``TypeError`` → 500.
+    assert client.post('/api/photos/query', json={
+        "rules": {"mode": "all", "rules": None},
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": {"mode": "all", "rules": "not-a-list"},
     }).status_code == 400
     assert client.post('/api/photos/query', data="not json",
                        content_type="text/plain").status_code == 400
