@@ -513,6 +513,30 @@ def test_single_photo_flag_blocked_while_bulk_undo_pending(live_server, page):
     assert _flags(db, photo_ids) == ["none"] * 4
 
 
+def test_bulk_reject_surfaces_live_flag_read_failure(live_server, page):
+    """A failed live-state read must use the standard request error toast
+    instead of silently abandoning the group action."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:4]
+    _write_grouped_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    page.route(
+        "**/api/pipeline/group/state",
+        lambda route: route.fulfill(
+            status=500,
+            json={"error": "Could not read current photo flags"},
+        ),
+    )
+
+    page.get_by_test_id("reject-burst").first.click()
+
+    expect(
+        page.get_by_text("Could not read current photo flags", exact=True)
+    ).to_be_visible()
+    assert _flags(db, photo_ids) == ["none"] * 4
+
+
 def test_encounter_reject_respects_active_label_filter(live_server, page):
     """Same guarantee as the burst-level test, but for the encounter-level
     Reject/Clear button: hidden KEEP frames stay untouched when the Review

@@ -3873,7 +3873,7 @@ function setPipelineReviewGroupFlag(target, flag) {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({photo_ids: ids, species: ''}),
-  }, {toast: false}).then(function(data) {
+  }).then(function(data) {
     var live = (data && data.photos) || {};
     var liveFlagFor = function(pid) {
       return normalizedPipelineReviewFlag(live[pid] && live[pid].flag);
