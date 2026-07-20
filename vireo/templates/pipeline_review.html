@@ -378,6 +378,32 @@
   cursor: default;
 }
 .encounter-footer:hover { background: var(--bg-tertiary); }
+.group-reject-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--danger) 65%, var(--border-primary));
+  border-radius: 5px;
+  padding: 4px 8px;
+  background: transparent;
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+.group-reject-btn:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: var(--danger);
+}
+.group-reject-btn.all-rejected {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+.group-reject-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
 
 /* Burst strip */
 .burst-strip {
@@ -396,6 +422,13 @@
   writing-mode: vertical-lr;
   text-orientation: mixed;
   padding: 4px 0;
+  flex-shrink: 0;
+}
+.burst-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
   flex-shrink: 0;
 }
 
@@ -3078,7 +3111,9 @@ function renderResults() {
     if (timeRange) html += '<span>' + timeRange + '</span>';
     html += missingTimestampBadge(enc);
     html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
-    html += '</span></div>';
+    html += '</span>';
+    html += renderGroupRejectButton('encounter', ei, null, encPhotoIds, photoMap);
+    html += '</div>';
     html += '<div class="encounter-body" id="encBody' + ei + '"' + (isCollapsed ? ' style="display:none;"' : '') + '>';
 
     if (enc.bursts && enc.bursts.length > 0) {
@@ -3086,7 +3121,7 @@ function renderResults() {
         if (hideConfirmed && isBurstConfirmed(enc, burst)) return;
         var burstIds = burst.photo_ids || burst;
         html += '<div class="burst-strip">';
-        html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">';
+        html += '<div class="burst-controls">';
         if (enc.bursts.length > 1) {
           html += '<span class="burst-label">B' + (bi+1) + '</span>';
         }
@@ -3098,6 +3133,7 @@ function renderResults() {
           html += '<span class="burst-species-edit" onclick="toggleSpeciesDropdown(event,' + ei + ',' + bi + ',\'top\')">&#9998;</span>';
         }
         html += renderBurstSpeciesConflict(enc, ei, burst, bi, speciesConflictEvidence);
+        html += renderGroupRejectButton('burst', ei, bi, burstIds, photoMap);
         html += '<button class="detach-btn" onclick="detachBurst(' + ei + ',' + bi + ')" title="Detach burst">&times;</button>';
         html += '</div>';
         burstIds.forEach(function(pid) {
@@ -3636,9 +3672,159 @@ function findEncounterForPhoto(photoId) {
 }
 
 var inspectPhotoId = null;
+var pipelineReviewGroupFlagInFlight = {};
 
 function pipelineReviewBareKey(e, key) {
   return !e.ctrlKey && !e.metaKey && !e.altKey && e.key && e.key.toLowerCase() === key;
+}
+
+function normalizedPipelineReviewFlag(flag) {
+  return flag === 'flagged' || flag === 'rejected' ? flag : 'none';
+}
+
+function updatePipelineReviewPhotoFlag(photo, flag) {
+  if (!photo) return;
+  photo.flag = flag;
+  // Rejected photos lose representative eligibility server-side
+  // (get_species_representatives(eligible_only=True) filters them out), so
+  // mirror that in the review cache immediately.
+  if (flag === 'rejected') {
+    if (photo.is_species_representative) photo.is_species_representative = false;
+    if (Array.isArray(photo.life_list)) {
+      photo.life_list.forEach(function(entry) {
+        if (!entry) return;
+        if (entry.is_current_photo) entry.is_current_photo = false;
+        if (entry.is_species_representative) entry.is_species_representative = false;
+      });
+    }
+  }
+}
+
+function renderGroupRejectButton(kind, encIdx, burstIdx, photoIds, photoMap) {
+  photoIds = Array.isArray(photoIds) ? photoIds : [];
+  var allRejected = photoIds.length > 0 && photoIds.every(function(pid) {
+    return photoMap[pid] && photoMap[pid].flag === 'rejected';
+  });
+  var noun = kind === 'burst' ? 'burst' : 'encounter';
+  var label = allRejected ? 'Clear rejects' : 'Reject ' + noun;
+  var title = allRejected
+    ? 'Clear the rejected flag from every photo in this ' + noun
+    : 'Mark every photo in this ' + noun + ' as rejected';
+  var handler = kind === 'burst'
+    ? 'toggleBurstRejected(event,' + encIdx + ',' + burstIdx + ')'
+    : 'toggleEncounterRejected(event,' + encIdx + ')';
+  var testId = kind === 'burst' ? 'reject-burst' : 'reject-encounter';
+  return '<button type="button" class="group-reject-btn' + (allRejected ? ' all-rejected' : '') +
+    '" data-testid="' + testId + '" onclick="' + handler + '" title="' + escapeAttr(title) +
+    '" aria-label="' + escapeAttr(label) + '"><span aria-hidden="true">&times;</span>' +
+    escapeHtml(label) + '</button>';
+}
+
+function groupFlagTarget(encIdx, burstIdx) {
+  if (!pipelineResults || !pipelineResults.encounters) return null;
+  var enc = pipelineResults.encounters[encIdx];
+  if (!enc) return null;
+  if (burstIdx == null) {
+    return {key: 'encounter:' + encIdx, noun: 'encounter', photoIds: enc.photo_ids || []};
+  }
+  var burst = enc.bursts && enc.bursts[burstIdx];
+  if (!burst) return null;
+  return {
+    key: 'burst:' + encIdx + ':' + burstIdx,
+    noun: 'burst',
+    photoIds: burst.photo_ids || burst || [],
+  };
+}
+
+function restorePipelineReviewFlags(previousFlags, noun) {
+  var byFlag = {none: [], flagged: [], rejected: []};
+  Object.keys(previousFlags).forEach(function(pid) {
+    var flag = normalizedPipelineReviewFlag(previousFlags[pid]);
+    byFlag[flag].push(parseInt(pid, 10));
+  });
+  var sequence = Promise.resolve();
+  ['none', 'flagged', 'rejected'].forEach(function(flag) {
+    if (!byFlag[flag].length) return;
+    sequence = sequence.then(function() {
+      return safeFetch('/api/batch/flag', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: byFlag[flag], flag: flag}),
+      }).then(function() {
+        byFlag[flag].forEach(function(pid) {
+          updatePipelineReviewPhotoFlag(findPhotoInResults(pid), flag);
+        });
+      });
+    });
+  });
+  return sequence.then(function() {
+    renderResults();
+    showToast('Restored previous flags for ' + noun, 'success');
+    refreshLatestScopeSnapshotIfCurrent();
+  });
+}
+
+function setPipelineReviewGroupFlag(target, flag) {
+  if (!target || pipelineReviewGroupFlagInFlight[target.key]) return Promise.resolve();
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return Promise.resolve();
+  }
+  var ids = Array.from(new Set((target.photoIds || []).map(function(pid) {
+    return parseInt(pid, 10);
+  }).filter(function(pid) { return !!pid && !!findPhotoInResults(pid); })));
+  var changedIds = ids.filter(function(pid) {
+    return normalizedPipelineReviewFlag(findPhotoInResults(pid).flag) !== flag;
+  });
+  if (!changedIds.length) return Promise.resolve();
+
+  var previousFlags = {};
+  changedIds.forEach(function(pid) {
+    previousFlags[pid] = normalizedPipelineReviewFlag(findPhotoInResults(pid).flag);
+  });
+  pipelineReviewGroupFlagInFlight[target.key] = true;
+  return safeFetch('/api/batch/flag', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_ids: changedIds, flag: flag}),
+  }).then(function() {
+    changedIds.forEach(function(pid) {
+      updatePipelineReviewPhotoFlag(findPhotoInResults(pid), flag);
+    });
+    renderResults();
+    refreshLatestScopeSnapshotIfCurrent();
+    var count = changedIds.length;
+    var message = flag === 'rejected'
+      ? 'Rejected ' + count + ' photo' + (count === 1 ? '' : 's') + ' in ' + target.noun
+      : 'Cleared rejects from ' + count + ' photo' + (count === 1 ? '' : 's') + ' in ' + target.noun;
+    showUndo(message, function() {
+      restorePipelineReviewFlags(previousFlags, target.noun);
+    });
+  }).finally(function() {
+    delete pipelineReviewGroupFlagInFlight[target.key];
+  });
+}
+
+function toggleEncounterRejected(event, encIdx) {
+  if (event && event.stopPropagation) event.stopPropagation();
+  var target = groupFlagTarget(encIdx, null);
+  if (!target) return;
+  var allRejected = target.photoIds.length > 0 && target.photoIds.every(function(pid) {
+    var photo = findPhotoInResults(pid);
+    return photo && photo.flag === 'rejected';
+  });
+  setPipelineReviewGroupFlag(target, allRejected ? 'none' : 'rejected');
+}
+
+function toggleBurstRejected(event, encIdx, burstIdx) {
+  if (event && event.stopPropagation) event.stopPropagation();
+  var target = groupFlagTarget(encIdx, burstIdx);
+  if (!target) return;
+  var allRejected = target.photoIds.length > 0 && target.photoIds.every(function(pid) {
+    var photo = findPhotoInResults(pid);
+    return photo && photo.flag === 'rejected';
+  });
+  setPipelineReviewGroupFlag(target, allRejected ? 'none' : 'rejected');
 }
 
 function setPipelineReviewFlag(photoId, flag) {
@@ -3657,23 +3843,7 @@ function setPipelineReviewFlag(photoId, flag) {
   }).then(function() {
     var photo = findPhotoInResults(photoId);
     if (photo) {
-      photo.flag = flag;
-      // Rejected photos lose representative eligibility server-side
-      // (get_species_representatives(eligible_only=True) filters them out),
-      // so drop the cached representative fields — the pipeline grid renders
-      // the Representative badge from photo.is_species_representative and
-      // would otherwise keep displaying it on a photo that's just been
-      // rejected via the inspect shortcut or the shared lightbox reject.
-      if (flag === 'rejected') {
-        if (photo.is_species_representative) photo.is_species_representative = false;
-        if (Array.isArray(photo.life_list)) {
-          photo.life_list.forEach(function(entry) {
-            if (!entry) return;
-            if (entry.is_current_photo) entry.is_current_photo = false;
-            if (entry.is_species_representative) entry.is_species_representative = false;
-          });
-        }
-      }
+      updatePipelineReviewPhotoFlag(photo, flag);
     }
     renderResults();
     if (inspectPhotoId === photoId && document.getElementById('inspectOverlay').classList.contains('open')) {
