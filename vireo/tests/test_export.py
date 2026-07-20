@@ -1,6 +1,7 @@
 """Tests for photo export operations."""
 
 import contextlib
+import errno
 import json
 import os
 import sys
@@ -13,6 +14,7 @@ from export import (
     developed_folder_key,
     export_photos,
     relocate_developed_dir,
+    relocate_developed_file,
     resolve_template,
     sanitize_filename,
 )
@@ -1898,6 +1900,118 @@ def test_relocate_developed_dir_merges_empty_source_into_existing_target(tmp_pat
     assert relocate_developed_dir(str(developed), old_path, new_path) is True
     assert not (developed / developed_folder_key(old_path)).exists()
     assert (developed / developed_folder_key(new_path)).is_dir()
+
+
+def test_relocate_developed_file_moves_matching_stem(tmp_path):
+    """Per-photo relocation moves every extension whose stem matches the photo.
+
+    Used by ``move_photos`` for date-organized moves where a single source
+    folder's photos fan out to many destinations, so the whole-subdir
+    rename that ``relocate_developed_dir`` does can't apply.
+    """
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    old_path = "/srv/photos/card"
+    new_path = "/srv/photos/archive/2026-07-12"
+    old_key = developed_folder_key(old_path)
+    new_key = developed_folder_key(new_path)
+    (developed / old_key).mkdir()
+    (developed / old_key / "IMG_0001.jpg").write_bytes(b"jpg")
+    (developed / old_key / "IMG_0001.tiff").write_bytes(b"tiff")
+    # A sibling photo's render stays behind — it isn't part of this move.
+    (developed / old_key / "IMG_0002.jpg").write_bytes(b"sibling")
+
+    moved = relocate_developed_file(
+        str(developed), old_path, new_path, "IMG_0001",
+    )
+    assert moved == 2
+    assert (developed / new_key / "IMG_0001.jpg").read_bytes() == b"jpg"
+    assert (developed / new_key / "IMG_0001.tiff").read_bytes() == b"tiff"
+    # Sibling stays under the old key; old subdir remains because it isn't
+    # empty yet.
+    assert (developed / old_key / "IMG_0002.jpg").read_bytes() == b"sibling"
+
+
+def test_relocate_developed_file_removes_old_subdir_when_empty(tmp_path):
+    """When the last matching file is moved, the old key's dir is cleaned up
+    — matches ``relocate_developed_dir``'s post-rename semantics.
+    """
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    old_path = "/srv/photos/card"
+    new_path = "/srv/photos/archive/2026-07-12"
+    old_key = developed_folder_key(old_path)
+    (developed / old_key).mkdir()
+    (developed / old_key / "only.jpg").write_bytes(b"only")
+
+    assert relocate_developed_file(
+        str(developed), old_path, new_path, "only",
+    ) == 1
+    assert not (developed / old_key).exists()
+
+
+def test_relocate_developed_file_preserves_existing_target(tmp_path):
+    """A collision at the destination is preserved — matches the photo-file
+    collision policy in ``move_photos``.
+    """
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    old_path = "/srv/photos/card"
+    new_path = "/srv/photos/archive/2026-07-12"
+    old_key = developed_folder_key(old_path)
+    new_key = developed_folder_key(new_path)
+    (developed / old_key).mkdir()
+    (developed / new_key).mkdir()
+    (developed / old_key / "IMG_0001.jpg").write_bytes(b"src")
+    (developed / new_key / "IMG_0001.jpg").write_bytes(b"dst")
+
+    moved = relocate_developed_file(
+        str(developed), old_path, new_path, "IMG_0001",
+    )
+    assert moved == 0
+    assert (developed / old_key / "IMG_0001.jpg").read_bytes() == b"src"
+    assert (developed / new_key / "IMG_0001.jpg").read_bytes() == b"dst"
+
+
+def test_relocate_developed_file_falls_back_across_filesystems(
+    tmp_path, monkeypatch,
+):
+    """EXDEV falls back to copy+remove for mounted archive destinations."""
+    developed = tmp_path / "darktable_out"
+    developed.mkdir()
+    old_path = "/srv/photos/card"
+    new_path = "/mnt/archive/2026-07-12"
+    old_key = developed_folder_key(old_path)
+    new_key = developed_folder_key(new_path)
+    old_subdir = developed / old_key
+    old_subdir.mkdir()
+    source = old_subdir / "IMG_0001.jpg"
+    source.write_bytes(b"developed")
+
+    real_rename = os.rename
+
+    def cross_device_rename(src, dst):
+        if os.fspath(src) == str(source):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", cross_device_rename)
+
+    moved = relocate_developed_file(
+        str(developed), old_path, new_path, "IMG_0001",
+    )
+
+    assert moved == 1
+    assert not source.exists()
+    assert (developed / new_key / "IMG_0001.jpg").read_bytes() == b"developed"
+
+
+def test_relocate_developed_file_noop_without_configuration(tmp_path):
+    """Missing developed_dir, missing stem, or identical paths is a no-op."""
+    assert relocate_developed_file("", "/a", "/b", "stem") == 0
+    assert relocate_developed_file(str(tmp_path), "", "/b", "stem") == 0
+    assert relocate_developed_file(str(tmp_path), "/a", "/b", "") == 0
+    assert relocate_developed_file(str(tmp_path), "/same", "/same", "stem") == 0
 
 
 def test_move_folder_rebases_configured_developed_dir(tmp_path):

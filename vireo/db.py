@@ -670,6 +670,7 @@ class Database:
                 working_copy_failed_at   TEXT,
                 working_copy_failed_mtime REAL,
                 working_copy_failed_source TEXT,
+                last_move_source_folder_path TEXT,
                 eye_x                    REAL,
                 eye_y                    REAL,
                 eye_conf                 REAL,
@@ -1394,6 +1395,23 @@ class Database:
         except sqlite3.OperationalError:
             self.conn.execute(
                 "ALTER TABLE photos ADD COLUMN working_copy_failed_source TEXT"
+            )
+        # Record the folder a photo most recently moved from. This lets
+        # per-photo moves prove that a same-stem file already at the
+        # destination is a RAW/JPEG sibling from the same source instead of
+        # an unrelated photo whose developed render would be overwritten.
+        # The value is the source folder's path (not its folders.id): SQLite
+        # INTEGER PRIMARY KEY without AUTOINCREMENT reuses freed rowids after
+        # ``delete_folder``, so a stale id could compare equal to an unrelated
+        # new folder and bypass the collision guard.
+        try:
+            self.conn.execute(
+                "SELECT last_move_source_folder_path FROM photos LIMIT 0"
+            )
+        except sqlite3.OperationalError:
+            self.conn.execute(
+                "ALTER TABLE photos "
+                "ADD COLUMN last_move_source_folder_path TEXT"
             )
         # Migration: add eye_kp_fingerprint column. Set to NULL for new
         # photos; populated when the eye-keypoint stage runs. Phase 1 also
@@ -3273,6 +3291,7 @@ class Database:
         """
         rows = self.conn.execute("SELECT id, path, status FROM folders").fetchall()
         changed = 0
+        newly_missing_paths = []
         for row in rows:
             exists = os.path.exists(row["path"])
             if not exists:
@@ -3287,6 +3306,28 @@ class Database:
                     (new_status, row["id"]),
                 )
                 changed += 1
+                if new_status == "missing":
+                    stored_path = row["path"] or ""
+                    if stored_path:
+                        newly_missing_paths.append(stored_path)
+        # A folder going missing frees its stored path to be reused by an
+        # unrelated mount without a corresponding row-delete: the folder row
+        # stays put in case the same content comes back, but a different
+        # removable card mounted at the same path can later be rescanned
+        # into it. Any destination photo whose ``last_move_source_folder_path``
+        # still equals that path would then compare equal to the new card's
+        # ``src_dir`` in ``move_photos`` and slip past the same-stem developed-
+        # render collision guard, letting an unrelated photo share the moved
+        # photo's rendered output (developed lookup is only by destination
+        # folder + stem). Clear provenance in the same transaction as the
+        # status flip so a rollback restores both together.
+        for chunk in _chunks(newly_missing_paths):
+            placeholders = ",".join("?" for _ in chunk)
+            self.conn.execute(
+                f"UPDATE photos SET last_move_source_folder_path = NULL "
+                f"WHERE last_move_source_folder_path IN ({placeholders})",
+                chunk,
+            )
         if changed:
             self.conn.commit()
         return changed
@@ -3744,6 +3785,29 @@ class Database:
                 )
                 cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
 
+        # Cascade the rebase into ``photos.last_move_source_folder_path``.
+        # ``move_folder_path`` already does this for the whole-folder move
+        # flow; ``relocate_folder`` runs when a missing folder is remapped
+        # to a new location (or a cascaded missing child is rediscovered
+        # under the new root), which frees each old path for reuse the same
+        # way. Without the rebase, a later scan of an unrelated folder at
+        # the freed path would compare equal to a stale stored provenance
+        # in ``move_photos`` and slip a same-stem developed-render collision
+        # past the guard, letting two unrelated destination rows share the
+        # developed-output lookup by folder+stem.
+        rebased_paths = [(old_path, new_path)]
+        rebased_paths.extend(
+            (c["old_path"], c["new_path"]) for c in cascaded
+        )
+        for prior_path, updated_path in rebased_paths:
+            if not prior_path or prior_path == updated_path:
+                continue
+            self.conn.execute(
+                "UPDATE photos SET last_move_source_folder_path = ? "
+                "WHERE last_move_source_folder_path = ?",
+                (updated_path, prior_path),
+            )
+
         self._relink_parents_by_path([folder_id] + [c["id"] for c in cascaded])
         self.conn.commit()
         return cascaded
@@ -3834,6 +3898,22 @@ class Database:
         self.conn.execute(
             "DELETE FROM folders WHERE id = ?", (source_folder_id,)
         )
+        # Clear stale move provenance keyed on the merged source folder's
+        # path. Mirrors ``delete_folder``: once the folder row is gone,
+        # any destination photo whose ``last_move_source_folder_path``
+        # still points at ``old_path`` would silently match a new
+        # unrelated folder that later appears at that same path — the
+        # same-stem developed-render collision guard in ``move_photos``
+        # compares the stored origin to a candidate move's ``src_dir``
+        # by string equality and would let two unrelated destination rows
+        # share developed-output lookup by folder+stem. Runs inside the
+        # merge's transaction so a rollback restores both together.
+        if old_path:
+            self.conn.execute(
+                "UPDATE photos SET last_move_source_folder_path = NULL "
+                "WHERE last_move_source_folder_path = ?",
+                (old_path,),
+            )
 
         # Ensure target folder is marked ok and recompute its photo count
         self.conn.execute(
@@ -3873,6 +3953,19 @@ class Database:
                     (candidate, child["id"]),
                 )
                 cascaded.append({"id": child["id"], "old_path": child["path"], "new_path": candidate})
+
+        # The surviving missing-child rows above have moved from each old
+        # path to its candidate under the existing target root. Keep any
+        # moved-photo provenance aligned with those live source rows. Clearing
+        # only the merged root path is insufficient: a same-stem sibling from
+        # a cascaded child would otherwise compare against its stale old path,
+        # and that freed path could later be reused by unrelated content.
+        for child in cascaded:
+            self.conn.execute(
+                "UPDATE photos SET last_move_source_folder_path = ? "
+                "WHERE last_move_source_folder_path = ?",
+                (child["new_path"], child["old_path"]),
+            )
 
         self._relink_parents_by_path([c["id"] for c in cascaded])
         if commit:
@@ -3974,12 +4067,35 @@ class Database:
                WHERE substr(REPLACE(path, '\\', '/'), 1, ?) = ?""",
             (len(_subtree_prefix(old_path)), _subtree_prefix(old_path)),
         ).fetchall()
+        rebased_paths = [(old_path, new_path)]
         for child in children:
             child_new = _join_subtree_path(
                 new_path, _subtree_relative(child["path"], old_path)
             )
             self.conn.execute(
                 "UPDATE folders SET path = ? WHERE id = ?", (child_new, child["id"])
+            )
+            rebased_paths.append((child["path"], child_new))
+        # Cascade the rename into ``photos.last_move_source_folder_path`` too.
+        # That column stores the STORED source folder path a destination photo
+        # was moved from, and the same-stem developed-render collision guard
+        # in ``move_photos`` (see ``destination_stem_origins``) compares it to
+        # a candidate move's ``src_dir``. Without this cascade, renaming the
+        # source folder frees its old path for reuse — e.g. a card remounted
+        # at ``/CARD`` after its earlier folder row was renamed to
+        # ``/CARD.bak`` — and a new unrelated photo scanned back at ``/CARD``
+        # would compare equal to the stale stored origin and slip past the
+        # collision guard, letting two unrelated destination rows share the
+        # developed-output lookup by folder+stem. Rebasing preserves the real
+        # provenance relationship: the destination photo still shares its
+        # render with any sibling that stays behind in the RENAMED folder.
+        for prior_path, updated_path in rebased_paths:
+            if prior_path == updated_path:
+                continue
+            self.conn.execute(
+                "UPDATE photos SET last_move_source_folder_path = ? "
+                "WHERE last_move_source_folder_path = ?",
+                (updated_path, prior_path),
             )
         self.conn.commit()
 
@@ -4909,13 +5025,24 @@ class Database:
         # has fewer separators than its child's, and parent_id order can't
         # be trusted for the legacy path-only rows.
         depth_by_id = {}
+        # Collect the raw stored paths of the folders about to be deleted so we
+        # can invalidate stale ``last_move_source_folder_path`` provenance on
+        # photos moved out earlier. Without this, a new folder that later ends
+        # up at the same path (e.g. a removable card re-mounted at the same
+        # spot after the earlier scan was cleared) would compare equal to the
+        # stored provenance and silently bypass the same-stem developed-render
+        # collision guard in ``move_photos``.
+        deleted_folder_paths = []
         for chunk in _chunks(delete_ids):
             placeholders = ",".join("?" for _ in chunk)
             for row in self.conn.execute(
                 f"SELECT id, path FROM folders WHERE id IN ({placeholders})",
                 chunk,
             ).fetchall():
-                path = _path_for_subtree_match(row["path"] or "")
+                stored_path = row["path"] or ""
+                if stored_path:
+                    deleted_folder_paths.append(stored_path)
+                path = _path_for_subtree_match(stored_path)
                 depth_by_id[row["id"]] = path.count("/")
         ordered_delete_ids = sorted(
             delete_ids, key=lambda fid: depth_by_id.get(fid, 0), reverse=True
@@ -4972,6 +5099,19 @@ class Database:
                 )
                 self.conn.execute(
                     f"DELETE FROM folders WHERE id IN ({placeholders})",
+                    chunk,
+                )
+            # Clear stale move provenance that would otherwise let a new
+            # unrelated folder appearing at one of these deleted paths bypass
+            # the same-stem developed-render collision guard in
+            # ``move_photos``. Run after the folder DELETEs (nothing left in
+            # this transaction can re-populate it) and inside the same outer
+            # transaction so a rollback restores both together.
+            for chunk in _chunks(deleted_folder_paths):
+                placeholders = ",".join("?" for _ in chunk)
+                self.conn.execute(
+                    f"UPDATE photos SET last_move_source_folder_path = NULL "
+                    f"WHERE last_move_source_folder_path IN ({placeholders})",
                     chunk,
                 )
             self.conn.commit()
@@ -8417,8 +8557,14 @@ class Database:
 
         # Count photos per folder for decrementing
         folder_counts = {}
+        deleted_stems_by_folder = {}
+        folder_paths = {}
         for row in rows:
             folder_counts[row["folder_id"]] = folder_counts.get(row["folder_id"], 0) + 1
+            deleted_stems_by_folder.setdefault(row["folder_id"], set()).add(
+                os.path.splitext(row["filename"])[0]
+            )
+            folder_paths[row["folder_id"]] = row["folder_path"]
 
         # Collect affected folder ids BEFORE the delete so we can invalidate the
         # new-images cache even if the delete raises. In "Remove from Vireo"
@@ -8482,6 +8628,53 @@ class Database:
             for chunk in id_chunks:
                 ph = ",".join("?" for _ in chunk)
                 self.conn.execute(f"DELETE FROM photos WHERE id IN ({ph})", chunk)
+
+            # A moved RAW/JPEG sibling stores the source folder path as
+            # provenance so another same-stem sibling can follow it to the
+            # destination without tripping the developed-render collision
+            # guard. Once delete_photos removes the last such sibling from
+            # the source, that proof is no longer valid: a later unrelated
+            # photo imported at the same path must not inherit the old
+            # render. Find source stems drained by this delete and expire
+            # their provenance in the same transaction.
+            drained_stems_by_path = {}
+            for folder_id, deleted_stems in deleted_stems_by_folder.items():
+                remaining_stems = {
+                    os.path.splitext(row["filename"])[0]
+                    for row in self.conn.execute(
+                        "SELECT filename FROM photos WHERE folder_id = ?",
+                        (folder_id,),
+                    )
+                }
+                drained = deleted_stems - remaining_stems
+                if drained:
+                    drained_stems_by_path.setdefault(
+                        folder_paths[folder_id], set()
+                    ).update(drained)
+
+            stale_provenance_ids = []
+            provenance_paths = list(drained_stems_by_path)
+            for path_chunk in _chunks(provenance_paths):
+                path_ph = ",".join("?" for _ in path_chunk)
+                for row in self.conn.execute(
+                    f"SELECT id, filename, last_move_source_folder_path "
+                    f"FROM photos WHERE last_move_source_folder_path "
+                    f"IN ({path_ph})",
+                    path_chunk,
+                ):
+                    stem = os.path.splitext(row["filename"])[0]
+                    if stem in drained_stems_by_path[
+                        row["last_move_source_folder_path"]
+                    ]:
+                        stale_provenance_ids.append(row["id"])
+            for stale_chunk in _chunks(stale_provenance_ids):
+                stale_ph = ",".join("?" for _ in stale_chunk)
+                self.conn.execute(
+                    f"UPDATE photos SET "
+                    f"last_move_source_folder_path = NULL "
+                    f"WHERE id IN ({stale_ph})",
+                    stale_chunk,
+                )
 
             # Update folder counts
             for fid, count in folder_counts.items():

@@ -592,6 +592,237 @@ def relocate_developed_dir(developed_dir, old_folder_path, new_folder_path):
         return False
 
 
+def _relocate_stem_files(old_subdir, new_subdir, stem, listing_cache=None,
+                         preserve_source=False):
+    """Rename files matching ``stem`` from ``old_subdir`` to ``new_subdir``.
+
+    Shared helper for both developed-output layouts (configured
+    ``darktable_output_dir`` and the default ``<folder>/developed/``).
+
+    ``listing_cache`` is an optional dict mapping ``old_subdir`` to its
+    cached ``os.listdir`` result (or ``None`` for a missing/unreadable
+    directory). It also remembers the first destination of each relocated
+    file so another catalog photo with the same stem can copy that render to
+    a different destination after the source has moved. Reuses cached
+    listings across per-photo calls so
+    ``move_folder_by_date`` — which routes every photo in a source folder
+    through ``move_photos`` — doesn't rescan the same developed
+    directory once per photo (a quadratic hazard on large libraries).
+
+    When ``preserve_source`` is true, matching renders are copied rather
+    than moved because another catalog photo with the same stem still
+    resolves them from the source folder.
+
+    Returns the number of files relocated. Never raises.
+    """
+    if not old_subdir or not new_subdir or old_subdir == new_subdir:
+        return 0
+    if listing_cache is not None and old_subdir in listing_cache:
+        names = listing_cache[old_subdir]
+    else:
+        names = None
+        if os.path.isdir(old_subdir):
+            try:
+                names = os.listdir(old_subdir)
+            except OSError as exc:
+                log.warning(
+                    "Failed to list developed dir %s: %s", old_subdir, exc,
+                )
+                names = None
+        if listing_cache is not None:
+            listing_cache[old_subdir] = names
+    if not names:
+        return 0
+    relocated = 0
+    for name in names:
+        entry_stem = os.path.splitext(name)[0]
+        # Stem match is case-sensitive to match the read side in
+        # `_DevelopedDirIndex`, which uses case-sensitive stems so two
+        # photos differing only in case on a case-sensitive filesystem
+        # don't collide onto each other's developed render.
+        if entry_stem != stem:
+            continue
+        src_file = os.path.join(old_subdir, name)
+        prior_destination = None
+        relocation_key = ("relocated-developed-file", old_subdir, name)
+        if not os.path.exists(src_file):
+            # A prior per-photo call may already have moved this shared-stem
+            # render (e.g. a RAW+JPEG pair). If the rows fan out to different
+            # date folders, the later destination needs its own copy; the
+            # render is only already in place when both rows share a target.
+            if listing_cache is not None:
+                prior_destination = listing_cache.get(relocation_key)
+            if not prior_destination or not os.path.isfile(prior_destination):
+                continue
+        dst_file = os.path.join(new_subdir, name)
+        if os.path.exists(dst_file):
+            created_destination = None
+            if listing_cache is not None:
+                created_destination = listing_cache.get(relocation_key)
+            if not preserve_source and os.path.exists(src_file) \
+                    and created_destination == dst_file:
+                # An earlier same-stem row copied this exact render to the
+                # shared destination while another source row still needed
+                # it. The final row can now remove the source without
+                # overwriting the known-good copy we created.
+                try:
+                    os.remove(src_file)
+                    relocated += 1
+                except OSError as exc:
+                    log.warning(
+                        "Failed to remove relocated developed file %s: %s",
+                        src_file, exc,
+                    )
+                continue
+            # Preserve the existing render at the destination — matches
+            # the collision policy used by `move_photos` for the photo
+            # file itself (skip rather than overwrite).
+            log.warning(
+                "Skipping developed relocate %s -> %s: destination exists",
+                src_file, dst_file,
+            )
+            continue
+        try:
+            os.makedirs(new_subdir, exist_ok=True)
+            if prior_destination:
+                shutil.copy2(prior_destination, dst_file)
+            elif preserve_source:
+                shutil.copy2(src_file, dst_file)
+                if listing_cache is not None:
+                    listing_cache.setdefault(relocation_key, dst_file)
+            else:
+                # Date-organized moves commonly cross from local storage to a
+                # mounted archive. Keep the fast atomic rename on one
+                # filesystem, then explicitly copy+unlink when rename fails.
+                # Handling unlink separately matters: the destination copy is
+                # complete at that point, so a locked/read-only source must
+                # not make the outer failure cleanup delete the only render
+                # the newly-repointed catalog row can resolve.
+                try:
+                    os.rename(src_file, dst_file)
+                except OSError:
+                    shutil.copy2(src_file, dst_file)
+                    try:
+                        os.unlink(src_file)
+                    except OSError as unlink_exc:
+                        log.warning(
+                            "Copied developed file %s -> %s but failed to "
+                            "remove source: %s",
+                            src_file, dst_file, unlink_exc,
+                        )
+                if listing_cache is not None:
+                    listing_cache.setdefault(relocation_key, dst_file)
+            relocated += 1
+        except OSError as exc:
+            log.warning(
+                "Failed to relocate developed file %s -> %s: %s",
+                src_file, dst_file, exc,
+            )
+            # shutil.copy2 (and shutil.move's EXDEV fallback) can create
+            # ``dst_file`` and then fail partway — a full disk, a flaky
+            # mounted archive, or a lost network share. The photo row was
+            # already repointed at this destination before the relocate
+            # call, so a truncated/corrupt render sitting at the new key
+            # would be picked up by ``_iter_developed_outputs`` and served
+            # to exports and full-resolution instead of the intact source
+            # render (or a clean fallback to the RAW). Delete the partial
+            # so lookup falls back correctly.
+            if os.path.lexists(dst_file):
+                try:
+                    os.remove(dst_file)
+                except OSError as cleanup_exc:
+                    log.warning(
+                        "Failed to remove partial developed file %s: %s",
+                        dst_file, cleanup_exc,
+                    )
+    if relocated:
+        try:
+            if not os.listdir(old_subdir):
+                os.rmdir(old_subdir)
+                # Keep the cached names for the rest of this batch. A later
+                # same-stem photo may need to copy a render from the first
+                # destination even though the source directory is now gone.
+        except OSError:
+            pass
+    return relocated
+
+
+def relocate_developed_file(developed_dir, old_folder_path, new_folder_path,
+                            stem, listing_cache=None, preserve_source=False):
+    """Rebase a single photo's developed outputs after its folder changes.
+
+    Sibling to `relocate_developed_dir` for per-photo moves (e.g. date-
+    organized folder moves fan photos from one source folder into many
+    date destinations, so the whole-subdir rename doesn't apply). Moves
+    every developed file whose stem matches ``stem`` from the old key's
+    subdir into the new key's subdir. Extensions are enumerated from disk
+    rather than a fixed list so a develop job configured for an unusual
+    output format still gets its render moved.
+
+    ``listing_cache`` is an optional dict shared across per-photo calls
+    to amortize the ``os.listdir`` of the old-key subdir. Passing one is
+    important for ``move_folder_by_date``, which fans a source folder's
+    photos through many per-destination ``move_photos`` calls; without it
+    the same developed subdir would be listed once per moved photo.
+
+    ``preserve_source`` copies instead of moving while another same-stem
+    catalog photo remains in the old folder.
+
+    Returns the number of files relocated. Never raises; a filesystem
+    hiccup here logs a warning and is treated as a no-op so it doesn't
+    also fail the move itself.
+    """
+    if not developed_dir or not old_folder_path or not new_folder_path \
+            or not stem:
+        return 0
+    if old_folder_path == new_folder_path:
+        return 0
+    old_key = developed_folder_key(old_folder_path)
+    new_key = developed_folder_key(new_folder_path)
+    if not old_key or not new_key or old_key == new_key:
+        return 0
+    old_subdir = os.path.join(developed_dir, old_key)
+    new_subdir = os.path.join(developed_dir, new_key)
+    return _relocate_stem_files(
+        old_subdir, new_subdir, stem, listing_cache, preserve_source,
+    )
+
+
+def relocate_default_developed_file(old_folder_path, new_folder_path, stem,
+                                    listing_cache=None, preserve_source=False):
+    """Rebase a photo's default-location developed render after a move.
+
+    When ``darktable_output_dir`` is unset, the develop job writes to
+    ``<folder>/developed/<stem>.<ext>``. The catalog's export/full-
+    resolution lookup then probes ``<folder>/developed/`` first (see
+    ``_iter_developed_outputs``), so a per-photo move that leaves the
+    render under the old source folder orphans it — the app silently
+    falls back to the RAW/original. This helper rebases the render to
+    the destination folder's ``developed/`` subdir to match.
+
+    A whole-folder move (``move_folder``) naturally carries the
+    ``developed/`` subdir along in the recursive copy; this helper is
+    specifically for per-photo moves (``move_photos``,
+    ``move_folder_by_date``) where photos fan out to different
+    destinations and the source subdir stays behind.
+
+    ``listing_cache`` — see ``relocate_developed_file``.
+    ``preserve_source`` copies instead of moving while another same-stem
+    catalog photo remains in the old folder.
+
+    Returns the number of files relocated. Never raises.
+    """
+    if not old_folder_path or not new_folder_path or not stem:
+        return 0
+    if old_folder_path == new_folder_path:
+        return 0
+    old_subdir = os.path.join(old_folder_path, "developed")
+    new_subdir = os.path.join(new_folder_path, "developed")
+    return _relocate_stem_files(
+        old_subdir, new_subdir, stem, listing_cache, preserve_source,
+    )
+
+
 class _DevelopedDirIndex:
     """Lazy, per-export cache of directory listings for developed lookups.
 
