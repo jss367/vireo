@@ -9984,3 +9984,190 @@ def test_api_photos_calendar_accepts_rules(app_and_db):
     # bird3.jpg (rating 5, 2024-06-10) is the only match in 2024
     assert resp.get_json()["days"] == {"2024-06-10": 1}
     assert client.get('/api/photos/calendar?rules=notjson').status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Universal filter visual clause (Phase 3).
+# ---------------------------------------------------------------------------
+
+
+def _stub_clip(monkeypatch, model_name="test-clip", model_type="bioclip"):
+    import models
+    monkeypatch.setattr(models, "get_active_model", lambda: {
+        "name": model_name,
+        "model_type": model_type,
+        "model_str": "fake",
+        "weights_path": "",
+    } if model_name else None)
+    monkeypatch.setitem(
+        sys.modules,
+        "text_encoder",
+        types.SimpleNamespace(
+            encode_text=lambda *_args, **_kwargs: np.array([1.0, 0.0], dtype=np.float32)
+        ),
+    )
+
+
+def _seed_embeddings(db, model_name="test-clip"):
+    photos = {p["filename"]: p["id"] for p in db.get_photos(sort="name")}
+    for name, vec in [
+        ("bird1.jpg", [0.95, 0.0]),
+        ("bird2.jpg", [0.8, 0.0]),
+        ("bird3.jpg", [0.05, 0.0]),
+    ]:
+        db.upsert_photo_embedding(
+            photos[name], model_name, np.array(vec, dtype=np.float32).tobytes()
+        )
+    return photos
+
+
+def test_api_photos_query_visual_ranks_by_similarity(app_and_db, monkeypatch):
+    app, db = app_and_db
+    photos = _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={
+        "rules": [],
+        "visual": {"prompt": "a bird", "strength": "balanced"},
+    })
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["visual"]["status"] == "ok"
+    assert data["visual"]["matched"] == 2
+    assert data["visual"]["indexed"] == 3
+    assert [p["filename"] for p in data["photos"]] == ["bird1.jpg", "bird2.jpg"]
+    assert data["photos"][0]["similarity"] == 0.95
+    assert data["total"] == 2
+
+    # Metadata rules constrain the candidate set before scoring.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "filename", "op": "is", "value": "bird2.jpg"}],
+        "visual": {"prompt": "a bird", "strength": "balanced"},
+    })
+    data = resp.get_json()
+    assert [p["filename"] for p in data["photos"]] == ["bird2.jpg"]
+
+    # Strength changes the threshold: strict drops bird2 (0.8 >= 0.22 stays;
+    # broad keeps everything above 0.10).
+    resp = client.post('/api/photos/query', json={
+        "rules": [],
+        "visual": {"prompt": "a bird", "strength": "broad"},
+    })
+    assert resp.get_json()["visual"]["matched"] == 2
+
+    # ids_only returns the ranked id set.
+    resp = client.post('/api/photos/query', json={
+        "rules": [], "ids_only": True,
+        "visual": {"prompt": "a bird", "strength": "balanced"},
+    })
+    data = resp.get_json()
+    assert data["ids"] == [photos["bird1.jpg"], photos["bird2.jpg"]]
+
+
+def test_api_photos_query_visual_error_states(app_and_db, monkeypatch):
+    app, db = app_and_db
+    client = app.test_client()
+
+    # No active model: metadata rules still apply, status is surfaced.
+    _stub_clip(monkeypatch, model_name=None)
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "rating", "op": ">=", "value": 4}],
+        "visual": {"prompt": "a bird"},
+    })
+    data = resp.get_json()
+    assert data["visual"]["status"] == "no_model"
+    assert data["total"] == 1  # metadata-only fallback, not zero
+
+    # timm models have no text tower.
+    _stub_clip(monkeypatch, model_type="timm")
+    resp = client.post('/api/photos/query', json={
+        "rules": [], "visual": {"prompt": "a bird"},
+    })
+    assert resp.get_json()["visual"]["status"] == "model_no_text_search"
+
+    # No embeddings stored for the active model.
+    _stub_clip(monkeypatch)
+    resp = client.post('/api/photos/query', json={
+        "rules": [], "visual": {"prompt": "a bird"},
+    })
+    data = resp.get_json()
+    assert data["visual"]["status"] == "no_embeddings"
+    assert data["total"] == 3
+
+    # Malformed clauses 400.
+    assert client.post('/api/photos/query', json={
+        "rules": [], "visual": {"prompt": "   "},
+    }).status_code == 400
+    assert client.post('/api/photos/query', json={
+        "rules": [], "visual": {"prompt": "x", "strength": "extreme"},
+    }).status_code == 400
+
+
+def test_api_summary_and_values_respect_visual(app_and_db, monkeypatch):
+    """Facet counts and the summary must describe the visually-filtered set."""
+    import json as _json
+    app, db = app_and_db
+    _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+    photos = {p["filename"]: p["id"] for p in db.get_photos(sort="name")}
+    db.conn.execute("UPDATE photos SET camera_model='Sony A1' WHERE id IN (?, ?)",
+                    (photos["bird1.jpg"], photos["bird3.jpg"]))
+    db.conn.commit()
+
+    client = app.test_client()
+    visual = _json.dumps({"prompt": "a bird", "strength": "balanced"})
+    resp = client.get(f'/api/browse/summary?visual={visual}')
+    assert resp.status_code == 200
+    assert resp.get_json()["filtered_total"] == 2  # bird1 + bird2 only
+
+    # bird3 (Sony, below threshold) must not appear in facet counts.
+    resp = client.get(f'/api/filters/values?field=camera_model&visual={visual}')
+    assert resp.get_json()["values"] == [{"value": "Sony A1", "count": 1}]
+
+
+def test_api_calendar_scopes_visual_to_collection(app_and_db, monkeypatch):
+    """Calendar's visual clause must resolve within the collection scope.
+
+    If the collection has no active-model embeddings but the wider
+    workspace does, the clause must fail 'no_embeddings' and fall back
+    to metadata-only within the collection — matching the grid — rather
+    than injecting outside-collection matches that get intersected away.
+    """
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos(sort="name")}
+    for name, vec in [("bird1.jpg", [0.95, 0.0]), ("bird2.jpg", [0.8, 0.0])]:
+        db.upsert_photo_embedding(
+            photos[name], "test-clip", np.array(vec, dtype=np.float32).tobytes()
+        )
+    # bird3 (the only photo in the collection) has no embedding.
+    collection_id = db.add_collection(
+        "Only bird3",
+        json.dumps([{"field": "photo_ids", "value": [photos["bird3.jpg"]]}]),
+    )
+    _stub_clip(monkeypatch)
+    client = app.test_client()
+    visual = json.dumps({"prompt": "a bird", "strength": "balanced"})
+    resp = client.get(
+        f"/api/photos/calendar?year=2024&collection_id={collection_id}&visual={visual}"
+    )
+    assert resp.status_code == 200
+    assert list(resp.get_json()["days"].keys()) == ["2024-06-10"]
+
+
+def test_embedding_fetch_chunks_over_999_ids(app_and_db):
+    """A broad rule tree passes every photo id as the candidate set; the
+    embedding fetch must chunk below SQLITE_MAX_VARIABLE_NUMBER."""
+    _, db = app_and_db
+    fid = db.get_photos()[0]["folder_id"]
+    ids = []
+    rows = []
+    for i in range(1200):
+        pid = db.add_photo(folder_id=fid, filename=f"bulk{i}.jpg", extension=".jpg",
+                           file_size=10, file_mtime=1.0)
+        ids.append(pid)
+        rows.append(pid)
+    vec = np.array([0.5, 0.5], dtype=np.float32).tobytes()
+    for pid in rows:
+        db.upsert_photo_embedding(pid, "test-clip", vec)
+    pairs = db.get_photos_with_embedding("test-clip", photo_ids=ids)
+    assert len(pairs) == 1200

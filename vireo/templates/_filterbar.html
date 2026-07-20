@@ -9,6 +9,7 @@
       <input type="search" autocomplete="off" spellcheck="false"
              placeholder="Search photos…" aria-label="Search photos">
       <kbd>⌘F</kbd>
+      <div class="vf-search-suggest" role="listbox" hidden></div>
     </div>
     <button class="vf-filters-btn" type="button" aria-expanded="false">
       <span aria-hidden="true">≡</span> Filters <span class="vf-count" hidden>0</span>
@@ -27,6 +28,7 @@
   </div>
 
   <div class="vf-paused-note" hidden></div>
+  <div class="vf-visual-note" hidden></div>
 
   <div class="vf-popover" role="dialog" aria-label="Edit photo filters" hidden>
     <div class="vf-popover-header">
@@ -133,6 +135,19 @@
 .vf-chip-x:hover { background: var(--bg-tertiary); color: var(--text-primary); }
 .vf-overflow { cursor: pointer; flex: none; }
 .vf-paused-note { margin-top: 6px; padding: 5px 9px; border-radius: 6px; background: color-mix(in srgb, var(--warning) 12%, var(--bg-tertiary)); color: var(--warning); font-size: 12px; }
+.vf-visual-note { margin-top: 6px; padding: 5px 9px; border-radius: 6px; background: color-mix(in srgb, #a782ff 12%, var(--bg-tertiary)); color: color-mix(in srgb, #a782ff 70%, var(--text-primary)); font-size: 12px; }
+.vf-visual-note.error { background: color-mix(in srgb, var(--danger) 12%, var(--bg-tertiary)); color: var(--danger); }
+.vf-chip.visual { border-color: color-mix(in srgb, #a782ff 65%, var(--border-secondary)); background: color-mix(in srgb, #a782ff 10%, var(--bg-primary)); }
+.vf-chip.error { border-color: var(--danger); color: var(--danger); }
+.vf-search-suggest { position: absolute; top: 38px; left: 0; right: 0; z-index: 5010; overflow: hidden; padding: 4px; border: 1px solid var(--border-secondary); border-radius: 8px; background: var(--bg-panel); box-shadow: 0 12px 32px rgba(0,0,0,.3); }
+.vf-search-suggest button { width: 100%; display: flex; align-items: center; gap: 9px; padding: 7px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer; font-size: 12px; }
+.vf-search-suggest button:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.vf-search-suggest button > span:first-child { width: 20px; text-align: center; color: var(--accent); }
+.vf-search-suggest .vf-suggest-visual > span:first-child { color: #a782ff; }
+.vf-search-suggest em { margin-left: auto; color: var(--text-faint); font-size: 10px; font-style: normal; }
+.vf-visual-row { grid-template-columns: 1fr auto 25px; }
+.vf-visual-label { color: color-mix(in srgb, #a782ff 70%, var(--text-primary)); font-size: 12px; padding-left: 2px; }
+.vf-visual-strength button { text-transform: capitalize; }
 .vf-popover { position: absolute; top: calc(100% + 8px); left: 0; z-index: 5000; width: min(680px, 100%); max-height: min(72vh, 640px); overflow-y: auto; border: 1px solid var(--border-secondary); border-radius: 11px; background: var(--bg-panel); box-shadow: 0 18px 50px rgba(0,0,0,.34); }
 .vf-popover-header { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: flex-start; padding: 13px 16px 10px; background: var(--bg-panel); border-bottom: 1px solid var(--border-primary); }
 .vf-popover-header h2 { margin: 0; font-size: 15px; color: var(--text-primary); }
