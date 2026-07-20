@@ -4111,6 +4111,66 @@ def test_after_process_move_rejects_strftime_template_landing_under_mount(
     assert resp.status_code == 200, resp.get_json()
 
 
+def test_after_process_move_rejects_separator_rendering_strftime_template(
+    app_and_db, tmp_path, stub_move,
+):
+    """Some strftime directives render path separators — the POSIX ``%D``
+    always renders ``MM/DD/YY``, and ``%x`` does the same on common
+    locales. Those tokens survive the raw ``os.sep`` split as a single
+    component but expand to multiple path components at import time. A
+    template like ``%D`` with a mount at ``<root>/07/20`` slips a
+    per-component length check even though every render lands on the
+    NAS. Locks in that the mount-tree guard (whether via wildcard
+    treatment or an explicit probe render) rejects this case up front."""
+    import datetime as _dt
+
+    # Skip on hosts whose libc doesn't implement %D (e.g. some non-glibc
+    # setups) — the raw compare would then be identity to "%D", not a
+    # slash-bearing render, and the case never triggers.
+    if "/" not in _dt.datetime(2000, 1, 2).strftime("%D"):
+        pytest.skip("%D does not render slashes on this host's libc")
+
+    import config as cfg
+    root = tmp_path / "Photos"
+    # Mount lives at <root>/01/02 — deeper than the raw single-component
+    # split of "%D" but overlapping its rendered MM/DD prefix.
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "01" / "02"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%D",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+
+    # A template with a literal first component that can't match the
+    # mount's outer ancestor stays legal — no render of ``shoots/%Y``
+    # can reach or wrap ``<root>/01/02``.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
 def test_after_process_move_rejects_dot_prefixed_template_landing_under_mount(
     app_and_db, tmp_path, stub_move,
 ):
