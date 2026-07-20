@@ -1668,6 +1668,14 @@ def plan_folder_date_moves(db, folder_id, destination, folder_template):
         relative = build_destination_path(capture_dt, template)
         if not relative:
             raise ValueError("folder template produced an empty path")
+        # Canonicalize harmless dot components before grouping or joining.
+        # Catalog folder paths are keyed by their exact text, so preserving
+        # ``./`` here could create a second row for ``/archive/./2026`` beside
+        # the existing ``/archive/2026`` even though both names address the
+        # same directory (and produce different developed-output hashes).
+        relative = posixpath.normpath(relative)
+        if relative == ".":
+            raise ValueError("folder template produced an empty path")
         groups.setdefault(relative, []).append(int(photo["id"]))
 
     # Defense-in-depth: ``build_destination_path`` already rejects unsafe
@@ -1933,6 +1941,7 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
     moved = 0
     errors = []
     managed_default_developed = {}
+    copied_xmp_companions = set()
 
     # Both the photo destination and a separately configured developed-output
     # directory can impose case-folded render names. For example, originals
@@ -2080,11 +2089,20 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
 
             # Gather companion files
             companions = _companion_files(photo, src_dir)
+            xmp_companion = os.path.splitext(photo["filename"])[0] + ".xmp"
 
             # Check companion collisions
             comp_collision = False
             for comp in companions:
                 if os.path.exists(os.path.join(destination, comp)):
+                    # Same-stem photos intentionally share one XMP. If an
+                    # earlier row in this batch already copied that exact
+                    # source sidecar into this destination, reuse the verified
+                    # copy instead of treating the later sibling as a
+                    # collision. A pre-existing untracked XMP still blocks.
+                    if comp == xmp_companion and \
+                            (src_dir, comp) in copied_xmp_companions:
+                        continue
                     errors.append(f"{comp}: companion file already exists at destination")
                     comp_collision = True
                     break
@@ -2103,15 +2121,22 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             for comp in companions:
                 comp_src = os.path.join(src_dir, comp)
                 comp_dst = os.path.join(destination, comp)
+                if comp == xmp_companion and \
+                        (src_dir, comp) in copied_xmp_companions:
+                    continue
                 if not _copy_and_verify(comp_src, comp_dst):
                     errors.append(f"{comp}: companion verification failed")
                     # Clean up what we copied
                     os.remove(dst_file)
                     for cc in copied_companions:
                         os.remove(os.path.join(destination, cc))
+                        if cc == xmp_companion:
+                            copied_xmp_companions.discard((src_dir, cc))
                     comp_ok = False
                     break
                 copied_companions.append(comp)
+                if comp == xmp_companion:
+                    copied_xmp_companions.add((src_dir, comp))
 
             if not comp_ok:
                 continue
@@ -2233,6 +2258,13 @@ def move_photos(db, photo_ids, destination, progress_cb=None,
             try:
                 os.remove(src_file)
                 for comp in companions:
+                    # Keep a shared XMP at the source until the final
+                    # same-stem catalog row leaves. Date-organized moves call
+                    # move_photos once per destination group; preserving the
+                    # sidecar after an early group lets each later group copy
+                    # the metadata before the final sibling removes it.
+                    if comp == xmp_companion and preserve_source_render:
+                        continue
                     comp_src = os.path.join(src_dir, comp)
                     if os.path.isfile(comp_src):
                         os.remove(comp_src)

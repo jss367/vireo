@@ -148,6 +148,75 @@ def test_move_folder_by_date_splits_photos_and_moves_sidecars(tmp_path):
     }
 
 
+def test_move_folder_by_date_copies_shared_xmp_to_each_date(tmp_path):
+    """Same-stem photos split by date each retain their shared XMP."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "IMG.CR3").write_bytes(b"raw")
+    (src / "IMG.JPG").write_bytes(b"jpeg")
+    (src / "IMG.xmp").write_bytes(b"shared-xmp")
+    db.add_photo(
+        folder_id=fid, filename="IMG.CR3", extension=".cr3",
+        file_size=3, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid, filename="IMG.JPG", extension=".jpg",
+        file_size=4, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    result = move_folder_by_date(db, fid, str(archive), "%Y-%m-%d")
+
+    assert result["moved"] == 2
+    assert result["errors"] == []
+    assert (
+        archive / "2026-07-12" / "IMG.xmp"
+    ).read_bytes() == b"shared-xmp"
+    assert (
+        archive / "2026-07-13" / "IMG.xmp"
+    ).read_bytes() == b"shared-xmp"
+    assert not (src / "IMG.xmp").exists()
+
+
+def test_move_photos_reuses_shared_xmp_within_one_destination(tmp_path):
+    """Same-batch siblings reuse the first verified XMP copy."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    destination = tmp_path / "archive"
+    fid = db.add_folder(str(src), name="card")
+    (src / "IMG.CR3").write_bytes(b"raw")
+    (src / "IMG.JPG").write_bytes(b"jpeg")
+    (src / "IMG.xmp").write_bytes(b"shared-xmp")
+    raw_pid = db.add_photo(
+        folder_id=fid, filename="IMG.CR3", extension=".cr3",
+        file_size=3, file_mtime=1.0,
+    )
+    jpeg_pid = db.add_photo(
+        folder_id=fid, filename="IMG.JPG", extension=".jpg",
+        file_size=4, file_mtime=2.0,
+    )
+
+    result = move_photos(db, [raw_pid, jpeg_pid], str(destination))
+
+    assert result["moved"] == 2
+    assert result["errors"] == []
+    assert (destination / "IMG.xmp").read_bytes() == b"shared-xmp"
+    assert not (src / "IMG.xmp").exists()
+
+
 def test_move_folder_by_date_rebases_developed_outputs(tmp_path):
     """Regression: when photos in one folder fan out to per-date destinations,
     each photo's developed-output file must move from the OLD folder-key
@@ -828,6 +897,48 @@ def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path):
 
     assert len(plan) == 1
     assert plan[0]["relative_path"] == "unsorted"
+
+
+def test_plan_folder_date_moves_normalizes_dot_components(tmp_path):
+    """Rendered dot components never leak into catalog destination paths."""
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive = tmp_path / "archive"
+
+    plan = plan_folder_date_moves(
+        db, fid, str(archive), "./%Y-%m-%d",
+    )
+
+    assert plan[0]["relative_path"] == "2026-07-12"
+    assert plan[0]["destination"] == str(archive / "2026-07-12")
+
+
+def test_plan_folder_date_moves_rejects_dot_only_template(tmp_path):
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+
+    with pytest.raises(ValueError, match="empty path"):
+        plan_folder_date_moves(db, fid, str(tmp_path / "archive"), ".")
 
 
 def test_plan_folder_date_moves_rejects_template_that_escapes_destination(tmp_path):
