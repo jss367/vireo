@@ -921,6 +921,152 @@ def test_legacy_merge_review_pending_loses_to_decided_metadata(tmp_path):
         assert review["total_votes"] == 5
 
 
+def test_legacy_merge_rekeys_canonical_rows_without_content_ids(tmp_path):
+    """Catalogs that ran the short-lived unversioned rename may already carry
+    ``detector_model = 'megadetector-v6'`` yet keep the pre-rename rowid instead
+    of the content-addressed id. The migration must re-key those rows even when
+    no literal ``MegaDetector`` alias remains — otherwise the next detector
+    rerun UPSERTs under the true content-addressed id and deletes the old
+    canonical row, cascading its predictions/reviews.
+    """
+    box = (0.10002, 0.2, 0.3, 0.4)
+    other_box = (0.6, 0.2, 0.2, 0.2)
+
+    db_path = str(tmp_path / "vireo.db")
+    schema.ensure_schema(db_path)
+
+    with Database(db_path, initialize_schema=False) as db:
+        workspace_id = db._active_workspace_id
+        folder_id = db.add_folder(str(tmp_path / "photos"), name="photos")
+        photo_id = db.add_photo(
+            folder_id,
+            "bird.jpg",
+            ".jpg",
+            1,
+            1.0,
+            timestamp="2026-01-01T00:00:00",
+            width=100,
+            height=100,
+        )
+        expected_primary_id = detection_id(
+            photo_id, "megadetector-v6", box, "animal",
+        )
+        expected_other_id = detection_id(
+            photo_id, "megadetector-v6", other_box, "animal",
+        )
+        # Guard: force ids that cannot collide with the true content-addressed
+        # values, so the migration is genuinely re-keying.
+        assert 500 not in (expected_primary_id, expected_other_id)
+        assert 501 not in (expected_primary_id, expected_other_id)
+
+        db.conn.executemany(
+            """
+            INSERT INTO detections (
+              id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (500, photo_id, "megadetector-v6",
+                 *box, 0.9, "animal", "2026-04-26T00:00:00"),
+                (501, photo_id, "megadetector-v6",
+                 *other_box, 0.7, "animal", "2026-04-26T00:00:00"),
+            ],
+        )
+        db.conn.executemany(
+            """
+            INSERT INTO predictions (
+              id, detection_id, classifier_model, labels_fingerprint,
+              species, confidence, category, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (600, 500, "BioCLIP-2.5", "birds", "Robin",
+                 0.9, "match", "2026-04-26T01:00:00"),
+                (601, 501, "BioCLIP-2.5", "birds", "Hawk",
+                 0.6, "new", "2026-04-26T01:00:00"),
+            ],
+        )
+        db.conn.executemany(
+            """
+            INSERT INTO prediction_review (
+              prediction_id, workspace_id, status, reviewed_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [
+                (600, workspace_id, "accepted", "2026-04-27T02:00:00"),
+                (601, workspace_id, "accepted", "2026-04-27T02:01:00"),
+            ],
+        )
+        db.conn.commit()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA user_version = 7")
+
+    schema.ensure_schema(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        detections = conn.execute(
+            "SELECT id, detector_model FROM detections WHERE photo_id = ? ORDER BY id",
+            (photo_id,),
+        ).fetchall()
+        assert {r["id"] for r in detections} == {
+            expected_primary_id, expected_other_id,
+        }
+        assert {r["detector_model"] for r in detections} == {"megadetector-v6"}
+
+        # Reviews and predictions must remain attached to the re-keyed detections.
+        surviving_predictions = conn.execute(
+            """
+            SELECT p.species, r.status
+            FROM predictions p
+            JOIN prediction_review r
+              ON r.prediction_id = p.id AND r.workspace_id = ?
+            WHERE p.detection_id IN (?, ?)
+            ORDER BY p.species
+            """,
+            (workspace_id, expected_primary_id, expected_other_id),
+        ).fetchall()
+        assert [(r["species"], r["status"]) for r in surviving_predictions] == [
+            ("Hawk", "accepted"),
+            ("Robin", "accepted"),
+        ]
+
+    # After the migration, rerunning the detector must be a no-op that keeps
+    # every prediction/review — this is the regression the reviewer flagged:
+    # without re-keying, `write_detection_batch` would delete the old row.
+    with Database(db_path, initialize_schema=False) as migrated_db:
+        rerun_ids = migrated_db.write_detection_batch(
+            photo_id,
+            "megadetector-v6",
+            [
+                {
+                    "box": {"x": box[0], "y": box[1], "w": box[2], "h": box[3]},
+                    "confidence": 0.9,
+                    "category": "animal",
+                },
+                {
+                    "box": {"x": other_box[0], "y": other_box[1],
+                            "w": other_box[2], "h": other_box[3]},
+                    "confidence": 0.7,
+                    "category": "animal",
+                },
+            ],
+        )
+        assert set(rerun_ids) == {expected_primary_id, expected_other_id}
+        remaining = migrated_db.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM predictions p
+            JOIN prediction_review r ON r.prediction_id = p.id
+            WHERE p.detection_id IN (?, ?) AND r.status = 'accepted'
+            """,
+            (expected_primary_id, expected_other_id),
+        ).fetchone()[0]
+        assert remaining == 2
+
+
 def test_legacy_megadetector_zero_box_run_is_normalized_without_detections(tmp_path):
     """A legacy empty-scene run has no detection row to drive the main merge."""
     db_path = str(tmp_path / "vireo.db")

@@ -181,11 +181,52 @@ def _merge_legacy_detector_alias(conn):
         (_CANONICAL_DETECTOR_MODEL, _LEGACY_DETECTOR_MODEL),
     )
 
-    legacy_count = conn.execute(
-        "SELECT COUNT(*) FROM detections WHERE detector_model = ?",
-        (_LEGACY_DETECTOR_MODEL,),
-    ).fetchone()[0]
-    if not legacy_count:
+    # Load every detection row that carries either alias in one pass so we can
+    # detect not just literal legacy rows but also canonical rows kept from the
+    # short-lived unversioned rename: those already carry the current model name
+    # yet keep their old rowid instead of the content-addressed one. Skipping
+    # them here would let the next detector rerun UPSERT under the correct id
+    # and delete the pre-existing canonical row, cascading its predictions and
+    # reviews.
+    from detection_id import detection_id as _detection_id
+
+    rows = conn.execute(
+        """
+        SELECT id, photo_id, detector_model, box_x, box_y, box_w, box_h,
+               detector_confidence, category, created_at
+        FROM detections
+        WHERE detector_model IN (?, ?)
+        """,
+        (_LEGACY_DETECTOR_MODEL, _CANONICAL_DETECTOR_MODEL),
+    ).fetchall()
+
+    def _expected_content_id(row):
+        """Return the content-addressed id ``row`` should have, or ``None``.
+
+        Historical fixtures with a NULL category or coordinate cannot be
+        content-addressed, so the caller falls back to preserving the raw
+        rowid for those rows.
+        """
+        coords = (row["box_x"], row["box_y"], row["box_w"], row["box_h"])
+        if row["category"] is None or any(value is None for value in coords):
+            return None
+        return _detection_id(
+            row["photo_id"], _CANONICAL_DETECTOR_MODEL, coords, row["category"],
+        )
+
+    def _is_stale_canonical(row):
+        """True if ``row`` is a canonical alias whose id needs to be re-keyed."""
+        if row["detector_model"] != _CANONICAL_DETECTOR_MODEL:
+            return False
+        expected = _expected_content_id(row)
+        return expected is not None and expected != row["id"]
+
+    has_legacy = any(
+        row["detector_model"] == _LEGACY_DETECTOR_MODEL for row in rows
+    )
+    has_stale_canonical = any(_is_stale_canonical(row) for row in rows)
+
+    if not has_legacy and not has_stale_canonical:
         # Zero-box detector runs can carry the old key even when no detection row
         # exists, so normalize them on the warm/empty path too.
         conn.execute(
@@ -212,6 +253,10 @@ def _merge_legacy_detector_alias(conn):
         )
         return
 
+    legacy_count = sum(
+        1 for row in rows if row["detector_model"] == _LEGACY_DETECTOR_MODEL
+    )
+
     conn.execute("DROP TABLE IF EXISTS temp.legacy_detector_groups")
     conn.execute("DROP TABLE IF EXISTS temp.legacy_detection_merge")
     conn.execute("DROP TABLE IF EXISTS temp.legacy_prediction_merge")
@@ -220,17 +265,7 @@ def _merge_legacy_detector_alias(conn):
     # writes. The canonical content-addressed id is the survivor even when a box
     # exists only under the legacy key, so a later detector rerun will UPSERT that
     # row instead of deleting it (and cascading its predictions/reviews).
-    from detection_id import detection_id as _detection_id
 
-    rows = conn.execute(
-        """
-        SELECT id, photo_id, detector_model, box_x, box_y, box_w, box_h,
-               detector_confidence, category, created_at
-        FROM detections
-        WHERE detector_model IN (?, ?)
-        """,
-        (_LEGACY_DETECTOR_MODEL, _CANONICAL_DETECTOR_MODEL),
-    ).fetchall()
     groups = {}
     for row in rows:
         coords = (row["box_x"], row["box_y"], row["box_w"], row["box_h"])
@@ -273,10 +308,19 @@ def _merge_legacy_detector_alias(conn):
     mask_prompt_remaps: list[tuple[int, tuple, tuple]] = []
 
     for group_rows in groups.values():
-        if not any(
+        group_has_legacy = any(
             row["detector_model"] == _LEGACY_DETECTOR_MODEL
             for row in group_rows
-        ):
+        )
+        group_has_stale_canonical = any(
+            _is_stale_canonical(row) for row in group_rows
+        )
+        # Legacy-touched groups always run through the merge to canonicalize the
+        # model name. Canonical-only groups only need attention when at least one
+        # row keeps a non-content-addressed id from a pre-versioned rename —
+        # otherwise the group is already in its final shape and processing it
+        # would be a no-op (survivor_id == source.id, no losers to merge).
+        if not group_has_legacy and not group_has_stale_canonical:
             continue
         canonical_rows = [
             row for row in group_rows
