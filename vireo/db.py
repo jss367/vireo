@@ -18359,18 +18359,28 @@ class Database:
                     # branch below; parameter order below must match this
                     # ordering.
                     legacy_pred = name_op.format(name_col="k.name")
-                    # A hierarchy leaf (``parent_id IS NOT NULL``) is displayed
-                    # as its same-taxon root in Browse / life list /
-                    # ``get_species_keywords_for_photos`` and enumerated as
-                    # the root by ``/api/filters/values``. Match through the
-                    # root spelling for leaves — ``root.name`` — and through
-                    # ``k.name`` itself when the attached row is already a
-                    # root, so a photo tagged only with ``Verdin`` is not
-                    # pulled in by an ``is "Desert Verdin"`` rule just
-                    # because a hierarchy leaf by that name exists for the
-                    # same taxon. Multiple roots per taxon (from prior data
-                    # merges) still match any of their root spellings.
+                    # An attached root (``k.parent_id IS NULL``) surfaces
+                    # under its own stored spelling everywhere else:
+                    # ``get_species_keywords_for_photos`` keeps it (its
+                    # ``is_root`` guard) and ``/api/filters/values``
+                    # groups by ``kv.name``. Match only that spelling —
+                    # never a same-taxon sibling root — so a taxon with
+                    # multiple roots (say ``American Crow`` MIN(id) and
+                    # ``crow (american)``) doesn't cross-match: selecting
+                    # the ``American Crow`` suggestion must not return
+                    # photos the typeahead counts under ``crow (american)``.
                     self_pred = name_op.format(name_col="k.name")
+                    # A hierarchy leaf (``k.parent_id IS NOT NULL``) is
+                    # displayed as the canonical MIN(id) root spelling of
+                    # its taxon — that's what
+                    # ``get_species_keywords_for_photos``'s
+                    # ``canonical_roots`` and ``/api/filters/values``'s
+                    # ``root_kv.id = MIN(id)`` both surface. Match only
+                    # that MIN(id) root's name so the filter agrees with
+                    # what typeahead offers and Browse shows; any-root
+                    # matching would let a leaf photo satisfy a rule for
+                    # a sibling-root spelling that never appears in the
+                    # UI.
                     root_pred = name_op.format(name_col="root.name")
                     # A hierarchy leaf whose taxon has no top-level root row
                     # in ``keywords`` (repair detached the ``Verdin`` root
@@ -18394,19 +18404,25 @@ class Database:
                         f"(k.taxon_id IS NULL AND {legacy_pred})"
                         " OR (k.taxon_id IS NOT NULL AND ("
                         f"(k.parent_id IS NULL AND {self_pred})"
-                        " OR EXISTS ("
+                        " OR (k.parent_id IS NOT NULL AND ("
+                        "EXISTS ("
                         "SELECT 1 FROM keywords root "
                         "WHERE root.taxon_id = k.taxon_id "
                         "AND root.parent_id IS NULL "
                         "AND (root.is_species = 1 OR root.type = 'taxonomy') "
+                        "AND root.id = ("
+                        "SELECT MIN(id) FROM keywords "
+                        "WHERE taxon_id = k.taxon_id "
+                        "AND parent_id IS NULL "
+                        "AND (is_species = 1 OR type = 'taxonomy')) "
                         f"AND {root_pred})"
-                        " OR (k.parent_id IS NOT NULL AND NOT EXISTS ("
+                        " OR (NOT EXISTS ("
                         "SELECT 1 FROM keywords rootless "
                         "WHERE rootless.taxon_id = k.taxon_id "
                         "AND rootless.parent_id IS NULL "
                         "AND (rootless.is_species = 1 OR rootless.type = 'taxonomy')"
                         f") AND {leaf_no_root_pred})"
-                        "))))"
+                        "))))))"
                     )
                 if op == "contains":
                     # Escape user LIKE metacharacters so ``%``/``_`` in the

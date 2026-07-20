@@ -21136,6 +21136,65 @@ def test_universal_filter_species_matches_rootless_hierarchy_leaf(tmp_path):
     _ = other
 
 
+def test_universal_filter_species_multi_root_isolates_attached_spelling(tmp_path):
+    """When a taxon has multiple top-level roots (say ``Verdin`` and the
+    sibling alias ``Auriparus flaviceps``), a photo tagged only with one
+    of them must match rules for that spelling only — never for the
+    sibling root's spelling. ``/api/filters/values`` groups attached
+    roots by their own ``kv.name`` (its ``kv.parent_id IS NULL`` branch),
+    so if the filter matched any same-taxon root, selecting one
+    suggestion would return photos the count advertises under the other.
+
+    A hierarchy leaf photo for the same taxon must still match the
+    canonical MIN(id) root spelling — that's what
+    ``get_species_keywords_for_photos`` and the typeahead surface for
+    leaves — but not the sibling root spelling.
+    """
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    # Create ``Verdin`` first so it wins MIN(id) — the sibling root
+    # ``Auriparus flaviceps`` gets a higher id.
+    verdin_root = db.add_keyword("Verdin", is_species=True)
+    sci_root = db.add_keyword("Auriparus flaviceps", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], sci_root))
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.conn.commit()
+
+    p_verdin = db.add_photo(folder_id=fid, filename='v.jpg', extension='.jpg',
+                            file_size=100, file_mtime=1.0)
+    p_sci = db.add_photo(folder_id=fid, filename='s.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    p_leaf = db.add_photo(folder_id=fid, filename='l.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.tag_photo(p_verdin, verdin_root)
+    db.tag_photo(p_sci, sci_root)
+    db.tag_photo(p_leaf, leaf)
+
+    # Sanity: display keeps each attached root's own spelling and
+    # canonicalizes the hierarchy leaf to MIN(id) root.
+    displayed = db.get_species_keywords_for_photos([p_verdin, p_sci, p_leaf])
+    assert displayed[p_verdin] == ["Verdin"]
+    assert displayed[p_sci] == ["Auriparus flaviceps"]
+    assert displayed[p_leaf] == ["Verdin"]
+
+    count = db.count_photos_for_rules
+    # ``species is "Verdin"`` matches only the photos surfaced as
+    # ``Verdin`` — the attached-``Verdin`` photo and the canonicalized
+    # leaf — never the sibling-root-tagged photo.
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 2
+    # ``species is "Auriparus flaviceps"`` matches only the attached
+    # sibling root, not the ``Verdin``-tagged nor the leaf-tagged photos
+    # (the leaf displays as ``Verdin`` via MIN(id) canonicalization).
+    assert count([{"field": "species", "op": "is",
+                   "value": "Auriparus flaviceps"}]) == 1
+
+
 def test_exif_backfill_migration_clears_empty_marker_for_rescan(tmp_path):
     """Rows whose ``exif_data`` is the ``'{}'`` marker were scanned with
     ``extract_full_metadata=False`` before the promoted EXIF columns
