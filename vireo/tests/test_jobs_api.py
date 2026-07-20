@@ -4941,8 +4941,14 @@ def test_chain_cancel_late_thread_skips_wait_loop_entirely(
             "second move-folder thread never started")
         # The first move-folder thread ran to completion (no wait loop,
         # no contention). Confirm it finished before the second thread
-        # got to run.
-        first_folder_id = calls[0] if calls else None
+        # got to run. Under CI load, ``second_thread_started`` can fire
+        # before the first thread has reached ``fake_move_folder``, so
+        # wait for that call to land before reading its folder id.
+        deadline = time.time() + 10
+        while not calls and time.time() < deadline:
+            time.sleep(0.02)
+        assert calls, "first move-folder thread never called fake_move_folder"
+        first_folder_id = calls[0]
         first_move_id = next(
             mid for mid in move_ids
             if _job_config(client, mid)["folder_id"] == first_folder_id
