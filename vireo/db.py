@@ -17917,10 +17917,22 @@ class Database:
                 "AND pr2.classifier_model = pred.classifier_model "
                 "ORDER BY pr2.created_at DESC, pr2.id DESC LIMIT 1)"
             )
+            # Always join prediction_review so alternatives can be filtered
+            # out below — the review_join parameter is retained for callers
+            # that also read prv.status in their predicate.
             review = (
                 " LEFT JOIN prediction_review prv "
                 "ON prv.prediction_id = pred.id AND prv.workspace_id = ?"
-                if review_join else ""
+            )
+            # Filters that represent the *displayed* prediction (confidence,
+            # classifier_model, taxonomy_*, plus the status predicates that
+            # already read prv.status) must ignore runner-up rows stored
+            # with prv.status = 'alternative'. Otherwise a top prediction
+            # at 0.95 with an alternative at 0.10 would satisfy
+            # prediction_confidence <= 0.2 even though /api/predictions
+            # (app.py:12386-12388) drops alternatives from top-level results.
+            not_alternative = (
+                " AND COALESCE(prv.status, 'pending') != 'alternative'"
             )
             # Gate by the workspace-effective detector_confidence floor.
             # /api/photos/query's response goes through
@@ -17934,14 +17946,15 @@ class Database:
             # shows with no visible detection context.
             conf_filter = " AND det.detector_confidence >= ?"
             params = (
-                ([self._ws_id()] if review_join else [])
+                [self._ws_id()]
                 + [_min_detector_conf()]
                 + list(predicate_params)
             )
             return (
                 "EXISTS (SELECT 1 FROM detections det "
                 "JOIN predictions pred ON pred.detection_id = det.id"
-                f"{review} WHERE det.photo_id = p.id{conf_filter} "
+                f"{review} WHERE det.photo_id = p.id{conf_filter}"
+                f"{not_alternative} "
                 f"AND {predicate}{fingerprint_pin})",
                 params,
             )

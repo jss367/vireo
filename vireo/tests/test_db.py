@@ -20701,6 +20701,61 @@ def test_universal_filter_prediction_rules_gate_by_detector_confidence(tmp_path,
                    "value": "pending"}]) == 1
 
 
+def test_universal_filter_prediction_rules_ignore_alternative_rows(tmp_path):
+    """Filters that represent the displayed prediction — prediction_confidence,
+    classifier_model, taxonomy_* — must ignore runner-up predictions stored
+    with ``prediction_review.status = 'alternative'``. /api/predictions drops
+    alternatives from top-level results (app.py:12386-12388) and Compare
+    hides them, so a top pick at 0.95 with an alternative at 0.10 must not
+    satisfy ``prediction_confidence <= 0.2``.
+    """
+    db, fid = _filter_db(tmp_path)
+    ws_id = db._ws_id()
+    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    det = db.save_detections(photo, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    # Displayed top prediction — high confidence.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Robin', 0.95, '2026-01-01')",
+        (det,),
+    )
+    # Runner-up alternative — low confidence, marked alternative in review.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Sparrow', 0.10, '2026-01-01')",
+        (det,),
+    )
+    alt_pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=? AND species='Sparrow'",
+        (det,),
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status, reviewed_at) "
+        "VALUES (?, ?, 'alternative', '2026-01-02')",
+        (alt_pred, ws_id),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # The alternative sits at 0.10 but must not drag the photo into a
+    # <=0.2 confidence bucket — the displayed 0.95 pick is what matters.
+    assert count([{"field": "prediction_confidence", "op": "<=",
+                   "value": 0.2}]) == 0
+    # The displayed pick still passes a >=0.9 rule.
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.9}]) == 1
+    # classifier_model still resolves via the top pick (still present, not
+    # excluded — alternative sits under the same model).
+    assert count([{"field": "classifier_model", "op": "is",
+                   "value": "bioclip-2"}]) == 1
+
+
 def test_universal_filter_classifier_model_contains_escapes_like_metacharacters(tmp_path):
     """``classifier_model contains`` must treat ``%`` / ``_`` in the value as
     literal characters, matching the other advertised text contains rules.
