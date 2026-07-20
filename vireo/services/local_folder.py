@@ -58,6 +58,26 @@ def folder_dir(vireo_dir: str, root_folder_id: int) -> Path:
     return Path(vireo_dir) / "local-folders" / str(int(root_folder_id))
 
 
+def default_local_base(vireo_dir: str, root_folder_id: int) -> Path:
+    """Return the parent directory used for a folder's managed local copy."""
+    return folder_dir(vireo_dir, root_folder_id) / "files"
+
+
+def _safe_folder_name(source_path: str, root_folder_id: int) -> str:
+    name = Path(source_path.rstrip("/\\")).name or f"folder-{root_folder_id}"
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name)
+
+
+def default_local_path(vireo_dir: str, root_folder_id: int, source_path: str) -> Path:
+    return local_path_for_base(
+        default_local_base(vireo_dir, root_folder_id), root_folder_id, source_path
+    )
+
+
+def local_path_for_base(local_base: str | Path, root_folder_id: int, source_path: str) -> Path:
+    return Path(local_base) / _safe_folder_name(source_path, root_folder_id)
+
+
 def manifest_path(vireo_dir: str, root_folder_id: int) -> Path:
     return folder_dir(vireo_dir, root_folder_id) / "manifest.json"
 
@@ -66,21 +86,36 @@ def _sync_recovery_path(vireo_dir: str, root_folder_id: int) -> Path:
     return folder_dir(vireo_dir, root_folder_id) / "sync-recovery.json"
 
 
-def _remove_folder_dir(vireo_dir: str, root_folder_id: int) -> None:
+def _remove_tree(path: Path) -> None:
     """Remove a managed tree without ever following a replacement symlink."""
-    base = folder_dir(vireo_dir, root_folder_id)
     try:
-        st = os.lstat(base)
+        st = os.lstat(path)
     except FileNotFoundError:
         return
     if stat.S_ISLNK(st.st_mode):
         with suppress(FileNotFoundError):
-            os.unlink(base)
+            os.unlink(path)
     elif stat.S_ISDIR(st.st_mode):
-        shutil.rmtree(base, ignore_errors=True)
+        shutil.rmtree(path, ignore_errors=True)
     else:
         with suppress(FileNotFoundError):
-            os.unlink(base)
+            os.unlink(path)
+
+
+def _remove_folder_dir(
+    vireo_dir: str, root_folder_id: int, local_path: str | None = None
+) -> None:
+    """Remove session metadata and its copy, including a custom destination."""
+    base = folder_dir(vireo_dir, root_folder_id)
+    if local_path:
+        local_root = Path(local_path)
+        try:
+            inside_session = _physical_is_within(str(local_root), str(base))
+        except OSError:
+            inside_session = False
+        if not inside_session:
+            _remove_tree(local_root)
+    _remove_tree(base)
 
 
 def folder_state(db, root_folder_id: int) -> dict | None:
@@ -301,14 +336,25 @@ def _catalog_records(db, root_folder_id: int, local_base: Path) -> tuple[list[di
                 "Finish or discard that session before staging this folder."
             )
 
-    name = Path(source_path.rstrip("/\\")).name or f"folder-{root_folder_id}"
-    safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in name)
-    local_root = local_base / safe_name
+    local_root = local_base / _safe_folder_name(source_path, root_folder_id)
     if _physical_is_within(str(local_root), source_path) or _physical_is_within(
         source_path, str(local_root)
     ):
         raise LocalWorkspaceError(
             "Managed local storage overlaps the source folder; move Vireo's data directory to local storage first"
+        )
+    for existing in db.conn.execute(
+        "SELECT root_folder_id, local_path FROM local_folder_mappings WHERE is_root=1"
+    ).fetchall():
+        if _physical_is_within(str(local_root), existing["local_path"]) or _physical_is_within(
+            existing["local_path"], str(local_root)
+        ):
+            raise LocalWorkspaceError(
+                f"Local destination overlaps an existing local copy: {existing['local_path']}"
+            )
+    if os.path.lexists(local_root):
+        raise LocalWorkspaceError(
+            f"Local destination already exists: {local_root}. Choose another location or rename the existing folder."
         )
 
     root = {
@@ -386,6 +432,7 @@ def stage_folder(
     root_folder_id: int,
     vireo_dir: str,
     *,
+    local_base: str | None = None,
     progress=None,
     cancel_check=None,
     begin_commit=None,
@@ -393,7 +440,6 @@ def stage_folder(
     """Copy one top-level folder locally and atomically rebase the catalog."""
     root_folder_id = int(root_folder_id)
     with _folder_lock(root_folder_id):
-        base = folder_dir(vireo_dir, root_folder_id)
         with stage_boundary_lock():
             covering = local_root_for_folder(db, root_folder_id)
             if covering is not None:
@@ -401,7 +447,24 @@ def stage_folder(
                     raise LocalWorkspaceError("This folder is already staged locally")
                 raise LocalWorkspaceError(f"This folder is already covered by local folder {covering}")
             _remove_folder_dir(vireo_dir, root_folder_id)
-            roots, folders = _catalog_records(db, root_folder_id, base / "files")
+            selected_base = Path(local_base).expanduser() if local_base else default_local_base(
+                vireo_dir, root_folder_id
+            )
+            if not selected_base.is_absolute():
+                raise LocalWorkspaceError("Local destination must be an absolute path")
+            roots, folders = _catalog_records(db, root_folder_id, selected_base)
+            local_root = roots[0]["local_path"]
+            try:
+                os.makedirs(local_root, exist_ok=False)
+            except FileExistsError:
+                raise LocalWorkspaceError(
+                    f"Local destination already exists: {local_root}. "
+                    "Choose another location or rename the existing folder."
+                ) from None
+            except OSError as exc:
+                raise LocalWorkspaceError(
+                    f"Could not create the local destination {local_root}: {exc}"
+                ) from exc
             db.conn.execute("BEGIN IMMEDIATE")
             try:
                 db.conn.execute(
@@ -426,12 +489,15 @@ def stage_folder(
                 db.conn.commit()
             except BaseException:
                 db.conn.rollback()
+                _remove_folder_dir(vireo_dir, root_folder_id, local_root)
                 raise
 
         copied = 0
         copied_bytes = 0
         try:
-            entries_per_root, total_files, total_bytes = _collect_source_entries(roots, base)
+            entries_per_root, total_files, total_bytes = _collect_source_entries(
+                roots, Path(roots[0]["local_path"])
+            )
             manifest = {
                 "version": MANIFEST_VERSION,
                 "root_folder_id": root_folder_id,
@@ -442,7 +508,6 @@ def stage_folder(
                 "files": [],
             }
             root = roots[0]
-            os.makedirs(root["local_path"], exist_ok=True)
             for rel, source, st in entries_per_root[0]:
                 if cancel_check and cancel_check():
                     raise LocalWorkspaceCancelled("Local folder transfer cancelled")
@@ -496,12 +561,15 @@ def stage_folder(
                 "root_folder_id": root_folder_id,
                 "files": total_files,
                 "bytes": total_bytes,
-                "local_path": str(base / "files"),
+                "local_path": roots[0]["local_path"],
             }
         except BaseException:
             current = folder_state(db, root_folder_id)
             if current and current.get("state") == "staging":
-                _remove_folder_dir(vireo_dir, root_folder_id)
+                root = _root_mapping(db, root_folder_id)
+                _remove_folder_dir(
+                    vireo_dir, root_folder_id, root["local_path"] if root else None
+                )
                 _delete_state_rows(db, root_folder_id)
                 db.conn.commit()
             raise
@@ -513,11 +581,21 @@ def folder_status(db, root_folder_id: int, vireo_dir: str) -> dict:
     covering = local_root_for_folder(db, root_folder_id)
     if covering is None:
         row = db.conn.execute("SELECT path FROM folders WHERE id=?", (root_folder_id,)).fetchone()
+        source_path = row["path"] if row else None
         return {
             "state": "remote",
             "folder_id": root_folder_id,
             "root_folder_id": root_folder_id,
-            "source_path": row["path"] if row else None,
+            "source_path": source_path,
+            "default_local_base": str(default_local_base(vireo_dir, root_folder_id)),
+            "local_folder_name": (
+                _safe_folder_name(source_path, root_folder_id) if source_path else None
+            ),
+            "default_local_path": (
+                str(default_local_path(vireo_dir, root_folder_id, source_path))
+                if source_path
+                else None
+            ),
             "workspace_ids": workspace_ids_for_folder_tree(db, root_folder_id),
         }
     root_folder_id = covering
@@ -792,7 +870,7 @@ def sync_folder(
                 progress(done, total, rel)
         workspace_ids = affected_workspace_ids(db, root_folder_id)
         _restore_catalog(db, root_folder_id)
-        _remove_folder_dir(vireo_dir, root_folder_id)
+        _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])
         for workspace_id in workspace_ids:
             db.invalidate_new_images_cache_for_workspace(workspace_id)
         return {
@@ -813,7 +891,10 @@ def discard_folder(db, root_folder_id: int, vireo_dir: str, *, acknowledge_publi
             raise LocalWorkspaceError("This folder is not working locally")
         state = state_row["state"]
         if state == "staging":
-            _remove_folder_dir(vireo_dir, root_folder_id)
+            root = _root_mapping(db, root_folder_id)
+            _remove_folder_dir(
+                vireo_dir, root_folder_id, root["local_path"] if root else None
+            )
             _delete_state_rows(db, root_folder_id)
             db.conn.commit()
             return {"ok": True, "root_folder_id": root_folder_id, "discarded": True}
@@ -823,9 +904,12 @@ def discard_folder(db, root_folder_id: int, vireo_dir: str, *, acknowledge_publi
             )
         if state not in {"active", "syncing"}:
             raise LocalWorkspaceError("Local folder is not in a recoverable state")
+        root = _root_mapping(db, root_folder_id)
+        if root is None:
+            raise LocalWorkspaceError("Local folder mapping is missing its root")
         workspace_ids = affected_workspace_ids(db, root_folder_id)
         _restore_catalog(db, root_folder_id)
-        _remove_folder_dir(vireo_dir, root_folder_id)
+        _remove_folder_dir(vireo_dir, root_folder_id, root["local_path"])
         for workspace_id in workspace_ids:
             db.invalidate_new_images_cache_for_workspace(workspace_id)
         return {"ok": True, "root_folder_id": root_folder_id, "discarded": True}

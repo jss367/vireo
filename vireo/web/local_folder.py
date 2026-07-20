@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 
 from db import Database
@@ -11,6 +12,7 @@ from services.local_folder import (
     affected_workspace_ids,
     discard_folder,
     folder_status,
+    local_path_for_base,
     local_root_for_folder,
     local_root_under_folder,
     stage_folder,
@@ -118,6 +120,23 @@ def create_local_folder_blueprint(
             )
         return None
 
+    def _folder_names(db, root_ids):
+        names = {}
+        paths = {}
+        for root_id in root_ids:
+            row = db.conn.execute(
+                """SELECT COALESCE(lfm.source_path, f.path) AS source_path
+                   FROM folders f
+                   LEFT JOIN local_folder_mappings lfm
+                     ON lfm.folder_id=f.id AND lfm.is_root=1
+                   WHERE f.id=?""",
+                (root_id,),
+            ).fetchone()
+            path = row["source_path"] if row else ""
+            paths[root_id] = path
+            names[root_id] = os.path.basename(path.rstrip("/\\")) or "Folder"
+        return names, paths
+
     @blueprint.get("/api/workspaces/active/local-folders")
     def local_folder_status():
         db, workspace_id, error = _active_context()
@@ -185,6 +204,39 @@ def create_local_folder_blueprint(
                 "The selected folders are already local or contain a folder working locally",
                 409,
             )
+        raw_destinations = body.get("destination_bases") or {}
+        if not isinstance(raw_destinations, dict):
+            return json_error("destination_bases must be an object", 400)
+        root_names, source_paths = _folder_names(db, root_ids)
+        destination_bases = {}
+        final_destinations = []
+        for root_id in root_ids:
+            raw = raw_destinations.get(str(root_id), raw_destinations.get(root_id))
+            if raw is None:
+                continue
+            if not isinstance(raw, str) or not raw.strip():
+                return json_error("Each local destination must be a non-empty path", 400)
+            destination = os.path.normpath(os.path.expanduser(raw.strip()))
+            if not os.path.isabs(destination):
+                return json_error("Each local destination must be an absolute path", 400)
+            destination_bases[root_id] = destination
+            final_destinations.append(
+                (root_id, os.path.normcase(os.path.abspath(local_path_for_base(
+                    destination, root_id, source_paths[root_id]
+                ))))
+            )
+        for index, (root_id, path) in enumerate(final_destinations):
+            for other_id, other_path in final_destinations[index + 1:]:
+                try:
+                    overlaps = os.path.commonpath([path, other_path]) in {path, other_path}
+                except ValueError:
+                    overlaps = False
+                if overlaps:
+                    return json_error(
+                        f"The selected destinations for {root_names[root_id]} and "
+                        f"{root_names[other_id]} overlap. Choose separate locations.",
+                        400,
+                    )
         runner = get_runner()
 
         def work(job):
@@ -195,7 +247,7 @@ def create_local_folder_blueprint(
                 runner.set_steps(
                     job["id"],
                     [
-                        {"id": f"folder-{root_id}", "label": f"Copy folder {root_id} locally"}
+                        {"id": f"folder-{root_id}", "label": f"Copy {root_names[root_id]} locally"}
                         for root_id in root_ids
                     ],
                 )
@@ -203,13 +255,16 @@ def create_local_folder_blueprint(
                     step_id = f"folder-{root_id}"
                     runner.update_step(job["id"], step_id, status="running")
 
-                    def report(current, total, current_bytes, total_bytes, path, _root=root_id):
+                    def report(
+                        current, total, current_bytes, total_bytes, path,
+                        _root=root_id, _name=root_names[root_id],
+                    ):
                         job["progress"].update(
                             {
                                 "current": current,
                                 "total": total,
                                 "current_file": path,
-                                "phase": f"Copying folder {_root} locally",
+                                "phase": f"Copying {_name} locally",
                                 "bytes_current": current_bytes,
                                 "bytes_total": total_bytes,
                                 "root_folder_id": _root,
@@ -227,6 +282,7 @@ def create_local_folder_blueprint(
                         thread_db,
                         root_id,
                         vireo_dir,
+                        local_base=destination_bases.get(root_id),
                         progress=report,
                         cancel_check=lambda: runner.is_cancelled(job["id"]),
                         begin_commit=lambda: runner.begin_uncancellable(job["id"]),
@@ -273,6 +329,7 @@ def create_local_folder_blueprint(
             return request_error
         if not root_ids:
             return json_error("No selected folders are working locally", 409)
+        root_names, _source_paths = _folder_names(db, root_ids)
         counts = body.get("confirmed_deletion_counts") or {}
         if not isinstance(counts, dict):
             return json_error("confirmed_deletion_counts must be an object", 400)
@@ -317,7 +374,7 @@ def create_local_folder_blueprint(
                 runner.set_steps(
                     job["id"],
                     [
-                        {"id": f"folder-{root_id}", "label": f"Sync folder {root_id} to source"}
+                        {"id": f"folder-{root_id}", "label": f"Sync {root_names[root_id]} to source"}
                         for root_id in root_ids
                     ],
                 )
@@ -325,13 +382,16 @@ def create_local_folder_blueprint(
                     step_id = f"folder-{root_id}"
                     runner.update_step(job["id"], step_id, status="running")
 
-                    def report(current, total, path, _root=root_id):
+                    def report(
+                        current, total, path,
+                        _root=root_id, _name=root_names[root_id],
+                    ):
                         job["progress"].update(
                             {
                                 "current": current,
                                 "total": total,
                                 "current_file": path,
-                                "phase": f"Syncing folder {_root} to source",
+                                "phase": f"Syncing {_name} to source",
                                 "root_folder_id": _root,
                             }
                         )
@@ -395,6 +455,7 @@ def create_local_folder_blueprint(
             return request_error
         if not root_ids:
             return json_error("No selected folders are working locally", 409)
+        root_names, _source_paths = _folder_names(db, root_ids)
         acknowledge = body.get("acknowledge_published") is True
         runner = get_runner()
 
@@ -406,7 +467,7 @@ def create_local_folder_blueprint(
                 runner.set_steps(
                     job["id"],
                     [
-                        {"id": f"folder-{root_id}", "label": f"Discard local folder {root_id}"}
+                        {"id": f"folder-{root_id}", "label": f"Discard local copy of {root_names[root_id]}"}
                         for root_id in root_ids
                     ],
                 )

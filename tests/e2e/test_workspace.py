@@ -24,12 +24,20 @@ def test_work_locally_full_cycle(live_server, page, tmp_path):
     work_locally = page.get_by_role("button", name="Work Locally", exact=True)
     expect(work_locally).to_be_visible(timeout=5000)
     work_locally.click()
+    modal = page.locator("#stageLocalFoldersModal")
+    expect(modal).to_have_class("modal-overlay open")
+    chosen_parent = tmp_path / "chosen-local-storage"
+    modal.locator("[data-local-destination-base]").fill(str(chosen_parent))
+    expect(modal.locator("[data-local-destination-preview]")).to_contain_text(
+        str(chosen_parent / "nas-src")
+    )
+    modal.get_by_role("button", name="Copy Locally", exact=True).click()
 
     panel = page.locator("#localWorkspaceContent")
     expect(panel).to_contain_text("using local storage", timeout=15000)
 
     local_path = db.conn.execute("SELECT path FROM folders WHERE id=?", (folder_id,)).fetchone()["path"]
-    assert local_path != str(source)
+    assert local_path == str(chosen_parent / "nas-src")
     Path(local_path, "bird.jpg").write_bytes(b"edited-locally")
 
     page.get_by_role("button", name="Sync Back", exact=True).click()
@@ -73,6 +81,9 @@ def test_shared_folder_local_status_follows_workspace_switch(live_server, page, 
     assert page.request.post(f"{live_server['url']}/api/workspaces/{first}/activate").ok
     page.goto(f"{live_server['url']}/workspace", timeout=5000)
     page.get_by_role("button", name="Work Locally", exact=True).click()
+    page.locator("#stageLocalFoldersModal").get_by_role(
+        "button", name="Copy Locally", exact=True
+    ).click()
     expect(page.get_by_text("Local · 2 workspaces", exact=True)).to_be_visible(timeout=15000)
 
     assert page.request.post(f"{live_server['url']}/api/workspaces/{second}/activate").ok

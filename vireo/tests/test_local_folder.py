@@ -63,6 +63,48 @@ def test_shared_folder_uses_one_local_copy_in_every_workspace(tmp_path):
         db.close()
 
 
+def test_custom_local_destination_is_used_and_removed_after_sync(tmp_path):
+    db, vireo_dir, source, _first, _second, folder_id = _shared_environment(tmp_path)
+    local_parent = tmp_path / "fast-storage"
+    try:
+        result = stage_folder(
+            db, folder_id, str(vireo_dir), local_base=str(local_parent)
+        )
+
+        local_root = local_parent / "photos"
+        assert result["local_path"] == str(local_root)
+        assert db.get_folder(folder_id)["path"] == str(local_root)
+        assert (local_root / "bird.jpg").read_bytes() == b"original"
+        assert (vireo_dir / "local-folders" / str(folder_id) / "manifest.json").is_file()
+
+        (local_root / "bird.jpg").write_bytes(b"edited locally")
+        sync_folder(db, folder_id, str(vireo_dir))
+
+        assert (source / "bird.jpg").read_bytes() == b"edited locally"
+        assert not local_root.exists()
+        assert local_parent.is_dir()
+        assert not (vireo_dir / "local-folders" / str(folder_id)).exists()
+    finally:
+        db.close()
+
+
+def test_custom_local_destination_refuses_existing_folder(tmp_path):
+    db, vireo_dir, _source, _first, _second, folder_id = _shared_environment(tmp_path)
+    local_parent = tmp_path / "fast-storage"
+    existing = local_parent / "photos"
+    existing.mkdir(parents=True)
+    (existing / "keep.txt").write_text("do not overwrite")
+    try:
+        with pytest.raises(LocalWorkspaceError, match="already exists"):
+            stage_folder(
+                db, folder_id, str(vireo_dir), local_base=str(local_parent)
+            )
+        assert (existing / "keep.txt").read_text() == "do not overwrite"
+        assert db.get_folder(folder_id)["path"].endswith("/nas/photos")
+    finally:
+        db.close()
+
+
 def test_workspace_status_is_derived_from_independent_root_folders(tmp_path):
     db = Database(str(tmp_path / "vireo.db"))
     workspace_id = db.create_workspace("Mixed")
@@ -228,6 +270,57 @@ def test_folder_scoped_http_cycle_and_shared_status(tmp_path, monkeypatch):
         assert response.status_code == 202
         assert wait_for_job_via_client(client, response.get_json()["job_id"])["status"] == "completed"
         assert (source / "bird.jpg").read_bytes() == b"edited"
+
+
+def test_folder_stage_endpoint_accepts_destination_and_uses_folder_name_in_job(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from app import create_app
+
+    source = tmp_path / "nas" / "104NCZ_8"
+    source.mkdir(parents=True)
+    (source / "bird.jpg").write_bytes(b"original")
+    vireo_dir = tmp_path / "vireo"
+    thumbs = vireo_dir / "thumbnails"
+    thumbs.mkdir(parents=True)
+    db_path = str(vireo_dir / "vireo.db")
+    db = Database(db_path)
+    workspace_id = db.create_workspace("Trip")
+    folder_id = db.add_folder(str(source), name="104NCZ_8", link_to_workspace=False)
+    db.add_workspace_folder(workspace_id, folder_id)
+    db.set_active_workspace(workspace_id)
+    db.close()
+
+    app = create_app(db_path, thumb_cache_dir=str(thumbs))
+    app.config["TESTING"] = True
+    destination = tmp_path / "chosen-local-storage"
+    with app.test_client() as client:
+        assert client.post(f"/api/workspaces/{workspace_id}/activate", json={}).status_code == 200
+        before = client.get("/api/workspaces/active/local-folders").get_json()
+        item = before["folders"][0]
+        assert item["default_local_base"] == str(
+            vireo_dir / "local-folders" / str(folder_id) / "files"
+        )
+        assert item["local_folder_name"] == "104NCZ_8"
+        assert item["default_local_path"].endswith("/104NCZ_8")
+
+        response = client.post(
+            "/api/workspaces/active/local-folders/stage",
+            json={
+                "folder_ids": [folder_id],
+                "destination_bases": {str(folder_id): str(destination)},
+            },
+        )
+        assert response.status_code == 202, response.get_json()
+        job = wait_for_job_via_client(client, response.get_json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["steps"][0]["label"] == "Copy 104NCZ_8 locally"
+        assert job["progress"]["phase"] == "Copying 104NCZ_8 locally"
+
+    check_db = Database(db_path)
+    try:
+        assert check_db.get_folder(folder_id)["path"] == str(destination / "104NCZ_8")
+    finally:
+        check_db.close()
 
 
 def test_local_root_under_folder_finds_descendant_session(tmp_path):
