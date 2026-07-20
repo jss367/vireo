@@ -4009,6 +4009,87 @@ def test_after_process_move_rejects_template_landing_under_mount(
         wait_for_job_via_client(client, mid)
 
 
+def test_after_process_move_rejects_strftime_template_landing_under_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """The static-prefix guard stops at the first ``%``-bearing component, so
+    a template like the default ``%Y/%Y-%m-%d`` slips past it even when a
+    render of ``%Y`` matches the mount leaf (e.g. mount=<root>/2026): the
+    import would land on the NAS and the chained move would re-copy it under
+    remote_path/2026/…. Treat strftime tokens as wildcards that could produce
+    whatever the mount has at that depth and reject up front. A template with
+    a literal component at the mount depth that can't match the mount leaf,
+    or a template shallower than the mount, stays legal — no render can
+    reach the mount."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    # Mount lives at <root>/2026 — a strftime-only template can slip past
+    # the leading-static-prefix check but every %Y render lands on it.
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "2026"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # Default dated template: %Y renders to "2026", matching the mount leaf.
+    # Every 2026 render would land directly on the NAS mount.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y/%Y-%m-%d",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+    assert "2026" in err
+
+    # Deeper mount plus a template whose components can all match every
+    # depth of the mount rel to destination — reject.
+    target["mount_path"] = str(root / "2026" / "07")
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y/%m/%d",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+
+    # Deeper mount with a template that has a literal at the mount-depth
+    # position that can't match the mount leaf — no render can reach the
+    # mount, so the request is legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y/fixed-name",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+    # Template shallower than mount ends above the mount every render —
+    # legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
 def test_after_process_move_non_string_target_id(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
