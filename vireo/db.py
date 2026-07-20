@@ -7157,6 +7157,7 @@ class Database:
         keyword=None,
         keyword_match_case=False,
         keyword_whole_word=False,
+        collection_id=None,
         color_label=None,
         flag=None,
         location_status=None,
@@ -7177,6 +7178,21 @@ class Database:
                 f"{r_folder_join} {r_join_clause} {r_where})"
             )
             where_params.extend(r_params)
+
+        # Dashboard-scoped collection Browse composes the collection with the
+        # active rules/folder — the calendar must match the grid, so restrict
+        # counts to photos in the collection (same subquery shape as
+        # get_browse_summary).
+        if collection_id is not None:
+            parts = self._build_collection_query(collection_id)
+            if parts is not None:
+                coll_folder_join, coll_join_clause, coll_where, coll_params = parts
+                coll_subquery = (
+                    f"SELECT DISTINCT p.id FROM photos p "
+                    f"{coll_folder_join} {coll_join_clause} {coll_where}"
+                )
+                conditions.append(f"p.id IN ({coll_subquery})")
+                where_params.extend(coll_params)
 
         join_clause = ("JOIN workspace_folders wf ON wf.folder_id = p.folder_id"
                        "\nJOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')")
@@ -18349,6 +18365,19 @@ class Database:
                     "EXISTS (SELECT 1 FROM photo_keywords pk "
                     "JOIN keywords k ON k.id = pk.keyword_id "
                     "WHERE pk.photo_id = p.id AND k.type = 'location')"
+                )
+                return _boolean_predicate(has, op, value)
+            if field == "has_coord_location_keyword":
+                # A structured location supplies coordinates the map can
+                # place. Matches the ``assigned`` branch of
+                # ``_append_location_status_filter`` — the deep-link path
+                # depends on this being distinct from ``has_location_keyword``
+                # (which also matches free-text locations without lat/lng).
+                has = (
+                    "EXISTS (SELECT 1 FROM photo_keywords pk "
+                    "JOIN keywords k ON k.id = pk.keyword_id "
+                    "WHERE pk.photo_id = p.id AND k.type = 'location' "
+                    "AND k.latitude IS NOT NULL AND k.longitude IS NOT NULL)"
                 )
                 return _boolean_predicate(has, op, value)
             if field == "location_keyword_missing":

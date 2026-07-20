@@ -5662,6 +5662,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         keyword = request.args.get("keyword", None)
         keyword_match_case = _request_bool_arg("keyword_match_case")
         keyword_whole_word = _request_bool_arg("keyword_whole_word")
+        collection_id = request.args.get("collection_id", None, type=int)
         color_label = request.args.get("color_label", None)
         try:
             flag = _request_flag_filter()
@@ -5674,6 +5675,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 year=year, folder_id=folder_id, rating_min=rating_min, keyword=keyword,
                 keyword_match_case=keyword_match_case,
                 keyword_whole_word=keyword_whole_word,
+                collection_id=collection_id,
                 color_label=color_label, flag=flag,
                 location_status=location_status,
                 rules=rules,

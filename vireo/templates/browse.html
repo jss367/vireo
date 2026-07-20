@@ -4073,6 +4073,12 @@ async function loadCalendarData() {
   var params = new URLSearchParams();
   params.set('year', calendarYear);
   if (activeFolderId) params.set('folder_id', activeFolderId);
+  // Dashboard-scoped Browse composes the collection with active filters —
+  // without this the calendar shows counts from the whole workspace/folder
+  // and a day-click applies a date chip based on photos not in the collection.
+  if (activeCollectionId && dashboardCollectionScope) {
+    params.set('collection_id', activeCollectionId);
+  }
   var rules = getBrowseRules();
   if (rules) params.set('rules', JSON.stringify(rules));
 
@@ -4242,7 +4248,13 @@ function getClipSearchQuery() {
 function appendClipSearchScopeParams(params) {
   if (activeCollectionId) {
     params.set('collection_id', activeCollectionId);
-    return;
+    // Dashboard-scoped collection Browse composes the collection with the
+    // active rules/folder in the grid — CLIP/select-all search must match
+    // that scope. Backend intersects collection_id with rules/folder_id.
+    // Legacy collection view (activeCollectionId && !dashboardCollectionScope)
+    // clears activeCollectionId as soon as a filter is applied (see
+    // VireoFilter.init.onChange), so composing here is a no-op in that path.
+    if (!dashboardCollectionScope) return;
   }
   if (activeFolderId) params.set('folder_id', activeFolderId);
   var rules = getBrowseRules();
