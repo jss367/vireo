@@ -20767,22 +20767,33 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 f"({mount}) — the import would land directly on the NAS and "
                 "the chained move would duplicate it under the remote path; "
                 "pick a local archive folder outside the mount")
-        # The rendered template can still push the actual import folder onto
-        # the mount even when ``destination`` itself is safely outside — e.g.
-        # destination=/Users/me/Photos + folder_template="NAS/%Y" with a
-        # mount at /Users/me/Photos/NAS. strftime tokens make the exact render
-        # unknowable at request time, so treat any ``%``-bearing template
-        # component as a wildcard that could produce whatever the mount has
-        # at that depth (a ``%Y`` component can render "2026", ``%m`` can
-        # render "07", etc.). If the mount is at or under the destination
-        # and every mount component under the destination could be matched
-        # by the template's component at that depth (literal-equal or
-        # ``%``-bearing), some render will land at or under the mount and
-        # take the import onto the NAS the same way a mount-side destination
-        # would. Reject up front. Reducing this to only the leading static
-        # prefix, as the earlier guard did, would still accept the default
-        # ``%Y/%Y-%m-%d`` template against a ``.../2026`` mount even though
-        # the first render already lands on it.
+        # The rendered template can still put the import folder in the same
+        # tree as the mount even when ``destination`` itself is safely
+        # outside. Two overlapping failure modes:
+        #   (a) The render lands AT or UNDER the mount — e.g.
+        #       destination=/Users/me/Photos, folder_template="NAS/%Y",
+        #       mount=/Users/me/Photos/NAS. The import lands directly on
+        #       the NAS mount and the chained move duplicates it under
+        #       remote_path.
+        #   (b) The render lands ABOVE the mount so the mount ends up
+        #       INSIDE the import source tree — e.g. destination=/Photos,
+        #       folder_template="%Y", mount=/Photos/2026/07. The %Y render
+        #       creates ``/Photos/2026`` as the import folder; the chained
+        #       move then computes the NAS-side destination as
+        #       ``mount_path/2026`` = ``/Photos/2026/07/2026``, which is
+        #       INSIDE the source ``/Photos/2026`` so ``move_folder``
+        #       rejects mid-run and the photos sit in the local archive.
+        # strftime tokens make the exact render unknowable at request time,
+        # so treat any ``%``-bearing template component as a wildcard that
+        # could produce whatever the mount has at that depth (``%Y`` can
+        # render "2026", ``%m`` can render "07", etc.). If every overlap
+        # position matches (literal-equal or ``%``-bearing), SOME render
+        # will overlap the mount in one of the two directions above. An
+        # earlier guard that reduced this to only the leading static prefix
+        # would still accept the default ``%Y/%Y-%m-%d`` template against a
+        # ``.../2026`` mount, and one that gated on ``template depth >=
+        # mount depth`` would still accept ``%Y`` against a
+        # ``.../2026/07`` mount even though the first render wraps it.
         #
         # Normalize the template with ``os.path.normpath`` before splitting
         # so ``.`` components collapse the same way the import path does
@@ -20821,29 +20832,43 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             mount_rel_parts = [
                 c for c in mount_rel.split(os.sep) if c and c != ".."
             ]
-            if mount_rel_parts and (
-                    len(template_components) >= len(mount_rel_parts)):
-                # Substitute the mount's actual component for every
-                # ``%``-bearing template component: that render is the
-                # worst case that WOULD hit, and ``_path_equal_or_descends``
-                # will then say whether the alias-folded candidate lands
-                # inside the mount.
+            if mount_rel_parts and template_components:
+                # For each position in the overlap between template and
+                # mount, substitute the mount's actual component when the
+                # template component is a strftime wildcard; otherwise
+                # keep the template's literal. Any template component past
+                # the mount's depth extends the candidate below the mount
+                # (unknown %-bearing tails become a placeholder so the
+                # candidate stays inside the mount subtree for case (a)).
+                overlap = min(
+                    len(template_components), len(mount_rel_parts))
                 candidate_parts = [
                     mc if "%" in tc else tc
                     for tc, mc in zip(
-                        template_components, mount_rel_parts, strict=False)
+                        template_components[:overlap],
+                        mount_rel_parts[:overlap],
+                        strict=True,
+                    )
                 ]
+                for tc in template_components[overlap:]:
+                    candidate_parts.append("x" if "%" in tc else tc)
                 candidate = os.path.join(dest_real, *candidate_parts)
-                if _path_equal_or_descends(candidate, mount_real):
+                # Reject if the candidate lands AT/UNDER the mount (case
+                # a) OR wraps the mount (case b). ``_path_equal_or_descends``
+                # is alias-aware in both directions.
+                if _path_equal_or_descends(candidate, mount_real) \
+                        or _path_equal_or_descends(mount_real, candidate):
                     return None, json_error(
                         "folder_template can render the import into the "
-                        f"target's NAS mount ({mount}) — the components in "
-                        f"\"{folder_template}\" can produce a path matching "
-                        f"\"{mount_rel}\" under the destination, so some "
-                        "renders would land directly on the NAS and the "
-                        "chained move would duplicate them under the "
-                        "remote path; pick a template that stays outside "
-                        "the mount")
+                        f"same tree as the target's NAS mount ({mount}) — "
+                        f"the components in \"{folder_template}\" can "
+                        f"produce a path matching \"{mount_rel}\" under "
+                        "the destination, so some renders would land on "
+                        "the NAS or wrap the mount and the chained move "
+                        "would either duplicate them under the remote "
+                        "path or be refused as a destination inside the "
+                        "source; pick a template that stays outside the "
+                        "mount")
         dest_is_root = _path_equal_or_descends(root, destination)
         # Root-level import with a folder template that resolves to "." lands
         # photos on the local_archive_root itself. The chained move

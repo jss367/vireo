@@ -4078,12 +4078,33 @@ def test_after_process_move_rejects_strftime_template_landing_under_mount(
     })
     assert resp.status_code == 200, resp.get_json()
 
-    # Template shallower than mount ends above the mount every render —
-    # legal.
+    # Template shallower than the mount, but every template component can
+    # match the corresponding mount component at that depth: the render
+    # WRAPS the mount (import folder ends up as an ancestor of the mount).
+    # Example: mount=<root>/2026/07, template=%Y renders to <root>/2026,
+    # which contains the mount — the chained move computes the NAS-side
+    # destination as ``mount_path/2026`` = ``<root>/2026/07/2026``, INSIDE
+    # the source ``<root>/2026``, and ``move_folder`` rejects mid-run
+    # after the import and processing have already completed. Reject the
+    # combination up front.
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [card],
         "destination": str(root),
         "folder_template": "%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+
+    # Template shallower than the mount whose first component CAN'T match
+    # the mount's first component — the render lands elsewhere entirely,
+    # neither on nor around the mount. Legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots",
         "after_import": cull_ready_id,
         "after_process_move": {"remote_target_id": "nas1"},
     })
@@ -4199,6 +4220,77 @@ def test_after_process_move_rejects_case_alias_template_landing_under_mount(
     assert "NAS" in err
 
     # A literal component that cannot alias the mount leaf stays legal.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "shoots/%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 200, resp.get_json()
+
+
+def test_after_process_move_rejects_template_wrapping_mount(
+    app_and_db, tmp_path, stub_move,
+):
+    """The mount-depth gate accepted templates that render SHALLOWER than
+    the mount, on the theory that a render ending above the mount can't
+    land ON it. But when the shallower render's components all match the
+    mount's corresponding components (literal-equal or ``%``-bearing), the
+    render ends up as an ANCESTOR of the mount — the mount ends up inside
+    the import source tree. The chained move then computes the NAS-side
+    destination as ``mount_path/<rel>`` where ``<rel>`` is the import
+    folder's path relative to the archive root. That destination sits
+    strictly INSIDE the source folder (mount is under the source), and
+    ``move_folder`` refuses it as a destination-inside-source mid-run —
+    after the import and processing have already completed. Reject the
+    combination up front."""
+    import config as cfg
+    root = tmp_path / "Photos"
+    # local_archive_root broader than mount_path: mount nested TWO levels
+    # deeper than what the template renders.
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": str(root / "2026" / "07"),
+        "local_archive_root": str(root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db := app_and_db[1], "Cull-ready")
+    client = app_and_db[0].test_client()
+
+    # ``%Y`` renders to ``2026`` — the import folder becomes ``<root>/2026``
+    # and the mount ``<root>/2026/07`` sits INSIDE it. Chained move would
+    # target ``<root>/2026/07/2026`` (inside source) — reject up front.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "%Y",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount" in err
+    assert "2026" in err
+
+    # Literal shallower template that matches the mount's first component
+    # exactly wraps the mount too — reject.
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(root),
+        "folder_template": "2026",
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+
+    # Shallower template whose literal can't match the mount's first
+    # component — the render lands elsewhere, not on or around the mount.
+    # Legal.
     resp = client.post("/api/jobs/import-photos", json={
         "sources": [card],
         "destination": str(root),
