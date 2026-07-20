@@ -3845,12 +3845,35 @@ class Database:
                WHERE substr(REPLACE(path, '\\', '/'), 1, ?) = ?""",
             (len(_subtree_prefix(old_path)), _subtree_prefix(old_path)),
         ).fetchall()
+        rebased_paths = [(old_path, new_path)]
         for child in children:
             child_new = _join_subtree_path(
                 new_path, _subtree_relative(child["path"], old_path)
             )
             self.conn.execute(
                 "UPDATE folders SET path = ? WHERE id = ?", (child_new, child["id"])
+            )
+            rebased_paths.append((child["path"], child_new))
+        # Cascade the rename into ``photos.last_move_source_folder_path`` too.
+        # That column stores the STORED source folder path a destination photo
+        # was moved from, and the same-stem developed-render collision guard
+        # in ``move_photos`` (see ``destination_stem_origins``) compares it to
+        # a candidate move's ``src_dir``. Without this cascade, renaming the
+        # source folder frees its old path for reuse — e.g. a card remounted
+        # at ``/CARD`` after its earlier folder row was renamed to
+        # ``/CARD.bak`` — and a new unrelated photo scanned back at ``/CARD``
+        # would compare equal to the stale stored origin and slip past the
+        # collision guard, letting two unrelated destination rows share the
+        # developed-output lookup by folder+stem. Rebasing preserves the real
+        # provenance relationship: the destination photo still shares its
+        # render with any sibling that stays behind in the RENAMED folder.
+        for prior_path, updated_path in rebased_paths:
+            if prior_path == updated_path:
+                continue
+            self.conn.execute(
+                "UPDATE photos SET last_move_source_folder_path = ? "
+                "WHERE last_move_source_folder_path = ?",
+                (updated_path, prior_path),
             )
         self.conn.commit()
 

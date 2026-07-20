@@ -1310,6 +1310,88 @@ def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
     assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
 
 
+def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
+    """Renaming/moving a source folder via ``move_folder_path`` (e.g. the
+    whole-folder move flow) frees the old path for reuse. Without cascading
+    the rename into ``photos.last_move_source_folder_path``, a new unrelated
+    folder later scanned at the freed path would compare equal to the stale
+    stored origin and slip past the same-stem developed-render collision
+    guard in ``move_photos``, letting two unrelated destination rows share
+    the developed-output lookup by folder+stem. The cascade must rebase the
+    stored provenance so it still points at the renamed folder — preserving
+    the shared-render relationship with siblings that stay behind — and
+    stops matching against any future occupant of the freed path.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    reusable_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    reusable_path.mkdir()
+    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_file = reusable_path / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(reusable_path)
+    )
+
+    # Rename the original source folder in the catalog (mirrors what the
+    # whole-folder move flow does before the on-disk directory is moved
+    # out). The old path is now free for reuse.
+    renamed_path = tmp_path / "CARD.bak"
+    reusable_path.rename(renamed_path)
+    db.move_folder_path(original_fid, str(renamed_path), new_name="CARD.bak")
+
+    # The provenance must have been rebased to the new path, not left
+    # pointing at the freed one.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(renamed_path)
+    )
+
+    # A brand-new folder appears at the freed path with an unrelated photo
+    # that happens to share the stem.
+    reusable_path.mkdir()
+    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
+    db.add_workspace_folder(ws_id, replacement_fid)
+    incoming_file = reusable_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=replacement_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The new folder shares the freed path, but the provenance was rebased
+    # onto the renamed folder, so the collision guard rejects rather than
+    # merging two unrelated content trees onto one destination folder+stem.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+
+
 def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
     """Regression: ``os.makedirs(destination, exist_ok=True)`` raises
     ``FileExistsError`` when the path exists as a regular file, so a
