@@ -464,6 +464,55 @@ def test_single_photo_flag_blocked_while_bulk_reject_pending(live_server, page):
     assert _flags(db, photo_ids) == ["rejected"] * 4
 
 
+def test_single_photo_flag_blocked_while_bulk_undo_pending(live_server, page):
+    """Undo restores are bulk writes too, so they must retain the photo-ID
+    lock until every prior flag has been restored."""
+    db = live_server["db"]
+    photo_ids = live_server["data"]["photos"][:4]
+    _write_grouped_pipeline_cache(live_server, photo_ids)
+
+    page.goto(f"{live_server['url']}/pipeline/review")
+    burst_button = page.get_by_test_id("reject-burst").first
+    burst_button.click()
+    expect(page.locator("#undoMsg")).to_have_text("Rejected 2 photos in burst")
+    assert _flags(db, photo_ids) == ["rejected", "rejected", "none", "none"]
+
+    held = {}
+
+    def handle_batch_flag(route):
+        if "route" not in held:
+            held["route"] = route
+            return
+        route.continue_()
+
+    page.route("**/api/batch/flag", handle_batch_flag)
+    page.locator("#undoToast .undo-toast-btn").click()
+
+    deadline = time.time() + 5
+    while "route" not in held and time.time() < deadline:
+        page.wait_for_timeout(50)
+    assert "route" in held, "expected the undo batch write to be held"
+
+    page.evaluate(
+        "([photoId]) => window.setFlagFor(photoId, 'flagged')",
+        [photo_ids[0]],
+    )
+
+    expect(
+        page.get_by_text(
+            "A bulk reject for this photo is still finishing", exact=False
+        )
+    ).to_be_visible()
+    assert _flags(db, photo_ids) == ["rejected", "rejected", "none", "none"]
+
+    held["route"].continue_()
+
+    expect(
+        page.get_by_text("Restored previous flags for burst", exact=True)
+    ).to_be_visible()
+    assert _flags(db, photo_ids) == ["none"] * 4
+
+
 def test_encounter_reject_respects_active_label_filter(live_server, page):
     """Same guarantee as the burst-level test, but for the encounter-level
     Reject/Clear button: hidden KEEP frames stay untouched when the Review

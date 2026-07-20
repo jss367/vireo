@@ -3799,6 +3799,18 @@ function restorePipelineReviewFlags(previousFlags, noun) {
     var flag = normalizedPipelineReviewFlag(previousFlags[pid]);
     byFlag[flag].push(parseInt(pid, 10));
   });
+  var ids = Object.keys(previousFlags).map(function(pid) { return parseInt(pid, 10); });
+  // Undo is another bulk flag write and must hold the same photo-ID lock as
+  // the forward action. Otherwise a pick/reject started while these restore
+  // requests are running can be overwritten by the older snapshot.
+  var overlaps = ids.some(function(pid) {
+    return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+  });
+  if (overlaps) {
+    showToast('Another flag change is still finishing — try Undo again in a moment', 'error');
+    return Promise.resolve();
+  }
+  ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.add(pid); });
   var sequence = Promise.resolve();
   ['none', 'flagged', 'rejected'].forEach(function(flag) {
     if (!byFlag[flag].length) return;
@@ -3818,6 +3830,8 @@ function restorePipelineReviewFlags(previousFlags, noun) {
     renderResults();
     showToast('Restored previous flags for ' + noun, 'success');
     refreshLatestScopeSnapshotIfCurrent();
+  }).finally(function() {
+    ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.delete(pid); });
   });
 }
 
