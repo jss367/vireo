@@ -2414,6 +2414,7 @@ def test_move_folder_prefers_discovered_gnu_rsync(move_env, monkeypatch):
 
     env = move_env
     captured = {}
+    monkeypatch.setattr(move_mod.sys, "platform", "darwin")
     monkeypatch.setattr(
         move_mod, "resolve_rsync_bin", lambda configured="": "/gnu/rsync",
     )
