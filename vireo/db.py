@@ -262,6 +262,57 @@ def _chunks(values, size=_SQLITE_PARAM_CHUNK_SIZE):
         yield values[idx:idx + size]
 
 
+# Life-list ancestor suppression. Broadening the identification-keyword
+# rank guard admits linked genus/family/class rows, but Lightroom catalog
+# imports copy every ``includeParents`` ancestor onto the photo as a flat
+# keyword (see ``vireo/catalog.py``) and the classifier already treats
+# ancestor tags as "broader labels for the same taxon" rather than
+# separate identifications (see ``_can_auto_accept_detection_prediction``
+# in ``vireo/classify_job.py``). Without a hierarchy filter, a normal
+# species-tagged robin would also inflate ``Turdus`` / ``Turdidae`` /
+# ``Aves`` Life List buckets on those catalogs.
+#
+# Suppress a linked higher-rank taxonomy keyword on a photo whenever the
+# same photo carries another linked taxonomy keyword whose taxon is a
+# strict descendant of it. Species-rank keywords are never suppressed;
+# unlinked keywords (``taxon_id IS NULL``) can't be checked for ancestry
+# and pass through unchanged. The clause references outer aliases
+# ``pk`` (photo_keywords) and ``k`` (keywords); callers don't need to
+# join ``taxa`` themselves because the rank/ancestry checks resolve
+# ``k.taxon_id`` via inner subqueries.
+_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE = """
+    AND NOT (
+        k.taxon_id IS NOT NULL
+        AND EXISTS (
+            SELECT 1 FROM taxa t_sup_rank
+            WHERE t_sup_rank.id = k.taxon_id
+              AND t_sup_rank.rank IS NOT NULL
+              AND t_sup_rank.rank != 'species'
+        )
+        AND EXISTS (
+            SELECT 1 FROM photo_keywords pk_sup
+            JOIN keywords k_sup ON k_sup.id = pk_sup.keyword_id
+             AND (k_sup.is_species = 1 OR k_sup.type = 'taxonomy')
+             AND k_sup.taxon_id IS NOT NULL
+            WHERE pk_sup.photo_id = pk.photo_id
+              AND k_sup.id != k.id
+              AND k.taxon_id IN (
+                  WITH RECURSIVE anc(id) AS (
+                      SELECT parent_id FROM taxa
+                       WHERE id = k_sup.taxon_id
+                         AND parent_id IS NOT NULL
+                      UNION ALL
+                      SELECT t_anc.parent_id
+                      FROM taxa t_anc JOIN anc a ON t_anc.id = a.id
+                       WHERE t_anc.parent_id IS NOT NULL
+                  )
+                  SELECT id FROM anc
+              )
+        )
+    )
+"""
+
+
 # Canonical set of keyword type values stored in keywords.type.
 # - taxonomy: a species/genus/etc. (linked to taxa via taxon_id)
 # - individual: a named person, pet, or otherwise tracked individual
@@ -9747,28 +9798,18 @@ class Database:
                         ")",
                         (taxon_id, existing["id"], taxon_id),
                     )
-                else:
-                    # No species-rank taxon available. Clear a stale
-                    # non-species taxon_id (e.g. a legacy row bound to
-                    # the genus/family from the old species-agnostic
-                    # lookup) so the row falls under the readers'
-                    # ``t.rank IS NULL`` branch until a genuine
-                    # species-rank match becomes available. Without
-                    # this the is_species/taxonomy promotion below
-                    # still succeeds, but every downstream
-                    # ``t.rank = 'species' OR t.rank IS NULL`` filter
-                    # (Life List, Compare, Explorer, highlight /
-                    # preference eligibility) silently hides the
-                    # just-accepted keyword.
-                    self.conn.execute(
-                        "UPDATE keywords SET taxon_id = NULL "
-                        "WHERE id = ? AND type IN ('general', 'taxonomy') "
-                        "AND taxon_id IS NOT NULL "
-                        "AND COALESCE("
-                        "  (SELECT rank FROM taxa WHERE id = keywords.taxon_id), ''"
-                        ") != 'species'",
-                        (existing["id"],),
-                    )
+                # Preserve an existing higher-rank ``taxon_id`` when no
+                # species-rank replacement is available. Earlier revisions
+                # cleared the link so the row would fall under the old
+                # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
+                # Life List, Compare, and highlight/preference eligibility.
+                # Those readers now accept linked higher-rank identifications
+                # (see :meth:`get_life_list_candidates` and
+                # :meth:`get_life_list_locations`), so clearing here would
+                # strip the row's ``taxon_rank`` / ``scientific_name`` /
+                # ``taxonomic_class`` metadata and silently break the new
+                # genus / family / class Life List filters — mirroring the
+                # startup preservation in :meth:`mark_species_keywords`.
             if kw_type is None and not is_species and existing["type"] == "general":
                 taxon_id = self._lookup_taxon_id_for_keyword(
                     name, prefer_species=True,
@@ -12856,12 +12897,25 @@ class Database:
         return rows
 
     def get_life_list_candidates(self, species=None):
-        """Return (photo x accepted-species-keyword) rows for the life list.
+        """Return (photo x accepted-identification-keyword) life-list rows.
 
         Every non-rejected photo in a workspace-visible folder carrying an
-        accepted species keyword (``is_species = 1`` or ``type = 'taxonomy'``)
-        produces one row per species keyword. Taxonomy names ride along from
-        ``taxa`` when the keyword is linked.
+        accepted identification keyword (``is_species = 1`` or
+        ``type = 'taxonomy'``) produces one row per keyword. Taxonomy names
+        and ranks ride along from ``taxa`` when the keyword is linked. Linked
+        higher-rank identifications are included so the Life List can show and
+        filter genus-, family-, and other non-species-level observations; the
+        Explorer continues to count only species-rank taxa through
+        :meth:`get_life_list_taxon_ids`.
+
+        A linked higher-rank taxonomy keyword is suppressed when the same
+        photo carries another linked taxonomy keyword whose taxon is a
+        strict descendant of it, so a species-tagged robin also carrying
+        Lightroom-imported ``includeParents`` ancestors (``Turdus`` /
+        ``Turdidae`` / ``Aves``) or classifier-added broader labels does
+        not inflate every ancestor rank's Life List bucket. See
+        :data:`_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE` for the shared
+        SQL fragment.
 
         Unlike :meth:`get_highlights_candidates`, photos without a
         ``quality_score`` are included — a species the user confirmed but
@@ -12923,8 +12977,8 @@ class Database:
                 AND f.status IN ('ok', 'partial')
                LEFT JOIN taxa t ON t.id = k.taxon_id
                WHERE COALESCE(p.flag, 'none') != 'rejected'
-                 AND (t.rank = 'species' OR t.rank IS NULL)
                  {species_filter}
+                 {_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                ORDER BY k.name, p.timestamp""",
             params,
         ).fetchall()
@@ -13114,15 +13168,27 @@ class Database:
         return dict(row) if row else None
 
     def get_photo_life_list_species(self, photo_id):
-        """Return this photo's lifelist-eligible species names in the active
-        workspace, ordered by name.
+        """Return this photo's lifelist-eligible identification names in the
+        active workspace, ordered by name.
 
         Same eligibility rule as :meth:`get_life_list_candidates`: an accepted
-        species keyword (``is_species = 1`` or ``type = 'taxonomy'``) on a
-        non-rejected photo in a workspace-visible folder. Returns ``[]`` when
-        the photo carries no such species (or is rejected / outside the
-        workspace), which is exactly when no "Add to Life List" affordance
-        should appear.
+        identification keyword (``is_species = 1`` or ``type = 'taxonomy'``)
+        on a non-rejected photo in a workspace-visible folder. Returns ``[]``
+        when the photo carries no such identification (or is rejected /
+        outside the workspace), which is exactly when no "Set Representative"
+        affordance should appear. Linked higher-rank taxonomy identifications
+        (genus, family, class, …) are included for the same reason they are
+        in :meth:`get_life_list_candidates` — so a photo tagged only with a
+        higher-rank identification exposes the shared representative row and
+        can complete ``POST /api/photo-preferences`` for the entry it
+        actually appears under on the Life List.
+
+        Ancestor suppression mirrors :meth:`get_life_list_candidates`: a
+        linked higher-rank taxonomy keyword on the photo is hidden when
+        the photo also carries another linked taxonomy keyword whose
+        taxon is a strict descendant of it, so the shared Set
+        Representative row surfaces only under the specific
+        identification the photo actually resolves to.
 
         Linked-taxon hierarchy leaves are canonicalized to the same-taxon
         root keyword's stored spelling — mirroring
@@ -13152,11 +13218,10 @@ class Database:
         """
         ws = self._ws_id()
         rows = self.conn.execute(
-            """SELECT k.name, k.parent_id, k.taxon_id
+            f"""SELECT k.name, k.parent_id, k.taxon_id
                FROM photo_keywords pk
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
-               LEFT JOIN taxa t ON t.id = k.taxon_id
                JOIN photos p ON p.id = pk.photo_id
                 AND COALESCE(p.flag, 'none') != 'rejected'
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
@@ -13164,7 +13229,7 @@ class Database:
                JOIN folders f ON f.id = p.folder_id
                 AND f.status IN ('ok', 'partial')
                WHERE pk.photo_id = ?
-                 AND (t.rank = 'species' OR t.rank IS NULL)
+                 {_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                ORDER BY CASE WHEN k.parent_id IS NULL THEN 1 ELSE 0 END,
                         k.id""",
             (ws, photo_id),
@@ -13202,19 +13267,30 @@ class Database:
         return sorted(chosen.values(), key=lambda n: keyword_match_key(n))
 
     def get_life_list_locations(self, species=None):
-        """Return {species name: [location keyword names]} for the life list.
+        """Return {identification name: [location keyword names]} for the life list.
 
-        A location is attributed to a species when at least one
-        workspace-visible, non-rejected photo carries both the species
-        keyword and a ``type = 'location'`` keyword.
+        A location is attributed to an identification when at least one
+        workspace-visible, non-rejected photo carries both the
+        identification keyword and a ``type = 'location'`` keyword.
+        Higher-rank taxonomy identifications (genus, family, class, …) are
+        eligible here for the same reason they are in
+        :meth:`get_life_list_candidates` — so a genus-level entry rendered
+        on the Life List keeps its location chips and CSV values instead of
+        appearing with an empty ``locations`` list.
 
-        When ``species`` is given, only that species is scanned — used by
-        the single-species paging endpoint so incremental loads don't do
-        catalog-wide work. Matching mirrors
+        When ``species`` is given, only that identification is scanned —
+        used by the single-identification paging endpoint so incremental
+        loads don't do catalog-wide work. Matching mirrors
         :meth:`get_life_list_candidates`: raw ``k.name`` first, then a
         taxon-linked root fallback so a hierarchy leaf surviving repair
         (``verdin`` vs canonical root ``Verdin``) still contributes its
         location keywords to the requested bucket.
+
+        Ancestor suppression also mirrors :meth:`get_life_list_candidates`:
+        a linked higher-rank taxonomy keyword's locations are dropped
+        when the same photo carries another linked taxonomy keyword whose
+        taxon is a strict descendant of it, so ``Aves`` doesn't inherit
+        every location where a robin was tagged.
         """
         ws = self._ws_id()
         species_filter = ""
@@ -13242,7 +13318,6 @@ class Database:
                JOIN keywords k ON k.id = pk.keyword_id
                 AND (k.is_species = 1 OR k.type = 'taxonomy')
                 {species_filter}
-               LEFT JOIN taxa t ON t.id = k.taxon_id
                JOIN photos p ON p.id = pk.photo_id
                 AND COALESCE(p.flag, 'none') != 'rejected'
                JOIN workspace_folders wf ON wf.folder_id = p.folder_id
@@ -13252,7 +13327,8 @@ class Database:
                JOIN photo_keywords plk ON plk.photo_id = p.id
                JOIN keywords lk ON lk.id = plk.keyword_id
                 AND lk.type = 'location'
-               WHERE t.rank = 'species' OR t.rank IS NULL
+               WHERE 1=1
+                 {_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                ORDER BY k.name, lk.name""",
             tuple(params),
         ).fetchall()
@@ -13295,25 +13371,31 @@ class Database:
         eligibility_filter = ""
         if eligible_only:
             # Accept a hierarchy leaf whose taxon links back to a root
-            # species with the curation-keyed name. After
+            # identification with the curation-keyed name. After
             # repair_duplicate_photo_species detaches a redundant root but
             # leaves the hierarchical leaf attached, the leaf's stored
             # spelling may differ from the root ("verdin" vs "Verdin"), yet
-            # the photo still represents the same species via a shared
-            # taxon_id. An exact k.name = sr.species compare would then
-            # silently drop that photo from Life List / Representative
+            # the photo still represents the same identification via a
+            # shared taxon_id. An exact k.name = sr.species compare would
+            # then silently drop that photo from Life List / Representative
             # eligibility even though curation was intentionally preserved
             # on the root key.
-            # Restrict the eligibility EXISTS to species-rank taxonomy rows.
-            # `mark_species_keywords` stamps `is_species=1`/`type='taxonomy'`
-            # regardless of the linked taxon's rank, so a genus/family
-            # keyword whose display name happens to match a species curation
-            # key (e.g. a genus row named `Puma`) would otherwise satisfy
-            # eligibility for the `Puma` species representative even though
-            # sibling queries (get_life_list_candidates, get_species_keywords_for_photos,
-            # etc.) exclude the photo from the species bucket via the same
-            # `(t.rank = 'species' OR t.rank IS NULL)` guard.
-            eligibility_filter = """
+            # Eligibility mirrors :meth:`get_life_list_candidates`,
+            # :meth:`get_photo_life_list_species`, and
+            # ``_photo_can_be_life_list_preference`` — all admit linked
+            # higher-rank taxonomy identifications (genus, family, class,
+            # …). Without this, a just-saved representative for a
+            # higher-rank Life List entry would be dropped by the
+            # eligible-only reader that ``GET /api/photos/<id>`` uses to
+            # decide ``is_current_photo``, so the shared Set Representative
+            # affordance would keep offering the write even after it had
+            # already succeeded. The shared ancestor-suppression clause is
+            # appended so an ancestor keyword (``Aves``) does not survive
+            # eligibility when the same photo also carries a descendant
+            # identification (``American Robin``) — otherwise the class
+            # bucket the Life List query already hides would still show a
+            # current representative here.
+            eligibility_filter = f"""
                  AND COALESCE(p.flag, 'none') != 'rejected'
                  AND f.status IN ('ok', 'partial')
                  AND EXISTS (
@@ -13321,9 +13403,7 @@ class Database:
                      FROM photo_keywords pk
                      JOIN keywords k ON k.id = pk.keyword_id
                       AND (k.is_species = 1 OR k.type = 'taxonomy')
-                     LEFT JOIN taxa t ON t.id = k.taxon_id
                      WHERE pk.photo_id = sr.photo_id
-                       AND (t.rank = 'species' OR t.rank IS NULL)
                        AND (
                            k.name = sr.species
                            OR (
@@ -13338,6 +13418,7 @@ class Database:
                                )
                            )
                        )
+                       {_LIFE_LIST_ANCESTOR_SUPPRESSION_CLAUSE}
                  )"""
         species_filter = ""
         params = [ws]
@@ -18902,15 +18983,17 @@ class Database:
         Matching rows get ``is_species=1``, ``type='taxonomy'``, and (if the
         local taxa table is populated and the lookup resolves to a
         species-rank taxon) a ``taxon_id`` link by iNaturalist id.
-        ``taxon_id`` is left NULL when only a higher-rank (genus/family)
-        match exists — binding to a non-species-rank taxon would satisfy the
-        marking pass but make the row invisible to every rank-filtered
-        reader that restricts to ``t.rank = 'species' OR t.rank IS NULL``.
-        A ``type='taxonomy'`` row whose ``taxon_id`` was bound by the old
-        species-agnostic lookup to a non-species-rank taxon (genus/family)
-        is rebound to the species-rank taxon whenever ``taxonomy.lookup``
-        resolves to one; otherwise the new ``rank = 'species'`` filters
-        would silently drop every photo carrying the accepted keyword.
+        ``taxon_id`` is left NULL when the row had no prior link and only
+        a higher-rank (genus/family) match exists — binding an unlinked
+        row to a non-species-rank taxon would auto-promote it in a way the
+        classifier callers never asked for. A ``type='taxonomy'`` row
+        whose ``taxon_id`` was bound by the old species-agnostic lookup
+        to a non-species-rank taxon (genus/family) is rebound to the
+        species-rank taxon whenever ``taxonomy.lookup`` resolves to one;
+        when no species-rank replacement exists, the higher-rank link is
+        preserved so ``get_life_list_candidates`` can keep surfacing the
+        row's ``taxon_rank`` / ``scientific_name`` / ``taxonomic_class``
+        metadata for genus/family/class Life List filters.
 
         Uses the local taxonomy only (no network requests).
 
@@ -18983,23 +19066,18 @@ class Database:
                 and lookup_local_id != kw["taxon_id"]
             ):
                 rebind_taxon_id = lookup_local_id
-            # When the existing binding is non-species-rank and no
-            # species-rank replacement is available, clear ``taxon_id`` to
-            # NULL. Leaving the higher-rank link in place would satisfy
-            # ``mark_species_keywords`` but make the row invisible to
-            # every rank-filtered reader (Life List, Compare,
-            # highlight/preference eligibility) that restricts to
-            # ``t.rank = 'species' OR t.rank IS NULL``; NULLing it lets
-            # the accepted keyword stay visible via the ``rank IS NULL``
-            # fallback until a species-rank taxon becomes available,
-            # mirroring ``add_keyword``'s reuse-path clearing (see
-            # ``test_add_species_clears_higher_rank_taxon_when_no_species_match``).
-            should_clear_taxon = (
-                kw["taxon_id"] is not None
-                and kw["taxon_rank"] is not None
-                and kw["taxon_rank"] != "species"
-                and rebind_taxon_id is None
-            )
+            # Preserve an existing higher-rank ``taxon_id`` when no
+            # species-rank replacement is available. Earlier revisions
+            # cleared the link to keep the row visible under the old
+            # ``t.rank = 'species' OR t.rank IS NULL`` filters used by
+            # Life List, Compare, and highlight/preference eligibility.
+            # Those readers now accept linked higher-rank identifications
+            # (see :meth:`get_life_list_candidates` and
+            # :meth:`get_life_list_locations`), so clearing on startup
+            # would strip the row's ``taxon_rank`` / ``scientific_name`` /
+            # ``taxonomic_class`` metadata and silently break the new
+            # genus / family / class Life List filters after the first
+            # restart.
             # Skip no-op updates so the "updated" count reflects real
             # changes. A matched row is fully consistent when type is
             # 'taxonomy', is_species is 1, and (taxon_id is already set to
@@ -19013,7 +19091,6 @@ class Database:
                 or is_species_fix
                 or is_taxon_link
                 or is_rebind
-                or should_clear_taxon
             ):
                 continue
             if is_rebind:
@@ -19021,12 +19098,6 @@ class Database:
                     "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
                     "taxon_id = ? WHERE id = ?",
                     (rebind_taxon_id, kw["id"]),
-                )
-            elif should_clear_taxon:
-                self.conn.execute(
-                    "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
-                    "taxon_id = NULL WHERE id = ?",
-                    (kw["id"],),
                 )
             else:
                 self.conn.execute(

@@ -19245,18 +19245,18 @@ def test_add_species_leaves_taxon_null_when_only_higher_rank_matches(tmp_path):
     assert row["taxon_id"] is None
 
 
-def test_add_species_clears_higher_rank_taxon_when_no_species_match(tmp_path):
-    """A pre-existing keyword row bound to a higher-rank taxon
-    (e.g. a legacy row stamped with the genus/family taxon before
-    ``prefer_species`` existed) must have that stale non-species
-    ``taxon_id`` cleared to NULL when the next species accept cannot
-    find a species-rank match. Without the clear the reuse branch
-    leaves the higher-rank binding in place while the taxonomy
-    promotion below still stamps ``is_species = 1``/``type =
-    'taxonomy'``, so every rank-filtered reader (Life List,
-    Compare, Explorer, highlight/preference eligibility) that
-    restricts to ``t.rank = 'species' OR t.rank IS NULL`` silently
-    hides the just-accepted keyword.
+def test_add_species_preserves_higher_rank_taxon_when_no_species_match(tmp_path):
+    """A pre-existing keyword row bound to a valid higher-rank taxon
+    (e.g. a ``Corvidae`` family observation) must keep that
+    ``taxon_id`` when the next species-typed accept cannot find a
+    species-rank match. ``get_life_list_candidates`` and
+    ``get_life_list_locations`` now surface linked higher-rank
+    identifications so their ``taxon_rank`` / ``scientific_name`` /
+    ``taxonomic_class`` metadata powers the new genus / family /
+    class Life List filters; clearing the ``taxon_id`` here would
+    strip that metadata on the next normal keyword edit and silently
+    break those filters — mirroring the preservation guarantee that
+    :meth:`mark_species_keywords` gives on startup.
     """
     from db import Database
 
@@ -19273,21 +19273,18 @@ def test_add_species_clears_higher_rank_taxon_when_no_species_match(tmp_path):
         "SELECT id FROM taxa WHERE rank = 'family'"
     ).fetchone()["id"]
 
-    # Legacy row: correctly typed taxonomy species but bound to the
-    # non-species-rank family taxon by the old species-agnostic lookup.
-    kid = db.add_keyword("Corvidae", is_species=True)
-    db.conn.execute(
-        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
-        (family_taxon, kid),
+    # Fully typed taxonomy row linked to a valid higher-rank taxon.
+    # ``add_keyword`` is species-preferring on insert, so bypass it
+    # with direct SQL to simulate the upgraded catalog.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Corvidae', 'taxonomy', 1, ?)",
+        (family_taxon,),
     )
+    kid = cur.lastrowid
     db.conn.commit()
-    pre = db.conn.execute(
-        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
-    ).fetchone()
-    assert pre["taxon_id"] == family_taxon
 
-    # Accepting again with is_species=True should clear the stale
-    # higher-rank binding rather than leaving it in place.
+    # Re-adding as a taxonomy keyword must NOT clear the family link.
     same = db.add_keyword("Corvidae", is_species=True)
     assert same == kid
     row = db.conn.execute(
@@ -19296,7 +19293,19 @@ def test_add_species_clears_higher_rank_taxon_when_no_species_match(tmp_path):
     ).fetchone()
     assert row["is_species"] == 1
     assert row["type"] == "taxonomy"
-    assert row["taxon_id"] is None
+    assert row["taxon_id"] == family_taxon
+
+    # The same guarantee must hold for the kw_type='taxonomy' variant
+    # taken by other callers.
+    same_typed = db.add_keyword("Corvidae", kw_type="taxonomy")
+    assert same_typed == kid
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["is_species"] == 1
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == family_taxon
 
 
 def test_mark_species_keywords_rebinds_higher_rank_taxonomy_link(tmp_path):
@@ -19460,19 +19469,16 @@ def test_mark_species_keywords_keeps_species_taxon_when_only_higher_rank_availab
     assert row["taxon_id"] == species_taxon
 
 
-def test_mark_species_keywords_clears_higher_rank_taxon_when_no_species_match(tmp_path):
-    """A fully typed taxonomy row already bound by the old species-agnostic
-    lookup to a higher-rank taxon (genus/family) must have its stale
-    non-species ``taxon_id`` cleared to NULL on the next
+def test_mark_species_keywords_preserves_higher_rank_taxon_when_no_species_match(tmp_path):
+    """A fully typed taxonomy row already linked to a higher-rank taxon
+    (genus/family/class) must retain that link on the next
     ``mark_species_keywords`` pass when no species-rank replacement is
-    available. Leaving the higher-rank link in place would satisfy the
-    marking pass but make the row invisible to every rank-filtered reader
-    (Life List, Compare, Explorer, highlight/preference eligibility) that
-    restricts to ``t.rank = 'species' OR t.rank IS NULL`` — clearing the
-    binding keeps the accepted keyword visible via the ``rank IS NULL``
-    fallback until a species-rank taxon becomes available. Mirrors
-    ``add_keyword``'s reuse-path clearing (see
-    ``test_add_species_clears_higher_rank_taxon_when_no_species_match``).
+    available. ``get_life_list_candidates`` and ``get_life_list_locations``
+    now surface linked higher-rank identifications so their
+    ``taxon_rank`` / ``scientific_name`` / ``taxonomic_class`` metadata
+    powers the new genus / family / class Life List filters; clearing
+    the ``taxon_id`` on startup would strip that metadata and silently
+    break those filters after the first restart.
     """
     from db import Database
 
@@ -19489,10 +19495,10 @@ def test_mark_species_keywords_clears_higher_rank_taxon_when_no_species_match(tm
         "SELECT id FROM taxa WHERE rank = 'family'"
     ).fetchone()["id"]
 
-    # Legacy row: fully typed taxonomy species but bound to the
-    # non-species-rank family taxon by the old species-agnostic lookup.
-    # add_keyword auto-promotes/clears on insert, so bypass it with
-    # direct SQL to simulate the upgraded catalog.
+    # Fully typed taxonomy row linked to a valid higher-rank taxon (a
+    # ``Corvidae`` family observation the user has accepted). add_keyword
+    # is species-preferring on insert, so bypass it with direct SQL to
+    # simulate the upgraded catalog.
     cur = db.conn.execute(
         "INSERT INTO keywords (name, type, is_species, taxon_id) "
         "VALUES ('Corvidae', 'taxonomy', 1, ?)",
@@ -19512,14 +19518,14 @@ def test_mark_species_keywords_clears_higher_rank_taxon_when_no_species_match(tm
             return self.lookup(name) is not None
 
     updated = db.mark_species_keywords(FakeTaxonomy())
-    assert updated == 1
+    assert updated == 0
     row = db.conn.execute(
         "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
         (kid,),
     ).fetchone()
     assert row["type"] == "taxonomy"
     assert row["is_species"] == 1
-    assert row["taxon_id"] is None
+    assert row["taxon_id"] == family_taxon
 
 
 def test_repair_duplicate_photo_species_preserves_highlight_eligibility(tmp_path):
@@ -19944,18 +19950,21 @@ def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_p
     )
 
 
-def test_curation_eligibility_rejects_higher_rank_taxonomy_homonym(tmp_path):
+def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
     """A linked higher-rank taxonomy keyword (e.g. a genus row named
-    ``Puma``) must not satisfy species-curation eligibility for the
-    matching species highlight or representative.
+    ``Puma``) is eligible for the identification-name-keyed
+    representative curation row that shares its stored spelling, but
+    not for the species-only ordered-highlights row keyed on the same
+    name.
 
-    ``mark_species_keywords`` stamps ``is_species=1``/``type='taxonomy'``
-    regardless of the linked taxon's rank, so without the same
-    ``(t.rank = 'species' OR t.rank IS NULL)`` guard used by sibling
-    species queries (``get_life_list_candidates``,
-    ``get_species_keywords_for_photos`` etc.), a genus-linked keyword
-    named ``Puma`` would keep a species ``Puma`` curation row eligible
-    for a photo that is no longer in the species bucket.
+    Representative eligibility mirrors the widened
+    :meth:`get_life_list_candidates`, :meth:`get_photo_life_list_species`,
+    and ``_photo_can_be_life_list_preference`` write path — the Life
+    List renders higher-rank identifications so their photos must
+    survive the ``eligible_only=True`` read that ``GET /api/photos/<id>``
+    uses to decide whether the shared Set-Representative button is
+    current. ``get_species_highlights`` remains species-only, because
+    the Highlights page still only surfaces species buckets.
     """
     from db import Database
 
@@ -19991,23 +20000,24 @@ def test_curation_eligibility_rejects_higher_rank_taxonomy_homonym(tmp_path):
     )
     db.tag_photo(pid, kid)
 
-    # Curation rows stored under the canonical "Puma" species key.
+    # Curation rows stored under the "Puma" identification key.
     db.set_species_representative("Puma", pid)
     db.add_species_highlight("Puma", pid)
     db.conn.commit()
 
-    # Sibling species queries already exclude the photo from the "Puma"
-    # species bucket because of the (t.rank='species' OR NULL) guard.
-    # The curation eligibility EXISTS must exclude it too — otherwise
-    # the representative/highlight remains eligible for a photo that
-    # nothing else considers a Puma species record.
+    # Representative eligibility matches the widened Life List siblings:
+    # the higher-rank homonym is a valid representative for the "Puma"
+    # entry the user actually renders under on the Life List.
     reps = db.get_species_representative_lists(eligible_only=True)
-    assert reps.get("Puma") in (None, []), (
-        "genus-rank taxonomy row named 'Puma' must not satisfy species "
-        "'Puma' representative eligibility"
+    assert reps.get("Puma") == [pid], (
+        "higher-rank homonym 'Puma' must satisfy 'Puma' representative "
+        "eligibility, matching the widened life-list write path"
     )
-    assert db.get_species_representatives(eligible_only=True) == {}
+    assert db.get_species_representatives(eligible_only=True) == {"Puma": pid}
 
+    # Highlights remain species-only. The Highlights page surfaces
+    # species buckets, so a genus-rank keyword named 'Puma' must not
+    # keep the species 'Puma' highlight eligible.
     highlights = db.get_species_highlights(eligible_only=True)
     assert pid not in highlights.get("Puma", {}), (
         "genus-rank taxonomy row named 'Puma' must not satisfy species "
@@ -20017,8 +20027,7 @@ def test_curation_eligibility_rejects_higher_rank_taxonomy_homonym(tmp_path):
     assert pid not in single.get("Puma", {})
 
     # Sanity check: when the row is rebound to the species-rank taxon,
-    # eligibility flips back on. Confirms the guard, not something
-    # else, is what excludes the row.
+    # even the species-only highlight eligibility flips on.
     species_taxon = db.conn.execute(
         "SELECT id FROM taxa WHERE rank = 'species'"
     ).fetchone()["id"]

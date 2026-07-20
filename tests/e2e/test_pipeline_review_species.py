@@ -1682,6 +1682,10 @@ def test_pipeline_review_species_confirm_ignores_duplicate_inflight_clicks(live_
     _write_confirmation_pipeline_cache(live_server, photo_ids)
 
     page.goto(f"{live_server['url']}/pipeline/review")
+    confirm_button = page.locator(
+        '[data-species-widget="1"][data-enc="1"] .species-confirm-btn'
+    ).first
+    confirm_button.wait_for(state="visible")
 
     page.evaluate(
         """
@@ -1722,9 +1726,7 @@ def test_pipeline_review_species_confirm_ignores_duplicate_inflight_clicks(live_
     )
 
     assert post_count == 1
-    expect(
-        page.locator('[data-species-widget="1"][data-enc="1"] .species-confirm-btn').first
-    ).to_be_disabled()
+    expect(confirm_button).to_be_disabled()
 
     page.evaluate("() => window.__resolveSpeciesPost()")
     page.evaluate("() => Promise.all(window.__confirmPromises)")
