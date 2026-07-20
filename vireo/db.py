@@ -17776,6 +17776,20 @@ class Database:
         def _falsey(value):
             return value is False or value == 0 or value == "0" or value == "false"
 
+        def _boolean_predicate(has_sql, op, value, params=None):
+            """Boolean-typed leaf builder used by every ``BOOLEAN_OPS`` field.
+
+            Guards ``op`` so a malformed rule such as
+            ``{"field":"has_edits","op":"contains","value":1}`` surfaces as a
+            ``ValueError`` (→ 400 at the API layer) instead of the silent
+            match the numeric branch already rejects — otherwise a client
+            can slip past the registry by inventing an op.
+            """
+            if op not in ("equals", "is", "is not"):
+                raise ValueError(f"unsupported boolean rule op: {op!r}")
+            affirmative = _truthy(value) if op in ("equals", "is") else not _truthy(value)
+            return (has_sql if affirmative else f"NOT ({has_sql})"), list(params or [])
+
         def _numeric_condition(column, op, value, allow_null=False):
             if op == ">=":
                 return f"{column} >= ?", [value]
@@ -18212,14 +18226,14 @@ class Database:
                     return "p.active_mask_variant LIKE ?", [f"%{value}%"]
             if field == "has_gps":
                 has = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
-                return (has if _truthy(value) else f"NOT ({has})"), []
+                return _boolean_predicate(has, op, value)
             if field == "has_location_keyword":
                 has = (
                     "EXISTS (SELECT 1 FROM photo_keywords pk "
                     "JOIN keywords k ON k.id = pk.keyword_id "
                     "WHERE pk.photo_id = p.id AND k.type = 'location')"
                 )
-                return (has if _truthy(value) else f"NOT {has}"), []
+                return _boolean_predicate(has, op, value)
             if field == "location_keyword_missing":
                 gps = "p.latitude IS NOT NULL AND p.longitude IS NOT NULL"
                 no_loc = (
@@ -18244,7 +18258,7 @@ class Database:
                     "WHERE p2.id != p.id AND p2.file_hash = p.file_hash "
                     "AND (p2.flag IS NULL OR p2.flag != 'rejected'))"
                 )
-                return (has if _truthy(value) else f"NOT ({has})"), []
+                return _boolean_predicate(has, op, value)
             if field in ("file_size", "width", "height", "focal_length",
                          "aperture", "shutter_speed", "iso"):
                 return _numeric_condition(f"p.{field}", op, value, allow_null=True)
@@ -18266,7 +18280,7 @@ class Database:
                     return "(p.burst_id IS NULL OR p.burst_id != ?)", [value]
             if field == "in_burst":
                 has = "p.burst_id IS NOT NULL"
-                return (has if _truthy(value) else f"NOT ({has})"), []
+                return _boolean_predicate(has, op, value)
             if field == "duplicate_group":
                 # Duplicate groups have no id table; membership is identity
                 # on file_hash (see find_duplicate_groups).
@@ -18277,7 +18291,7 @@ class Database:
             if field == "has_edits":
                 has = ("EXISTS (SELECT 1 FROM photo_edit_recipes per "
                        "WHERE per.photo_id = p.id)")
-                return (has if _truthy(value) else f"NOT {has}"), []
+                return _boolean_predicate(has, op, value)
             if field == "has_visual_index":
                 # Optional rule key "model" narrows to one embedding model.
                 # The universal-filter API layer injects the active visual
@@ -18286,14 +18300,6 @@ class Database:
                 # embeddings for the active model). Saved smart
                 # collections without a ``model`` keep matching any row —
                 # a portable "some embedding exists" check.
-                # Reject bad ops here rather than silently returning a
-                # boolean predicate — the registry advertises only ``is``
-                # for boolean fields, so a rule like
-                # ``{"field":"has_visual_index","op":"contains","value":1}``
-                # is a malformed request and should surface as 400 via the
-                # API's ValueError handler, not a 200 with unfiltered rows.
-                if op not in ("equals", "is", "is not"):
-                    raise ValueError(f"unsupported boolean rule op: {op!r}")
                 model = rule.get("model")
                 if model:
                     has = ("EXISTS (SELECT 1 FROM photo_embeddings pe "
@@ -18303,8 +18309,7 @@ class Database:
                     has = ("EXISTS (SELECT 1 FROM photo_embeddings pe "
                            "WHERE pe.photo_id = p.id)")
                     params = []
-                affirmative = _truthy(value) if op in ("equals", "is") else not _truthy(value)
-                return (has if affirmative else f"NOT {has}"), params
+                return _boolean_predicate(has, op, value, params)
             if field == "species":
                 # Confirmed species ride photo_keywords→keywords(→taxa);
                 # a photo with several species matches when ANY matches
@@ -18342,11 +18347,22 @@ class Database:
                         f"AND {sibling_pred}))))"
                     )
                 if op == "contains":
-                    like = f"%{value}%"
-                    return _species_exists("{name_col} LIKE ?"), [like, like]
+                    # Escape user LIKE metacharacters so ``%``/``_`` in the
+                    # value stay literal — matches the other text/folder
+                    # rules and blocks a ``value="%"`` request from matching
+                    # every species-tagged photo. Applied to both the
+                    # legacy ``k.name`` and same-taxon ``sib.name`` branches.
+                    like = f"%{_escape_like(str(value or ''))}%"
+                    return (
+                        _species_exists("{name_col} LIKE ? ESCAPE '\\'"),
+                        [like, like],
+                    )
                 if op == "not_contains":
-                    like = f"%{value}%"
-                    return "NOT " + _species_exists("{name_col} LIKE ?"), [like, like]
+                    like = f"%{_escape_like(str(value or ''))}%"
+                    return (
+                        "NOT " + _species_exists("{name_col} LIKE ? ESCAPE '\\'"),
+                        [like, like],
+                    )
                 if op in ("equals", "is"):
                     return _species_exists("{name_col} = ?"), [value, value]
                 if op == "is not":

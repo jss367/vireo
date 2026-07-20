@@ -20295,6 +20295,33 @@ def test_universal_filter_species_any_match(tmp_path):
     assert count([{"field": "species", "op": "contains", "value": "wetlands"}]) == 0
 
 
+def test_universal_filter_species_contains_escapes_like_metacharacters(tmp_path):
+    """``contains``/``not_contains`` on species must treat ``%``/``_`` in the
+    value as literal characters — otherwise a rule like
+    ``{"field":"species","op":"contains","value":"%"}`` matches every
+    species-tagged photo instead of only species whose name literally
+    contains ``%``. The other text/folder filters already escape LIKE
+    metacharacters; species did not, so a client could bypass the filter
+    by passing a wildcard."""
+    db, fid = _filter_db(tmp_path)
+    only = db.add_photo(folder_id=fid, filename='only.jpg', extension='.jpg',
+                        file_size=100, file_mtime=1.0)
+    heron = db.add_keyword('Great Blue Heron', is_species=True)
+    db.tag_photo(only, heron)
+
+    count = db.count_photos_for_rules
+    # A bare ``%`` used to match every species-tagged photo; after the fix
+    # it matches only species whose name literally contains ``%``.
+    assert count([{"field": "species", "op": "contains", "value": "%"}]) == 0
+    assert count([{"field": "species", "op": "contains", "value": "_"}]) == 0
+    # ``not_contains`` with a wildcard used to exclude every species-tagged
+    # photo; the escaped form leaves them included (nothing literally
+    # contains ``%``).
+    assert count([{"field": "species", "op": "not_contains", "value": "%"}]) == 1
+    # Sanity: normal literal substring still works.
+    assert count([{"field": "species", "op": "contains", "value": "Heron"}]) == 1
+
+
 def test_universal_filter_species_matches_root_via_taxon_of_hierarchy_leaf(tmp_path):
     """Species rules resolve through taxon identity — a photo tagged only
     with a hierarchy leaf whose linked taxon has a same-taxon top-level root
@@ -20367,9 +20394,18 @@ def test_universal_filter_workflow_fields(tmp_path):
     # An unsupported op on a boolean field must raise, not silently return
     # a truthy predicate — the API layer catches ValueError → 400 so
     # malformed requests surface as validation errors instead of a 200
-    # with unfiltered rows.
-    with pytest.raises(ValueError):
-        count([{"field": "has_visual_index", "op": "contains", "value": 1}])
+    # with unfiltered rows. Every registry-advertised boolean field must
+    # fail-closed the same way, not just ``has_visual_index``.
+    for bad in (
+        {"field": "has_visual_index", "op": "contains", "value": 1},
+        {"field": "has_edits", "op": "contains", "value": 1},
+        {"field": "in_burst", "op": "starts_with", "value": 1},
+        {"field": "has_gps", "op": "between", "value": [0, 1]},
+        {"field": "has_location_keyword", "op": "contains", "value": 1},
+        {"field": "is_duplicate", "op": ">=", "value": 1},
+    ):
+        with pytest.raises(ValueError):
+            count([bad])
     assert count([{"field": "in_burst", "op": "is", "value": 1}]) == 1
     assert count([{"field": "burst_id", "op": "is", "value": "B42"}]) == 1
     assert count([{"field": "duplicate_group", "op": "is", "value": "abc123"}]) == 1
