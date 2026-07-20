@@ -5340,15 +5340,25 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         index" means; smart-collection storage paths keep the rule
         verbatim so a saved collection stays portable across model
         switches.
+
+        When no active model is configured (fresh library, or every
+        installed model was removed while cached embeddings remain), the
+        UI-emitted rule must fail closed instead of falling through to
+        "any embedding row" — otherwise ``/api/photos/query`` would
+        report photos as visually indexed while ``/api/photos/search``
+        returns ``no_model``. Inject a sentinel model name that can never
+        match a stored ``photo_embeddings.model`` value, so
+        ``has_visual_index is true`` matches nothing and
+        ``has_visual_index is false`` matches everything — both correct
+        for "there is no usable visual index right now".
         """
         try:
             from models import get_active_model
             active = get_active_model()
         except Exception:
-            return rules
+            active = None
         model_name = active.get("name") if active else None
-        if not model_name:
-            return rules
+        injected_model = model_name or "__no_active_visual_model__"
 
         def _walk(node):
             if isinstance(node, dict):
@@ -5363,7 +5373,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         return node
                     return {**node, "rules": [_walk(r) for r in inner]}
                 if node.get("field") == "has_visual_index" and "model" not in node:
-                    return {**node, "model": model_name}
+                    return {**node, "model": injected_model}
                 return node
             if isinstance(node, list):
                 return [_walk(r) for r in node]

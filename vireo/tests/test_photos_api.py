@@ -9730,6 +9730,60 @@ def test_api_photos_query_has_visual_index_injects_active_model(app_and_db, monk
     assert filenames == ["bird1.jpg"]
 
 
+def test_api_photos_query_has_visual_index_fails_closed_without_active_model(
+    app_and_db, monkeypatch
+):
+    """When no active visual model is configured — fresh library or every
+    installed model was removed — a UI-emitted ``has_visual_index`` rule
+    (no ``model`` key) must fail closed: ``is true`` matches nothing and
+    ``is false`` matches everything. Otherwise the filter would keep
+    matching stale embeddings from a removed model while
+    ``/api/photos/search`` returns ``no_model``, so Browse and visual
+    search would disagree on what "has a visual index" means.
+    """
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    # Every photo has a stale embedding — the previously-active model was
+    # uninstalled but its rows remain in ``photo_embeddings``.
+    for filename in photos:
+        db.conn.execute(
+            "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+            "VALUES (?, 'removed-model', '', ?)",
+            (photos[filename], b"\x01"),
+        )
+    db.conn.commit()
+
+    import models as models_mod
+    monkeypatch.setattr(models_mod, "get_active_model", lambda: None)
+
+    client = app.test_client()
+    # ``is true`` must match nothing — there is no usable visual index.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1}],
+    })
+    assert resp.status_code == 200
+    assert resp.get_json()["photos"] == []
+
+    # ``is false`` must match every photo for the same reason.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 0}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == sorted(photos.keys())
+
+    # An explicit ``model`` in the rule is still honored — a saved smart
+    # collection with an old model name keeps working even when nothing is
+    # active, so it stays portable.
+    resp = client.post('/api/photos/query', json={
+        "rules": [{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "removed-model"}],
+    })
+    assert resp.status_code == 200
+    filenames = sorted(p["filename"] for p in resp.get_json()["photos"])
+    assert filenames == sorted(photos.keys())
+
+
 def test_api_photos_query_timestamp_gt_preserves_subsecond(app_and_db):
     """``timestamp > 2024-01-01T12:00:00`` must NOT pad the value to
     ``.999999`` — that would spuriously exclude sub-second photos in the
