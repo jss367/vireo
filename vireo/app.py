@@ -20717,6 +20717,26 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error(
                 "this remote target has no local archive root — set one "
                 "under Settings → Remote targets")
+        # The move-folder endpoint rejects a missing/relative mount_path
+        # (see api_job_move_folder), but only when the move job is created —
+        # for a chained run that's after the import and processing have
+        # already finished, so the photos would sit in the local archive
+        # despite the accepted chain. The move target is snapshotted here,
+        # so a Settings edit mid-run can't repair it either. Reject up front
+        # alongside the archive-root check.
+        mount = (target.get("mount_path") or "").strip()
+        if not mount:
+            return None, json_error(
+                "this remote target has no local mount path — the chained "
+                "move would have nowhere to land photos. Set one under "
+                "Settings → Remote targets")
+        if not os.path.isabs(mount):
+            return None, json_error(
+                "this remote target's local mount path isn't absolute "
+                f"(\"{mount}\") — the chained move would be repointed to a "
+                "path relative to the server's working directory and photos "
+                "would appear missing. Set an absolute mount path under "
+                "Settings → Remote targets")
         # Containment goes through move.py's alias-folding helper, not a raw
         # commonpath: on the default case-insensitive macOS/Windows volumes a
         # destination typed with different casing than the saved root (e.g.
@@ -20738,8 +20758,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         # remote_path/<mount leaf>/… — nesting duplicates instead of moving
         # local staging. The chain stages locally and moves TO the mount, so
         # a destination on the mount is never valid for it.
-        mount = (target.get("mount_path") or "").strip()
-        if mount and _path_equal_or_descends(destination, mount):
+        if _path_equal_or_descends(destination, mount):
             return None, json_error(
                 "destination is inside the target's NAS mount "
                 f"({mount}) — the import would land directly on the NAS and "

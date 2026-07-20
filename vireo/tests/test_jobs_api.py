@@ -3832,6 +3832,70 @@ def test_after_process_move_target_without_root(app_and_db, tmp_path):
     assert "local archive root" in resp.get_json()["error"]
 
 
+def test_after_process_move_target_without_mount_path(app_and_db, tmp_path):
+    """A target with a valid local_archive_root but an empty mount_path is
+    unusable for the chain — the move job would reject it, but only after
+    the import and processing have finished, stranding photos in the local
+    archive. Reject up front."""
+    import config as cfg
+    local_root = tmp_path / "archive"
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": "",
+        "local_archive_root": str(local_root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(local_root),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    assert "mount path" in resp.get_json()["error"]
+
+
+def test_after_process_move_target_with_relative_mount_path(
+        app_and_db, tmp_path):
+    """A relative mount_path would be resolved against the server's CWD by
+    later realpath calls — that's non-deterministic and never what the user
+    intended. Reject up front so the chain doesn't accept a target it can't
+    actually deliver to."""
+    import config as cfg
+    local_root = tmp_path / "archive"
+    target = {
+        "id": "nas1", "name": "NAS", "host": "nas.local", "user": "julius",
+        "remote_path": "/volume1/Photos",
+        "mount_path": "NAS",
+        "local_archive_root": str(local_root),
+    }
+    current = cfg.load()
+    current["remote_targets"] = [target]
+    cfg.save(current)
+    app, db = app_and_db
+    client = app.test_client()
+    card = _import_card(tmp_path)
+    cull_ready_id = _process_id(db, "Cull-ready")
+
+    resp = client.post("/api/jobs/import-photos", json={
+        "sources": [card],
+        "destination": str(local_root),
+        "after_import": cull_ready_id,
+        "after_process_move": {"remote_target_id": "nas1"},
+    })
+    assert resp.status_code == 400, resp.get_json()
+    err = resp.get_json()["error"]
+    assert "mount path" in err and "absolute" in err
+
+
 def test_after_process_move_destination_outside_root(app_and_db, tmp_path):
     app, db = app_and_db
     client = app.test_client()
