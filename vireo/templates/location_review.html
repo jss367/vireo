@@ -575,6 +575,33 @@ body {
     openLightbox(photo.id, photo.filename || '', group.photos.slice());
   }
 
+  function refreshGroupMetadata(group) {
+    if (!group || !group.photos.length) return;
+    var referenceLng = Number(group.photos[0].longitude);
+    var centerLat = group.photos.reduce(function(total, photo) {
+      return total + Number(photo.latitude);
+    }, 0) / group.photos.length;
+    var lngDeltas = group.photos.map(function(photo) {
+      return ((Number(photo.longitude) - referenceLng + 180) % 360 + 360) % 360 - 180;
+    });
+    var centerLng = ((referenceLng + lngDeltas.reduce(function(total, value) {
+      return total + value;
+    }, 0) / group.photos.length + 180) % 360 + 360) % 360 - 180;
+    var timestamps = group.photos.map(function(photo) { return photo.timestamp; }).filter(Boolean).sort();
+    group.center = {lat: centerLat, lng: centerLng};
+    group.bounds = {
+      south: Math.min.apply(null, group.photos.map(function(photo) { return Number(photo.latitude); })),
+      west: Math.min.apply(null, group.photos.map(function(photo) { return Number(photo.longitude); })),
+      north: Math.max.apply(null, group.photos.map(function(photo) { return Number(photo.latitude); })),
+      east: Math.max.apply(null, group.photos.map(function(photo) { return Number(photo.longitude); })),
+    };
+    group.spread_m = Math.round(Math.max.apply(null, group.photos.map(function(photo) {
+      return distanceBetween(centerLat, centerLng, Number(photo.latitude), Number(photo.longitude));
+    })) * 10) / 10;
+    group.captured_from = timestamps.length ? timestamps[0] : null;
+    group.captured_to = timestamps.length ? timestamps[timestamps.length - 1] : null;
+  }
+
   document.addEventListener('lightbox:photodeleted', function(event) {
     var photoId = Number(event.detail && event.detail.photoId);
     var group = currentGroup();
@@ -588,6 +615,7 @@ body {
       renderCurrentGroup();
       return;
     }
+    refreshGroupMetadata(group);
     renderGroupFacts(group);
     renderPhotoMarkers(group);
     updateProgress();

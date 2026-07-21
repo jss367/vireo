@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from playwright.sync_api import expect
 
 LEAFLET_STUB = """
@@ -151,7 +152,7 @@ def test_location_review_photo_marker_opens_the_photo_preview(live_server, page)
             "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
             [
                 (33.2550, -116.4050, photo_ids[0]),
-                (33.2550, -116.4050, photo_ids[1]),
+                (33.2554, -116.4053, photo_ids[1]),
             ],
         )
         live_server["db"].conn.execute(
@@ -200,7 +201,10 @@ def test_location_review_photo_marker_opens_the_photo_preview(live_server, page)
     page.locator("#locationReviewCustom").click()
     with page.expect_request("**/api/batch/location/text") as request_info:
         page.locator("#locationReviewAssign").click()
-    assert request_info.value.post_data_json["photo_ids"] == [photo_ids[1]]
+    assignment = request_info.value.post_data_json
+    assert assignment["photo_ids"] == [photo_ids[1]]
+    assert assignment["latitude"] == pytest.approx(33.2554)
+    assert assignment["longitude"] == pytest.approx(-116.4053)
     expect(page.locator("#locationReviewEmptyTitle")).to_have_text(
         "All locations reviewed"
     )
