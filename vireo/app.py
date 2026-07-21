@@ -6008,6 +6008,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)
+        # Rules-only path: ``db.get_photos``'s collection restriction is
+        # built by ``_build_collection_query`` and evaluates ``rules`` alone.
+        # ``/api/v1/photos`` aliases this view, so a headless caller that
+        # scopes to a visual collection here would silently widen to every
+        # metadata match instead of the saved visual result set (Codex
+        # review r3621634298).
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
@@ -6324,6 +6333,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         sort = request.args.get("sort", "date")
         folder_id = request.args.get("folder_id", None, type=int)
         collection_id = request.args.get("collection_id", None, type=int)
+        # Rules-only path — see ``api_photos``. ``db.get_photo_ids`` also
+        # goes through ``_build_collection_query``, so a visual collection
+        # id would silently widen to every metadata match (Codex review
+        # r3621634298).
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         rating_min = request.args.get("rating_min", None, type=int)
         date_from = request.args.get("date_from", None)
         date_to = request.args.get("date_to", None)
