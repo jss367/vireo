@@ -994,6 +994,23 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
             const externalPanel = document.createElement('div');
             externalPanel.id = 'syncLightboxPanel';
             document.getElementById('lightboxOverlay').appendChild(externalPanel);
+            window.__lightboxTransformCallsWhilePending = 0;
+            window.__originalLightboxApplyTransform = window._lbApplyTransform;
+            window._lbApplyTransform = function() {
+                if (window._lbVisualTransitionPending) {
+                    window.__lightboxTransformCallsWhilePending += 1;
+                }
+                return window.__originalLightboxApplyTransform.apply(this, arguments);
+            };
+        }"""
+    )
+
+    # Queue the same delayed layout refresh that can be left behind when the
+    # bottom bar finishes laying out just before navigation starts.
+    page.evaluate(
+        """() => {
+            const wrap = document.getElementById('lightboxWrap');
+            wrap.style.height = `${wrap.clientHeight - 42}px`;
         }"""
     )
 
@@ -1052,6 +1069,11 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     page.evaluate("window.lightboxDelete()")
     expect(page.locator("#deleteModal")).not_to_have_class("modal-overlay open")
 
+    # The queued refresh must not re-clamp or move the outgoing bitmap while
+    # the next photo is still waiting to decode.
+    page.wait_for_timeout(150)
+    assert page.evaluate("window.__lightboxTransformCallsWhilePending") == 0
+
     while_loading = page.evaluate(
         """() => {
             const transform = document.getElementById('lightboxTransform');
@@ -1067,6 +1089,12 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         "width": before["width"],
         "height": before["height"],
     }
+    page.evaluate(
+        """() => {
+            window._lbApplyTransform = window.__originalLightboxApplyTransform;
+            delete window.__originalLightboxApplyTransform;
+        }"""
+    )
 
     held_original.pop("route").fulfill(
         body=next_svg, content_type="image/svg+xml"

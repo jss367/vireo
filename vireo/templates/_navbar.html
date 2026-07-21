@@ -7370,6 +7370,13 @@ function toggleLightboxZoom(e) {
       resizeTimer = null;
       var shouldUpdateSourceTier = refreshSourceTier;
       refreshSourceTier = false;
+      // Arrow navigation deliberately keeps the outgoing bitmap and its
+      // transform frozen until the incoming image decodes. A resize queued
+      // just before navigation may fire after the incoming metadata has
+      // replaced the layout dimensions; applying it here would move the old
+      // bitmap using the new photo's geometry. The image load/error handlers
+      // recompute and apply the current layout when the transition finishes.
+      if (_lbVisualTransitionPending) return;
       _lbRecomputeNativeZoom();
       // A deferred 1:1 keeps _lbZoom at fit while the high-res source loads.
       // _lbSetZoom clears _lbPending1To1 (and its trailing reschedule retargets
