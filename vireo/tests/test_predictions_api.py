@@ -657,3 +657,33 @@ def test_get_predictions_status_not_in_keeps_pending_siblings(app_and_db):
         'the whole photo, hiding the pending sibling the filter should '
         'have kept'
     )
+
+
+def test_get_predictions_classifier_model_is_not_keeps_other_model_siblings(app_and_db):
+    """``classifier_model is not X`` on a photo with predictions from
+    both model X and model Y must return the Y row. The previous SQL
+    translated ``is not`` as a photo-level NOT EXISTS, dropping the entire
+    photo the moment any sibling used model X — hiding the Y row the
+    visible filter should have surfaced.
+    """
+    _, db = app_and_db
+    photos = db.get_photos()
+    photo_id = photos[0]['id']
+    det = _make_detection(db, photo_id)
+    db.add_prediction(detection_id=det, species='PickA', confidence=0.9,
+                      model='model-a', category='new')
+    db.add_prediction(detection_id=det, species='PickB', confidence=0.5,
+                      model='model-b', category='new')
+
+    rules = [{'field': 'classifier_model', 'op': 'is not', 'value': 'model-a'}]
+    preds = db.get_predictions(rules=rules)
+    returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
+    assert 'PickB' in returned, (
+        'is-not translated to NOT EXISTS at the photo level and dropped '
+        'the whole photo, hiding the model-b sibling the filter should '
+        'have kept'
+    )
+    assert 'PickA' not in returned, (
+        'row-level pass failed to drop the model-a sibling from the '
+        'is-not result set'
+    )

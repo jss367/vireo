@@ -18883,10 +18883,17 @@ class Database:
                 if op in ("equals", "is"):
                     return _prediction_exists("pred.classifier_model = ?", [value])
                 if op == "is not":
-                    exists, params = _prediction_exists(
-                        "pred.classifier_model = ?", [value],
+                    # Positive EXISTS ("photo has at least one prediction
+                    # whose classifier_model is NOT X"), not NOT EXISTS
+                    # ("photo has no predictions with classifier_model = X").
+                    # NOT EXISTS drops a photo the moment it has any sibling
+                    # from model X, hiding the other-model rows the visible
+                    # filter should keep — see r3618514362. Row-level
+                    # clean-up in ``_filter_prediction_rows_by_rules`` then
+                    # removes any sibling rows that use model X themselves.
+                    return _prediction_exists(
+                        "pred.classifier_model != ?", [value],
                     )
-                    return "NOT " + exists, params
                 if op == "contains":
                     # Escape LIKE metacharacters so a value like ``%`` or ``_``
                     # stays literal — matches the other advertised text
