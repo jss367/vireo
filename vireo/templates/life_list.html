@@ -87,6 +87,7 @@
   .ll-sumchip.active { border-color:var(--accent); color:var(--text-primary); }
   .ll-sumchip b { color:var(--text-primary); font-weight:600; }
 
+  .ll-rank-notice { font-size:12px; color:var(--text-muted); margin-bottom:12px; }
   .ll-linkbtn { background:none; border:none; padding:0; color:var(--accent); cursor:pointer; font-size:inherit; text-decoration:underline; font-family:inherit; }
   .ll-leaf-head input[type="search"] { font-size:13px; padding:4px 8px; background:var(--bg-input); color:var(--text-primary); border:1px solid var(--border-secondary); border-radius:4px; }
 
@@ -1488,9 +1489,11 @@ function renderRankView() {
   renderRankGrid();
 }
 
-// Fill #rankGrid (and #rankNotice) from the current filter state. Kept separate
-// from renderRankView so search/checkbox changes never rebuild (and refocus)
-// the input.
+// Fill #rankNotice + #rankGrid from the current filter state. Kept separate from
+// renderRankView so search/checkbox changes never rebuild (and refocus) the
+// input. Applies the large-rank guard: >800 items with no search / no
+// missing-only shows a visible notice and caps to the first 500 unless "Show
+// all" is pressed (No-black-boxes: never truncate silently).
 function renderRankGrid() {
   var grid = document.getElementById('rankGrid');
   var notice = document.getElementById('rankNotice');
@@ -1511,8 +1514,23 @@ function renderRankGrid() {
     return true;
   });
 
+  var CAP = 500, LARGE = 800;
   var renderList = shown;
-  if (notice) notice.innerHTML = '';
+  var noticeHtml = '';
+  var narrowed = term || rv.missingOnly;
+  if (!narrowed && shown.length > LARGE) {
+    if (rv.showAll) {
+      noticeHtml = '<div class="ll-rank-notice">Showing all ' + shown.length + ' '
+        + escapeHtml(rankPlural(rank)) + '.</div>';
+    } else {
+      noticeHtml = '<div class="ll-rank-notice">Showing the first ' + CAP + ' of ' + shown.length
+        + '. Use search or "Show missing only" to narrow, or '
+        + '<button type="button" class="ll-linkbtn" id="rankShowAll">Show all ' + shown.length
+        + '</button>.</div>';
+      renderList = shown.slice(0, CAP);
+    }
+  }
+  if (notice) notice.innerHTML = noticeHtml;
 
   var gh = '';
   if (rank === 'species') {
@@ -1526,6 +1544,13 @@ function renderRankGrid() {
   }
   if (!shown.length) gh += '<div class="ll-exp-empty">Nothing to show.</div>';
   grid.innerHTML = gh;
+
+  var showAll = document.getElementById('rankShowAll');
+  if (showAll) showAll.addEventListener('click', function() {
+    if (!explorerRankView) return;
+    explorerRankView.showAll = true;
+    renderRankGrid();
+  });
 
   // order/family/genus rows drill into the normal card/species view. Species
   // rows are non-interactive.
