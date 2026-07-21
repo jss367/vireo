@@ -289,35 +289,40 @@ def _sync_preview_presentation(
             ),
             None,
         )
-        if existing is None and change_type == "keyword_remove":
-            hierarchy = next(
-                (
-                    keyword
-                    for keyword in sorted(
-                        metadata.get("hierarchical_keywords", set())
-                    )
-                    if any(
-                        keyword_match_key(segment) == keyword_match_key(value)
-                        for segment in keyword.split("|")
-                    )
-                ),
-                None,
+        # Solo keyword_remove routes through remove_keywords() with
+        # hierarchical=True in sync.py, which drops every
+        # lr:hierarchicalSubject whose segments match this key in addition
+        # to the flat dc:subject entry. Collect every hierarchy sync would
+        # touch so the review reflects the full deletion.
+        matching_hierarchies = []
+        if change_type == "keyword_remove":
+            matching_hierarchies = sorted(
+                keyword
+                for keyword in metadata.get("hierarchical_keywords", set())
+                if any(
+                    keyword_match_key(segment) == keyword_match_key(value)
+                    for segment in keyword.split("|")
+                )
             )
-            if hierarchy:
-                hierarchy = hierarchy.replace("|", " › ")
-            if hierarchy and paired_keyword_rename:
-                return {
-                    "field": "Keyword hierarchy",
-                    "action": "unchanged",
-                    "before": hierarchy,
-                    "after": hierarchy,
-                    "after_detail": (
-                        "The matching keyword addition replaces only the "
-                        "flat spelling; this hierarchy stays in XMP"
-                    ),
-                }
-            if hierarchy:
-                existing = hierarchy
+        hierarchy_display = [
+            keyword.replace("|", " › ") for keyword in matching_hierarchies
+        ]
+        if (
+            change_type == "keyword_remove"
+            and paired_keyword_rename
+            and hierarchy_display
+        ):
+            hierarchy_text = "; ".join(hierarchy_display)
+            return {
+                "field": "Keyword hierarchy",
+                "action": "unchanged",
+                "before": hierarchy_text,
+                "after": hierarchy_text,
+                "after_detail": (
+                    "The matching keyword addition replaces only the "
+                    "flat spelling; this hierarchy stays in XMP"
+                ),
+            }
         xmp_value = existing or _sync_preview_absent_xmp_value(
             metadata, "Not in XMP",
         )
@@ -328,6 +333,18 @@ def _sync_preview_presentation(
                 "before": xmp_value,
                 "after": value,
             }
+        if change_type == "keyword_remove" and not paired_keyword_rename:
+            removed_entries = []
+            if existing:
+                removed_entries.append(existing)
+            removed_entries.extend(hierarchy_display)
+            if removed_entries:
+                return {
+                    "field": "Keyword",
+                    "action": "removed",
+                    "before": "; ".join(removed_entries),
+                    "after": "Not in XMP",
+                }
         if existing is None:
             if metadata.get("status") == "unreadable":
                 detail = (
