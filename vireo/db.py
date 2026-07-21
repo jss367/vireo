@@ -15135,8 +15135,17 @@ class Database:
         base_conditions = ["wf.workspace_id = ?"]
         base_params = [ws]
         if rules is not None:
+            # ``_build_query_from_rules`` compiles ``none(...)`` as photo-level
+            # ``NOT EXISTS(...)``. For a row-level predicate like
+            # ``none(prediction_confidence >= 0.8)`` that drops any photo with
+            # a sibling row over the threshold — even when the 0.10 sibling
+            # satisfies the outer expression at the row level. Strip prediction
+            # leaves nested inside a ``none`` group before scoping photos so
+            # ``_filter_prediction_rows_by_rules`` can decide those per row
+            # against the ORIGINAL tree — see r3618822252.
+            scope_rules = self._relax_negated_prediction_leaves(rules)
             r_folder_join, r_join_clause, r_where, r_params = (
-                self._build_query_from_rules(rules)
+                self._build_query_from_rules(scope_rules)
             )
             base_conditions.append(
                 "p.id IN (SELECT DISTINCT p.id FROM photos p "
@@ -15226,6 +15235,47 @@ class Database:
         "taxonomy_genus",
         "needs_review",
     })
+
+    def _relax_negated_prediction_leaves(self, rules):
+        """Strip prediction-field leaves that are nested inside a ``none``
+        group so ``get_predictions``'s photo-scoping subquery doesn't
+        over-restrict on row-level predicates.
+
+        ``_build_query_from_rules`` compiles a ``none`` group as
+        photo-level ``NOT EXISTS(...)``; for a leaf like
+        ``prediction_confidence >= 0.8`` that removes any photo with a
+        sibling row above the threshold, even though the 0.10 sibling
+        satisfies ``none(prediction_confidence >= 0.8)`` per row.
+        ``_filter_prediction_rows_by_rules`` still evaluates the
+        ORIGINAL tree per row, so dropping these leaves from the SQL
+        broadens the photo set without weakening the row check.
+
+        Only leaves inside a ``none`` group are stripped; leaves in
+        ``all``/``any`` positions still pull their weight in the SQL
+        (an ``all`` narrows and an ``any`` widens correctly at the
+        photo level).
+        """
+        def _walk(node, negated):
+            if isinstance(node, dict) and "rules" in node and "field" not in node:
+                mode = node.get("mode", "all")
+                child_negated = negated or (mode == "none")
+                new_children = []
+                for child in node.get("rules") or []:
+                    stripped = _walk(child, child_negated)
+                    if stripped is not None:
+                        new_children.append(stripped)
+                new_node = dict(node)
+                new_node["rules"] = new_children
+                return new_node
+            if negated and isinstance(node, dict) and \
+                    node.get("field") in self._PREDICTION_ROW_FIELDS:
+                return None
+            return node
+
+        if isinstance(rules, list):
+            wrapped = _walk({"mode": "all", "rules": rules}, False)
+            return wrapped.get("rules", []) if wrapped else []
+        return _walk(rules, False)
 
     def _filter_prediction_rows_by_rules(self, rows, rules):
         """Drop returned prediction rows that don't satisfy prediction-field

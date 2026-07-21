@@ -583,11 +583,33 @@
     var newExamples = keptProposals.slice(0, 3).map(function(p) {
       return (p.winner || {}).filename || '';
     });
+    // Recompute folders from the kept subset — mirrors ``bucket_unresolved_proposals``:
+    // include the parent directory of every candidate (winner + losers) that still
+    // exists on disk. Without this, ``renderBucket`` would keep offering a
+    // ``Keep <folder> for all`` button for a folder that only appears in
+    // filtered-out groups, and ``bulkResolveByFolder`` would then post those
+    // visible hashes with a ``keep_folder`` value none of them contain — silently
+    // skipping every remaining group.
+    var keptFolderSet = {};
+    keptProposals.forEach(function(p) {
+      var cands = [p.winner].concat(p.losers || []);
+      cands.forEach(function(c) {
+        if (!c || c.exists === false) return;
+        var path = c.path || '';
+        var sep = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+        if (sep <= 0) return;
+        keptFolderSet[path.substring(0, sep)] = true;
+      });
+    });
+    var newFolders = (bucket.folders || []).filter(function(f) {
+      return keptFolderSet[f];
+    });
     return Object.assign({}, bucket, {
       file_hashes: keptHashes,
       group_count: keptHashes.length,
       total_size: newTotalSize,
       example_filenames: newExamples,
+      folders: newFolders,
     });
   }
 
