@@ -10338,15 +10338,16 @@ class Database:
         if parent_id is None:
             if reuse_location_component:
                 # Google's address_components carry no per-component
-                # place_id, so when the DB has multiple same-name location
-                # roots with distinct non-null place_ids (e.g. Georgia the
-                # country and Georgia the state, which
-                # _merge_duplicate_location_roots intentionally leaves
-                # unmerged), we cannot tell which one the caller means.
-                # Prefer a coordless root — safe to use as a shared
-                # hierarchy anchor — and fall through to inserting a fresh
-                # coordless root rather than silently attaching under
-                # whichever place-bearing row happens to have the lower id.
+                # place_id, so when the DB has any place-bearing root at
+                # this name (e.g. Georgia the state saved with a
+                # place_id), we cannot prove that a component-only parent
+                # of the same name refers to that specific Google place —
+                # a later same-name second place (Georgia the country)
+                # would misparent under the first one's root. Reuse a
+                # coordless root when one exists (safe shared anchor);
+                # otherwise fall through to inserting a fresh coordless
+                # anchor rather than silently attaching under whichever
+                # place-bearing row happens to have the lower id.
                 candidates = self.conn.execute(
                     "SELECT id, type, place_id FROM keywords "
                     "WHERE name = ? AND parent_id IS NULL "
@@ -10362,15 +10363,6 @@ class Database:
                     top = candidates[0]
                     if top["place_id"] is None:
                         existing = top
-                    else:
-                        top_place = top["place_id"]
-                        conflicting = any(
-                            c["place_id"] is not None
-                            and c["place_id"] != top_place
-                            for c in candidates[1:]
-                        )
-                        if not conflicting:
-                            existing = top
             else:
                 existing = self.conn.execute(
                     "SELECT id, type FROM keywords "
@@ -10551,20 +10543,22 @@ class Database:
         Retyping a place-bearing taxonomy root at startup can leave two
         location rows with the same ``name`` and ``parent_id IS NULL``
         because SQLite's ``UNIQUE(name, parent_id)`` index does not enforce
-        NULL parents. Later child-place upserts pick the lowest-id root and
-        silently orphan the other's descendants. Merge the survivors so a
-        single root owns every child. Rows with distinct non-null
-        ``place_id`` values describe different Google places that happen to
-        share a name and are left alone.
+        NULL parents. Multiple coordless duplicates without any competing
+        place-bearing root describe the same neutral hierarchy anchor and
+        must collapse so children stay under one shared parent.
 
-        When the same-name set carries multiple distinct place-bearing
-        roots, ``_upsert_one_keyword`` inserts a coordless anchor row for
-        ambiguous address components so future children have a neutral
-        parent instead of being nested under an arbitrary Google place.
-        Merging that anchor into either place-bearing root would silently
-        reparent its descendants and undo the ambiguity guard, so leave
-        coordless-vs-place-bearing pairs alone in that case and only
-        collapse duplicates of the same kind.
+        Whenever any place-bearing root exists at this name, coordless
+        roots are neutral hierarchy anchors that
+        ``_upsert_one_keyword`` installs (or preserves) for
+        component-only references — Google's per-component
+        ``address_components`` carry no ``place_id``, so we cannot prove
+        which specific Google place the caller meant. Merging a
+        coordless anchor into the place-bearing root would silently
+        reparent its descendants under that Google place — the wrong
+        answer once a second same-name Google place appears. Leave
+        place-bearing roots and their coordless anchors alone; only
+        consolidate coordless duplicates so ambiguous children still
+        share one shared parent.
         """
         duplicates = self.conn.execute(
             "SELECT name FROM keywords "
@@ -10581,22 +10575,16 @@ class Database:
             ).fetchall()
             if len(candidates) < 2:
                 continue
-            distinct_place_ids = {
-                cand["place_id"]
-                for cand in candidates
-                if cand["place_id"] is not None
-            }
-            if len(distinct_place_ids) > 1:
-                # Distinct Google places share this name. The ambiguity
-                # anchor _upsert_one_keyword installs must not be
-                # absorbed into (or promoted onto) a place-bearing root
-                # — that would silently reparent its descendants under
-                # an arbitrary Google place. Leave place-bearing roots
-                # alone and only collapse redundant coordless duplicates
-                # so children stay under one shared anchor.
-                coordless = [
-                    cand for cand in candidates if cand["place_id"] is None
-                ]
+            place_bearing = [c for c in candidates if c["place_id"] is not None]
+            coordless = [c for c in candidates if c["place_id"] is None]
+            if place_bearing:
+                # Any place-bearing root at this name means coordless
+                # anchors cannot be safely merged into it: address
+                # components have no place_id, so coordless-anchor
+                # descendants may refer to a different Google place with
+                # the same name. Preserve place-bearing roots alongside
+                # coordless anchors; only collapse coordless duplicates
+                # into a single shared anchor.
                 if len(coordless) < 2:
                     continue
                 survivor_id = coordless[0]["id"]
@@ -10605,42 +10593,12 @@ class Database:
                         cand["id"], survivor_id,
                     )
                 continue
-            survivor = dict(candidates[0])
+            # No place-bearing roots — every candidate is coordless.
+            # Legacy duplicate anchors describe the same neutral parent
+            # and can safely merge into the oldest survivor.
+            survivor_id = candidates[0]["id"]
             for cand in candidates[1:]:
-                if (
-                    survivor["place_id"] is None
-                    and cand["place_id"] is not None
-                ):
-                    # Promote the source's place metadata onto the survivor
-                    # before deleting it. UNIQUE(place_id) requires clearing
-                    # the source first so the value can move to the peer.
-                    self.conn.execute(
-                        "UPDATE keywords SET place_id = NULL WHERE id = ?",
-                        (cand["id"],),
-                    )
-                    self.conn.execute(
-                        "UPDATE keywords SET place_id = ?, "
-                        "latitude = COALESCE(latitude, ?), "
-                        "longitude = COALESCE(longitude, ?) WHERE id = ?",
-                        (
-                            cand["place_id"],
-                            cand["latitude"],
-                            cand["longitude"],
-                            survivor["id"],
-                        ),
-                    )
-                    survivor["place_id"] = cand["place_id"]
-                    survivor["latitude"] = (
-                        survivor["latitude"]
-                        if survivor["latitude"] is not None
-                        else cand["latitude"]
-                    )
-                    survivor["longitude"] = (
-                        survivor["longitude"]
-                        if survivor["longitude"] is not None
-                        else cand["longitude"]
-                    )
-                merged += self._merge_keyword_into(cand["id"], survivor["id"])
+                merged += self._merge_keyword_into(cand["id"], survivor_id)
         return merged
 
     @staticmethod

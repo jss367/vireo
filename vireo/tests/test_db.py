@@ -1739,24 +1739,26 @@ def test_repair_misclassified_location_ancestors_ignores_taxonomy_root_with_loca
     assert dict(row) == {"type": "taxonomy", "is_species": 1}
 
 
-def test_repair_misclassified_location_ancestors_merges_duplicate_roots(
+def test_repair_misclassified_location_ancestors_preserves_coordless_root_beside_place_bearing(
     tmp_path,
 ):
-    """Startup repair collapses same-name location roots into one row.
+    """Startup repair keeps the coordless root beside a retyped place-bearing root.
 
     Regression: SQLite's ``UNIQUE(name, parent_id)`` index does not enforce
     ``parent_id IS NULL``, so a coordless legacy ``United States`` location
-    root and a place-bearing taxonomy ``United States`` root could coexist.
-    Retyping the taxonomy row without merging left later child-place
-    upserts picking the lowest-id root and orphaning the other's
-    descendants. Repair must fold the retyped root into the survivor,
-    transfer its place metadata, and move its subtree.
+    root and a place-bearing taxonomy ``United States`` root can coexist.
+    Retyping the taxonomy row promotes it to a location, but repair must
+    NOT fold the coordless root into it: the coordless anchor is the
+    neutral parent for component-only references (Google's per-component
+    ``address_components`` carry no ``place_id``), and its descendants
+    may refer to a same-name second Google place that hasn't been saved
+    yet. Preserve both roots and let their subtrees stay put.
     """
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
     coordless_root = db.add_keyword("United States", kw_type="location")
-    db.add_keyword(
+    legacy_park_id = db.add_keyword(
         "Legacy Park", parent_id=coordless_root, kw_type="location",
     )
     place_bearing_root = db.add_keyword("United States", kw_type="taxonomy")
@@ -1777,56 +1779,59 @@ def test_repair_misclassified_location_ancestors_merges_duplicate_roots(
 
     assert db.repair_misclassified_location_ancestors() == 1
     roots = db.conn.execute(
-        "SELECT id, place_id, latitude, longitude FROM keywords "
+        "SELECT id, place_id, latitude, longitude, type FROM keywords "
         "WHERE name = ? AND parent_id IS NULL ORDER BY id",
         ("United States",),
     ).fetchall()
-    assert [row["id"] for row in roots] == [coordless_root]
+    assert [(row["id"], row["place_id"], row["type"]) for row in roots] == [
+        (coordless_root, None, "location"),
+        (place_bearing_root, "united-states-country", "location"),
+    ]
+    # The retyped root keeps its coords; the coordless anchor stays coordless.
     assert dict(roots[0]) == {
         "id": coordless_root,
+        "place_id": None,
+        "latitude": None,
+        "longitude": None,
+        "type": "location",
+    }
+    assert dict(roots[1]) == {
+        "id": place_bearing_root,
         "place_id": "united-states-country",
         "latitude": 39.5,
         "longitude": -98.35,
+        "type": "location",
     }
-    survivor_children = db.conn.execute(
+    # Each root retains its own subtree — the ambiguity guard leaves
+    # them in place.
+    coordless_children = db.conn.execute(
         "SELECT id, name, type FROM keywords WHERE parent_id = ? ORDER BY name",
         (coordless_root,),
     ).fetchall()
-    assert [dict(row) for row in survivor_children] == [
-        {"id": stale_state, "name": "California", "type": "location"},
-        {
-            "id": db.conn.execute(
-                "SELECT id FROM keywords WHERE name = ? AND parent_id = ?",
-                ("Legacy Park", coordless_root),
-            ).fetchone()["id"],
-            "name": "Legacy Park",
-            "type": "location",
-        },
+    assert [dict(row) for row in coordless_children] == [
+        {"id": legacy_park_id, "name": "Legacy Park", "type": "location"},
     ]
-    # The retyped root row itself is gone — only the survivor remains.
-    assert db.conn.execute(
-        "SELECT COUNT(*) FROM keywords WHERE id = ?",
+    place_bearing_children = db.conn.execute(
+        "SELECT id, name, type FROM keywords WHERE parent_id = ? ORDER BY name",
         (place_bearing_root,),
-    ).fetchone()[0] == 0
+    ).fetchall()
+    assert [dict(row) for row in place_bearing_children] == [
+        {"id": stale_state, "name": "California", "type": "location"},
+    ]
     # Second call is a no-op.
     assert db.repair_misclassified_location_ancestors() == 0
 
 
-def test_repair_misclassified_location_ancestors_preserves_child_place_id(
+def test_repair_misclassified_location_ancestors_preserves_children_of_both_roots(
     tmp_path,
 ):
-    """Merging duplicate roots must transfer overlapping children's place_id.
+    """Preserved coordless + place-bearing roots keep their own children apart.
 
-    Regression: when both roots already carry a same-name child (e.g. one
-    catalog branch has a coordless ``United States -> California`` while a
-    repaired place-bearing branch has ``United States -> California`` with a
-    Google place ID), collapsing the duplicate roots recursively merges the
-    two ``California`` rows. ``_merge_keyword_into`` previously folded
-    ``is_species``/``latitude``/``longitude``/``taxon_id`` but never
-    ``place_id``, so the place-bearing child was deleted with its Google
-    place link silently dropped. The next map assignment for the same place
-    would then create a new coordless disambiguated row instead of reusing
-    the surviving child.
+    When a coordless root and a place-bearing (retyped) root share a name,
+    each root's ``California`` child keeps its Google place ID and its
+    original parent. The ambiguity guard leaves both roots — and their
+    respective ``California`` subtrees — in place, so a later assignment
+    knowing the specific Google place still finds the right row.
     """
     from db import Database
 
@@ -1862,30 +1867,41 @@ def test_repair_misclassified_location_ancestors_preserves_child_place_id(
     db.conn.commit()
 
     assert db.repair_misclassified_location_ancestors() == 1
-    surviving_state = db.conn.execute(
+    coordless_california = db.conn.execute(
         "SELECT id, place_id, latitude, longitude, parent_id FROM keywords "
         "WHERE name = ? AND parent_id = ?",
         ("California", coordless_root),
     ).fetchall()
-    assert len(surviving_state) == 1
-    assert dict(surviving_state[0]) == {
+    assert len(coordless_california) == 1
+    assert dict(coordless_california[0]) == {
         "id": coordless_state,
+        "place_id": None,
+        "latitude": None,
+        "longitude": None,
+        "parent_id": coordless_root,
+    }
+    place_bearing_california = db.conn.execute(
+        "SELECT id, place_id, latitude, longitude, parent_id FROM keywords "
+        "WHERE name = ? AND parent_id = ?",
+        ("California", place_bearing_root),
+    ).fetchall()
+    assert len(place_bearing_california) == 1
+    assert dict(place_bearing_california[0]) == {
+        "id": place_bearing_state,
         "place_id": "california-state",
         "latitude": 37.25,
         "longitude": -119.75,
-        "parent_id": coordless_root,
+        "parent_id": place_bearing_root,
     }
-    # The place-bearing child row is gone — merged into the survivor.
-    assert db.conn.execute(
-        "SELECT COUNT(*) FROM keywords WHERE id = ?",
-        (place_bearing_state,),
-    ).fetchone()[0] == 0
-    # And no orphan California survives outside the surviving root.
+    # Both California rows survive under their respective roots.
     all_california = db.conn.execute(
         "SELECT id FROM keywords WHERE name = ? ORDER BY id",
         ("California",),
     ).fetchall()
-    assert [row["id"] for row in all_california] == [coordless_state]
+    assert [row["id"] for row in all_california] == [
+        coordless_state,
+        place_bearing_state,
+    ]
 
 
 def test_repair_misclassified_location_ancestors_disambiguates_distinct_place_children(
@@ -1893,36 +1909,38 @@ def test_repair_misclassified_location_ancestors_disambiguates_distinct_place_ch
 ):
     """Recursive child merge must not collapse distinct Google places.
 
-    Regression: when duplicate roots each already carry a same-name child
-    row with a *different* non-null ``place_id`` (e.g. two direct
+    Regression: when two coordless legacy roots each carry a same-name
+    child row with a *different* non-null ``place_id`` (e.g. two direct
     ``United States -> Springfield`` rows created from different Google
-    places), collapsing the roots reparents the migrating child onto the
-    survivor and hits ``UNIQUE(name, parent_id)``. The recursive
-    ``_merge_keyword_into`` fallback would delete the migrating row and
-    silently retag its photos onto the sibling that represents a
-    different Google place. Instead, disambiguate the migrating child
-    with a place-id suffix so both distinct places survive.
+    places), collapsing the two coordless roots reparents the migrating
+    child onto the survivor and hits ``UNIQUE(name, parent_id)``. The
+    recursive ``_merge_keyword_into`` fallback would delete the
+    migrating row and silently retag its photos onto the sibling that
+    represents a different Google place. Instead, disambiguate the
+    migrating child with a place-id suffix so both distinct places
+    survive.
     """
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
-    coordless_root = db.add_keyword("United States", kw_type="location")
+    coordless_root_a = db.add_keyword("United States", kw_type="location")
     springfield_illinois = db.add_keyword(
-        "Springfield", parent_id=coordless_root, kw_type="location",
+        "Springfield", parent_id=coordless_root_a, kw_type="location",
     )
     db.conn.execute(
         "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
         "WHERE id = ?",
         ("springfield-illinois-12345678", 39.78, -89.65, springfield_illinois),
     )
-    taxonomy_root = db.add_keyword("United States", kw_type="taxonomy")
-    db.conn.execute(
-        "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
-        "WHERE id = ?",
-        ("united-states-country", 39.5, -98.35, taxonomy_root),
-    )
+    # Second same-name coordless root — legacy accidental duplicate,
+    # no place_id of its own. Both coordless roots collapse into one.
+    coordless_root_b = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, is_species) "
+        "VALUES (?, NULL, 'location', 0) RETURNING id",
+        ("United States",),
+    ).fetchone()["id"]
     springfield_missouri = db.add_keyword(
-        "Springfield", parent_id=taxonomy_root, kw_type="location",
+        "Springfield", parent_id=coordless_root_b, kw_type="location",
     )
     db.conn.execute(
         "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
@@ -1948,7 +1966,7 @@ def test_repair_misclassified_location_ancestors_disambiguates_distinct_place_ch
     )
     db.conn.commit()
 
-    assert db.repair_misclassified_location_ancestors() == 1
+    db.repair_misclassified_location_ancestors()
 
     springfields = db.conn.execute(
         "SELECT id, name, place_id, parent_id FROM keywords "
@@ -1963,8 +1981,8 @@ def test_repair_misclassified_location_ancestors_disambiguates_distinct_place_ch
     by_place = {row["place_id"]: dict(row) for row in springfields}
     illinois = by_place["springfield-illinois-12345678"]
     missouri = by_place["springfield-missouri-abcdefgh"]
-    assert illinois["parent_id"] == coordless_root
-    assert missouri["parent_id"] == coordless_root
+    assert illinois["parent_id"] == coordless_root_a
+    assert missouri["parent_id"] == coordless_root_a
     # The pre-existing survivor keeps its natural name; the migrating row
     # gets a place-id suffix so the (name, parent_id) UNIQUE index does
     # not force one to be deleted.
@@ -2185,6 +2203,121 @@ def test_repair_preserves_coordless_anchor_beside_distinct_place_roots(
     ]
     child_parent = db.conn.execute(
         "SELECT parent_id FROM keywords WHERE id = ?", (child_id,),
+    ).fetchone()["parent_id"]
+    assert child_parent == coordless_id
+
+
+def test_place_upsert_avoids_lone_place_bearing_root_for_component_only_parent(
+    tmp_path,
+):
+    """A single place-bearing root is not proof that a component-only parent matches it.
+
+    Regression: before this fix, when only one place-bearing root existed
+    (e.g. Georgia the state saved with ``georgia-state``) and a later
+    child place's address component was just ``{"name": "Georgia"}`` with
+    no per-component place_id, ``_upsert_one_keyword`` treated the lone
+    place-bearing root as unambiguous and reused it. A park in the
+    country of Georgia would then attach under Georgia the state.
+    Instead, insert a fresh coordless anchor so the ambiguous
+    component-only reference stays separate from the specific Google
+    place already known.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    state_id = db.add_keyword("Georgia", kw_type="location")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ? WHERE id = ?",
+        ("georgia-state", state_id),
+    )
+    db.conn.commit()
+
+    leaf_id = db.upsert_place_chain({
+        "place_id": "tbilisi-park",
+        "name": "Tbilisi Park",
+        "types": ["park"],
+        "lat": 41.7151,
+        "lng": 44.8271,
+        "address_components": [
+            {"name": "Georgia", "types": ["country"]},
+        ],
+    })
+
+    parent_id = db.conn.execute(
+        "SELECT parent_id FROM keywords WHERE id = ?", (leaf_id,),
+    ).fetchone()["parent_id"]
+    # Park must NOT be attached to the pre-existing place-bearing state root.
+    assert parent_id != state_id
+    parent = db.conn.execute(
+        "SELECT name, type, place_id, parent_id FROM keywords WHERE id = ?",
+        (parent_id,),
+    ).fetchone()
+    assert dict(parent) == {
+        "name": "Georgia",
+        "type": "location",
+        "place_id": None,
+        "parent_id": None,
+    }
+    # Both roots survive: the original place-bearing state and the new
+    # coordless anchor for the ambiguous component-only reference.
+    roots = db.conn.execute(
+        "SELECT id, place_id FROM keywords "
+        "WHERE name = ? AND parent_id IS NULL ORDER BY id",
+        ("Georgia",),
+    ).fetchall()
+    assert [(row["id"], row["place_id"]) for row in roots] == [
+        (state_id, "georgia-state"),
+        (parent_id, None),
+    ]
+
+
+def test_repair_preserves_coordless_anchor_beside_single_place_bearing_root(
+    tmp_path,
+):
+    """Startup merge preserves a coordless anchor even beside a lone place-bearing root.
+
+    Regression: when a place-bearing root and a coordless anchor share a
+    name (e.g. Georgia state with ``georgia-state`` plus a coordless
+    Georgia inserted by ``_upsert_one_keyword`` for an ambiguous
+    component-only parent), the merge must NOT absorb the anchor into
+    the lone place-bearing root. Doing so would silently reparent the
+    anchor's descendants under the state — the same misparenting bug the
+    upsert-time fix at line 10373 prevents. A single distinct place_id
+    is not enough evidence to consolidate: a second same-name Google
+    place may arrive later, and the anchor's coordless children belong
+    on a neutral parent.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    state_id = db.add_keyword("Georgia", kw_type="location")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ? WHERE id = ?",
+        ("georgia-state", state_id),
+    )
+    coordless_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, is_species) "
+        "VALUES (?, NULL, 'location', 0) RETURNING id",
+        ("Georgia",),
+    ).fetchone()["id"]
+    ambiguous_child = db.add_keyword(
+        "Ambiguous Park", parent_id=coordless_id, kw_type="location",
+    )
+    db.conn.commit()
+
+    db.repair_misclassified_location_ancestors()
+
+    roots = db.conn.execute(
+        "SELECT id, place_id, type FROM keywords "
+        "WHERE name = ? AND parent_id IS NULL ORDER BY id",
+        ("Georgia",),
+    ).fetchall()
+    assert [(row["id"], row["place_id"], row["type"]) for row in roots] == [
+        (state_id, "georgia-state", "location"),
+        (coordless_id, None, "location"),
+    ]
+    child_parent = db.conn.execute(
+        "SELECT parent_id FROM keywords WHERE id = ?", (ambiguous_child,),
     ).fetchone()["parent_id"]
     assert child_parent == coordless_id
 
