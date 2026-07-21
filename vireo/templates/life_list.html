@@ -1026,9 +1026,43 @@ function renderExplorerBody() {
   if (!body) return;
   // Flat rank breakdown takes over the body when a summary chip is open.
   if (explorerRankView) { renderRankView(); return; }
+
+  // If the drill path ends at a genus, the current card level has no nodes
+  // (species aren't in explorerData.nodes) — render the species leaf instead of
+  // an empty grid. This covers returning from the flat rank view via "Back to
+  // cards", which clears explorerRankView but leaves explorerPath at the genus.
+  var last = explorerPath.length ? explorerPath[explorerPath.length - 1] : null;
+  if (last && last.rank === 'genus') {
+    if (explorerLeafGenus && explorerLeafGenus.id === last.id && explorerLeafData) {
+      // Leaf payload for this genus is already in hand — re-render it directly.
+      renderExplorerLeaf(false);
+    } else {
+      // Load it. loadExplorerSpecies pushes the genus crumb itself, so drop the
+      // genus from the path and locate its node under the parent family first
+      // (mirrors openRankItem's genus handling).
+      explorerPath = explorerPath.slice(0, -1);
+      var genusNode = currentExplorerNodes().find(function(n) { return n.id === last.id; });
+      if (genusNode) {
+        loadExplorerSpecies(genusNode);
+      } else {
+        // Couldn't resolve the genus node — restore the path and show a
+        // non-blank empty state.
+        explorerPath.push(last);
+        body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Nothing to show.</div>';
+      }
+    }
+    return;
+  }
+
   var html = renderBreadcrumb();
 
   var nodes = currentExplorerNodes();
+  // Defense-in-depth: never leave a blank card grid. If the level resolves to
+  // zero nodes (and it wasn't a genus leaf, handled above), say so explicitly.
+  if (!nodes.length) {
+    body.innerHTML = html + '<div class="ll-exp-empty">Nothing to show.</div>';
+    return;
+  }
   html += '<div class="ll-cards">';
   nodes.forEach(function(n) { html += renderExplorerCard(n); });
   html += '</div>';
@@ -1406,6 +1440,8 @@ var rankSearchTimer = null;   // debounce for the flat-view search input
 // endpoint scopes to the same class the drill cards use. Clicking the already-
 // open rank's chip toggles the view closed.
 async function openRankView(rank) {
+  // Drop any pending search debounce so it can't fire against a different view.
+  clearTimeout(rankSearchTimer);
   if (explorerRankView && explorerRankView.rank === rank) {
     explorerRankView = null;
     renderExplorer();
@@ -1460,7 +1496,7 @@ function renderRankView() {
   html += '<div id="rankGrid"></div>';
   body.innerHTML = html;
 
-  var back = function() { explorerRankView = null; renderExplorer(); };
+  var back = function() { clearTimeout(rankSearchTimer); explorerRankView = null; renderExplorer(); };
   var bc = document.getElementById('rankBackCrumb');
   if (bc) bc.addEventListener('click', back);
   var bb = document.getElementById('rankBackBtn');
@@ -1491,9 +1527,11 @@ function renderRankView() {
 
 // Fill #rankNotice + #rankGrid from the current filter state. Kept separate from
 // renderRankView so search/checkbox changes never rebuild (and refocus) the
-// input. Applies the large-rank guard: >800 items with no search / no
-// missing-only shows a visible notice and caps to the first 500 unless "Show
-// all" is pressed (No-black-boxes: never truncate silently).
+// input. Applies the large-render guard: whenever the FINAL filtered list about
+// to render exceeds 800 items — unfiltered, "Show missing only", or a broad
+// search — a visible notice shows and the render caps to the first 500 unless
+// "Show all" is pressed (No-black-boxes: never truncate silently, and never
+// build an ~11k-tile innerHTML that can freeze the WKWebView renderer).
 function renderRankGrid() {
   var grid = document.getElementById('rankGrid');
   var notice = document.getElementById('rankNotice');
@@ -1514,17 +1552,20 @@ function renderRankGrid() {
     return true;
   });
 
+  // Cap based purely on the size of the final filtered list about to render, no
+  // matter why it's large. Search narrows `shown` naturally; if that drops it to
+  // <=800 there's no cap. N in the notice is the filtered count being capped, so
+  // it never implies more or fewer than it actually shows.
   var CAP = 500, LARGE = 800;
   var renderList = shown;
   var noticeHtml = '';
-  var narrowed = term || rv.missingOnly;
-  if (!narrowed && shown.length > LARGE) {
+  if (shown.length > LARGE) {
     if (rv.showAll) {
       noticeHtml = '<div class="ll-rank-notice">Showing all ' + shown.length + ' '
         + escapeHtml(rankPlural(rank)) + '.</div>';
     } else {
       noticeHtml = '<div class="ll-rank-notice">Showing the first ' + CAP + ' of ' + shown.length
-        + '. Use search or "Show missing only" to narrow, or '
+        + '. Use search to narrow, or '
         + '<button type="button" class="ll-linkbtn" id="rankShowAll">Show all ' + shown.length
         + '</button>.</div>';
       renderList = shown.slice(0, CAP);
