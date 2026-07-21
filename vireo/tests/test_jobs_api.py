@@ -3296,13 +3296,12 @@ def _make_visual_collection(app):
 
     from db import Database
 
-    db = Database(app.config["DB_PATH"])
-    db.set_active_workspace(db._active_workspace_id)
-    return db.add_collection(
-        "Visual test",
-        json_mod.dumps([{"field": "rating", "op": ">=", "value": 3}]),
-        visual_json=json_mod.dumps({"prompt": "a bird", "strength": "balanced"}),
-    )
+    with Database(app.config["DB_PATH"]) as db:
+        return db.add_collection(
+            "Visual test",
+            json_mod.dumps([{"field": "rating", "op": ">=", "value": 3}]),
+            visual_json=json_mod.dumps({"prompt": "a bird", "strength": "balanced"}),
+        )
 
 
 def test_pipeline_rejects_visual_collection(app_and_db, monkeypatch):

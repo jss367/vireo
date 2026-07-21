@@ -2970,8 +2970,28 @@ async function bootstrapBrowse() {
       // (Codex review r3620935211). Treat the collection as a composable
       // dashboard-style scope for this case: keep the URL filter chips
       // and scope /api/photos/query by the collection alongside them.
+      //
+      // Exception — visual collections: /api/photos/query's collection
+      // restriction evaluates ``rules`` only, not ``visual_json``. Composing
+      // URL filters this way would silently drop the visual clause and
+      // widen to every metadata match with the URL filter (Codex review
+      // r3621403147). Fall through to filterByCollection() instead so the
+      // saved rules + visual expression loads correctly; the URL filter
+      // chips are cleared because loadExpression() replaces state.root, so
+      // surface a toast so the drop isn't silent.
+      var deepLinkedCollection = collectionLink ? collectionsById[activeCollectionId] : null;
+      var deepLinkedIsVisual = !!(deepLinkedCollection && deepLinkedCollection.visual_json);
       if (collectionLink && hasExplicitFilterParams && !dashboardCollectionScope) {
-        dashboardCollectionScope = true;
+        if (deepLinkedIsVisual) {
+          if (typeof showToast === 'function') {
+            showToast(
+              'Opened the visual collection — URL filters (rating/date/etc.) were dropped so the visual clause applies. Edit the filter bar to add them back.',
+              'info'
+            );
+          }
+        } else {
+          dashboardCollectionScope = true;
+        }
       }
       if (activeCollectionId && !dashboardCollectionScope) {
         // Plain collection deep link: open it into the filter bar as
