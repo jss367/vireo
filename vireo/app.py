@@ -275,7 +275,7 @@ def _sync_preview_flag_label(value):
 
 def _sync_preview_presentation(
     change, metadata, *, assigned_location=None, write_locations=False,
-    sidecar_will_exist=False, sync_flags=False,
+    sidecar_will_exist=False, sync_flags=False, paired_keyword_rename=False,
 ):
     """Translate one internal pending row into user-facing XMP before/after data."""
     change_type = change["change_type"]
@@ -304,7 +304,20 @@ def _sync_preview_presentation(
                 None,
             )
             if hierarchy:
-                existing = hierarchy.replace("|", " › ")
+                hierarchy = hierarchy.replace("|", " › ")
+            if hierarchy and paired_keyword_rename:
+                return {
+                    "field": "Keyword hierarchy",
+                    "action": "unchanged",
+                    "before": hierarchy,
+                    "after": hierarchy,
+                    "after_detail": (
+                        "The matching keyword addition replaces only the "
+                        "flat spelling; this hierarchy stays in XMP"
+                    ),
+                }
+            if hierarchy:
+                existing = hierarchy
         xmp_value = existing or _sync_preview_absent_xmp_value(
             metadata, "Not in XMP",
         )
@@ -10079,8 +10092,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 assigned_location = _serialize_photo_location(
                     db, photo["photo_id"],
                 )
+            keyword_add_keys = {
+                keyword_match_key(change["value"])
+                for change in photo["changes"]
+                if change["type"] == "keyword_add" and change["value"]
+            }
             for change in photo["changes"]:
                 pending = changes_by_id[change["id"]]
+                change["paired_keyword_rename"] = bool(
+                    change["type"] == "keyword_remove"
+                    and keyword_match_key(change["value"]) in keyword_add_keys
+                )
                 change["creates_xmp_sidecar"] = (
                     _sync_preview_change_creates_sidecar(
                         pending,
@@ -10108,6 +10130,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             write_locations=write_locations,
                             sidecar_will_exist=False,
                             sync_flags=sync_flags,
+                            paired_keyword_rename=change[
+                                "paired_keyword_rename"
+                            ],
                         )
                     )
                     change["presentation_with_sidecar"] = (
@@ -10118,6 +10143,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             write_locations=write_locations,
                             sidecar_will_exist=True,
                             sync_flags=sync_flags,
+                            paired_keyword_rename=change[
+                                "paired_keyword_rename"
+                            ],
                         )
                     )
                     change["presentation"] = change[
@@ -10132,6 +10160,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     assigned_location=assigned_location,
                     write_locations=write_locations,
                     sync_flags=sync_flags,
+                    paired_keyword_rename=change["paired_keyword_rename"],
                 )
 
         result = {

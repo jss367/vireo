@@ -654,6 +654,46 @@ def test_sync_preview_shows_hierarchical_keyword_before_removal(
     }
 
 
+def test_sync_preview_preserves_hierarchy_during_paired_keyword_rename(
+    client_with_photo,
+):
+    """A normalized add/remove pair only replaces the flat XMP spelling."""
+    from xmp import write_sidecar
+
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    write_sidecar(
+        os.path.join(folder, "test.xmp"),
+        flat_keywords=set(),
+        hierarchical_keywords={"Animals|Birds|Raptor"},
+    )
+    db.queue_change(photo_id, "keyword_remove", "Birds")
+    db.queue_change(photo_id, "keyword_add", "Birds")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    changes = {
+        change["type"]: change
+        for change in response.get_json()["photos"][0]["changes"]
+    }
+    removal = changes["keyword_remove"]
+    assert removal["paired_keyword_rename"] is True
+    assert removal["presentation"] == {
+        "field": "Keyword hierarchy",
+        "action": "unchanged",
+        "before": "Animals › Birds › Raptor",
+        "after": "Animals › Birds › Raptor",
+        "after_detail": (
+            "The matching keyword addition replaces only the flat spelling; "
+            "this hierarchy stays in XMP"
+        ),
+    }
+
+
 def test_sync_preview_treats_flag_as_unchanged_when_sync_is_disabled(
     client_with_photo,
 ):
