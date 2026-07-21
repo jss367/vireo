@@ -366,7 +366,7 @@ ALL_NAV_IDS = frozenset({
     "import",
     "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
     "misses", "highlights", "life_list", "browse", "edit", "map", "location_review", "variants",
-    "dashboard", "storage", "audit", "move", "compare",
+    "dashboard", "storage", "audit", "move", "id_conflicts",
     "settings", "workspace", "lightroom", "shortcuts",
     "keywords", "duplicates", "logs",
 })
@@ -375,6 +375,13 @@ DEFAULT_TABS = [
     "import", "browse", "pipeline", "pipeline_review",
     "review", "cull", "jobs", "highlights", "misses", "storage", "settings",
 ]
+
+# Retired nav id -> current nav id. Applied when reading a workspace's saved
+# tabs so a pinned tab written under an old id survives a rename instead of
+# being dropped as unknown. "compare" was renamed to "id_conflicts".
+NAV_ID_ALIASES = {
+    "compare": "id_conflicts",
+}
 
 
 def commit_with_retry(conn, max_retries=5, base_delay=0.1):
@@ -2339,6 +2346,7 @@ class Database:
             self._ws_id(),
             allowed_nav_ids=ALL_NAV_IDS,
             default_tabs=DEFAULT_TABS,
+            nav_id_aliases=NAV_ID_ALIASES,
         )
 
     def set_workspace_group_state(self, workspace_id, fingerprint, when_ts):
@@ -15869,7 +15877,7 @@ class Database:
                     # than the prediction), broader (existing is more
                     # specific than the prediction). See compare.py's
                     # compare_prediction_to_keywords and the "keyword
-                    # support" counters in templates/compare.html. Without
+                    # support" counters in templates/id_conflicts.html. Without
                     # this, a photo tagged with a broader ancestor keyword
                     # (e.g. Anatidae) that is only "held down" by a
                     # neighbour's American Wigeon prediction is stripped

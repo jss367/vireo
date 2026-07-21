@@ -2698,6 +2698,34 @@ def test_get_tabs_returns_default_for_new_workspace(db):
     assert db.get_tabs() == DEFAULT_TABS
 
 
+def test_get_tabs_upgrades_legacy_compare_nav_id(db):
+    """A tab pinned under the retired "compare" id is upgraded to
+    "id_conflicts" on read instead of being dropped as unknown."""
+    import json
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    db.conn.execute(
+        "UPDATE workspaces SET tabs=? WHERE id=?",
+        (json.dumps(["browse", "compare", "settings"]), ws_id),
+    )
+    db.conn.commit()
+    assert db.get_tabs() == ["browse", "id_conflicts", "settings"]
+
+
+def test_get_tabs_dedupes_when_alias_collides(db):
+    """If both the old and new id are saved, aliasing collapses them to a
+    single "id_conflicts" entry preserving first-seen order."""
+    import json
+    ws_id = db.create_workspace("Fresh")
+    db.set_active_workspace(ws_id)
+    db.conn.execute(
+        "UPDATE workspaces SET tabs=? WHERE id=?",
+        (json.dumps(["compare", "browse", "id_conflicts"]), ws_id),
+    )
+    db.conn.commit()
+    assert db.get_tabs() == ["id_conflicts", "browse"]
+
+
 def test_pin_tab_appends(db):
     from db import DEFAULT_TABS
     ws_id = db.create_workspace("Fresh")

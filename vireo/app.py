@@ -150,7 +150,8 @@ ALL_PAGES = [
     {"id": "storage",         "label": "Storage",         "href": "/storage"},
     {"id": "audit",           "label": "Audit",           "href": "/audit"},
     {"id": "move",            "label": "Move",            "href": "/move"},
-    {"id": "compare",         "label": "Compare",         "href": "/compare"},
+    {"id": "id_conflicts",    "label": "ID Conflicts",    "href": "/id-conflicts",
+     "keywords": "compare conflict prediction model disagreement species keyword classify review"},
     {"id": "settings",        "label": "Settings",        "href": "/settings"},
     {"id": "workspace",       "label": "Workspace",       "href": "/workspace"},
     {"id": "lightroom",       "label": "Lightroom",       "href": "/lightroom"},
@@ -3294,6 +3295,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # verbatim. Add the new coordinate-source field only for that exact legacy
     # list; customized card layouts remain unchanged.
     cfg.migrate_browse_location_status_field()
+    # One-time rename of the "compare" navigation shortcut to "id_conflicts"
+    # after the Compare page became ID Conflicts, so a user's saved binding
+    # follows the page instead of being orphaned.
+    cfg.migrate_compare_nav_id_to_id_conflicts()
     # One-time rewrite of the previous encounter-grouping species weight
     # (0.10) to the new default (0.40) in both ~/.vireo/config.json and
     # workspace overrides. Without this, upgraded installs that had the
