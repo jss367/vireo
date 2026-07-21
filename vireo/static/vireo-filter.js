@@ -1260,8 +1260,9 @@
     // reopen (CodeRabbit review r3620473554).
     // Preserve the root's group mode (any/none) so the count reflects
     // what the saved collection actually matches, not an all-mode
-    // flattening of it (Codex review r3620791294).
-    const rules = state.root.rules.length ? clone(state.root) : { mode: 'all', rules: [] };
+    // flattening of it (Codex review r3620791294). ``userRules()`` is
+    // the shared helper for that shape.
+    const rules = userRules();
     const preview = $('.vf-save-preview');
     preview.textContent = expressionSummary();
     fetchJson('/api/photos/query', {

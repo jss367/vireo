@@ -3348,11 +3348,21 @@ function refreshActiveCollectionAfterMembershipChange() {
       if (Array.isArray(list)) {
         list.forEach(function(c) { collectionsById[c.id] = c; });
       }
-      filterByCollection(reopenId, { preserveAnchor: false });
+      // The user can switch scope (folder click, keyword click, filter
+      // change) while this fetch is in flight; those paths clear
+      // ``openedCollectionId``. Reopening unconditionally would reinstate
+      // the old collection and wipe the user's new scope (Codex review
+      // r3622743705). Only reopen if the same collection is still open.
+      if (openedCollectionId === reopenId) {
+        filterByCollection(reopenId, { preserveAnchor: false });
+      }
     }).catch(function() {
       // Even without the refresh, opening the cached copy is closer to
-      // right than leaving the stale expression in place.
-      filterByCollection(reopenId, { preserveAnchor: false });
+      // right than leaving the stale expression in place — but still
+      // only if the user hasn't already moved on.
+      if (openedCollectionId === reopenId) {
+        filterByCollection(reopenId, { preserveAnchor: false });
+      }
     });
     return;
   }

@@ -790,10 +790,11 @@ class Database:
             );
 
             CREATE TABLE IF NOT EXISTS collections (
-                id          INTEGER PRIMARY KEY,
-                name        TEXT,
-                rules       TEXT,
-                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE
+                id           INTEGER PRIMARY KEY,
+                name         TEXT,
+                rules        TEXT,
+                workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+                visual_json  TEXT
             );
 
             CREATE TABLE IF NOT EXISTS pending_changes (
