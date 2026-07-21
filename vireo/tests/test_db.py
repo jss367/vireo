@@ -2130,6 +2130,121 @@ def test_place_upsert_prefers_coordless_root_over_place_bearing_peer(tmp_path):
     assert roots == 2
 
 
+def test_repair_preserves_coordless_anchor_beside_distinct_place_roots(
+    tmp_path,
+):
+    """Startup merge must not absorb the ambiguity anchor.
+
+    When two same-name roots carry distinct non-null place_ids (e.g.
+    Georgia the country and Georgia the state) plus a coordless anchor
+    that ``_upsert_one_keyword`` inserted for ambiguous address
+    components, ``_merge_duplicate_location_roots`` must leave the
+    coordless anchor alone. Merging it into either place-bearing root
+    would silently reparent its descendants under an arbitrary Google
+    place and undo the ambiguity guard for future coordless children.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    state_id = db.add_keyword("Georgia", kw_type="location")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ? WHERE id = ?",
+        ("georgia-state", state_id),
+    )
+    # add_keyword dedupes case-insensitively per type, so a second
+    # kw_type='location' call would just return state_id. Insert the
+    # additional Georgia roots directly to simulate the ambiguity state
+    # _upsert_one_keyword leaves behind (two distinct Google places plus
+    # a neutral coordless anchor for future children).
+    country_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, is_species, place_id) "
+        "VALUES (?, NULL, 'location', 0, ?) RETURNING id",
+        ("Georgia", "georgia-country"),
+    ).fetchone()["id"]
+    coordless_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, is_species) "
+        "VALUES (?, NULL, 'location', 0) RETURNING id",
+        ("Georgia",),
+    ).fetchone()["id"]
+    child_id = db.add_keyword(
+        "Ambiguous Park", parent_id=coordless_id, kw_type="location",
+    )
+    db.conn.commit()
+
+    db.repair_misclassified_location_ancestors()
+
+    roots = db.conn.execute(
+        "SELECT id, place_id, type FROM keywords "
+        "WHERE name = ? AND parent_id IS NULL ORDER BY id",
+        ("Georgia",),
+    ).fetchall()
+    assert [(row["id"], row["place_id"], row["type"]) for row in roots] == [
+        (state_id, "georgia-state", "location"),
+        (country_id, "georgia-country", "location"),
+        (coordless_id, None, "location"),
+    ]
+    child_parent = db.conn.execute(
+        "SELECT parent_id FROM keywords WHERE id = ?", (child_id,),
+    ).fetchone()["parent_id"]
+    assert child_parent == coordless_id
+
+
+def test_repair_still_merges_coordless_duplicates_alongside_place_roots(
+    tmp_path,
+):
+    """Duplicate coordless anchors still collapse into one survivor.
+
+    The ambiguity guard preserves coordless anchors sitting beside
+    multiple distinct place-bearing roots, but two coordless rows for
+    the same name still describe the same neutral hierarchy anchor and
+    must collapse into a single row so children stay under one parent.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    state_id = db.add_keyword("Georgia", kw_type="location")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ? WHERE id = ?",
+        ("georgia-state", state_id),
+    )
+    country_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, is_species, place_id) "
+        "VALUES (?, NULL, 'location', 0, ?) RETURNING id",
+        ("Georgia", "georgia-country"),
+    ).fetchone()["id"]
+    coordless_survivor = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, is_species) "
+        "VALUES (?, NULL, 'location', 0) RETURNING id",
+        ("Georgia",),
+    ).fetchone()["id"]
+    coordless_dup = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, type, is_species) "
+        "VALUES (?, NULL, 'location', 0) RETURNING id",
+        ("Georgia",),
+    ).fetchone()["id"]
+    child_id = db.add_keyword(
+        "Old Anchor Child", parent_id=coordless_dup, kw_type="location",
+    )
+    db.conn.commit()
+
+    db.repair_misclassified_location_ancestors()
+
+    roots = db.conn.execute(
+        "SELECT id, place_id FROM keywords "
+        "WHERE name = ? AND parent_id IS NULL ORDER BY id",
+        ("Georgia",),
+    ).fetchall()
+    assert [(row["id"], row["place_id"]) for row in roots] == [
+        (state_id, "georgia-state"),
+        (country_id, "georgia-country"),
+        (coordless_survivor, None),
+    ]
+    child_parent = db.conn.execute(
+        "SELECT parent_id FROM keywords WHERE id = ?", (child_id,),
+    ).fetchone()["parent_id"]
+    assert child_parent == coordless_survivor
+
+
 def test_place_upsert_repairs_adjacent_location_ancestors_on_demand(
     tmp_path,
 ):

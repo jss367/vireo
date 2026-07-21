@@ -10556,6 +10556,15 @@ class Database:
         single root owns every child. Rows with distinct non-null
         ``place_id`` values describe different Google places that happen to
         share a name and are left alone.
+
+        When the same-name set carries multiple distinct place-bearing
+        roots, ``_upsert_one_keyword`` inserts a coordless anchor row for
+        ambiguous address components so future children have a neutral
+        parent instead of being nested under an arbitrary Google place.
+        Merging that anchor into either place-bearing root would silently
+        reparent its descendants and undo the ambiguity guard, so leave
+        coordless-vs-place-bearing pairs alone in that case and only
+        collapse duplicates of the same kind.
         """
         duplicates = self.conn.execute(
             "SELECT name FROM keywords "
@@ -10572,15 +10581,32 @@ class Database:
             ).fetchall()
             if len(candidates) < 2:
                 continue
+            distinct_place_ids = {
+                cand["place_id"]
+                for cand in candidates
+                if cand["place_id"] is not None
+            }
+            if len(distinct_place_ids) > 1:
+                # Distinct Google places share this name. The ambiguity
+                # anchor _upsert_one_keyword installs must not be
+                # absorbed into (or promoted onto) a place-bearing root
+                # — that would silently reparent its descendants under
+                # an arbitrary Google place. Leave place-bearing roots
+                # alone and only collapse redundant coordless duplicates
+                # so children stay under one shared anchor.
+                coordless = [
+                    cand for cand in candidates if cand["place_id"] is None
+                ]
+                if len(coordless) < 2:
+                    continue
+                survivor_id = coordless[0]["id"]
+                for cand in coordless[1:]:
+                    merged += self._merge_keyword_into(
+                        cand["id"], survivor_id,
+                    )
+                continue
             survivor = dict(candidates[0])
             for cand in candidates[1:]:
-                if (
-                    survivor["place_id"] is not None
-                    and cand["place_id"] is not None
-                    and survivor["place_id"] != cand["place_id"]
-                ):
-                    # Two distinct Google places — leave both in place.
-                    continue
                 if (
                     survivor["place_id"] is None
                     and cand["place_id"] is not None
