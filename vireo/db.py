@@ -376,6 +376,13 @@ DEFAULT_TABS = [
     "review", "cull", "jobs", "highlights", "misses", "storage", "settings",
 ]
 
+# Retired nav id -> current nav id. Applied when reading a workspace's saved
+# tabs so a pinned tab written under an old id survives a rename instead of
+# being dropped as unknown. "compare" was renamed to "id_conflicts".
+NAV_ID_ALIASES = {
+    "compare": "id_conflicts",
+}
+
 
 def commit_with_retry(conn, max_retries=5, base_delay=0.1):
     """Commit ``conn`` with retry on transient "locked"/"busy" errors.
@@ -2339,6 +2346,7 @@ class Database:
             self._ws_id(),
             allowed_nav_ids=ALL_NAV_IDS,
             default_tabs=DEFAULT_TABS,
+            nav_id_aliases=NAV_ID_ALIASES,
         )
 
     def set_workspace_group_state(self, workspace_id, fingerprint, when_ts):
