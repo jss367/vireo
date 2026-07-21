@@ -10206,21 +10206,31 @@ class Database:
                 if existing_place is None:
                     if parent_id is None:
                         existing_component = self.conn.execute(
-                            "SELECT id FROM keywords "
+                            "SELECT id, type FROM keywords "
                             "WHERE name = ? AND parent_id IS NULL "
-                            "  AND type = 'location' AND place_id IS NULL "
+                            "  AND place_id IS NULL "
+                            "ORDER BY CASE WHEN type = 'location' THEN 0 "
+                            "  WHEN type = 'taxonomy' THEN 1 ELSE 2 END, id "
                             "LIMIT 1",
                             (name,),
                         ).fetchone()
                     else:
                         existing_component = self.conn.execute(
-                            "SELECT id FROM keywords "
+                            "SELECT id, type FROM keywords "
                             "WHERE name = ? AND parent_id = ? "
-                            "  AND type = 'location' AND place_id IS NULL "
+                            "  AND place_id IS NULL "
                             "LIMIT 1",
                             (name, parent_id),
                         ).fetchone()
-                if existing_component is not None:
+                if (
+                    existing_component is not None
+                    and (
+                        existing_component["type"] == "location"
+                        or self._restore_misclassified_location_ancestor(
+                            existing_component["id"],
+                        )
+                    )
+                ):
                     self.conn.execute(
                         "UPDATE keywords SET place_id = ?, type = 'location', "
                         "is_species = 0, taxon_id = NULL, latitude = ?, "
@@ -10382,10 +10392,10 @@ class Database:
 
         Before explicit keyword types were protected during taxonomy marking,
         geographic homonyms such as ``California`` could be changed from a
-        location into taxonomy. A taxonomy row below a location parent and
-        above a location descendant, connected only through other taxonomy
-        rows, is an administrative location-tree node. Clear the stale
-        taxonomy metadata and restore its original type.
+        location into taxonomy. A taxonomy root, or a taxonomy row below a
+        location parent, that sits above a location descendant connected only
+        through other taxonomy rows is an administrative location-tree node.
+        Clear the stale taxonomy metadata and restore its original type.
         """
         row = self.conn.execute(
             "WITH RECURSIVE descendants(id, type) AS ("
@@ -10397,9 +10407,9 @@ class Database:
             "  WHERE parent.type = 'taxonomy'"
             ") "
             "SELECT k.id FROM keywords k "
-            "JOIN keywords parent ON parent.id = k.parent_id "
+            "LEFT JOIN keywords parent ON parent.id = k.parent_id "
             "WHERE k.id = ? AND k.type = 'taxonomy' "
-            "  AND parent.type = 'location' "
+            "  AND (k.parent_id IS NULL OR parent.type = 'location') "
             "  AND EXISTS ("
             "    SELECT 1 FROM descendants WHERE type = 'location'"
             "  )",
@@ -10427,8 +10437,9 @@ class Database:
         while True:
             rows = self.conn.execute(
                 "SELECT k.id FROM keywords k "
-                "JOIN keywords parent ON parent.id = k.parent_id "
-                "WHERE k.type = 'taxonomy' AND parent.type = 'location'"
+                "LEFT JOIN keywords parent ON parent.id = k.parent_id "
+                "WHERE k.type = 'taxonomy' "
+                "  AND (k.parent_id IS NULL OR parent.type = 'location')"
             ).fetchall()
             repaired_this_pass = 0
             for row in rows:

@@ -1645,6 +1645,27 @@ def test_repair_misclassified_location_ancestors_restores_adjacent_nodes(
     assert db.repair_misclassified_location_ancestors() == 0
 
 
+def test_repair_misclassified_location_ancestors_restores_root_chain(tmp_path):
+    """Repair a taxonomy-typed country at the root of a location hierarchy."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="taxonomy")
+    state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="taxonomy",
+    )
+    db.add_keyword(
+        "San Diego County", parent_id=state_id, kw_type="location",
+    )
+
+    assert db.repair_misclassified_location_ancestors() == 2
+    rows = db.conn.execute(
+        "SELECT type FROM keywords WHERE id IN (?, ?) ORDER BY id",
+        (country_id, state_id),
+    ).fetchall()
+    assert [row["type"] for row in rows] == ["location", "location"]
+
+
 def test_place_upsert_repairs_adjacent_location_ancestors_on_demand(
     tmp_path,
 ):
@@ -1853,6 +1874,44 @@ def test_place_upsert_reuses_root_administrative_location(tmp_path):
         "latitude": 39.8283,
         "longitude": -98.5795,
     }
+
+
+def test_place_upsert_repairs_root_administrative_location(tmp_path):
+    """Selecting a legacy taxonomy root heals it without creating a duplicate."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="taxonomy")
+    state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="location",
+    )
+
+    selected_id = db.upsert_place_chain({
+        "place_id": "united-states-country",
+        "name": "United States",
+        "types": ["country"],
+        "lat": 39.8283,
+        "lng": -98.5795,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+        ],
+    })
+
+    assert selected_id == country_id
+    country = db.conn.execute(
+        "SELECT type, place_id FROM keywords WHERE id = ?", (country_id,),
+    ).fetchone()
+    assert dict(country) == {
+        "type": "location",
+        "place_id": "united-states-country",
+    }
+    assert db.conn.execute(
+        "SELECT parent_id FROM keywords WHERE id = ?", (state_id,),
+    ).fetchone()["parent_id"] == country_id
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE name = ? AND parent_id IS NULL",
+        ("United States",),
+    ).fetchone()[0] == 1
 
 
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
