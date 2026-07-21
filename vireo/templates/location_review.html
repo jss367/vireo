@@ -135,14 +135,21 @@ body {
   border-top: 1px solid var(--border-primary);
 }
 .location-review-thumb {
+  appearance: none;
   width: 84px;
   min-width: 84px;
   height: 94px;
+  padding: 0;
   border: 1px solid var(--border-primary);
   border-radius: 5px;
   overflow: hidden;
   background: var(--bg-tertiary);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
 }
+.location-review-thumb:hover,
+.location-review-thumb:focus-visible { border-color: var(--accent); }
 .location-review-thumb img { width: 100%; height: 68px; object-fit: cover; display: block; }
 .location-review-thumb span {
   display: block;
@@ -295,6 +302,7 @@ body {
   background: var(--accent);
   border: 2px solid white;
   box-shadow: 0 1px 4px rgba(0,0,0,.5);
+  cursor: pointer;
 }
 .leaflet-control-layers {
   background: var(--bg-secondary) !important;
@@ -561,6 +569,12 @@ body {
     state.candidateMarkers = [];
   }
 
+  function openPhotoPreview(photo) {
+    var group = currentGroup();
+    if (!photo || !group || typeof openLightbox !== 'function') return;
+    openLightbox(photo.id, photo.filename || '', group.photos);
+  }
+
   function renderPhotoMarkers(group) {
     clearMapObjects();
     if (!state.map || !group) return;
@@ -582,6 +596,7 @@ body {
           },
           zIndex: 20,
         });
+        marker.addListener('click', function() { openPhotoPreview(photo); });
         state.photoMarkers.push(marker);
         bounds.extend(position);
       });
@@ -596,6 +611,7 @@ body {
           icon: L.divIcon({className: '', html: '<div class="location-review-photo-dot"></div>', iconSize: [15,15], iconAnchor: [7,7]}),
           title: photo.filename,
         }).addTo(state.map);
+        marker.on('click', function() { openPhotoPreview(photo); });
         state.photoMarkers.push(marker);
         latLngs.push([photo.latitude, photo.longitude]);
       });
@@ -714,11 +730,18 @@ body {
     var container = document.getElementById('locationReviewThumbnails');
     var visible = group.photos.slice(0, 24);
     container.innerHTML = visible.map(function(photo) {
-      return '<div class="location-review-thumb" title="' + escapeAttr(photo.filename) + '">' +
+      return '<button class="location-review-thumb" type="button" data-photo-id="' + photo.id + '" title="Open ' + escapeAttr(photo.filename) + '">' +
         '<img src="/thumbnails/' + photo.id + '.jpg" alt="" loading="lazy" onerror="this.style.visibility=\'hidden\'">' +
-        '<span>' + escapeHtml(photo.filename) + '</span></div>';
+        '<span>' + escapeHtml(photo.filename) + '</span></button>';
     }).join('') + (group.photos.length > visible.length
       ? '<div class="location-review-more">+' + formatNumber(group.photos.length - visible.length) + ' more</div>' : '');
+    container.querySelectorAll('[data-photo-id]').forEach(function(button) {
+      button.addEventListener('click', function() {
+        var photoId = parseInt(button.dataset.photoId, 10);
+        var photo = group.photos.find(function(item) { return item.id === photoId; });
+        openPhotoPreview(photo);
+      });
+    });
   }
 
   function renderGroupFacts(group) {
