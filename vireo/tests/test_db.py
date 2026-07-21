@@ -2378,6 +2378,55 @@ def test_repair_still_merges_coordless_duplicates_alongside_place_roots(
     assert child_parent == coordless_survivor
 
 
+def test_merge_keyword_into_transfers_coords_with_place_id(tmp_path):
+    """When ``_merge_keyword_into`` moves ``place_id`` from src to a
+    coordless dst, it must also move src's coordinates. The metadata fold
+    below the place-id transfer only fills coordless rows via
+    ``COALESCE(latitude, ?)``, so a dst that carried unrelated stale
+    coords would otherwise represent the incoming Google place at the
+    wrong point — saved-suggestion ranking and map markers would then
+    plot the survivor at the stale location instead of the place's
+    actual coordinates. Regression for a Codex finding on duplicate-root
+    collapse where a Google-linked child merges into a same-name
+    coordless sibling with custom coordinates.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        src_id = db.add_keyword("United States", kw_type="location")
+        db.conn.execute(
+            "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
+            "WHERE id = ?",
+            ("us-google", 39.828175, -98.5795, src_id),
+        )
+        dst_id = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, type, is_species, "
+            "latitude, longitude) "
+            "VALUES (?, NULL, 'location', 0, ?, ?) RETURNING id",
+            ("United States", 12.34, 56.78),
+        ).fetchone()["id"]
+        db.conn.commit()
+
+        db._merge_keyword_into(src_id, dst_id)
+        db.conn.commit()
+
+        row = db.conn.execute(
+            "SELECT place_id, latitude, longitude FROM keywords WHERE id = ?",
+            (dst_id,),
+        ).fetchone()
+        assert row["place_id"] == "us-google"
+        assert row["latitude"] == 39.828175
+        assert row["longitude"] == -98.5795
+
+        deleted = db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (src_id,),
+        ).fetchone()
+        assert deleted is None
+    finally:
+        db.close()
+
+
 def test_place_upsert_repairs_adjacent_location_ancestors_on_demand(
     tmp_path,
 ):

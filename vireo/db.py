@@ -12466,19 +12466,28 @@ class Database:
         # California`` present as both a coordless branch and a place-bearing
         # branch). The partial ``UNIQUE(place_id) WHERE place_id IS NOT NULL``
         # index requires clearing the source first before moving the value.
-        if (
+        # When the transfer happens, force the destination's coordinates to
+        # match the source's — the metadata fold below only fills coordless
+        # rows via ``COALESCE(latitude, ?)``, so a destination that carried
+        # unrelated stale coords would otherwise represent the incoming
+        # Google place at the wrong point (saved-suggestion ranking and map
+        # markers then use the stale location instead of the place's actual
+        # coordinates).
+        place_id_transferred = (
             src is not None
             and dst is not None
             and src["place_id"] is not None
             and dst["place_id"] is None
-        ):
+        )
+        if place_id_transferred:
             self.conn.execute(
                 "UPDATE keywords SET place_id = NULL WHERE id = ?",
                 (src_id,),
             )
             self.conn.execute(
-                "UPDATE keywords SET place_id = ? WHERE id = ?",
-                (src["place_id"], dst_id),
+                "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
+                "WHERE id = ?",
+                (src["place_id"], src["latitude"], src["longitude"], dst_id),
             )
         if src is not None:
             # A species-bearing row being RETYPED into a non-taxonomy
