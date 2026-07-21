@@ -10496,16 +10496,31 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # rules (raised by _build_query_from_rules) and malformed JSON in
             # the rules column (json.JSONDecodeError is a ValueError subclass).
             # Anything else bubbles up as a 500 so real infra failures surface.
-            try:
-                d["photo_count"] = db.count_collection_photos(c["id"])
-            except ValueError:
-                app.logger.exception(
-                    "Failed to count photos for collection %s (%s)",
-                    c["id"],
-                    c["name"],
-                )
+            #
+            # Visual collections narrow the result set at open time via the
+            # filter bar's visual clause; ``count_collection_photos`` only
+            # evaluates ``rules``, so a saved visual collection with e.g.
+            # ``rules: []`` would return the workspace-wide metadata count
+            # here while Browse shows a much smaller set on reopen
+            # (Codex review r3620935217). Resolving the visual clause on
+            # every listing would run the embedding for every visual
+            # collection on every page load — too expensive. Omit the count
+            # instead: the sidebar (browse.html) renders an empty count
+            # span for null photo_count, and the ✦ visual marker already
+            # tells users this collection is visually resolved.
+            if c["visual_json"] is not None:
                 d["photo_count"] = None
-                d["count_error"] = True
+            else:
+                try:
+                    d["photo_count"] = db.count_collection_photos(c["id"])
+                except ValueError:
+                    app.logger.exception(
+                        "Failed to count photos for collection %s (%s)",
+                        c["id"],
+                        c["name"],
+                    )
+                    d["photo_count"] = None
+                    d["count_error"] = True
             # Degraded rows must never advertise manual-add support: the
             # add-to-collection modal filters only on can_add_photos, and
             # /api/collections/<id>/add-photos calls set(ids_rule["value"])

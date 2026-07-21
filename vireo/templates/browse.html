@@ -1992,6 +1992,18 @@ var activeCollectionId = null;
 // A Dashboard deep link can combine a collection with date/keyword filters.
 // Normal collection clicks keep the historical collection-only behavior.
 var dashboardCollectionScope = false;
+// Which saved collection (if any) is currently loaded into the filter bar
+// as editable chips. Phase 5's ``filterByCollection`` clears
+// ``activeCollectionId`` when it hands off to the filter bar (because the
+// expression IS the filter and the historical "collection endpoint" mode
+// is gone), so we need a separate handle to reload the expression after
+// membership edits — refreshActiveCollectionAfterMembershipChange used to
+// only reload the sidebar counts, leaving a stale photo_ids list in the
+// bar until the user reopened the collection (CodeRabbit review
+// r3620473562). Cleared by the filter bar's onChange when the user edits
+// the expression (so a user-edited chip set isn't silently reverted to
+// the saved collection on the next membership refresh).
+var openedCollectionId = null;
 
 var timelineMode = false;
 var calendarYear = new Date().getFullYear();
@@ -2886,6 +2898,16 @@ async function bootstrapBrowse() {
       onChange: function(info) {
         if (timelineMode) loadCalendarData();
         if (activeCollectionId && !dashboardCollectionScope) activeCollectionId = null;
+        // Any user-driven change to the filter chips means the bar no
+        // longer represents the saved collection verbatim — drop the
+        // handle so a later membership refresh doesn't silently revert
+        // the user's edits back to the collection's saved expression.
+        // Our own filterByCollection() → loadExpression() fires onChange
+        // with reason 'expressionLoaded'; that path already sets
+        // openedCollectionId above, so leave it alone.
+        if (openedCollectionId && info && info.reason !== 'expressionLoaded') {
+          openedCollectionId = null;
+        }
         // A cleared quick search is the one filter edit where the previously
         // selected photo is expected to reappear in the wider result set \u2014
         // preserve the anchor so the detail panel and scroll position don't
@@ -2940,6 +2962,16 @@ async function bootstrapBrowse() {
       var collectionLink = !!urlParams.get('collection_id');
       if (collectionLink && !hasExplicitFilterParams && VireoFilter.hasFilters()) {
         VireoFilter.clearAll(true);
+      }
+      // A ?collection_id=...&rating_min=4 (or &date_from=..., etc.) link
+      // compiles the URL filter params into rules above; if we then called
+      // filterByCollection() its loadExpression() would REPLACE state.root
+      // with the saved collection rules and silently drop the URL filters
+      // (Codex review r3620935211). Treat the collection as a composable
+      // dashboard-style scope for this case: keep the URL filter chips
+      // and scope /api/photos/query by the collection alongside them.
+      if (collectionLink && hasExplicitFilterParams && !dashboardCollectionScope) {
+        dashboardCollectionScope = true;
       }
       if (activeCollectionId && !dashboardCollectionScope) {
         // Plain collection deep link: open it into the filter bar as
@@ -3241,6 +3273,31 @@ function refreshActiveCollectionAfterMembershipChange() {
     filterByCollection(activeCollectionId, { preserveAnchor: false });
     return;
   }
+  // A collection opened into the filter bar carries a static rules snapshot
+  // (the saved photo_ids list plus any user-picked chips). loadCollections()
+  // refreshes the sidebar counts but the bar keeps the STALE photo_ids
+  // rule until the user manually reopens the collection, so an add/remove
+  // just made from Browse doesn't show up in the current grid (CodeRabbit
+  // review r3620473562). Refetch the collection metadata and reopen so
+  // the bar's photo_ids expression matches the fresh membership.
+  if (openedCollectionId) {
+    var reopenId = openedCollectionId;
+    // Ensure filterByCollection sees the freshest rules/visual_json, not
+    // whatever the last renderCollectionList cached; loadCollections
+    // (called by callers of this function) refreshes collectionsById via
+    // loadCollectionCounts, but that's async — sequence with a fetch.
+    safeFetch('/api/collections', {}, { toast: false }).then(function(list) {
+      if (Array.isArray(list)) {
+        list.forEach(function(c) { collectionsById[c.id] = c; });
+      }
+      filterByCollection(reopenId, { preserveAnchor: false });
+    }).catch(function() {
+      // Even without the refresh, opening the cached copy is closer to
+      // right than leaving the stale expression in place.
+      filterByCollection(reopenId, { preserveAnchor: false });
+    });
+    return;
+  }
   // Collections open into the filter bar now (Phase 5): when a membership
   // change (tag/untag, add/remove) happens while an expression is active,
   // re-evaluate it so photos that no longer match leave the grid.
@@ -3316,6 +3373,9 @@ async function filterByCollection(id, options) {
   activeKeyword = null;
   activeCollectionId = null;
   dashboardCollectionScope = false;
+  // Track which collection is currently loaded so post-membership refresh
+  // can pull fresh rules/photo_ids without waiting for a user reopen.
+  openedCollectionId = id;
   var rules = [];
   var visual = null;
   try { rules = JSON.parse(collectionMeta.rules || '[]'); } catch (e) { rules = []; }
