@@ -924,6 +924,14 @@ async function loadCollectionFilter() {
 
 async function switchCollection(val) {
   currentCollection = val;
+  // Gate mutation entry points immediately: currentCollection has already
+  // changed, but the /api/collections/<id>/photos fetch below may take a
+  // moment before loadPredictions() runs (and flips the flag itself).
+  // Without setting this now, Accept All and per-card handlers stay
+  // enabled under the newly selected collection and iterate the STALE
+  // ``predictions`` array from the previous collection during that gap.
+  _predictionsReloading = true;
+  renderButtons();
   if (val === 'all') {
     collectionPhotoIds = null;
   } else {
@@ -942,6 +950,10 @@ async function switchCollection(val) {
       console.error('Failed to load photos for collection ' + val + ':', e);
       collectionPhotoIds = new Set();
       predictions = [];
+      // Release the reload guard so ``renderButtons`` shows the correct
+      // hidden/disabled state for the empty ``predictions`` array instead
+      // of a stuck "Reloading…" button.
+      _predictionsReloading = false;
       if (typeof showToast === 'function') {
         showToast('Could not load photos for this collection — check its rules', 'error');
       }
