@@ -1812,6 +1812,82 @@ def test_repair_misclassified_location_ancestors_merges_duplicate_roots(
     assert db.repair_misclassified_location_ancestors() == 0
 
 
+def test_repair_misclassified_location_ancestors_preserves_child_place_id(
+    tmp_path,
+):
+    """Merging duplicate roots must transfer overlapping children's place_id.
+
+    Regression: when both roots already carry a same-name child (e.g. one
+    catalog branch has a coordless ``United States -> California`` while a
+    repaired place-bearing branch has ``United States -> California`` with a
+    Google place ID), collapsing the duplicate roots recursively merges the
+    two ``California`` rows. ``_merge_keyword_into`` previously folded
+    ``is_species``/``latitude``/``longitude``/``taxon_id`` but never
+    ``place_id``, so the place-bearing child was deleted with its Google
+    place link silently dropped. The next map assignment for the same place
+    would then create a new coordless disambiguated row instead of reusing
+    the surviving child.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    coordless_root = db.add_keyword("United States", kw_type="location")
+    coordless_state = db.add_keyword(
+        "California", parent_id=coordless_root, kw_type="location",
+    )
+    place_bearing_root = db.add_keyword("United States", kw_type="taxonomy")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
+        "WHERE id = ?",
+        (
+            "united-states-country",
+            39.5,
+            -98.35,
+            place_bearing_root,
+        ),
+    )
+    place_bearing_state = db.add_keyword(
+        "California", parent_id=place_bearing_root, kw_type="location",
+    )
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ?, latitude = ?, longitude = ? "
+        "WHERE id = ?",
+        (
+            "california-state",
+            37.25,
+            -119.75,
+            place_bearing_state,
+        ),
+    )
+    db.conn.commit()
+
+    assert db.repair_misclassified_location_ancestors() == 1
+    surviving_state = db.conn.execute(
+        "SELECT id, place_id, latitude, longitude, parent_id FROM keywords "
+        "WHERE name = ? AND parent_id = ?",
+        ("California", coordless_root),
+    ).fetchall()
+    assert len(surviving_state) == 1
+    assert dict(surviving_state[0]) == {
+        "id": coordless_state,
+        "place_id": "california-state",
+        "latitude": 37.25,
+        "longitude": -119.75,
+        "parent_id": coordless_root,
+    }
+    # The place-bearing child row is gone — merged into the survivor.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE id = ?",
+        (place_bearing_state,),
+    ).fetchone()[0] == 0
+    # And no orphan California survives outside the surviving root.
+    all_california = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ? ORDER BY id",
+        ("California",),
+    ).fetchall()
+    assert [row["id"] for row in all_california] == [coordless_state]
+
+
 def test_repair_misclassified_location_ancestors_keeps_distinct_place_roots(
     tmp_path,
 ):

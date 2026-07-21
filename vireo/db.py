@@ -12395,14 +12395,37 @@ class Database:
         """
         merged = 1
         src = self.conn.execute(
-            "SELECT name, type, is_species, latitude, longitude, taxon_id "
-            "FROM keywords WHERE id = ?",
+            "SELECT name, type, is_species, latitude, longitude, taxon_id, "
+            "place_id FROM keywords WHERE id = ?",
             (src_id,),
         ).fetchone()
         dst = self.conn.execute(
-            "SELECT name, type, is_species FROM keywords WHERE id = ?",
+            "SELECT name, type, is_species, place_id FROM keywords WHERE id = ?",
             (dst_id,),
         ).fetchone()
+        # Transfer the source's Google ``place_id`` onto the destination when
+        # the destination lacks one before the row is deleted below. Without
+        # this, merging a coordless sibling on top of a place-bearing sibling
+        # (or the reverse) silently drops the Google place link — repeat
+        # startup repair of duplicate location roots would otherwise strip
+        # the place ID from a repaired child (e.g. ``United States ->
+        # California`` present as both a coordless branch and a place-bearing
+        # branch). The partial ``UNIQUE(place_id) WHERE place_id IS NOT NULL``
+        # index requires clearing the source first before moving the value.
+        if (
+            src is not None
+            and dst is not None
+            and src["place_id"] is not None
+            and dst["place_id"] is None
+        ):
+            self.conn.execute(
+                "UPDATE keywords SET place_id = NULL WHERE id = ?",
+                (src_id,),
+            )
+            self.conn.execute(
+                "UPDATE keywords SET place_id = ? WHERE id = ?",
+                (src["place_id"], dst_id),
+            )
         if src is not None:
             # A species-bearing row being RETYPED into a non-taxonomy
             # destination must not leak its species flag or taxon link
