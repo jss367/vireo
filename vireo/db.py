@@ -15265,7 +15265,20 @@ class Database:
         Leaves and subgroups in ``all``/``any`` positions still pull
         their weight in the SQL — an ``all`` narrows and an ``any``
         widens correctly at the photo level.
+
+        A negated branch that ends up fully emptied by this pass
+        represents "broaden to TRUE at photo level" (the row filter
+        will decide per row). Under an ``any`` parent that TRUE
+        satisfies the OR for every photo, so we propagate a broad
+        marker up: an ``any`` group with any broad child becomes broad
+        itself, and a top-level broad marker resolves to empty rules
+        (no photo-level restriction). Without this, ``any(none(
+        prediction_confidence >= 0.8), rating >= 5)`` compiled as just
+        ``rating >= 5``, hiding rating-3 photos whose low-confidence
+        rows satisfy the outer OR at the row level (see r3619014565).
         """
+        broad = self._RELAX_BROAD
+
         def _contains_prediction_field(node):
             if not isinstance(node, dict):
                 return False
@@ -15281,6 +15294,7 @@ class Database:
                 mode = node.get("mode", "all")
                 child_negated = negated or (mode == "none")
                 new_children = []
+                had_broad = False
                 for child in node.get("rules") or []:
                     is_group = (
                         isinstance(child, dict)
@@ -15299,10 +15313,27 @@ class Database:
                         and is_group
                         and _contains_prediction_field(child)
                     ):
+                        had_broad = True
                         continue
                     stripped = _walk(child, child_negated)
-                    if stripped is not None:
-                        new_children.append(stripped)
+                    if stripped is None:
+                        # Bare row-level leaf dropped under negation:
+                        # SQL for that leaf broadens to TRUE.
+                        had_broad = True
+                        continue
+                    if stripped is broad:
+                        had_broad = True
+                        continue
+                    new_children.append(stripped)
+                # ``any`` with any broad child is TRUE at the photo
+                # level — the whole OR broadens. ``all``/``none`` drop
+                # broad children silently (they don't restrict) unless
+                # every child broadened, in which case the group itself
+                # is broad and must propagate.
+                if mode == "any" and had_broad:
+                    return broad
+                if had_broad and not new_children:
+                    return broad
                 new_node = dict(node)
                 new_node["rules"] = new_children
                 return new_node
@@ -15313,8 +15344,18 @@ class Database:
 
         if isinstance(rules, list):
             wrapped = _walk({"mode": "all", "rules": rules}, False)
-            return wrapped.get("rules", []) if wrapped else []
-        return _walk(rules, False)
+            if wrapped is broad or wrapped is None:
+                return []
+            return wrapped.get("rules", [])
+        walked = _walk(rules, False)
+        if walked is broad or walked is None:
+            return {"mode": "all", "rules": []}
+        return walked
+
+    # Sentinel returned by ``_relax_negated_prediction_leaves`` when a
+    # branch broadens to TRUE at the photo level. Identity-compared with
+    # ``is``; never stored in a rules tree that reaches SQL.
+    _RELAX_BROAD = object()
 
     def _filter_prediction_rows_by_rules(self, rows, rules):
         """Drop returned prediction rows that don't satisfy prediction-field

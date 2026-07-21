@@ -593,6 +593,87 @@ def test_get_predictions_any_group_mixes_metadata_and_prediction(app_and_db):
     )
 
 
+def test_get_predictions_any_group_none_prediction_branch_broadens(app_and_db):
+    """``any(none(prediction_confidence >= 0.8), rating >= 5)`` on a
+    rating-3 photo with only a 0.10 prediction: the ``none(...)`` branch
+    is TRUE per row for the 0.10 sibling, so the outer OR must let the
+    row through even though ``rating >= 5`` is FALSE. Previously the
+    relaxation stripped the prediction leaf and left ``none()`` empty,
+    which compiled to no SQL clause under the ``any``; the photo was
+    photo-scoped to just ``rating >= 5`` and dropped before the row
+    filter could keep it (see r3619014565).
+    """
+    _, db = app_and_db
+    photos = db.get_photos()
+    # p1 has rating 3 in the fixture.
+    photo_id = photos[0]['id']
+    det = _make_detection(db, photo_id)
+    db.add_prediction(detection_id=det, species='Low', confidence=0.10,
+                      model='test-model', category='new')
+
+    rules = {
+        'mode': 'any',
+        'rules': [
+            {
+                'mode': 'none',
+                'rules': [
+                    {'field': 'prediction_confidence', 'op': '>=', 'value': 0.8},
+                ],
+            },
+            {'field': 'rating', 'op': '>=', 'value': 5},
+        ],
+    }
+    preds = db.get_predictions(rules=rules)
+    returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
+    assert returned == ['Low'], (
+        'emptied `none` branch under `any` was dropped from the SQL; the '
+        'photo was scoped to just `rating >= 5` and the low-confidence row '
+        'the outer OR should have surfaced never reached the row filter'
+    )
+
+
+def test_get_predictions_any_group_none_mixed_subgroup_broadens(app_and_db):
+    """``any(none(all(rating >= 5, prediction_confidence >= 0.8)),
+    rating >= 999)`` on a rating-3 photo with a 0.10 prediction: the
+    inner ``all`` is FALSE per row (rating != 5), so ``none(...)`` is
+    TRUE and the outer OR keeps the row. The relaxation drops the whole
+    negated mixed subgroup, which must broaden the OR — not disappear
+    under it — so the photo isn't scoped away by ``rating >= 999`` alone.
+    """
+    _, db = app_and_db
+    photos = db.get_photos()
+    photo_id = photos[0]['id']
+    det = _make_detection(db, photo_id)
+    db.add_prediction(detection_id=det, species='Low', confidence=0.10,
+                      model='test-model', category='new')
+
+    rules = {
+        'mode': 'any',
+        'rules': [
+            {
+                'mode': 'none',
+                'rules': [
+                    {
+                        'mode': 'all',
+                        'rules': [
+                            {'field': 'rating', 'op': '>=', 'value': 5},
+                            {'field': 'prediction_confidence', 'op': '>=', 'value': 0.8},
+                        ],
+                    },
+                ],
+            },
+            {'field': 'rating', 'op': '>=', 'value': 999},
+        ],
+    }
+    preds = db.get_predictions(rules=rules)
+    returned = sorted(p['species'] for p in preds if p['photo_id'] == photo_id)
+    assert returned == ['Low'], (
+        'emptied mixed `none` subgroup under `any` was dropped from the '
+        'SQL; the outer OR compiled to just the impossible `rating >= 999` '
+        'clause and hid the row the outer expression matched at the row level'
+    )
+
+
 def test_get_predictions_status_is_not_keeps_pending_siblings(app_and_db):
     """``prediction_status is not Rejected`` on a photo with one pending
     and one rejected sibling must return the pending row. The previous
