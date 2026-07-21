@@ -10178,3 +10178,348 @@ def test_embedding_fetch_chunks_over_999_ids(app_and_db):
         db.upsert_photo_embedding(pid, "test-clip", vec)
     pairs = db.get_photos_with_embedding("test-clip", photo_ids=ids)
     assert len(pairs) == 1200
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: rules on /api/photos/geo and /api/predictions.
+# ---------------------------------------------------------------------------
+
+
+def test_api_photos_geo_accepts_rules(app_and_db):
+    import json as _json
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    db.conn.execute(
+        "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id IN (?, ?)",
+        (photos["bird1.jpg"], photos["bird3.jpg"]))
+    db.conn.commit()
+
+    client = app.test_client()
+    resp = client.get('/api/photos/geo')
+    assert resp.status_code == 200
+    assert resp.get_json()["total_filtered"] == 2
+
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/photos/geo?rules={rules}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_filtered"] == 1  # bird3: rating 5 + coordinates
+    assert data["photos"][0]["id"] == photos["bird3.jpg"]
+    assert client.get('/api/photos/geo?rules=notjson').status_code == 400
+
+
+def test_api_predictions_accepts_rules(app_and_db):
+    import json as _json
+    app, db = app_and_db
+    from labels_fingerprint import TOL_SENTINEL
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    for name, species in [("bird1.jpg", "Cardinal"), ("bird3.jpg", "Blue Jay")]:
+        det_ids = db.save_detections(photos[name], [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+             "confidence": 0.9, "category": "animal"},
+        ], detector_model="test-detector")
+        db.add_prediction(
+            detection_id=det_ids[0], species=species, confidence=0.9,
+            model="TestModel", labels_fingerprint=TOL_SENTINEL,
+        )
+
+    client = app.test_client()
+    resp = client.get('/api/predictions')
+    assert resp.status_code == 200
+    assert len(resp.get_json()['predictions']) == 2
+
+    rules = _json.dumps([{"field": "rating", "op": ">=", "value": 4}])
+    resp = client.get(f'/api/predictions?rules={rules}')
+    assert resp.status_code == 200
+    preds = resp.get_json()['predictions']
+    assert len(preds) == 1
+    assert preds[0]["photo_id"] == photos["bird3.jpg"]
+    assert client.get('/api/predictions?rules=notjson').status_code == 400
+
+
+def test_api_predictions_filters_prediction_rows_by_confidence(app_and_db):
+    """A prediction_confidence rule filters at the row level, not the photo
+    level. With two predictions on the same photo (0.95 and 0.10), asking
+    for ``prediction_confidence >= 0.8`` must return only the high-confidence
+    row — not both because the photo has *some* matching prediction. The
+    review grid and ``Accept All`` would otherwise operate on rows the
+    filter chip excludes.
+    """
+    import json as _json
+    app, db = app_and_db
+    from labels_fingerprint import TOL_SENTINEL
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    det_ids = db.save_detections(photos["bird1.jpg"], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.5, "y": 0.5, "w": 0.4, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="test-detector")
+    db.add_prediction(detection_id=det_ids[0], species="Cardinal",
+                      confidence=0.95, model="M1",
+                      labels_fingerprint=TOL_SENTINEL)
+    db.add_prediction(detection_id=det_ids[1], species="Sparrow",
+                      confidence=0.10, model="M1",
+                      labels_fingerprint=TOL_SENTINEL)
+
+    client = app.test_client()
+    resp = client.get('/api/predictions')
+    assert resp.status_code == 200
+    assert len(resp.get_json()['predictions']) == 2
+
+    rules = _json.dumps([
+        {"field": "prediction_confidence", "op": ">=", "value": 0.8},
+    ])
+    resp = client.get(f'/api/predictions?rules={rules}')
+    assert resp.status_code == 200
+    preds = resp.get_json()['predictions']
+    assert len(preds) == 1
+    assert preds[0]["species"] == "Cardinal"
+    assert preds[0]["confidence"] >= 0.8
+
+
+def test_photos_query_status_is_not_includes_photos_without_predictions(app_and_db):
+    """``prediction_status is not Rejected`` at the photo level must include
+    photos with no current predictions — historically compiled as
+    ``NOT EXISTS(status = rejected)``. Review's row-scoped rewrite
+    (``EXISTS(status != rejected)``) requires at least one prediction row,
+    so a saved collection or ``/api/photos/query`` built on this rule
+    would silently drop every un-classified photo (r3619275290).
+    """
+    from labels_fingerprint import TOL_SENTINEL
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+
+    # bird1 has one prediction (accepted); bird2 has one rejected;
+    # bird3 has no predictions at all — the photo-scoped `is not
+    # Rejected` filter must include bird1 and bird3 and exclude bird2.
+    det = db.save_detections(photos["bird1.jpg"], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="test-detector")
+    db.add_prediction(detection_id=det[0], species="Cardinal",
+                      confidence=0.9, model="M1",
+                      labels_fingerprint=TOL_SENTINEL)
+
+    det2 = db.save_detections(photos["bird2.jpg"], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="test-detector")
+    db.add_prediction(detection_id=det2[0], species="Sparrow",
+                      confidence=0.9, model="M1",
+                      labels_fingerprint=TOL_SENTINEL)
+    pred2 = db.conn.execute(
+        "SELECT id FROM predictions WHERE species='Sparrow'"
+    ).fetchone()["id"]
+    db.update_prediction_status(pred2, "rejected")
+
+    rules = [{"field": "prediction_status", "op": "is not",
+              "value": "rejected"}]
+
+    # count_photos_for_rules and query_photo_ids share the same
+    # _build_query_from_rules path — both should behave the same.
+    assert db.count_photos_for_rules(rules) == 2
+    assert set(db.query_photo_ids(rules)) == {
+        photos["bird1.jpg"], photos["bird3.jpg"],
+    }
+
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={"rules": rules})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    returned = {p["id"] for p in data["photos"]}
+    assert returned == {photos["bird1.jpg"], photos["bird3.jpg"]}
+    assert data["total"] == 2
+
+    # not_in variant compiles to the same broad NOT EXISTS. bird1's
+    # Cardinal prediction defaults to pending → still included; bird2's
+    # rejected → excluded; bird3 has no predictions → included.
+    rules_ni = [{"field": "prediction_status", "op": "not_in",
+                 "value": ["rejected", "accepted"]}]
+    resp = client.post('/api/photos/query', json={"rules": rules_ni})
+    assert resp.status_code == 200
+    returned = {p["id"] for p in resp.get_json()["photos"]}
+    assert returned == {photos["bird1.jpg"], photos["bird3.jpg"]}
+
+
+def test_photos_query_classifier_model_is_not_includes_photos_without_predictions(
+    app_and_db,
+):
+    """``classifier_model is not X`` at the photo level must include photos
+    with no current predictions — the row-scoped rewrite would require an
+    ``EXISTS`` row and silently drop every un-classified photo
+    (r3619275290).
+    """
+    from labels_fingerprint import TOL_SENTINEL
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+
+    det = db.save_detections(photos["bird1.jpg"], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="test-detector")
+    db.add_prediction(detection_id=det[0], species="Cardinal",
+                      confidence=0.9, model="model-a",
+                      labels_fingerprint=TOL_SENTINEL)
+
+    rules = [{"field": "classifier_model", "op": "is not",
+              "value": "model-a"}]
+    # bird1 is the only classified photo (with model-a) and must be
+    # excluded; bird2 and bird3 have no predictions and must remain.
+    assert set(db.query_photo_ids(rules)) == {
+        photos["bird2.jpg"], photos["bird3.jpg"],
+    }
+
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={"rules": rules})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert {p["id"] for p in data["photos"]} == {
+        photos["bird2.jpg"], photos["bird3.jpg"],
+    }
+
+
+def test_api_photos_geo_surfaces_visual_status(app_and_db, monkeypatch):
+    """Map endpoint must return the visual clause status so the filter
+    bar can warn on fallback. Without this, choosing "Visually similar…"
+    on a map with no active model / no embeddings would silently return
+    every metadata-matching plottable photo while the visual chip
+    remained on-screen.
+    """
+    import json as _json
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    db.conn.execute(
+        "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id IN (?, ?, ?)",
+        (photos["bird1.jpg"], photos["bird2.jpg"], photos["bird3.jpg"]))
+    db.conn.commit()
+    client = app.test_client()
+
+    visual = _json.dumps({"prompt": "a bird", "strength": "balanced"})
+
+    # Healthy visual clause: response reports status ok and ranks by
+    # similarity within the plottable set.
+    _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+    resp = client.get(f'/api/photos/geo?visual={visual}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["visual"]["status"] == "ok"
+    assert data["visual"]["matched"] == 2
+    assert data["total_filtered"] == 2
+    assert {p["id"] for p in data["photos"]} == {
+        photos["bird1.jpg"], photos["bird2.jpg"]
+    }
+
+    # No active model: fallback to metadata-only, but status is surfaced
+    # so the visual chip can warn. Without this the response would look
+    # identical to a healthy clause with a broader match.
+    _stub_clip(monkeypatch, model_name=None)
+    resp = client.get(f'/api/photos/geo?visual={visual}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["visual"]["status"] == "no_model"
+    assert data["total_filtered"] == 3  # all plottable photos, unchanged
+
+    # No visual clause: no ``visual`` key in the response (the filter
+    # bar's visual note should be hidden, not stale).
+    resp = client.get('/api/photos/geo')
+    assert resp.status_code == 200
+    assert "visual" not in resp.get_json()
+
+
+def test_api_photos_geo_visual_scoped_to_plottable(app_and_db, monkeypatch):
+    """Map visual search must not silently return zero when the only
+    embedded photos are non-plottable. Without scoping the candidate set
+    to plottable ids, ``_resolve_visual`` would return ``status: ok``
+    with non-plottable ids and ``get_geolocated_photos`` would then
+    intersect them away — leaving the user with a "visual match" chip
+    and zero markers, no fallback / no-index warning.
+    """
+    import json as _json
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    # Only bird3 is plottable — and only bird1 and bird2 (both
+    # non-plottable in this test) carry embeddings. Without the
+    # plottable-scoped candidate set, _resolve_visual would happily
+    # return bird1/bird2 as ``ok`` matches and get_geolocated_photos
+    # would then intersect them away.
+    db.conn.execute(
+        "UPDATE photos SET latitude=37.7, longitude=-122.4 WHERE id = ?",
+        (photos["bird3.jpg"],),
+    )
+    db.conn.commit()
+    _seed_embeddings(db)
+    db.conn.execute(
+        "DELETE FROM photo_embeddings WHERE photo_id = ?",
+        (photos["bird3.jpg"],),
+    )
+    db.conn.commit()
+    _stub_clip(monkeypatch)
+    client = app.test_client()
+
+    visual = _json.dumps({"prompt": "a bird", "strength": "balanced"})
+    resp = client.get(f'/api/photos/geo?visual={visual}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    # Falls back to metadata-only because no plottable photo has an
+    # embedding — the chip can now warn ("no photos in this scope have
+    # embeddings") instead of showing a bogus zero result.
+    assert data["visual"]["status"] == "no_embeddings"
+    assert data["visual"]["indexed"] == 0
+    assert data["total_filtered"] == 1
+    assert {p["id"] for p in data["photos"]} == {photos["bird3.jpg"]}
+
+
+def test_api_predictions_surfaces_visual_status(app_and_db, monkeypatch):
+    """Predictions endpoint must return the visual clause status so the
+    Review filter bar can warn on fallback. Without this the visual chip
+    stays on-screen while Accept All / bulk actions operate on the
+    broadened metadata-only prediction set.
+    """
+    import json as _json
+
+    from labels_fingerprint import TOL_SENTINEL
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+    for name, species in [("bird1.jpg", "Cardinal"),
+                          ("bird2.jpg", "Sparrow"),
+                          ("bird3.jpg", "Blue Jay")]:
+        det_ids = db.save_detections(photos[name], [
+            {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+             "confidence": 0.9, "category": "animal"},
+        ], detector_model="test-detector")
+        db.add_prediction(
+            detection_id=det_ids[0], species=species, confidence=0.9,
+            model="TestModel", labels_fingerprint=TOL_SENTINEL,
+        )
+
+    client = app.test_client()
+    visual = _json.dumps({"prompt": "a bird", "strength": "balanced"})
+
+    # Healthy visual clause: status ok and predictions restricted to the
+    # visually-matched photos.
+    _seed_embeddings(db)
+    _stub_clip(monkeypatch)
+    resp = client.get(f'/api/predictions?visual={visual}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["visual"]["status"] == "ok"
+    assert data["visual"]["matched"] == 2
+    matched_photo_ids = {p["photo_id"] for p in data["predictions"]}
+    assert matched_photo_ids == {photos["bird1.jpg"], photos["bird2.jpg"]}
+
+    # No active model: fallback to metadata-only predictions, but status
+    # is surfaced so the visual chip can warn.
+    _stub_clip(monkeypatch, model_name=None)
+    resp = client.get(f'/api/predictions?visual={visual}')
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["visual"]["status"] == "no_model"
+    assert len(data["predictions"]) == 3  # all predictions, unbroadened
+
+    # No visual clause: no ``visual`` key in the response (the filter
+    # bar's visual note should be hidden, not stale).
+    resp = client.get('/api/predictions')
+    assert resp.status_code == 200
+    assert "visual" not in resp.get_json()

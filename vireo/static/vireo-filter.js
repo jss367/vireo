@@ -533,8 +533,19 @@
     renderLight();
   }
 
+  function renderTotal() {
+    const total = state.resultTotal;
+    const el = $('.vf-total strong');
+    if (el) el.textContent = total == null ? '–' : Number(total).toLocaleString();
+    const matchEl = $('.vf-match-count');
+    if (matchEl) matchEl.textContent = total == null ? '' : `${Number(total).toLocaleString()} matching ${total === 1 ? 'photo' : 'photos'}`;
+  }
+
   function renderLight() {
     if (!state.ready) return;
+    // A page may have reported its total before init resolved (its first
+    // fetch races the registry/persistence loads) — paint the stored value.
+    renderTotal();
     renderChips();
     renderQuick();
     renderMuteState();
@@ -545,6 +556,7 @@
     $('.vf-clear').hidden = !hasUserFilters();
     $('.vf-mute').hidden = !hasUserFilters() && !state.muted;
     renderVisualNote();
+    renderHandoff();
     requestAnimationFrame(updateChipOverflow);
   }
 
@@ -735,7 +747,8 @@
       </div>`;
     }
     const spec = state.fields[node.field] || { label: node.field, type: 'text', ops: ['is'] };
-    const fieldOptions = state.fieldOrder.map((key) =>
+    const fieldOptions = state.fieldOrder.filter((key) =>
+      fieldAvailable(state.fields[key]) || key === node.field).map((key) =>
       `<option value="${key}" ${key === node.field ? 'selected' : ''}>${esc(state.fields[key].label)}</option>`).join('');
     const opOptions = spec.ops.map((op) =>
       `<option value="${esc(op)}" ${op === node.op ? 'selected' : ''}>${esc(OP_LABELS[op] || op)}</option>`).join('');
@@ -843,11 +856,16 @@
     if (shouldOpen) renderRules();
   }
 
+  function fieldAvailable(spec) {
+    return !spec.pages || spec.pages.includes(state.page);
+  }
+
   function renderFieldPicker(query) {
     const needle = String(query || '').trim().toLowerCase();
     const byCategory = new Map();
     state.fieldOrder.forEach((key) => {
       const spec = state.fields[key];
+      if (!fieldAvailable(spec)) return;
       if (needle && !`${spec.label} ${spec.category}`.toLowerCase().includes(needle)) return;
       if (!byCategory.has(spec.category)) byCategory.set(spec.category, []);
       byCategory.get(spec.category).push([key, spec]);
@@ -950,6 +968,21 @@
     $('.vf-done').addEventListener('click', () => openPopover(false));
     $('.vf-overflow').addEventListener('click', () => openPopover(true));
     $('.vf-mute').addEventListener('click', toggleMute);
+    const handoffBtn = $('.vf-handoff');
+    if (handoffBtn) {
+      handoffBtn.addEventListener('click', openHandoffMenu);
+      $('.vf-handoff-menu').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-handoff-path]');
+        if (!btn) return;
+        // The expression transfers; the destination adds its own locked
+        // page scope. URL param wins over the destination's persisted
+        // state on load.
+        const payload = encodeURIComponent(
+          JSON.stringify({ root: state.root, visual: state.visual })
+        );
+        window.location.href = `${btn.dataset.handoffPath}?filters=${payload}`;
+      });
+    }
     $('.vf-clear').addEventListener('click', () => {
       mutate(() => {
         state.root = { mode: 'all', rules: [] };
@@ -1145,13 +1178,44 @@
       if (!rootEl.contains(e.target)) {
         hideSuggests();
         $('.vf-field-picker').hidden = true;
+        const handoffMenu = $('.vf-handoff-menu');
+        if (handoffMenu) handoffMenu.hidden = true;
         if (!$('.vf-popover').hidden && !e.target.closest('.vf-popover')) openPopover(false);
       } else {
         if (!e.target.closest('.vf-value-wrap')) hideSuggests();
         if (!e.target.closest('.vf-add-wrap')) $('.vf-field-picker').hidden = true;
+        // Same rule as the field picker: clicks inside the filter bar but
+        // outside the handoff wrap (search input, other dropdowns) should
+        // close the menu — otherwise it stays open while the user moves
+        // on to something else.
+        if (!e.target.closest('.vf-handoff-wrap')) {
+          const handoffMenu = $('.vf-handoff-menu');
+          if (handoffMenu) handoffMenu.hidden = true;
+        }
       }
     });
     window.addEventListener('resize', updateChipOverflow);
+  }
+
+  const HANDOFF_PAGES = [
+    ['browse', '/browse', 'Browse', 'Workspace · All available photos'],
+    ['map', '/map', 'Map', 'Adds: plottable locations scope'],
+    ['review', '/review', 'Review', 'Adds: pending predictions scope'],
+    ['duplicates', '/duplicates', 'Duplicates', 'Adds: duplicate groups scope'],
+  ];
+
+  function renderHandoff() {
+    const btn = $('.vf-handoff');
+    if (!btn) return;
+    btn.hidden = !hasUserFilters();
+  }
+
+  function openHandoffMenu() {
+    const menu = $('.vf-handoff-menu');
+    if (!menu.hidden) { menu.hidden = true; return; }
+    menu.innerHTML = HANDOFF_PAGES.filter(([key]) => key !== state.page).map(([key, path, label, detail]) =>
+      `<button type="button" data-handoff-path="${path}"><span>${label}</span><small>${esc(detail)}</small></button>`).join('');
+    menu.hidden = false;
   }
 
   function toggleMute() {
@@ -1174,7 +1238,29 @@
       return loadRegistry().then(() => {
         installEvents();
         const urlParams = new URLSearchParams(window.location.search);
-        const fromUrl = applyLegacyParams(urlParams);
+        let fromUrl = false;
+        const handoffRaw = urlParams.get('filters');
+        if (handoffRaw) {
+          try {
+            const payload = JSON.parse(handoffRaw);
+            if (payload && payload.root && Array.isArray(payload.root.rules)) {
+              state.root = payload.root;
+              // Reconstruct the visual clause from the allowed fields
+              // rather than trusting the parsed URL payload — an invalid
+              // ``strength`` (or an unknown extra key) would otherwise
+              // ride through to ``/api/photos/query`` and 500 the request.
+              // Mirrors ``restorePersisted()``.
+              state.visual = (
+                payload.visual && typeof payload.visual.prompt === 'string' && payload.visual.prompt
+              ) ? { prompt: payload.visual.prompt,
+                    strength: ['broad', 'balanced', 'strict'].includes(payload.visual.strength)
+                      ? payload.visual.strength : 'balanced' }
+                : null;
+              fromUrl = true;
+            }
+          } catch (e) { /* malformed handoff param — fall through */ }
+        }
+        if (!fromUrl) fromUrl = applyLegacyParams(urlParams);
         const finish = () => {
           state.ready = true;
           render();
@@ -1269,11 +1355,8 @@
     },
     setResultTotal(total) {
       state.resultTotal = total;
-      if (!state.ready) return;
-      const el = $('.vf-total strong');
-      if (el) el.textContent = total == null ? '–' : Number(total).toLocaleString();
-      const matchEl = $('.vf-match-count');
-      if (matchEl) matchEl.textContent = total == null ? '' : `${Number(total).toLocaleString()} matching ${total === 1 ? 'photo' : 'photos'}`;
+      if (!state.ready) return;  // painted by renderTotal() once init finishes
+      renderTotal();
     },
     refresh() { if (state.ready) render(); },
   };

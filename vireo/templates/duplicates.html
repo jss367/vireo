@@ -111,6 +111,13 @@
     text-transform: uppercase; letter-spacing: 0.5px;
     align-self: flex-start;
   }
+
+  .filter-match-badge {
+    position: absolute; top: 8px; right: 8px; padding: 2px 7px;
+    border-radius: 9px; background: var(--accent); color: var(--accent-text, #0a1f2e);
+    font-size: 10px; font-weight: 700;
+  }
+  .dup-card { position: relative; }
   .dup-card.winner .badge {
     background: var(--accent); color: var(--accent-text);
   }
@@ -292,6 +299,10 @@
 
 <div class="content">
 
+  <div class="dup-filterbar" style="margin-bottom: 12px;">
+    {% include '_filterbar.html' %}
+  </div>
+
   <div class="page-header">
     <div>
       <h1>Duplicate Files</h1>
@@ -386,6 +397,17 @@
       // would re-enable the scan button and risk overlapping scan jobs.
       if (_scanInProgress) return;
       if (!data || !data.found) return;
+      // Wait for the first ``refreshFilterMatches`` pass to populate
+      // ``_filterMatchedIds`` before rendering. Without this, a persisted /
+      // deep-linked filter races against ``VireoFilter.init`` on
+      // DOMContentLoaded — if the last-scan fetch resolves first, groups
+      // the filter would hide still render with their resolve/trash actions
+      // enabled until the filter query later re-renders (r3619553534).
+      // ``_filterReady`` always resolves (even without filters: the no-op
+      // pass in ``refreshFilterMatches`` still marks the epoch ready), so
+      // this never blocks indefinitely.
+      await _filterReady;
+      if (_scanInProgress) return;
       renderResults(data.result || {});
       var banner = document.getElementById('restoredBanner');
       document.getElementById('restoredAgo').textContent =
@@ -405,6 +427,15 @@
     document.getElementById('results').innerHTML = '';
     document.getElementById('summary').style.display = 'none';
     document.getElementById('applyBar').style.display = 'none';
+    // Invalidate any prior scan snapshot (from a restored scan or a
+    // previous run). If the new scan is cancelled, fails, or the
+    // EventSource errors, ``_scanInProgress`` flips back to false while
+    // the DOM has already been cleared — leaving the stale snapshot in
+    // ``_lastScanResult`` would let the next filter edit / pause / resume
+    // re-render those old duplicate cards and re-enable their actions.
+    // Successful completion repopulates ``_lastScanResult`` via
+    // ``renderResults``.
+    _lastScanResult = null;
     showProgress('Starting scan...');
 
     try {
@@ -431,7 +462,15 @@
           // disappears from the page.
           _scanInProgress = false;
           if (evt.status === 'completed') {
-            renderResults(evt.result || {});
+            // Wait for any in-flight filter refresh so the initial
+            // render uses the CURRENT filter state, not the pre-edit
+            // one. If the scan completes before a slower filter query
+            // (typical with a visual clause) — or right after the user
+            // edits chips mid-scan — a raw ``renderResults`` would use
+            // the stale ``_filterMatchedIds`` (often ``null``) and
+            // briefly re-enable apply/bulk actions for groups the newly
+            // edited chips will hide once the query settles.
+            renderScanWhenFilterReady(evt.result);
           } else if (evt.status === 'cancelled') {
             hideProgress();
             scanBtn.disabled = false;
@@ -466,6 +505,189 @@
   // full re-scan to refresh the UI.
   var _lastScanResult = null;
 
+  // Photo ids matching the filter bar's expression (null = no filters).
+  // Groups come from the library-wide scan and are never re-derived from
+  // the filtered set — the filter only decides which MEMBERS match; a
+  // matching member reveals its complete group so cross-workspace
+  // duplicate sets stay resolvable.
+  var _filterMatchedIds = null;
+
+  // Bumped by every refreshFilterMatches() invocation. Slow queries (a
+  // visual clause on a large library, in particular) can still be in
+  // flight when the user edits the chips or hits Pause; a stale response
+  // must not overwrite _filterMatchedIds and re-render _lastScanResult
+  // for filters that are no longer shown — that would expose and enable
+  // apply/bulk-resolve on groups outside the current chips.
+  var _filterEpoch = 0;
+
+  // Resolves the first time ``refreshFilterMatches`` finishes (with or
+  // without active filters). ``tryRestoreLastScan`` awaits this so a
+  // persisted/deep-linked filter can't race the last-scan render and
+  // briefly expose groups the filter should hide. Both paths still work
+  // when no filter is active — the no-op branch of
+  // ``refreshFilterMatches`` still resolves this.
+  var _filterReadyResolve;
+  var _filterReady = new Promise(function(resolve) { _filterReadyResolve = resolve; });
+
+  // Currently in-flight ``refreshFilterMatches`` promise, or null.
+  // Scan-complete's ``renderResults`` awaits this so a filter edit made
+  // mid-scan can't let the initial render use the pre-edit
+  // ``_filterMatchedIds`` — otherwise groups the newly-edited chips will
+  // hide would render with apply/bulk actions enabled for the seconds
+  // between scan-complete and the filter query finally settling.
+  var _pendingFilterRefresh = null;
+
+  async function refreshFilterMatches() {
+    var myEpoch = ++_filterEpoch;
+    var settlePending;
+    var thisRefresh = new Promise(function(resolve) { settlePending = resolve; });
+    _pendingFilterRefresh = thisRefresh;
+    try {
+      var hasFilters = window.VireoFilter && VireoFilter.hasFilters && VireoFilter.hasFilters()
+        && !VireoFilter.isMuted();
+      var visualInfo = null;
+      var nextMatchedIds = null;
+      if (hasFilters) {
+        try {
+          var body = { rules: VireoFilter.getRules(), ids_only: true };
+          var visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+          if (visual) body.visual = visual;
+          var data = await safeFetch('/api/photos/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }, { toast: false });
+          if (myEpoch !== _filterEpoch) return;  // superseded — drop
+          nextMatchedIds = new Set(data.ids || []);
+          visualInfo = data.visual || null;
+        } catch (e) {
+          if (myEpoch !== _filterEpoch) return;  // superseded — drop
+          // Failing the query (400 on a stale/deep-linked rule, transient
+          // network error) must NOT null out _filterMatchedIds — the old
+          // behaviour let ``groupMatchesFilter`` treat null as "no filters
+          // active" and widen the render to the entire scan while the chips
+          // stayed on-screen, silently re-enabling resolve/bulk controls for
+          // groups the user meant to exclude. Empty set instead so every
+          // group correctly fails the filter and the "N hidden" empty-state
+          // renders.
+          nextMatchedIds = new Set();
+          if (typeof showToast === 'function') {
+            showToast('Filter query failed — check the rules or your connection', 'error');
+          }
+        }
+      }
+      _filterMatchedIds = nextMatchedIds;
+      if (window.VireoFilter && VireoFilter.setResultTotal) {
+        VireoFilter.setResultTotal(_filterMatchedIds ? _filterMatchedIds.size : null);
+      }
+      // Surface the visual clause's status so the filter bar's visual chip
+      // can warn on fallback. Without this, a Duplicates filter with an
+      // unresolvable visual clause (no model / no embeddings / encoding
+      // failed) would show the chip while groups + bulk actions ran on the
+      // broadened metadata-only match set.
+      if (window.VireoFilter && VireoFilter.setVisualInfo) {
+        VireoFilter.setVisualInfo(visualInfo);
+      }
+      // Never re-render a cached snapshot while a new scan is in flight.
+      // ``renderResults`` hides the progress UI and re-enables the Scan
+      // button, so filter edits (or pause/resume) mid-scan would otherwise
+      // resurrect stale duplicate cards + actions and even let the user
+      // kick off a second overlapping scan.
+      if (_lastScanResult && !_scanInProgress) renderResults(_lastScanResult);
+      // Release ``tryRestoreLastScan`` — the first pass has now set
+      // ``_filterMatchedIds`` (or left it null when no filters are active),
+      // so restoring a cached scan can safely render.
+      if (_filterReadyResolve) { _filterReadyResolve(); _filterReadyResolve = null; }
+    } finally {
+      // Only clear the pointer if a newer refresh hasn't already claimed
+      // it — otherwise we'd drop the tracker for the newest in-flight
+      // query and defeat the mid-scan wait in ``renderScanWhenFilterReady``.
+      if (_pendingFilterRefresh === thisRefresh) _pendingFilterRefresh = null;
+      settlePending();
+    }
+  }
+
+  // Await any in-flight ``refreshFilterMatches`` before rendering a
+  // just-completed scan. Loops so a filter edit that starts DURING the
+  // wait (replacing ``_pendingFilterRefresh``) is also awaited — without
+  // this the initial post-scan render would use the older refresh's
+  // ``_filterMatchedIds`` and the newer refresh's line-576 re-render
+  // would show a brief flash of the outdated filter state.
+  async function renderScanWhenFilterReady(result) {
+    while (_pendingFilterRefresh) {
+      var current = _pendingFilterRefresh;
+      try { await current; } catch (e) { /* handled inside refresh */ }
+      if (_pendingFilterRefresh === current) break;
+    }
+    renderResults(result || {});
+  }
+
+  function groupMatchesFilter(group) {
+    if (!_filterMatchedIds) return true;
+    var members = [group.winner].concat(group.losers || []);
+    return members.some(function(p) {
+      return p && p.id != null && _filterMatchedIds.has(p.id);
+    });
+  }
+
+  // Return a filter-restricted view of a bucket. When ``_filterMatchedIds``
+  // is active, keep only file_hashes whose proposal matches the filter,
+  // and recompute group_count/total_size/example_filenames from that
+  // subset. Returns ``null`` when no groups survive the filter. Callers
+  // that render the Bulk-decide card AND ``bulkResolveByFolder`` MUST
+  // both go through this — otherwise clicking "Keep X for all" would
+  // send the raw ``bucket.file_hashes`` to
+  // ``/api/duplicates/bulk-resolve``, rejecting (and with delete enabled,
+  // trashing) duplicate groups the active filter had removed from view.
+  function visibleBucket(bucket) {
+    if (!bucket) return null;
+    if (!_filterMatchedIds) return bucket;
+    var proposals = (_lastScanResult && _lastScanResult.proposals) || [];
+    var proposalsByHash = {};
+    proposals.forEach(function(p) { proposalsByHash[p.file_hash] = p; });
+    var keptHashes = (bucket.file_hashes || []).filter(function(h) {
+      var p = proposalsByHash[h];
+      return p && groupMatchesFilter(p);
+    });
+    if (keptHashes.length === 0) return null;
+    if (keptHashes.length === (bucket.file_hashes || []).length) return bucket;
+    var keptProposals = keptHashes.map(function(h) { return proposalsByHash[h]; });
+    var newTotalSize = keptProposals.reduce(function(n, p) {
+      return n + ((p.losers || []).length * ((p.winner || {}).file_size || 0));
+    }, 0);
+    var newExamples = keptProposals.slice(0, 3).map(function(p) {
+      return (p.winner || {}).filename || '';
+    });
+    // Recompute folders from the kept subset — mirrors ``bucket_unresolved_proposals``:
+    // include the parent directory of every candidate (winner + losers) that still
+    // exists on disk. Without this, ``renderBucket`` would keep offering a
+    // ``Keep <folder> for all`` button for a folder that only appears in
+    // filtered-out groups, and ``bulkResolveByFolder`` would then post those
+    // visible hashes with a ``keep_folder`` value none of them contain — silently
+    // skipping every remaining group.
+    var keptFolderSet = {};
+    keptProposals.forEach(function(p) {
+      var cands = [p.winner].concat(p.losers || []);
+      cands.forEach(function(c) {
+        if (!c || c.exists === false) return;
+        var path = c.path || '';
+        var sep = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+        if (sep <= 0) return;
+        keptFolderSet[path.substring(0, sep)] = true;
+      });
+    });
+    var newFolders = (bucket.folders || []).filter(function(f) {
+      return keptFolderSet[f];
+    });
+    return Object.assign({}, bucket, {
+      file_hashes: keptHashes,
+      group_count: keptHashes.length,
+      total_size: newTotalSize,
+      example_filenames: newExamples,
+      folders: newFolders,
+    });
+  }
+
   function renderResults(result) {
     hideProgress();
     document.getElementById('scanBtn').disabled = false;
@@ -479,11 +701,27 @@
     // would mislead the apply count and confuse the action affordances.
     var unresolved = [];
     var resolved = [];
+    var hiddenByFilter = 0;
     _proposals.forEach(function(p, gi) {
       p._gi = gi;  // stable index back into _proposals for checkbox lookup
+      if (!groupMatchesFilter(p)) { hiddenByFilter += 1; return; }
       if (p.status === 'resolved') resolved.push(p);
       else unresolved.push(p);
     });
+    if (hiddenByFilter && !unresolved.length && !resolved.length) {
+      setEmptyVisible(false);
+      // Hide the previously-rendered summary and sticky apply bar so a
+      // stale "Reject N extra copies" button (or the summary counts) does
+      // not remain visible under the "no groups match" message — that
+      // button would otherwise post loser hashes for groups the active
+      // filter has hidden.
+      document.getElementById('summary').style.display = 'none';
+      document.getElementById('applyBar').style.display = 'none';
+      document.getElementById('results').innerHTML =
+        '<div class="no-results">No duplicate groups match the active filters (' +
+        hiddenByFilter + ' hidden). Clear or pause filters to see them.</div>';
+      return;
+    }
 
     if (_proposals.length === 0) {
       setEmptyVisible(false);
@@ -550,10 +788,13 @@
     // shift later indexes, so subsequent button clicks would resolve the
     // wrong bucket — and with delete enabled, potentially trash the wrong
     // files. Skip 1-group buckets inline instead — the per-group UI handles
-    // them more expressively (per-photo cards, ratings, etc.).
+    // them more expressively (per-photo cards, ratings, etc.). Under an
+    // active filter, each bucket is passed through ``visibleBucket()`` so
+    // the card and its Keep-for-all action reflect only matching groups.
     var allBuckets = result.buckets || [];
-    var hasVisibleBuckets = allBuckets.some(function(b) {
-      return b.group_count >= 2;
+    var visibleBuckets = allBuckets.map(visibleBucket);
+    var hasVisibleBuckets = visibleBuckets.some(function(b) {
+      return b && b.group_count >= 2;
     });
     if (hasVisibleBuckets) {
       html += '<div class="section-header"><div>' +
@@ -561,8 +802,8 @@
         '<div class="section-sub">' +
         'The same dedup question repeats across multiple groups. Decide ' +
         'once per bucket to clear them all at once.</div></div></div>';
-      allBuckets.forEach(function(bucket, bi) {
-        if (bucket.group_count < 2) return;
+      visibleBuckets.forEach(function(bucket, bi) {
+        if (!bucket || bucket.group_count < 2) return;
         html += renderBucket(bucket, bi);
       });
     }
@@ -743,11 +984,16 @@
   }
 
   function bulkResolveByFolderIdx(bi, fi) {
-    var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+    // ``visibleBucket`` restricts to filter-matching groups so the button
+    // acts only on what the user sees. Without it, a bucket with one
+    // matching and one hidden group would still submit both file_hashes,
+    // rejecting (and with delete enabled, trashing) the hidden group.
+    var bucket = visibleBucket((_lastScanResult && _lastScanResult.buckets || [])[bi]);
     if (!bucket) return;
     // After a partial prune a bucket can drop to ``group_count < 2`` and be
     // filtered out of the next render. A button left in the DOM from a stale
-    // render must not be allowed to act on it.
+    // render must not be allowed to act on it. Same guard covers a bucket
+    // shrunk below the threshold by the active filter.
     if (!bucket.file_hashes || bucket.file_hashes.length < 2) return;
     var folder = (bucket.folders || [])[fi];
     if (folder == null) return;
@@ -931,7 +1177,11 @@
   async function bulkResolveByFolder(bi, keepFolder) {
     var card = document.querySelector('.bucket-card[data-bi="' + bi + '"]');
     if (!card) return;
-    var bucket = (_lastScanResult && _lastScanResult.buckets || [])[bi];
+    // Same filter-restricted view used at render + click time so the
+    // confirmation count and the POSTed file_hashes describe only the
+    // visible groups. Skipping this step would let a filter-driven "N
+    // shown" bucket resolve every group behind the filter as well.
+    var bucket = visibleBucket((_lastScanResult && _lastScanResult.buckets || [])[bi]);
     if (!bucket) return;
 
     var deleteToggle = card.querySelector('input[data-delete-toggle]');
@@ -1125,6 +1375,9 @@
       html += '<div class="thumb-placeholder">No thumbnail</div>';
     }
     html += '<span class="badge">' + badge + '</span>';
+    if (_filterMatchedIds && photo.id != null && _filterMatchedIds.has(photo.id)) {
+      html += '<span class="filter-match-badge" title="This member matches the active filters">Matches filter</span>';
+    }
     if (missing) html += '<span class="missing-tag" title="File is no longer at this path on disk">Missing on disk</span>';
     html += '<div class="filename">' + escapeHtml(photo.filename || '') + '</div>';
     html += '<div class="path">' + escapeHtml(photo.path || '') + '</div>';
@@ -1356,6 +1609,12 @@
     var remaining = 0;
     _proposals.forEach(function(p) {
       if (p.status !== 'resolved' || isBulkTrashProtected(p)) return;
+      // Only count losers from groups that survived the active filter.
+      // The bulk button label mirrors the render loop's filtered count
+      // (see ``bulkTrashableLoserCount``); walking the unfiltered list
+      // here would let the label drift to reflect hidden groups and
+      // trick the user into thinking the action still has work to do.
+      if (!groupMatchesFilter(p)) return;
       (p.losers || []).forEach(function(l) {
         var card = document.querySelector('.dup-card[data-photo-id="' + l.id + '"]');
         if (card && !card.classList.contains('trashed')) remaining++;
@@ -1371,7 +1630,16 @@
   }
 
   async function trashAllLoserFiles() {
-    var resolved = _proposals.filter(function(p) { return p.status === 'resolved'; });
+    // ``groupMatchesFilter`` restricts to groups the filter actually
+    // surfaced. Without it, an active filter shrinks the rendered
+    // resolved section and the button label (both driven by the
+    // filtered ``resolved`` list in ``renderResults``) while this
+    // action still walked every resolved proposal — a click on "Move
+    // N extra copies to Trash" would then trash records for groups the
+    // filter had hidden from view.
+    var resolved = _proposals.filter(function(p) {
+      return p.status === 'resolved' && groupMatchesFilter(p);
+    });
     var ids = [];
     resolved.forEach(function(p) {
       if (isBulkTrashProtected(p)) return;
@@ -1483,6 +1751,11 @@
   function clearResults() {
     _proposals = [];
     _currentJobId = null;
+    // Drop the cached scan snapshot too. Otherwise a later filter-bar
+    // change (or pause/resume) would call ``refreshFilterMatches`` and
+    // re-render the stale results the user just cleared, resurrecting the
+    // duplicate groups and their bulk/apply actions.
+    _lastScanResult = null;
     document.getElementById('results').innerHTML = '';
     document.getElementById('summary').style.display = 'none';
     document.getElementById('applyBar').style.display = 'none';
@@ -1492,6 +1765,19 @@
   }
 
   document.addEventListener('DOMContentLoaded', tryRestoreLastScan);
+  VireoFilter.init({
+    page: 'duplicates',
+    root: document.getElementById('vireoFilterBar'),
+    scopeLabel: 'Duplicates \u00b7 Grouped matches',
+    onChange: refreshFilterMatches,
+  }).then(refreshFilterMatches).catch(function() {
+    // VireoFilter.init failing means no filter chips will ever load, so
+    // there are no filters for the render to respect. Release
+    // ``tryRestoreLastScan`` immediately \u2014 otherwise a cached last scan
+    // would hang unrendered forever waiting for a filter query that
+    // never runs.
+    if (_filterReadyResolve) { _filterReadyResolve(); _filterReadyResolve = null; }
+  });
 </script>
 </body>
 </html>

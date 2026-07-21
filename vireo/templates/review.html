@@ -758,6 +758,11 @@
   </div>
 </div>
 
+<!-- Universal filter bar -->
+<div class="review-filterbar" style="padding: 8px 20px 0;">
+  {% include '_filterbar.html' %}
+</div>
+
 <!-- Action Bar -->
 <div class="settings-panel open" id="reviewBar">
   <div class="setting-group">
@@ -919,15 +924,23 @@ async function loadCollectionFilter() {
 
 async function switchCollection(val) {
   currentCollection = val;
+  // Gate mutation entry points immediately: currentCollection has already
+  // changed, but the /api/collections/<id>/photos fetch below may take a
+  // moment before loadPredictions() runs (and flips the flag itself).
+  // Without setting this now, Accept All and per-card handlers stay
+  // enabled under the newly selected collection and iterate the STALE
+  // ``predictions`` array from the previous collection during that gap.
+  _predictionsReloading = true;
+  renderButtons();
   if (val === 'all') {
     collectionPhotoIds = null;
-    predictions = allPredictions.slice();
   } else {
-    // Fetch photo IDs in this collection
+    // Fetch photo IDs in this collection so ``loadPredictions``' existing
+    // safety intersection (allPredictions ∩ collectionPhotoIds) still
+    // narrows a stale ``allPredictions`` while the new fetch is in flight.
     try {
       var data = await safeFetch('/api/collections/' + val + '/photos?per_page=999999', {}, { toast: false });
       collectionPhotoIds = new Set(data.photos.map(function(p) { return p.id; }));
-      predictions = allPredictions.filter(function(p) { return collectionPhotoIds.has(p.photo_id); });
     } catch(e) {
       // The old catch fell back to allPredictions.slice(), which silently
       // widened the review scope to every prediction — the opposite of what
@@ -937,18 +950,65 @@ async function switchCollection(val) {
       console.error('Failed to load photos for collection ' + val + ':', e);
       collectionPhotoIds = new Set();
       predictions = [];
+      // Release the reload guard so ``renderButtons`` shows the correct
+      // hidden/disabled state for the empty ``predictions`` array instead
+      // of a stuck "Reloading…" button.
+      _predictionsReloading = false;
       if (typeof showToast === 'function') {
         showToast('Could not load photos for this collection — check its rules', 'error');
       }
+      renderAll();
+      return;
     }
   }
-  renderAll();
+  // Re-fetch server-side so ``/api/predictions`` resolves rules/visual
+  // against the new collection (not the stale one). Without this the
+  // visual_info chip would keep describing whichever collection was
+  // active at the last loadPredictions call, and — for a collection
+  // that hides some workspace embeddings — the filter-bar total would
+  // stay workspace-scoped instead of collection-scoped.
+  await loadPredictions();
+}
+
+// Bumped by every loadPredictions() invocation; responses whose epoch is
+// no longer current are dropped. The bootstrap kicks a pre-init unfiltered
+// fetch, and VireoFilter.init().then() may kick a post-init filtered
+// fetch \u2014 without this token, if the unfiltered fetch resolved LAST
+// (large libraries), it would overwrite allPredictions / the grid / the
+// filter-bar total with unfiltered rows while the filter chips remained
+// active.
+// Must be initialized BEFORE the bootstrap call to loadPredictions()
+// below \u2014 `var` hoists the declaration but not the `= 0` initializer,
+// so if declared later the first ++ increments `undefined` to `NaN` and
+// every subsequent epoch check (NaN !== 0) drops the response silently.
+var _loadPredictionsEpoch = 0;
+
+// True while a loadPredictions() request is in flight. The old
+// ``predictions`` array and action bar remain live until the new
+// response returns, so without this flag a click on Accept All (or a
+// keyboard accept/skip) between filter change and response would
+// iterate the STALE list under the newer visible chips. renderButtons()
+// / renderGrid() disable the mutation entry points while this is true,
+// and each action captures the epoch on entry so a mid-flight reload
+// aborts the loop rather than committing to now-hidden rows.
+var _predictionsReloading = false;
+function _predictionEpochStale(epoch) {
+  return epoch !== _loadPredictionsEpoch;
 }
 
 /* ---------- Bootstrap ---------- */
 applyReviewQueryParams();
 loadPredictions();
 loadCollectionFilter();
+VireoFilter.init({
+  page: 'review',
+  root: document.getElementById('vireoFilterBar'),
+  scopeLabel: 'Review \u00b7 Pending predictions',
+  onChange: loadPredictions,
+}).then(function() {
+  // Restored/deep-linked filters weren't part of the first fetch above.
+  if (VireoFilter.hasFilters()) loadPredictions();
+}).catch(function() {});
 
 function applyReviewQueryParams() {
   var qs = new URLSearchParams(window.location.search);
@@ -984,11 +1044,57 @@ function renderFingerprintFilterPill() {
 }
 
 async function loadPredictions() {
+  var myEpoch = ++_loadPredictionsEpoch;
+  _predictionsReloading = true;
+  // Disable the header Accept All immediately so it cannot iterate the
+  // stale ``predictions`` array while this reload is in flight. The
+  // per-card actions are gated inline in their handlers because they
+  // are rendered by ``renderGrid()`` and cheaper to guard on click.
+  var _acceptAllReloadBtn = document.getElementById('acceptAllBtn');
+  if (_acceptAllReloadBtn) {
+    _acceptAllReloadBtn.disabled = true;
+    _acceptAllReloadBtn.textContent = 'Reloading…';
+  }
   document.getElementById('loading').style.display = 'block';
   document.getElementById('empty').style.display = 'none';
 
   try {
-    allPredictions = await safeFetch('/api/predictions', {}, { toast: false });
+    var params = new URLSearchParams();
+    if (window.VireoFilter && VireoFilter.getRules) {
+      var rules = VireoFilter.getRules();
+      var ruleCount = Array.isArray(rules) ? rules.length : (rules.rules || []).length;
+      if (ruleCount) params.set('rules', JSON.stringify(rules));
+      var visual = VireoFilter.getVisual ? VireoFilter.getVisual() : null;
+      if (visual) params.set('visual', JSON.stringify(visual));
+    }
+    // Forward the active Review collection so rule/visual resolution and the
+    // returned visual_info describe the collection-scoped queue (not the
+    // whole workspace). Without this, a visual clause with the collection
+    // holding no embeddings would still return ``status: ok`` from
+    // out-of-collection photos, the client would intersect those away, and
+    // the Review grid would empty out while the visual chip stayed on-screen
+    // with no fallback warning. Also keeps the filter-bar total honest —
+    // it's the collection-scoped match count, not a workspace-wide proxy.
+    if (currentCollection !== 'all') {
+      var collId = parseInt(currentCollection, 10);
+      if (!isNaN(collId)) params.set('collection_id', String(collId));
+    }
+    var qs = params.toString();
+    var predData = await safeFetch('/api/predictions' + (qs ? '?' + qs : ''), {}, { toast: false });
+    if (myEpoch !== _loadPredictionsEpoch) return;  // superseded — drop
+    allPredictions = predData.predictions || [];
+    if (window.VireoFilter && VireoFilter.setResultTotal) {
+      var uniquePhotos = {};
+      allPredictions.forEach(function(p) { uniquePhotos[p.photo_id] = true; });
+      VireoFilter.setResultTotal(Object.keys(uniquePhotos).length);
+    }
+    // Surface the visual clause's status so the filter bar can warn on
+    // fallback (no model / no embeddings / encoding failed). Without
+    // this a visual chip stays on-screen while Accept All / bulk actions
+    // operate on the broadened metadata-only result set.
+    if (window.VireoFilter && VireoFilter.setVisualInfo) {
+      VireoFilter.setVisualInfo(predData.visual || null);
+    }
 
     // Re-apply collection filter if active
     if (currentCollection !== 'all' && collectionPhotoIds) {
@@ -1003,6 +1109,16 @@ async function loadPredictions() {
       if (p.model && !modelSet[p.model]) modelSet[p.model] = true;
     });
     availableModels = Object.keys(modelSet);
+    // Reset a stale ``currentModel`` when the new response no longer
+    // contains it. Without this, a filter change (or collection switch)
+    // that narrows the model universe leaves ``currentModel`` pinned to a
+    // model that's not present: ``renderModelFilter()`` hides the selector
+    // (0 or 1 models remain), while ``getVisibleItems()`` still filters by
+    // the stale model — leaving an empty grid with no visible way to
+    // clear the filter.
+    if (currentModel !== 'all' && !modelSet[currentModel]) {
+      currentModel = 'all';
+    }
 
     var pending = allPredictions.filter(function(p) { return p.status === 'pending'; });
     mode = allPredictions.length > 0 ? 'review' : 'browse';
@@ -1012,9 +1128,21 @@ async function loadPredictions() {
     document.title = 'Vireo - Review (' + pending.length + ' pending)';
 
     document.getElementById('loading').style.display = 'none';
+    _predictionsReloading = false;
     renderAll();
   } catch(err) {
+    if (myEpoch !== _loadPredictionsEpoch) return;  // superseded — drop
+    _predictionsReloading = false;
     document.getElementById('loading').textContent = 'Error: ' + err.message;
+    // Clear the stale ``predictions`` array before re-rendering so Accept
+    // All and per-card handlers can't fire against the previous filter
+    // or collection's rows under the new visible chips. Without this the
+    // header button (and inline handlers) become enabled again with old
+    // counts, letting users accept/reject predictions that are outside
+    // the current filter scope.
+    allPredictions = [];
+    predictions = [];
+    renderAll();
   }
 }
 
@@ -1101,6 +1229,13 @@ function switchTab(tab) {
 
 function renderButtons() {
   var acceptAllBtn = document.getElementById('acceptAllBtn');
+  if (_predictionsReloading) {
+    acceptAllBtn.style.display = '';
+    acceptAllBtn.disabled = true;
+    acceptAllBtn.textContent = 'Reloading…';
+    return;
+  }
+  acceptAllBtn.disabled = false;
   var pending = predictions.filter(function(p) { return p.status === 'pending'; }).length;
   if (pending > 0) {
     acceptAllBtn.style.display = '';
@@ -1411,27 +1546,39 @@ function groupMembersHtml(pred) {
 
 /* ---------- Actions ---------- */
 async function acceptPrediction(predId) {
+  if (_predictionsReloading) return;
+  var epoch = _loadPredictionsEpoch;
   try {
     await safeFetch('/api/predictions/' + predId + '/accept', { method: 'POST' });
   } catch(e) { return; }
+  // A reload between click and response would have swapped ``predictions``;
+  // touching the new array with a stale id would either miss (harmless) or
+  // mis-label a row that isn't the one the user clicked.
+  if (_predictionEpochStale(epoch)) return;
   var pred = predictions.find(function(p) { return p.id === predId; });
   if (pred) pred.status = 'accepted';
   renderAll();
 }
 
 async function rejectPrediction(predId) {
+  if (_predictionsReloading) return;
+  var epoch = _loadPredictionsEpoch;
   try {
     await safeFetch('/api/predictions/' + predId + '/reject', { method: 'POST' });
   } catch(e) { return; }
+  if (_predictionEpochStale(epoch)) return;
   var pred = predictions.find(function(p) { return p.id === predId; });
   if (pred) pred.status = 'rejected';
   renderAll();
 }
 
 async function acceptAlternative(altId, parentPredId) {
+  if (_predictionsReloading) return;
+  var epoch = _loadPredictionsEpoch;
   try {
     await safeFetch('/api/predictions/' + altId + '/accept', { method: 'POST' });
   } catch(e) { return; }
+  if (_predictionEpochStale(epoch)) return;
   // Update local state: mark alternative as accepted, parent as rejected
   var parent = predictions.find(function(p) { return p.id === parentPredId; });
   if (parent) parent.status = 'rejected';
@@ -1441,13 +1588,21 @@ async function acceptAlternative(altId, parentPredId) {
 }
 
 async function acceptAllPending() {
+  if (_predictionsReloading) return;
+  // Capture the epoch on entry — a filter edit / collection switch mid-loop
+  // bumps ``_loadPredictionsEpoch``; without this the loop would keep
+  // accepting rows from the pre-reload ``predictions`` array while the
+  // visible chips already show a narrower filter. See r3618935660.
+  var epoch = _loadPredictionsEpoch;
   var pending = predictions.filter(function(p) { return p.status === 'pending'; });
   for (var i = 0; i < pending.length; i++) {
+    if (_predictionEpochStale(epoch)) break;
     try {
       await safeFetch('/api/predictions/' + pending[i].id + '/accept', { method: 'POST' });
       pending[i].status = 'accepted';
     } catch(e) { break; }
   }
+  if (_predictionEpochStale(epoch)) return;
   renderAll();
 }
 
@@ -1456,6 +1611,10 @@ document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
   if (mode !== 'review') return;
   if (!_shortcuts) return;
+  // Ignore A/S while a filter-driven reload is in flight — the ``predictions``
+  // array still points at the pre-reload rows, so a keystroke would
+  // accept/skip a card that no longer matches the visible chips.
+  if (_predictionsReloading) return;
   // No-op while an overlay owns the keyboard (lightbox, burst modal, etc.) —
   // otherwise A/S would invisibly accept/reject grid cards behind it.
   if (document.querySelector('.lightbox-overlay.active, .pipeline-overlay.active, .similar-overlay.active, .modal-overlay.open, .grm-overlay.open, .inspect-overlay.open, .shortcuts-overlay.open, .help-overlay.active, .report-overlay.active')) return;

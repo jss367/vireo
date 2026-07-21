@@ -7964,8 +7964,13 @@ class Database:
         keyword_match_case=False,
         keyword_whole_word=False,
         species=None,
+        rules=None,
     ):
         """Return all geolocated photos with optional species, scoped to active workspace.
+
+        ``rules`` (a universal-filter rule tree) restricts the plottable set
+        exactly like Browse's grid — the Map page passes the shared filter
+        bar's expression here so the full field vocabulary works on Map.
 
         Returns photos that have either non-null EXIF latitude/longitude OR a
         ``type='location'`` keyword link whose keyword has non-null coords. No
@@ -8001,6 +8006,15 @@ class Database:
         if date_to is not None:
             conditions.append("p.timestamp <= ?")
             params.append(_inclusive_date_to(date_to))
+        if rules is not None:
+            r_folder_join, r_join_clause, r_where, r_params = (
+                self._build_query_from_rules(rules)
+            )
+            conditions.append(
+                "p.id IN (SELECT DISTINCT p.id FROM photos p "
+                f"{r_folder_join} {r_join_clause} {r_where})"
+            )
+            params.extend(r_params)
 
         # Pick one location keyword per photo. Ordering: prefer the deepest-
         # in-chain row (parent_id NOT NULL ranks before parent_id IS NULL),
@@ -8268,6 +8282,53 @@ class Database:
             (self._ws_id(),),
         ).fetchone()
         return row[0]
+
+    def get_plottable_photo_ids(self, folder_id=None):
+        """Return ids of every photo the Map endpoint could render.
+
+        A photo is plottable when either its EXIF lat/lng are both present
+        OR it carries a ``type='location'`` keyword whose lat/lng are both
+        present — the same paired-fallback semantics
+        :meth:`get_geolocated_photos` and
+        :meth:`count_photos_without_coordinates` use.
+
+        Callers pass this to ``_apply_visual_to_rules`` for the Map path so
+        the visual candidate set is restricted to plottable photos BEFORE
+        the embedding query runs. Without it, a workspace with embeddings
+        on non-plottable photos but none on plottable ones returns
+        ``status: "ok"`` with non-plottable ids; ``get_geolocated_photos``
+        then intersects them away and the map silently renders zero
+        markers with no fallback / no-index warning.
+        """
+        params = [self._ws_id()]
+        folder_clause = ""
+        if folder_id is not None:
+            subtree = self.get_folder_subtree_ids(folder_id)
+            placeholders = ",".join("?" for _ in subtree)
+            folder_clause = f"AND p.folder_id IN ({placeholders})"
+            params.extend(subtree)
+        rows = self.conn.execute(
+            f"""
+            SELECT p.id FROM photos p
+            JOIN workspace_folders wf ON wf.folder_id = p.folder_id
+            JOIN folders f ON f.id = p.folder_id AND f.status IN ('ok', 'partial')
+            WHERE wf.workspace_id = ?
+              {folder_clause}
+              AND (
+                (p.latitude IS NOT NULL AND p.longitude IS NOT NULL)
+                OR EXISTS (
+                  SELECT 1 FROM photo_keywords pk
+                  JOIN keywords k ON k.id = pk.keyword_id
+                  WHERE pk.photo_id = p.id
+                    AND k.type = 'location'
+                    AND k.latitude IS NOT NULL
+                    AND k.longitude IS NOT NULL
+                )
+              )
+            """,
+            params,
+        ).fetchall()
+        return [row[0] for row in rows]
 
     def update_photo_rating(self, photo_id, rating, verify_workspace=True):
         """Set photo rating (0-5).
@@ -15083,7 +15144,8 @@ class Database:
             )
         self.conn.commit()
 
-    def get_predictions(self, photo_ids=None, model=None, status=None):
+    def get_predictions(self, photo_ids=None, model=None, status=None,
+                        rules=None):
         """Get predictions with photo, detection and review info.
 
         Workspace scoping is enforced by joining ``workspace_folders``; the
@@ -15095,10 +15157,48 @@ class Database:
         per ``(detection_id, classifier_model)`` so stale rows from prior
         label sets don't contaminate ``/api/predictions`` or
         ``/api/predictions/compare`` after re-classification.
+
+        Row-level scoping for prediction-field rules: the workspace/rules
+        subquery below is applied at the photo level (``p.id IN (...)``),
+        which correctly limits *which photos* surface but returns every
+        current prediction for those photos. When the rules tree references
+        Review-only fields (``prediction_confidence``, ``prediction_status``,
+        ``classifier_model``, ``taxonomy_*``), a photo with a sibling
+        prediction that matches would still return low-confidence /
+        already-accepted rows that don't satisfy the visible filter — the
+        Review grid and Accept All would then act on rows the filter chip
+        excluded. ``_filter_prediction_rows_by_rules`` re-evaluates those
+        leaves against each returned row so the grid matches the chip. It
+        applies only when the tree can be resolved safely per row — see
+        that method's docstring for when it falls back to the SQL result.
         """
         ws = self._ws_id()
         base_conditions = ["wf.workspace_id = ?"]
         base_params = [ws]
+        if rules is not None:
+            # ``_build_query_from_rules`` compiles ``none(...)`` as photo-level
+            # ``NOT EXISTS(...)``. For a row-level predicate like
+            # ``none(prediction_confidence >= 0.8)`` that drops any photo with
+            # a sibling row over the threshold — even when the 0.10 sibling
+            # satisfies the outer expression at the row level. Strip prediction
+            # leaves nested inside a ``none`` group before scoping photos so
+            # ``_filter_prediction_rows_by_rules`` can decide those per row
+            # against the ORIGINAL tree — see r3618822252.
+            scope_rules = self._relax_negated_prediction_leaves(rules)
+            # row_scoped=True selects broader candidate SQL for the negative
+            # prediction-field operators — the row filter below drops the
+            # matching sibling rows so we can safely widen photo selection.
+            # Photo-scoped callers (photo queries, saved collections) must
+            # keep the default False to preserve the NOT EXISTS semantics
+            # that include photos with no current predictions (r3619275290).
+            r_folder_join, r_join_clause, r_where, r_params = (
+                self._build_query_from_rules(scope_rules, row_scoped=True)
+            )
+            base_conditions.append(
+                "p.id IN (SELECT DISTINCT p.id FROM photos p "
+                f"{r_folder_join} {r_join_clause} {r_where})"
+            )
+            base_params.extend(r_params)
         if model:
             base_conditions.append("pr.classifier_model = ?")
             base_params.append(model)
@@ -15157,7 +15257,344 @@ class Database:
             rows.sort(
                 key=lambda r: (r["confidence"] is None, -(r["confidence"] or 0))
             )
+        if rules is not None:
+            rows = self._filter_prediction_rows_by_rules(rows, rules)
         return rows
+
+    # Row-level filterable fields: those the row's own values can prove.
+    # ``species`` is intentionally excluded — the SQL ``species`` leaf
+    # (``_build_query_from_rules``) matches confirmed photo keywords via
+    # ``photo_keywords → keywords → taxa``, whereas ``pr.species`` on the
+    # returned row holds the model's *proposed* species. Re-checking the
+    # proposed species against a keyword filter would silently hide the
+    # exact disagreement/refinement rows users would filter for
+    # (e.g. a photo tagged ``Robin`` with a pending ``Sparrow`` prediction
+    # would be selected by SQL and then dropped here).
+    _PREDICTION_ROW_FIELDS = frozenset({
+        "prediction_confidence",
+        "prediction_status",
+        "classifier_model",
+        "taxonomy_kingdom",
+        "taxonomy_phylum",
+        "taxonomy_class",
+        "taxonomy_order",
+        "taxonomy_family",
+        "taxonomy_genus",
+        "needs_review",
+    })
+
+    def _relax_negated_prediction_leaves(self, rules):
+        """Strip prediction-field leaves — and mixed subgroups containing
+        them — that sit under a ``none`` group so
+        ``get_predictions``'s photo-scoping subquery doesn't
+        over-restrict on row-level predicates.
+
+        ``_build_query_from_rules`` compiles a ``none`` group as
+        photo-level ``NOT EXISTS(...)``. For a bare leaf like
+        ``prediction_confidence >= 0.8`` that removes any photo with a
+        sibling row above the threshold, even though the 0.10 sibling
+        satisfies ``none(prediction_confidence >= 0.8)`` per row —
+        dropping the leaf broadens the SQL to a no-op there and lets
+        ``_filter_prediction_rows_by_rules`` evaluate the ORIGINAL
+        tree per row.
+
+        A mixed subgroup like ``none(all(rating >= 5, conf >= 0.8))``
+        is trickier: stripping only the prediction leaf leaves
+        ``none(all(rating >= 5))`` = ``NOT EXISTS(rating >= 5)``,
+        which excludes every rating-5 photo — including one whose only
+        high-conf row is 0.10 and should PASS the outer expression at
+        the row level (see r3618935666). Whenever a negated subgroup
+        (transitively) contains a prediction row field we therefore
+        drop the whole subgroup so SQL becomes a no-op there; the
+        row-level pass then evaluates the original expression per row
+        against the actual metadata + prediction values.
+
+        Leaves and subgroups in ``all``/``any`` positions still pull
+        their weight in the SQL — an ``all`` narrows and an ``any``
+        widens correctly at the photo level.
+
+        A negated branch that ends up fully emptied by this pass
+        represents "broaden to TRUE at photo level" (the row filter
+        will decide per row). Under an ``any`` parent that TRUE
+        satisfies the OR for every photo, so we propagate a broad
+        marker up: an ``any`` group with any broad child becomes broad
+        itself, and a top-level broad marker resolves to empty rules
+        (no photo-level restriction). Without this, ``any(none(
+        prediction_confidence >= 0.8), rating >= 5)`` compiled as just
+        ``rating >= 5``, hiding rating-3 photos whose low-confidence
+        rows satisfy the outer OR at the row level (see r3619014565).
+        """
+        broad = self._RELAX_BROAD
+
+        def _contains_prediction_field(node):
+            if not isinstance(node, dict):
+                return False
+            if "rules" in node and "field" not in node:
+                return any(
+                    _contains_prediction_field(c)
+                    for c in node.get("rules") or []
+                )
+            return node.get("field") in self._PREDICTION_ROW_FIELDS
+
+        def _walk(node, negated):
+            if isinstance(node, dict) and "rules" in node and "field" not in node:
+                mode = node.get("mode", "all")
+                child_negated = negated or (mode == "none")
+                new_children = []
+                had_broad = False
+                for child in node.get("rules") or []:
+                    is_group = (
+                        isinstance(child, dict)
+                        and "rules" in child
+                        and "field" not in child
+                    )
+                    # Under negation, a subgroup that mixes metadata with
+                    # prediction leaves would be compiled by the outer
+                    # ``NOT EXISTS(...)`` in a way that lets its metadata
+                    # siblings prune photos before the row filter sees
+                    # them (see docstring). Drop the whole subgroup so
+                    # SQL broadens; the row filter re-evaluates the
+                    # ORIGINAL tree per row.
+                    if (
+                        child_negated
+                        and is_group
+                        and _contains_prediction_field(child)
+                    ):
+                        had_broad = True
+                        continue
+                    stripped = _walk(child, child_negated)
+                    if stripped is None:
+                        # Bare row-level leaf dropped under negation:
+                        # SQL for that leaf broadens to TRUE.
+                        had_broad = True
+                        continue
+                    if stripped is broad:
+                        had_broad = True
+                        continue
+                    new_children.append(stripped)
+                # ``any`` with any broad child is TRUE at the photo
+                # level — the whole OR broadens. ``all``/``none`` drop
+                # broad children silently (they don't restrict) unless
+                # every child broadened, in which case the group itself
+                # is broad and must propagate.
+                if mode == "any" and had_broad:
+                    return broad
+                if had_broad and not new_children:
+                    return broad
+                new_node = dict(node)
+                new_node["rules"] = new_children
+                return new_node
+            if negated and isinstance(node, dict) and \
+                    node.get("field") in self._PREDICTION_ROW_FIELDS:
+                return None
+            return node
+
+        if isinstance(rules, list):
+            wrapped = _walk({"mode": "all", "rules": rules}, False)
+            if wrapped is broad or wrapped is None:
+                return []
+            return wrapped.get("rules", [])
+        walked = _walk(rules, False)
+        if walked is broad or walked is None:
+            return {"mode": "all", "rules": []}
+        return walked
+
+    # Sentinel returned by ``_relax_negated_prediction_leaves`` when a
+    # branch broadens to TRUE at the photo level. Identity-compared with
+    # ``is``; never stored in a rules tree that reaches SQL.
+    _RELAX_BROAD = object()
+
+    def _filter_prediction_rows_by_rules(self, rows, rules):
+        """Drop returned prediction rows that don't satisfy prediction-field
+        rules at the row level.
+
+        The SQL rules subquery limits the set of *photos* whose predictions
+        surface, but leaves like ``prediction_confidence >= 0.8`` return
+        every current prediction for a photo that has any matching one.
+        This walks the rule tree per row: prediction-field leaves are
+        evaluated against the row's own values; every other leaf is treated
+        as satisfied (the photo already matched via the SQL subquery).
+
+        The satisfied-by-default shortcut is only sound inside pure ``all``
+        intersections — SQL ensured every non-prediction leaf was True at
+        the photo level. Inside an ``any`` or ``none`` group the shortcut
+        would incorrectly contribute True for a leaf that may have been
+        False for this photo (e.g. ``(rating >= 5 OR prediction_confidence
+        >= 0.8)`` — a rating-3 photo with one 0.95 and one 0.10 prediction:
+        SQL keeps both rows because of the 0.95, but the 0.10 row must not
+        be shown and shortcutting ``rating >= 5`` to True would let it
+        through). For non-prediction leaves nested inside a mixed ``any``/
+        ``none`` group we therefore resolve the leaf to its actual matching
+        photo ids and answer per-row from that set, so prediction leaves in
+        the same group still filter and the metadata leaf's truth is real.
+        """
+        if not rows:
+            return rows
+        # Normalize to the same shape ``_build_query_from_rules`` accepts so
+        # both list and grouped-tree inputs go through the same walker.
+        if isinstance(rules, list):
+            root = {"mode": "all", "rules": rules}
+        elif isinstance(rules, dict) and "rules" in rules:
+            root = rules
+        else:
+            return rows
+
+        def _touches_prediction(node):
+            if not isinstance(node, dict):
+                return False
+            if "rules" in node and "field" not in node:
+                return any(_touches_prediction(c) for c in node.get("rules") or [])
+            return node.get("field") in self._PREDICTION_ROW_FIELDS
+
+        if not _touches_prediction(root):
+            return rows
+
+        # Resolve non-prediction leaves nested inside ``any``/``none`` groups
+        # to the photo-id set they actually match. Anywhere else the outer
+        # SQL subquery already proved the leaf holds for the photo, so we
+        # keep the True-shortcut. ``id(node)`` is stable across this call —
+        # the dict identity is what we look up in ``_leaf_row_match``.
+        leaf_photo_sets = {}
+
+        def _collect_alt_metadata_leaves(node, inside_alt=False):
+            if not isinstance(node, dict):
+                return
+            if "rules" in node and "field" not in node:
+                mode = node.get("mode", "all")
+                child_alt = inside_alt or mode in ("any", "none")
+                for c in node.get("rules") or []:
+                    _collect_alt_metadata_leaves(c, child_alt)
+                return
+            if inside_alt and node.get("field") not in self._PREDICTION_ROW_FIELDS:
+                key = id(node)
+                if key in leaf_photo_sets:
+                    return
+                try:
+                    leaf_photo_sets[key] = set(self.query_photo_ids([node]))
+                except (ValueError, sqlite3.Error):
+                    # Malformed / unresolvable leaf: fall back to matching
+                    # every photo the SQL subquery kept. Never hide rows
+                    # the outer filter should have allowed through.
+                    leaf_photo_sets[key] = None
+
+        _collect_alt_metadata_leaves(root)
+
+        def _truthy(value):
+            return value is True or value == 1 or value == "1" or value == "true"
+
+        def _num_match(row_val, op, want):
+            if row_val is None:
+                return False
+            try:
+                a = float(row_val)
+            except (TypeError, ValueError):
+                return False
+            if op == "between":
+                if not isinstance(want, list) or len(want) != 2:
+                    return False
+                try:
+                    lo, hi = float(want[0]), float(want[1])
+                except (TypeError, ValueError):
+                    return False
+                return lo <= a <= hi
+            try:
+                b = float(want)
+            except (TypeError, ValueError):
+                return False
+            if op == ">=":
+                return a >= b
+            if op == "<=":
+                return a <= b
+            if op == ">":
+                return a > b
+            if op == "<":
+                return a < b
+            if op in ("equals", "is"):
+                return a == b
+            if op == "is not":
+                return a != b
+            return False
+
+        def _text_match(row_val, op, want):
+            a = "" if row_val is None else str(row_val)
+            b = "" if want is None else str(want)
+            if op == "contains":
+                return b.lower() in a.lower()
+            if op == "not_contains":
+                return b.lower() not in a.lower()
+            if op == "starts_with":
+                return a.lower().startswith(b.lower())
+            if op == "ends_with":
+                return a.lower().endswith(b.lower())
+            if op in ("equals", "is"):
+                return a.lower() == b.lower()
+            if op == "is not":
+                return a.lower() != b.lower()
+            return False
+
+        def _enum_match(row_val, op, want):
+            a = "" if row_val is None else str(row_val)
+            if op in ("in", "not_in"):
+                values = [str(v) for v in (want or [])]
+                inside = a in values
+                return inside if op == "in" else not inside
+            if op in ("equals", "is"):
+                return a == str(want)
+            if op == "is not":
+                return a != str(want)
+            return False
+
+        def _leaf_row_match(rule, row):
+            field = rule.get("field")
+            op = rule.get("op", "")
+            value = rule.get("value")
+            if field == "prediction_confidence":
+                return _num_match(row["confidence"], op, value)
+            if field == "prediction_status":
+                return _enum_match(row["status"], op, value)
+            if field == "classifier_model":
+                return _text_match(row["classifier_model"], op, value)
+            if field in (
+                "taxonomy_kingdom",
+                "taxonomy_phylum",
+                "taxonomy_class",
+                "taxonomy_order",
+                "taxonomy_family",
+                "taxonomy_genus",
+            ):
+                col = row[field] if field in row.keys() else None  # noqa: SIM118 -- sqlite3.Row supports `in` on keys() but not on the row itself
+                if op == "contains":
+                    return _text_match(col, "contains", value)
+                return _text_match(col, op, value)
+            if field == "needs_review":
+                is_pending = str(row["status"] or "pending") == "pending"
+                return is_pending if _truthy(value) else not is_pending
+            # Non-prediction leaf. In a pure ``all`` position the SQL
+            # subquery already proved this photo satisfies it, so shortcut
+            # to True. Inside a mixed ``any``/``none`` group we can't
+            # shortcut (SQL only proved *some* sibling matched at the
+            # photo level, not this leaf), so answer from the pre-resolved
+            # per-leaf photo-id set.
+            pset = leaf_photo_sets.get(id(rule))
+            if pset is None:
+                return True
+            return row["photo_id"] in pset
+
+        def _eval(node, row):
+            if "rules" in node and "field" not in node:
+                mode = node.get("mode", "all")
+                children = node.get("rules") or []
+                if not children:
+                    # Empty group: match SQL (all=True, any=False, none=True).
+                    return mode != "any"
+                if mode == "any":
+                    return any(_eval(c, row) for c in children)
+                if mode == "none":
+                    return not any(_eval(c, row) for c in children)
+                return all(_eval(c, row) for c in children)
+            return _leaf_row_match(node, row)
+
+        return [r for r in rows if _eval(root, r)]
 
     def update_prediction_status(self, prediction_id, status, _commit=True):
         """Update per-workspace review status for a prediction.
@@ -18091,7 +18528,8 @@ class Database:
             rules, include_offline_folders=include_offline_folders,
         )
 
-    def _build_query_from_rules(self, rules, include_offline_folders=False):
+    def _build_query_from_rules(self, rules, include_offline_folders=False,
+                                row_scoped=False):
         """Build SQL clauses from a smart-collection rule tree.
 
         Returns (folder_join, join_clause, where, params). Raises ValueError on
@@ -18103,6 +18541,18 @@ class Database:
         callers need. Pass ``include_offline_folders=True`` for metadata-only
         callers (e.g. Dashboard totals) that count photos even when their
         storage is currently missing.
+
+        ``row_scoped=True`` selects broader candidate SQL for the negative
+        prediction-field operators (``prediction_status is not/not_in``,
+        ``classifier_model is not``): ``EXISTS(status != X)`` rather than
+        ``NOT EXISTS(status = X)``. That widening is only safe when the
+        caller re-evaluates the rule per row afterwards, which
+        ``get_predictions`` does via ``_filter_prediction_rows_by_rules``.
+        Photo-scoped callers (``/api/photos/query``, saved-collection
+        evaluation, calendar/geo totals) MUST leave this False — the
+        broad ``NOT EXISTS(status = X)`` form is what includes photos
+        with no current predictions in "is not Rejected" results (see
+        review r3619275290).
 
         Backward compatibility: the original collection format was a flat list
         of rule objects, implicitly combined with AND. Newer collections may use
@@ -18627,6 +19077,23 @@ class Database:
                 if op in ("equals", "is"):
                     return _prediction_exists("pred.classifier_model = ?", [value])
                 if op == "is not":
+                    # Splits by caller, mirroring prediction_status above:
+                    #   row_scoped=True (get_predictions) → positive EXISTS
+                    #     ("photo has at least one prediction whose model is
+                    #     NOT X"). NOT EXISTS would drop the whole photo the
+                    #     moment any sibling used model X, hiding the
+                    #     other-model rows the visible filter should keep
+                    #     (see r3618514362). Row-level clean-up in
+                    #     ``_filter_prediction_rows_by_rules`` removes the
+                    #     matching sibling rows.
+                    #   row_scoped=False (default; photo queries, saved
+                    #     collections) → broad NOT EXISTS so photos with no
+                    #     current predictions still satisfy ``is not X``
+                    #     (see r3619275290).
+                    if row_scoped:
+                        return _prediction_exists(
+                            "pred.classifier_model != ?", [value],
+                        )
                     exists, params = _prediction_exists(
                         "pred.classifier_model = ?", [value],
                     )
@@ -18642,6 +19109,21 @@ class Database:
                         "pred.classifier_model LIKE ? ESCAPE '\\'", [like]
                     )
             if field == "prediction_status":
+                # Negative predicates split by caller:
+                #   row_scoped=True (get_predictions) → positive EXISTS
+                #     ("photo has at least one prediction whose status is
+                #     NOT X"). NOT EXISTS would drop the whole photo the
+                #     moment any sibling matched X, hiding pending rows the
+                #     visible filter should keep (see r3618393423). The
+                #     row-level pass in ``_filter_prediction_rows_by_rules``
+                #     then removes the matching sibling rows.
+                #   row_scoped=False (default; photo queries, saved
+                #     collections) → broad NOT EXISTS ("photo has no
+                #     prediction whose status is X"). This preserves the
+                #     historical behavior where a photo with zero current
+                #     predictions still satisfies ``is not Rejected`` and
+                #     is included by /api/photos/query and collections
+                #     built on the same rule (see r3619275290).
                 if op in ("equals", "is"):
                     return _prediction_exists(
                         "COALESCE(prv.status, 'pending') = ?",
@@ -18649,6 +19131,12 @@ class Database:
                         review_join=True,
                     )
                 if op == "is not":
+                    if row_scoped:
+                        return _prediction_exists(
+                            "COALESCE(prv.status, 'pending') != ?",
+                            [value],
+                            review_join=True,
+                        )
                     exists, params = _prediction_exists(
                         "COALESCE(prv.status, 'pending') = ?",
                         [value],
@@ -18660,21 +19148,60 @@ class Database:
                     if not values:
                         return ("0" if op == "in" else "1"), []
                     placeholders = ",".join("?" * len(values))
+                    if op == "in":
+                        return _prediction_exists(
+                            f"COALESCE(prv.status, 'pending') IN ({placeholders})",
+                            values,
+                            review_join=True,
+                        )
+                    # not_in: row_scoped keeps a positive EXISTS on the
+                    # inverse set; photo-scoped stays broad via NOT EXISTS.
+                    if row_scoped:
+                        return _prediction_exists(
+                            f"COALESCE(prv.status, 'pending') NOT IN ({placeholders})",
+                            values,
+                            review_join=True,
+                        )
                     exists, params = _prediction_exists(
                         f"COALESCE(prv.status, 'pending') IN ({placeholders})",
                         values,
                         review_join=True,
                     )
-                    if op == "not_in":
-                        return "NOT " + exists, params
-                    return exists, params
+                    return "NOT " + exists, params
             if field == "needs_review":
+                # Splits by caller, mirroring prediction_status "is not":
+                #   row_scoped=True (get_predictions) → for the False case,
+                #     positive EXISTS on a non-pending row so a photo with
+                #     mixed pending + accepted/rejected siblings still
+                #     surfaces the non-pending row that satisfies "Needs
+                #     review is No". NOT EXISTS(pending) would drop the
+                #     whole photo the moment any sibling is pending, hiding
+                #     rows the visible filter should keep (r3619118948).
+                #     The row-level pass in
+                #     ``_filter_prediction_rows_by_rules`` then removes the
+                #     pending sibling rows.
+                #   row_scoped=False (default; photo queries, saved
+                #     collections) → broad NOT EXISTS so photos with no
+                #     pending prediction (including none at all) satisfy
+                #     "Needs review is No".
+                if _truthy(value):
+                    return _prediction_exists(
+                        "COALESCE(prv.status, 'pending') = 'pending'",
+                        [],
+                        review_join=True,
+                    )
+                if row_scoped:
+                    return _prediction_exists(
+                        "COALESCE(prv.status, 'pending') != 'pending'",
+                        [],
+                        review_join=True,
+                    )
                 exists, params = _prediction_exists(
                     "COALESCE(prv.status, 'pending') = 'pending'",
                     [],
                     review_join=True,
                 )
-                return (exists if _truthy(value) else "NOT " + exists), params
+                return "NOT " + exists, params
             if field == "has_mask":
                 has = "p.mask_path IS NOT NULL"
                 return (has if _truthy(value) else f"NOT ({has})"), []

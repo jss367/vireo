@@ -159,7 +159,12 @@ def test_map_photo_id_deep_link_is_one_shot_for_later_filters(live_server, page)
         timeout=3000,
     )
 
-    page.select_option("#filterSpecies", "American Robin")
+    # Filter down to just the robin via the shared filter bar. The old
+    # `#filterSpecies` select was removed when Map adopted the universal bar.
+    page.wait_for_selector("#vireoFilterBar", timeout=5000)
+    search = page.locator(".vf-search input")
+    search.fill("robin")
+    search.press("Enter")
 
     expect(page.locator("#mapStatus")).to_contain_text("Showing 1 of 2 geolocated photos")
     expect(page.locator("#mapStatus")).not_to_contain_text("No map location found")

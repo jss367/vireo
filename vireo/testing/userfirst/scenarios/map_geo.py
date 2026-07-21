@@ -1,7 +1,7 @@
 """Scenario: visit the map/geo view page.
 
-Verifies that /map renders, the Leaflet map container exists, filter
-controls are present, and the appropriate "no geolocated photos" message
+Verifies that /map renders, the Leaflet map container exists, the shared
+filter bar is present, and the appropriate "no geolocated photos" message
 is shown when the seed data has no GPS coordinates.
 """
 import contextlib
@@ -121,16 +121,20 @@ def run(session):
     has_map = session.eval("!!document.getElementById('map')")
     session.assert_that(has_map, "expected #map container on map page")
 
-    for elem_id, label in [
-        ("filterFolder", "folder filter dropdown"),
-        ("filterRating", "rating filter dropdown"),
-        ("filterSpecies", "species filter dropdown"),
-        ("filterKeyword", "keyword filter input"),
-        ("filterDateFrom", "date-from filter"),
-        ("filterDateTo", "date-to filter"),
-    ]:
-        present = session.eval(f"!!document.getElementById('{elem_id}')")
-        session.assert_that(present, f"expected {label}")
+    # Map adopted the universal filter bar in Phase 4, so the bespoke
+    # #filterFolder/#filterRating/... controls are gone. Assert the shared
+    # bar's container and its search input are wired up instead — that is
+    # the entry point every filter (folder/rating/species/keyword/date)
+    # now goes through.
+    has_filter_bar = session.eval("!!document.getElementById('vireoFilterBar')")
+    session.assert_that(has_filter_bar, "expected shared filter bar (#vireoFilterBar) on map page")
+
+    has_filter_search = session.eval(
+        "!!document.querySelector('#vireoFilterBar .vf-search input')"
+    )
+    session.assert_that(
+        has_filter_search, "expected filter-bar search input on map page"
+    )
 
     has_sidebar_header = session.eval("!!document.getElementById('sidebarHeader')")
     session.assert_that(has_sidebar_header, "expected sidebar header on map page")

@@ -4412,7 +4412,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             raise ValueError("visual must be valid JSON") from exc
         return _validate_visual_arg(parsed)
 
-    def _resolve_visual(db, rules, visual, collection_id=None, folder_id=None):
+    def _resolve_visual(
+        db, rules, visual, collection_id=None, folder_id=None,
+        candidate_photo_ids=None,
+    ):
         """Run a visual clause over the rule tree's candidate photos.
 
         Returns ``(info, ordered_ids, sims_by_pid)``. ``info["status"]`` is
@@ -4421,6 +4424,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         ``encoding_failed``) with ``ordered_ids is None`` — callers then
         apply metadata rules only and surface the state. Never silently
         zero results (design hard requirement).
+
+        ``candidate_photo_ids`` further intersects the rule-derived
+        candidate set. The Map endpoint passes plottable ids so a
+        workspace whose only embeddings sit on non-plottable photos
+        surfaces as ``no_embeddings`` (metadata fallback) instead of
+        returning ``ok`` with ids that ``get_geolocated_photos`` will
+        silently intersect down to zero.
         """
         import numpy as np
         from models import get_active_model
@@ -4435,6 +4445,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         candidates = db.query_photo_ids(
             rules, collection_id=collection_id, folder_id=folder_id,
         )
+        if candidate_photo_ids is not None:
+            restrict = set(candidate_photo_ids)
+            candidates = [pid for pid in candidates if pid in restrict]
         emb_pairs = db.get_photos_with_embedding(model_name, photo_ids=candidates)
         if not emb_pairs:
             return (
@@ -4479,27 +4492,47 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "candidates": len(candidates), "indexed": len(emb_pairs)}
         return info, ordered_ids, sims_by_pid
 
-    def _apply_visual_to_rules(db, rules, visual, collection_id=None, folder_id=None):
-        """For GET consumers (summary/calendar/values): when the visual
-        clause is healthy, restrict the rules to the matched ids (inlined
-        photo_ids — no bound-parameter cap) so counts describe the same
-        photos the visually-filtered grid shows. Unhealthy → rules
-        unchanged, matching the grid's metadata-only fallback.
+    def _apply_visual_to_rules(
+        db, rules, visual, collection_id=None, folder_id=None,
+        candidate_photo_ids=None,
+    ):
+        """For GET consumers (summary/calendar/values/geo/predictions):
+        when the visual clause is healthy, restrict the rules to the
+        matched ids (inlined photo_ids — no bound-parameter cap) so
+        counts describe the same photos the visually-filtered grid
+        shows. Unhealthy → rules unchanged, matching the grid's
+        metadata-only fallback.
+
+        Returns ``(rules, visual_info)``. ``visual_info`` is ``None`` when
+        no visual clause was requested; otherwise it is the
+        ``_resolve_visual`` status dict — ``{status: "ok", matched, …}``
+        on a successful clause, or an unhealthy state (``no_model`` /
+        ``model_no_text_search`` / ``no_embeddings`` / ``encoding_failed``)
+        when the clause fell back to metadata-only. Endpoints whose UI
+        renders the visual chip (Map, Browse, Review) must surface this
+        so the chip does not silently broaden results.
+
+        ``candidate_photo_ids`` narrows the pre-embedding candidate set —
+        used by ``/api/photos/geo`` to keep the visual search inside the
+        Map's plottable scope so a workspace with embeddings only on
+        non-plottable photos surfaces as ``no_embeddings`` instead of
+        returning ``ok`` ids that the endpoint then intersects away.
         """
         if visual is None:
-            return rules
+            return rules, None
         base_rules = rules if rules is not None else []
-        _info, ordered_ids, _sims = _resolve_visual(
+        info, ordered_ids, _sims = _resolve_visual(
             db, base_rules, visual,
             collection_id=collection_id, folder_id=folder_id,
+            candidate_photo_ids=candidate_photo_ids,
         )
         if ordered_ids is None:
-            return rules
+            return rules, info
         rules_list = (
             [] if rules is None
             else ([rules] if isinstance(rules, dict) else list(rules))
         )
-        return rules_list + [{"field": "photo_ids", "value": ordered_ids}]
+        return rules_list + [{"field": "photo_ids", "value": ordered_ids}], info
 
     def _request_location_status_filter():
         value = (request.args.get("location_status") or "").strip().lower()
@@ -6273,7 +6306,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         rules = _inject_active_visual_model(rules)
         try:
             visual = _request_visual_arg()
-            rules = _apply_visual_to_rules(
+            rules, _visual_info = _apply_visual_to_rules(
                 db, rules, visual,
                 collection_id=collection_id, folder_id=folder_id,
             )
@@ -6345,7 +6378,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             location_status = _request_location_status_filter()
             rules = _request_rules_arg()
             visual = _request_visual_arg()
-            rules = _apply_visual_to_rules(
+            rules, _visual_info = _apply_visual_to_rules(
                 db, rules, visual,
                 collection_id=collection_id, folder_id=folder_id,
             )
@@ -6382,7 +6415,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             location_status = _request_location_status_filter()
             rules = _request_rules_arg()
             visual = _request_visual_arg()
-            rules = _apply_visual_to_rules(
+            rules, _visual_info = _apply_visual_to_rules(
                 db, rules, visual,
                 collection_id=collection_id, folder_id=folder_id,
             )
@@ -6710,17 +6743,49 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         keyword_match_case = _request_bool_arg("keyword_match_case")
         keyword_whole_word = _request_bool_arg("keyword_whole_word")
         species = request.args.get("species", None)
+        try:
+            rules = _request_rules_arg()
+            visual = _request_visual_arg()
+            # Fill in the active visual model on any UI-emitted
+            # ``has_visual_index`` rule that omits it. Without this a Map
+            # filter for "has index" (rule sent without a ``model`` key)
+            # would match any embedding row, so a workspace with stale
+            # embeddings from an inactive model would surface photos that
+            # are not indexed for the currently-active visual search —
+            # /api/photos/query already injects here (line 5691), so the
+            # Map path must match to stay consistent.
+            rules = _inject_active_visual_model(rules)
+            # Restrict the visual candidate set to plottable photos so a
+            # workspace whose only embeddings live on non-plottable photos
+            # doesn't return ``status: ok`` with ids that
+            # ``get_geolocated_photos`` then intersects to zero — the user
+            # would see a "visual match" chip over an empty map with no
+            # fallback / no-index warning.
+            plottable_ids = (
+                db.get_plottable_photo_ids(folder_id=folder_id)
+                if visual is not None else None
+            )
+            rules, visual_info = _apply_visual_to_rules(
+                db, rules, visual, folder_id=folder_id,
+                candidate_photo_ids=plottable_ids,
+            )
+        except ValueError as e:
+            return json_error(str(e), 400)
 
-        photos = db.get_geolocated_photos(
-            folder_id=folder_id,
-            rating_min=rating_min,
-            date_from=date_from,
-            date_to=date_to,
-            keyword=keyword,
-            keyword_match_case=keyword_match_case,
-            keyword_whole_word=keyword_whole_word,
-            species=species,
-        )
+        try:
+            photos = db.get_geolocated_photos(
+                folder_id=folder_id,
+                rating_min=rating_min,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                keyword_match_case=keyword_match_case,
+                keyword_whole_word=keyword_whole_word,
+                species=species,
+                rules=rules,
+            )
+        except ValueError as e:
+            return json_error(str(e), 400)
 
         total_photos = db.count_photos()
         total_without_coordinates = db.count_photos_without_coordinates()
@@ -6729,7 +6794,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         photo_dicts = [dict(p) for p in photos]
         _attach_edit_recipes(db, photo_dicts)
 
-        return jsonify({
+        response = {
             "photos": photo_dicts,
             "total_filtered": len(photos),
             "total_photos": total_photos,
@@ -6739,7 +6804,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             # names because assigned locations are included in these totals.
             "total_with_gps": total_geolocated,
             "total_without_gps": total_without_coordinates,
-        })
+        }
+        # Surface the visual clause's status so the filter bar's visual
+        # chip can warn on fallback — without this the chip advertises a
+        # visual search that silently returned metadata-only matches.
+        if visual_info is not None:
+            response["visual"] = visual_info
+        return jsonify(response)
 
     @app.route("/api/species")
     def api_species():
@@ -13333,25 +13404,65 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         collection_id = request.args.get("collection_id", None, type=int)
         status = request.args.get("status", None)
-        if collection_id:
-            photos = db.get_collection_photos(collection_id, per_page=999999)
-            photo_ids = [p["id"] for p in photos]
-            preds = (
-                db.get_predictions(photo_ids=photo_ids, status=status)
-                if photo_ids
-                else []
+        try:
+            rules = _request_rules_arg()
+            visual = _request_visual_arg()
+            # Fill in the active visual model on any UI-emitted
+            # ``has_visual_index`` rule that omits it. /api/photos/query
+            # already injects here; the Review GET path must do the same
+            # so a workspace with stale embeddings from an inactive model
+            # doesn't include predictions for photos that aren't indexed
+            # by the currently-active visual model.
+            rules = _inject_active_visual_model(rules)
+            # Forward ``collection_id`` so ``visual_info`` (matched /
+            # candidates / indexed) describes the collection-scoped Review
+            # queue the filter bar chip is showing — not a workspace-wide
+            # proxy that misrepresents the actual queue and also wastes
+            # embedding work on photos outside it.
+            rules, visual_info = _apply_visual_to_rules(
+                db, rules, visual, collection_id=collection_id,
             )
-        else:
-            preds = db.get_predictions(status=status)
-
-        # Fetch alternatives to attach to their parent predictions
-        alt_preds = []
-        if not status or status == "pending":
+        except ValueError as e:
+            return json_error(str(e), 400)
+        try:
             if collection_id:
-                if photo_ids:
-                    alt_preds = db.get_predictions(photo_ids=photo_ids, status="alternative")
+                photos = db.get_collection_photos(collection_id, per_page=999999)
+                photo_ids = [p["id"] for p in photos]
+                preds = (
+                    db.get_predictions(photo_ids=photo_ids, status=status, rules=rules)
+                    if photo_ids
+                    else []
+                )
             else:
-                alt_preds = db.get_predictions(status="alternative")
+                preds = db.get_predictions(status=status, rules=rules)
+
+            # Fetch alternatives to attach to their parent predictions.
+            # Constrain by the returned parents' photo_ids and skip ``rules``
+            # for this lookup: row-level parent predicates (e.g.
+            # ``prediction_confidence >= 0.8`` or
+            # ``prediction_status is pending``) evaluate against each row's
+            # own values, so alternatives — whose status is
+            # ``alternative`` and whose confidence/species usually differ
+            # from the matching parent — would otherwise be dropped by
+            # ``_filter_prediction_rows_by_rules`` before ``alts_by_key`` is
+            # built. The parent would then render with an empty
+            # ``alternatives`` list and the user could not accept an
+            # alternate species in that filtered view. The
+            # ``(detection_id, model)`` key in ``alts_by_key`` already
+            # restricts attachment to alternatives whose parent is in
+            # ``preds``, so no extra rows leak into the response.
+            alt_preds = []
+            if not status or status == "pending":
+                parent_photo_ids = list({
+                    p["photo_id"] for p in preds
+                    if p["photo_id"] is not None
+                })
+                if parent_photo_ids:
+                    alt_preds = db.get_predictions(
+                        photo_ids=parent_photo_ids, status="alternative",
+                    )
+        except ValueError as e:
+            return json_error(str(e), 400)
 
         # Index alternatives by (detection_id, model)
         alts_by_key = {}
@@ -13393,7 +13504,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             key = (d.get("detection_id"), d.get("model"))
             d["alternatives"] = alts_by_key.get(key, [])
             results.append(d)
-        return jsonify(results)
+        # Surface the visual clause's status so the Review filter bar's
+        # visual chip can warn on fallback. Without this the chip would
+        # advertise a visual search while Accept All / bulk operations ran
+        # over the broadened metadata-only prediction set. Response is a
+        # dict envelope so the field can travel alongside the list;
+        # callers unwrap ``data.predictions``.
+        response = {"predictions": results}
+        if visual_info is not None:
+            response["visual"] = visual_info
+        return jsonify(response)
 
     @app.route("/api/predictions/compare")
     def api_predictions_compare():

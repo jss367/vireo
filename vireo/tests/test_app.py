@@ -3148,7 +3148,7 @@ def test_api_predictions_include_bounding_box(app_and_db):
 
     client = app.test_client()
     resp = client.get("/api/predictions")
-    data = resp.get_json()
+    data = resp.get_json()["predictions"]
     assert len(data) == 1
     assert data[0]["box_x"] == 0.1
     assert data[0]["box_y"] == 0.2
@@ -3171,7 +3171,7 @@ def test_api_predictions_multiple_detections(app_and_db):
 
     client = app.test_client()
     resp = client.get("/api/predictions")
-    data = resp.get_json()
+    data = resp.get_json()["predictions"]
     assert len(data) == 2
     species = {d["species"] for d in data}
     assert species == {"Elk", "Magpie"}
@@ -8099,7 +8099,11 @@ def test_api_photos_missing_cancel_does_not_write_ready_cache(
     started = client.post("/api/photos/missing/check", json={})
     assert started.status_code == 202, started.get_json()
     job_id = started.get_json()["job_id"]
-    assert scan_entered.wait(timeout=1.0)
+    # 5s (was 1s): Windows CI can take several seconds to spin up the
+    # background job thread after ``/api/photos/missing/check`` returns, and
+    # a 1s deadline occasionally beat the worker there, tripping this
+    # assertion before the scan even entered ``get_missing_photos``.
+    assert scan_entered.wait(timeout=5.0)
 
     cancelled = client.post(f"/api/jobs/{job_id}/cancel")
     assert cancelled.status_code == 200, cancelled.get_json()
