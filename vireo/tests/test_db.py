@@ -1694,6 +1694,13 @@ def test_repair_misclassified_location_ancestors_restores_root_chain(tmp_path):
     db.add_keyword(
         "San Diego County", parent_id=state_id, kw_type="location",
     )
+    # A structurally-rooted taxonomy row must carry strong evidence
+    # (place_id) before startup repair rewrites it, so mixed hierarchies
+    # like a genus with a manually-added location descendant stay intact.
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ? WHERE id = ?",
+        ("united-states-country", country_id),
+    )
 
     assert db.repair_misclassified_location_ancestors() == 2
     rows = db.conn.execute(
@@ -1701,6 +1708,35 @@ def test_repair_misclassified_location_ancestors_restores_root_chain(tmp_path):
         (country_id, state_id),
     ).fetchall()
     assert [row["type"] for row in rows] == ["location", "location"]
+
+
+def test_repair_misclassified_location_ancestors_ignores_taxonomy_root_with_location_descendant(
+    tmp_path,
+):
+    """A bare taxonomy root with a location descendant needs stronger evidence.
+
+    Regression: previously any taxonomy root with a location descendant was
+    retyped on startup, clobbering genuine mixed hierarchies such as
+    ``Ardea`` (genus) with a manually added ``Backyard`` location child.
+    Startup repair must leave such roots alone until an explicit Google
+    admin match or an existing ``place_id`` proves they belong to a
+    location chain.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    genus_id = db.add_keyword("Ardea", kw_type="taxonomy")
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 1 WHERE id = ?", (genus_id,),
+    )
+    db.add_keyword("Backyard", parent_id=genus_id, kw_type="location")
+
+    assert db.repair_misclassified_location_ancestors() == 0
+    row = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?",
+        (genus_id,),
+    ).fetchone()
+    assert dict(row) == {"type": "taxonomy", "is_species": 1}
 
 
 def test_place_upsert_repairs_adjacent_location_ancestors_on_demand(
@@ -2056,6 +2092,81 @@ def test_place_upsert_repairs_coordless_taxonomy_leaf_component(tmp_path):
     assert db.conn.execute(
         "SELECT parent_id FROM keywords WHERE id = ?", (park_id,),
     ).fetchone()["parent_id"] == state_id
+
+
+def test_place_upsert_reconciles_suffixed_admin_duplicate_with_hierarchy_row(
+    tmp_path,
+):
+    """A legacy suffixed admin row merges into the matching coordless row.
+
+    Old catalogs can carry both a place-bearing admin duplicate created by
+    the earlier disambiguation path (e.g. ``California (<suffix>)`` with the
+    Google ``place_id``) and the coordless hierarchy row of the same name
+    under the same parent. Re-selecting that Google place used to fail the
+    ``ON CONFLICT(place_id)`` update on the table-level UNIQUE(name,
+    parent_id) constraint and re-suffix instead of reusing the hierarchy
+    row. The upsert must now merge the suffixed row into the coordless row
+    and let the hierarchy row own the place metadata.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    coordless_state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="location",
+    )
+    suffixed_state_id = db.conn.execute(
+        "INSERT INTO keywords "
+        "(name, parent_id, type, place_id, latitude, longitude) "
+        "VALUES (?, ?, 'location', ?, ?, ?)",
+        (
+            "California (a-region)",
+            country_id,
+            "california-region",
+            36.7,
+            -119.4,
+        ),
+    ).lastrowid
+    db.conn.commit()
+
+    selected_id = db.upsert_place_chain({
+        "place_id": "california-region",
+        "name": "California",
+        "types": ["administrative_area_level_1"],
+        "lat": 36.7783,
+        "lng": -119.4179,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+            {
+                "name": "California",
+                "types": ["administrative_area_level_1"],
+            },
+        ],
+    })
+
+    assert selected_id == coordless_state_id
+    survivor = db.conn.execute(
+        "SELECT name, parent_id, place_id, type, latitude, longitude "
+        "FROM keywords WHERE id = ?",
+        (coordless_state_id,),
+    ).fetchone()
+    assert dict(survivor) == {
+        "name": "California",
+        "parent_id": country_id,
+        "place_id": "california-region",
+        "type": "location",
+        "latitude": 36.7783,
+        "longitude": -119.4179,
+    }
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE id = ?",
+        (suffixed_state_id,),
+    ).fetchone()[0] == 0
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords "
+        "WHERE name LIKE 'California%' AND parent_id = ?",
+        (country_id,),
+    ).fetchone()[0] == 1
 
 
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):

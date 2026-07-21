@@ -10202,26 +10202,24 @@ class Database:
                     "SELECT id FROM keywords WHERE place_id = ?",
                     (place_id,),
                 ).fetchone()
-                existing_component = None
-                if existing_place is None:
-                    if parent_id is None:
-                        existing_component = self.conn.execute(
-                            "SELECT id, type FROM keywords "
-                            "WHERE name = ? AND parent_id IS NULL "
-                            "  AND place_id IS NULL "
-                            "ORDER BY CASE WHEN type = 'location' THEN 0 "
-                            "  WHEN type = 'taxonomy' THEN 1 ELSE 2 END, id "
-                            "LIMIT 1",
-                            (name,),
-                        ).fetchone()
-                    else:
-                        existing_component = self.conn.execute(
-                            "SELECT id, type FROM keywords "
-                            "WHERE name = ? AND parent_id = ? "
-                            "  AND place_id IS NULL "
-                            "LIMIT 1",
-                            (name, parent_id),
-                        ).fetchone()
+                if parent_id is None:
+                    existing_component = self.conn.execute(
+                        "SELECT id, type FROM keywords "
+                        "WHERE name = ? AND parent_id IS NULL "
+                        "  AND place_id IS NULL "
+                        "ORDER BY CASE WHEN type = 'location' THEN 0 "
+                        "  WHEN type = 'taxonomy' THEN 1 ELSE 2 END, id "
+                        "LIMIT 1",
+                        (name,),
+                    ).fetchone()
+                else:
+                    existing_component = self.conn.execute(
+                        "SELECT id, type FROM keywords "
+                        "WHERE name = ? AND parent_id = ? "
+                        "  AND place_id IS NULL "
+                        "LIMIT 1",
+                        (name, parent_id),
+                    ).fetchone()
                 if (
                     existing_component is not None
                     and (
@@ -10232,6 +10230,22 @@ class Database:
                         )
                     )
                 ):
+                    if (
+                        existing_place is not None
+                        and existing_place["id"] != existing_component["id"]
+                    ):
+                        # Legacy admin disambiguation could leave a suffixed
+                        # place-bearing row (e.g. "California (suffix)")
+                        # alongside the matching coordless hierarchy row.
+                        # Re-selecting the same Google place would otherwise
+                        # fail the ON CONFLICT(place_id) DO UPDATE with
+                        # UNIQUE(name, parent_id) and re-suffix instead of
+                        # reusing the hierarchy row. Merge the suffixed row
+                        # into the hierarchy row and let it own the place
+                        # metadata so future assignments settle on one row.
+                        self._merge_keyword_into(
+                            existing_place["id"], existing_component["id"],
+                        )
                     self.conn.execute(
                         "UPDATE keywords SET place_id = ?, type = 'location', "
                         "is_species = 0, taxon_id = NULL, latitude = ?, "
@@ -10414,13 +10428,22 @@ class Database:
 
         Before explicit keyword types were protected during taxonomy marking,
         geographic homonyms such as ``California`` could be changed from a
-        location into taxonomy. A taxonomy root, or a taxonomy row below a
-        location parent, that sits above a location descendant connected only
-        through other taxonomy rows is an administrative location-tree node.
-        A place-bearing row is also unambiguously a location. ``allow_leaf``
-        is reserved for an explicit Google administrative-component match,
-        where the place response supplies the evidence a coordless leaf lacks
-        during startup. Clear stale taxonomy metadata and restore its type.
+        location into taxonomy. A taxonomy row below a location parent that
+        sits above a location descendant connected only through other
+        taxonomy rows is an administrative location-tree node. A place-
+        bearing row is also unambiguously a location, regardless of where
+        it sits. ``allow_leaf`` is reserved for an explicit Google
+        administrative-component match, where the place response supplies
+        the evidence a coordless leaf lacks during startup.
+
+        Root rows (``parent_id IS NULL``) lack a location parent proving
+        they belong to a legacy location chain, so a location descendant
+        alone is not enough evidence — a genuine taxonomy root with a
+        mixed-hierarchy location descendant (e.g. ``Ardea`` → ``Backyard``)
+        would otherwise be retyped and lose its taxonomy metadata. Roots
+        need stronger evidence: an existing ``place_id`` or an explicit
+        Google component match via ``allow_leaf``. Clear stale taxonomy
+        metadata and restore the row's type when evidence is sufficient.
         """
         row = self.conn.execute(
             "WITH RECURSIVE descendants(id, type) AS ("
@@ -10435,9 +10458,13 @@ class Database:
             "LEFT JOIN keywords parent ON parent.id = k.parent_id "
             "WHERE k.id = ? AND k.type = 'taxonomy' "
             "  AND (k.parent_id IS NULL OR parent.type = 'location') "
-            "  AND (k.place_id IS NOT NULL OR ? OR EXISTS ("
-            "    SELECT 1 FROM descendants WHERE type = 'location'"
-            "  ))",
+            "  AND ("
+            "    k.place_id IS NOT NULL "
+            "    OR ? "
+            "    OR (parent.type = 'location' AND EXISTS ("
+            "      SELECT 1 FROM descendants WHERE type = 'location'"
+            "    ))"
+            "  )",
             (keyword_id, keyword_id, allow_leaf),
         ).fetchone()
         if row is None:
