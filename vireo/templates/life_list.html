@@ -922,7 +922,6 @@ function renderExplorer() {
   html += '</div>';
   panel.innerHTML = html;
 
-  renderSunburst();
   wireBreadcrumb(document.getElementById('explorerBody'));
   renderExplorerBody();
 }
@@ -994,6 +993,9 @@ function currentExplorerNodes() {
 function renderExplorerBody() {
   var body = document.getElementById('explorerBody');
   if (!body) return;
+  // Keep the overview in lockstep with the cards. The current taxon becomes
+  // the sunburst center and its descendants expand to use the full chart.
+  renderSunburst();
   var html = renderBreadcrumb();
 
   var nodes = currentExplorerNodes();
@@ -1038,19 +1040,45 @@ function renderBreadcrumb() {
 
 // ---------------- Explorer: sunburst overview (Task 13) ----------------
 //
-// Whole-class completeness at a glance: three rings out from the center —
-// orders (inner) → families (middle) → genera (outer), built from
-// explorerData.nodes (the tree materialized down to genus; species are NOT
-// in that tree, so there is no species ring). Each node's angular span is
+// Zoomable taxonomic completeness: at the class root, three rings show orders
+// → families → genera. As the user selects a subset, that taxon moves into the
+// center and its descendants expand to fill the available rings. Species are
+// not materialized in this tree, so a selected genus is represented by the
+// center while its species are listed below. Each node's angular span is
 // proportional to its total_species; children partition their parent's arc in
 // the same order the cards use (explorerData.nodes is already found-first-then-
 // alpha from the server). Arc fill is var(--accent) at an opacity scaled by
 // found_species/total_species, over a var(--bg-tertiary) ghost track, so an
 // untouched branch reads clearly faded and a complete branch fully saturated.
-// Clicking an arc drills the cards below via the same explorerPath the cards
-// and breadcrumb use; clicking the center resets to the top level.
+// Clicking an arc drills in; clicking the center moves up one level.
 
 var explorerSunburstLineage = {};   // node id -> [{id,name,rank}] root→node lineage
+
+// Resolve explorerPath against the materialized tree. Keeping this separate
+// from currentExplorerNodes makes the selected taxon's own rollup available to
+// the sunburst center as well as its children.
+function currentExplorerFocus() {
+  var nodes = (explorerData && explorerData.nodes) || [];
+  var focus = null;
+  var lineage = [];
+  for (var i = 0; i < explorerPath.length; i++) {
+    var step = explorerPath[i];
+    var match = nodes.find(function(n) { return n.id === step.id; });
+    if (!match) break;
+    focus = match;
+    lineage.push({ id: match.id, name: match.common_name || match.name, rank: match.rank });
+    nodes = match.children || [];
+  }
+  return { node: focus, children: focus ? (focus.children || []) : nodes, lineage: lineage };
+}
+
+function explorerTreeDepth(nodes) {
+  var depth = 0;
+  (nodes || []).forEach(function(node) {
+    depth = Math.max(depth, 1 + explorerTreeDepth(node.children || []));
+  });
+  return depth;
+}
 
 // Convert a polar point (center + radius + angle in radians, 0 = top,
 // clockwise) to SVG x/y. Returns a string "x,y".
@@ -1092,30 +1120,37 @@ function llArcFill(found, total) {
 function renderSunburst() {
   var host = document.getElementById('explorerSunburst');
   if (!host) return;
-  var top = (explorerData && explorerData.nodes) || [];
+  var focus = currentExplorerFocus();
+  var top = focus.children;
   explorerSunburstLineage = {};
 
-  // Total angular weight = sum of order total_species. Guard total==0 / empty:
-  // hide the sunburst entirely (honesty states already cover those below).
+  // Total angular weight = sum of the focused node's immediate children.
+  // A selected genus has no materialized children, but its center remains
+  // visible while the species leaf is displayed below.
   var classTotal = 0;
   top.forEach(function(n) { classTotal += (n.total_species || 0); });
-  if (!top.length || classTotal <= 0) { host.innerHTML = ''; host.style.display = 'none'; return; }
+  if (top.length && classTotal <= 0) { host.innerHTML = ''; host.style.display = 'none'; return; }
   host.style.display = 'flex';
 
   var SIZE = 360, cx = SIZE / 2, cy = SIZE / 2;
   var R_CENTER = 46;                       // clickable reset hub
-  var rings = [R_CENTER, 92, 138, 176];    // ring boundaries: center→order→family→genus
+  var R_OUTER = 176;
+  var visibleDepth = Math.max(1, explorerTreeDepth(top));
+  var rings = [R_CENTER];
+  for (var ringIndex = 1; ringIndex <= visibleDepth; ringIndex++) {
+    rings.push(R_CENTER + ((R_OUTER - R_CENTER) * ringIndex / visibleDepth));
+  }
 
   var root = (explorerData && explorerData.root) || {};
-  var rootLineage = [];   // lineage entries accumulate as we recurse
+  var rootLineage = focus.lineage;   // lineage entries accumulate as we recurse
   var arcs = [];          // collected {path, fill, op, tip, lineage}
 
   var FULL = 2 * Math.PI;
 
   // Recurse a level, laying children out proportional to total_species within
-  // [a0,a1]. depth 0 = orders, 1 = families, 2 = genera (last ring).
+  // [a0,a1]. The first visible level depends on the active selection.
   function layout(list, a0, a1, depth, lineage) {
-    if (depth > 2 || !list || !list.length) return;
+    if (depth >= visibleDepth || !list || !list.length) return;
     var span = a1 - a0;
     // Denominator = sum of this level's total_species; fall back to equal
     // partition if every child is zero (degenerate, keeps geometry valid).
@@ -1157,15 +1192,20 @@ function renderSunburst() {
       + ' data-sci="' + escapeAttr(a.sci) + '"'
       + ' data-found="' + a.found + '" data-total="' + a.total + '" data-pct="' + pct + '"></path>');
   });
-  // Center hub = reset-to-top control, labeled with class-level completeness.
+  // Center hub = active selection. Clicking it moves up one level.
   var summary = (explorerData && explorerData.summary) || {};
-  var sp = summary.species || { found: 0, total: 0 };
+  var selected = focus.node || root;
+  var sp = focus.node
+    ? { found: focus.node.found_species || 0, total: focus.node.total_species || 0 }
+    : (summary.species || { found: 0, total: 0 });
   var centerPct = sp.total > 0 ? Math.round((sp.found / sp.total) * 100) : 0;
-  var centerLabel = escapeHtml((root.common_name || root.name || 'All'));
+  var centerName = selected.common_name || selected.name || 'All';
+  var centerLabel = centerName.length > 14 ? centerName.slice(0, 13) + '…' : centerName;
+  var centerSci = (selected.common_name && selected.common_name !== selected.name) ? selected.name : '';
   parts.push('<circle class="ll-sb-center" id="explorerSunburstCenter" cx="' + cx + '" cy="' + cy + '" r="' + R_CENTER + '"'
-    + ' data-name="' + escapeAttr(root.common_name || root.name || 'All') + '"'
+    + ' data-name="' + escapeAttr(centerName) + '" data-sci="' + escapeAttr(centerSci) + '"'
     + ' data-found="' + sp.found + '" data-total="' + sp.total + '" data-pct="' + centerPct + '"></circle>');
-  parts.push('<text class="ll-sb-center-label" x="' + cx + '" y="' + (cy - 6) + '">' + centerLabel + '</text>');
+  parts.push('<text class="ll-sb-center-label" x="' + cx + '" y="' + (cy - 6) + '">' + escapeHtml(centerLabel) + '</text>');
   parts.push('<text class="ll-sb-center-label" x="' + cx + '" y="' + (cy + 11) + '" style="font-size:11px;fill:var(--text-secondary)">' + centerPct + '%</text>');
   parts.push('</svg>');
   host.innerHTML = parts.join('');
@@ -1220,11 +1260,11 @@ function wireSunburst(host) {
   });
   svg.addEventListener('mouseleave', hideTip);
 
-  // Click an arc → drill via its precomputed lineage; click center → reset.
+  // Click an arc → drill via its precomputed lineage; click center → up one.
   svg.addEventListener('click', function(ev) {
     var center = ev.target.closest('.ll-sb-center');
     if (center) {
-      explorerPath = [];
+      if (explorerPath.length) explorerPath = explorerPath.slice(0, -1);
       hideTip();
       renderExplorerBody();
       return;
@@ -1300,6 +1340,7 @@ var explorerLeafGenus = null;  // {id,name,rank} of the genus being shown
 async function loadExplorerSpecies(node) {
   explorerLeafGenus = { id: node.id, name: node.common_name || node.name, rank: node.rank };
   explorerPath.push(explorerLeafGenus);
+  renderSunburst();
   var body = document.getElementById('explorerBody');
   if (body) body.innerHTML = renderBreadcrumb() + '<div class="ll-exp-empty">Loading species…</div>';
   try {
