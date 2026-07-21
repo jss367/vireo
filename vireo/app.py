@@ -6179,6 +6179,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             not isinstance(collection_id, int) or isinstance(collection_id, bool)
         ):
             return json_error("collection_id must be an integer", 400)
+        # Rules-only scoping path: ``query_photo_ids`` / ``query_photos`` /
+        # ``count_photos_for_rules`` all funnel through
+        # ``_append_collection_restriction`` → ``_build_collection_query``,
+        # which reads only ``collections.rules``. An API/headless caller
+        # posting ``{"collection_id": <visual id>}`` would therefore silently
+        # widen to every metadata match instead of the saved visual result
+        # set; the Browse reopen path already sends the stored ``rules`` +
+        # ``visual`` without relying on ``collection_id`` (Codex review
+        # r3621903988).
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         folder_id = payload.get("folder_id")
         if folder_id is not None and (
             not isinstance(folder_id, int) or isinstance(folder_id, bool)

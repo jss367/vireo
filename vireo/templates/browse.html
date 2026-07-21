@@ -8163,8 +8163,19 @@ async function deleteCollectionById(cid, name) {
     return;
   }
   // If we were filtering by the deleted collection, clear the filter.
+  // ``activeCollectionId`` covers dashboard-scope collection links; opened
+  // collections now live under ``openedCollectionId`` (their saved
+  // expression is loaded into the filter bar instead of being applied as a
+  // scope), so we need to clear that path too — otherwise the sidebar row
+  // disappears but the filter bar and grid keep applying the deleted
+  // collection's expression until the user manually clears it (Codex
+  // review r3621903982).
   if (activeCollectionId === cid) {
     activeCollectionId = null;
+    resetAndLoad();
+  } else if (openedCollectionId === cid) {
+    openedCollectionId = null;
+    if (VireoFilter.hasFilters()) VireoFilter.clearAll(true);
     resetAndLoad();
   }
   await loadCollections();
