@@ -21886,6 +21886,32 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             snapshot_unreadable = []
             snapshot_eligible = set(snapshot_paths or [])
             snapshot_known_before = {}
+
+            def active_photo_ids_by_path():
+                """Map primary and companion paths to active photo records."""
+                rows = thread_db.conn.execute(
+                    """SELECT p.id, p.filename, p.companion_path,
+                              f.path AS folder_path
+                       FROM photos p
+                       JOIN folders f ON f.id = p.folder_id
+                       JOIN workspace_folders wf ON wf.folder_id = f.id
+                       WHERE wf.workspace_id = ?""",
+                    (active_ws,),
+                ).fetchall()
+                result = {}
+                for row in rows:
+                    result[
+                        os.path.join(row["folder_path"], row["filename"])
+                    ] = row["id"]
+                    if row["companion_path"]:
+                        companion_path = row["companion_path"]
+                        if not os.path.isabs(companion_path):
+                            companion_path = os.path.join(
+                                row["folder_path"], companion_path,
+                            )
+                        result[companion_path] = row["id"]
+                return result
+
             if snapshot_paths is not None:
                 # Freeze execution outcomes before scanning. Missing and
                 # unreadable files stay visible in the result instead of
@@ -21906,25 +21932,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 # Record active-workspace membership before the scan so a
                 # concurrent/repeated import is reported as idempotent rather
                 # than as a newly admitted photo.
-                paths_by_folder = {}
-                for path in snapshot_eligible:
-                    paths_by_folder.setdefault(
-                        os.path.dirname(path), set()
-                    ).add(os.path.basename(path))
-                for folder_path, filenames in paths_by_folder.items():
-                    rows = thread_db.conn.execute(
-                        """SELECT p.id, p.filename
-                           FROM photos p
-                           JOIN folders f ON f.id = p.folder_id
-                           JOIN workspace_folders wf ON wf.folder_id = f.id
-                           WHERE wf.workspace_id = ? AND f.path = ?""",
-                        (active_ws, folder_path),
-                    ).fetchall()
-                    for row in rows:
-                        if row["filename"] in filenames:
-                            snapshot_known_before[
-                                os.path.join(folder_path, row["filename"])
-                            ] = row["id"]
+                snapshot_known_before = {
+                    path: photo_id
+                    for path, photo_id in active_photo_ids_by_path().items()
+                    if path in snapshot_eligible
+                }
 
             def photo_cb(photo_id, path):
                 if photo_id not in seen_photo_ids:
@@ -22069,6 +22081,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         )
                     advance_scan_acc()
 
+            if snapshot_paths is not None:
+                # Pairing can fold a newly scanned JPEG into an existing RAW
+                # row and delete the temporary JPEG row after photo_cb saw it.
+                # Resolve the frozen paths again so collections, tags, and a
+                # chained Process job receive durable catalog IDs rather than
+                # a deleted transient ID.
+                catalog_ids_after = active_photo_ids_by_path()
+                photo_ids = list(dict.fromkeys(
+                    catalog_ids_after[path]
+                    for path in snapshot_paths
+                    if path in indexed_paths and path in catalog_ids_after
+                ))
             indexed = len(photo_ids)
             snapshot_unindexed = sorted(
                 snapshot_eligible - indexed_paths

@@ -5797,6 +5797,61 @@ def test_import_in_place_snapshot_reports_missing_without_processing(
     assert "process_job_id" not in result
 
 
+def test_import_in_place_snapshot_normalizes_raw_companion_and_replay(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    root = tmp_path / "registered"
+    root.mkdir()
+    raw = root / "IMG_0001.nef"
+    companion = root / "IMG_0001.jpg"
+    Image.new("RGB", (16, 16), "red").save(raw, "JPEG")
+    Image.new("RGB", (16, 16), "blue").save(companion, "JPEG")
+    root_id = db.add_folder(str(root), name="registered")
+    raw_id = db.add_photo(
+        root_id, raw.name, ".nef", raw.stat().st_size, raw.stat().st_mtime,
+    )
+    snap_id = db.create_new_images_snapshot([str(companion)])
+
+    with app.test_client() as client:
+        first = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": None,
+        })
+        assert first.status_code == 200, first.get_json()
+        first_job = wait_for_job_via_client(
+            client, first.get_json()["job_id"],
+        )
+
+        quick_look_id = _process_id(db, "Quick look")
+        replay = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": quick_look_id,
+        })
+        assert replay.status_code == 200, replay.get_json()
+        replay_job = wait_for_job_via_client(
+            client, replay.get_json()["job_id"],
+        )
+
+    assert first_job["result"]["imported"] == 1
+    assert first_job["result"]["photo_ids"] == [raw_id]
+    first_collection = db.get_collection_photos(
+        first_job["result"]["collection_id"], per_page=999999,
+    )
+    assert [photo["id"] for photo in first_collection] == [raw_id]
+    raw_row = db.conn.execute(
+        "SELECT companion_path FROM photos WHERE id = ?", (raw_id,),
+    ).fetchone()
+    assert raw_row["companion_path"] == companion.name
+
+    replay_result = replay_job["result"]
+    assert replay_result["imported"] == 0
+    assert replay_result["already_cataloged"] == 1
+    assert replay_result["after_import_skipped"] == "no new photos"
+    assert "collection_id" not in replay_result
+    assert "process_job_id" not in replay_result
+
+
 def test_import_in_place_snapshot_rejects_path_outside_registered_roots(
     app_and_db, tmp_path,
 ):
