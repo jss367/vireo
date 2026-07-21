@@ -10271,6 +10271,107 @@ def test_api_predictions_filters_prediction_rows_by_confidence(app_and_db):
     assert preds[0]["confidence"] >= 0.8
 
 
+def test_photos_query_status_is_not_includes_photos_without_predictions(app_and_db):
+    """``prediction_status is not Rejected`` at the photo level must include
+    photos with no current predictions — historically compiled as
+    ``NOT EXISTS(status = rejected)``. Review's row-scoped rewrite
+    (``EXISTS(status != rejected)``) requires at least one prediction row,
+    so a saved collection or ``/api/photos/query`` built on this rule
+    would silently drop every un-classified photo (r3619275290).
+    """
+    from labels_fingerprint import TOL_SENTINEL
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+
+    # bird1 has one prediction (accepted); bird2 has one rejected;
+    # bird3 has no predictions at all — the photo-scoped `is not
+    # Rejected` filter must include bird1 and bird3 and exclude bird2.
+    det = db.save_detections(photos["bird1.jpg"], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="test-detector")
+    db.add_prediction(detection_id=det[0], species="Cardinal",
+                      confidence=0.9, model="M1",
+                      labels_fingerprint=TOL_SENTINEL)
+
+    det2 = db.save_detections(photos["bird2.jpg"], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="test-detector")
+    db.add_prediction(detection_id=det2[0], species="Sparrow",
+                      confidence=0.9, model="M1",
+                      labels_fingerprint=TOL_SENTINEL)
+    pred2 = db.conn.execute(
+        "SELECT id FROM predictions WHERE species='Sparrow'"
+    ).fetchone()["id"]
+    db.update_prediction_status(pred2, "rejected")
+
+    rules = [{"field": "prediction_status", "op": "is not",
+              "value": "rejected"}]
+
+    # count_photos_for_rules and query_photo_ids share the same
+    # _build_query_from_rules path — both should behave the same.
+    assert db.count_photos_for_rules(rules) == 2
+    assert set(db.query_photo_ids(rules)) == {
+        photos["bird1.jpg"], photos["bird3.jpg"],
+    }
+
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={"rules": rules})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    returned = {p["id"] for p in data["photos"]}
+    assert returned == {photos["bird1.jpg"], photos["bird3.jpg"]}
+    assert data["total"] == 2
+
+    # not_in variant compiles to the same broad NOT EXISTS. bird1's
+    # Cardinal prediction defaults to pending → still included; bird2's
+    # rejected → excluded; bird3 has no predictions → included.
+    rules_ni = [{"field": "prediction_status", "op": "not_in",
+                 "value": ["rejected", "accepted"]}]
+    resp = client.post('/api/photos/query', json={"rules": rules_ni})
+    assert resp.status_code == 200
+    returned = {p["id"] for p in resp.get_json()["photos"]}
+    assert returned == {photos["bird1.jpg"], photos["bird3.jpg"]}
+
+
+def test_photos_query_classifier_model_is_not_includes_photos_without_predictions(
+    app_and_db,
+):
+    """``classifier_model is not X`` at the photo level must include photos
+    with no current predictions — the row-scoped rewrite would require an
+    ``EXISTS`` row and silently drop every un-classified photo
+    (r3619275290).
+    """
+    from labels_fingerprint import TOL_SENTINEL
+    app, db = app_and_db
+    photos = {p["filename"]: p["id"] for p in db.get_photos()}
+
+    det = db.save_detections(photos["bird1.jpg"], [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="test-detector")
+    db.add_prediction(detection_id=det[0], species="Cardinal",
+                      confidence=0.9, model="model-a",
+                      labels_fingerprint=TOL_SENTINEL)
+
+    rules = [{"field": "classifier_model", "op": "is not",
+              "value": "model-a"}]
+    # bird1 is the only classified photo (with model-a) and must be
+    # excluded; bird2 and bird3 have no predictions and must remain.
+    assert set(db.query_photo_ids(rules)) == {
+        photos["bird2.jpg"], photos["bird3.jpg"],
+    }
+
+    client = app.test_client()
+    resp = client.post('/api/photos/query', json={"rules": rules})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert {p["id"] for p in data["photos"]} == {
+        photos["bird2.jpg"], photos["bird3.jpg"],
+    }
+
+
 def test_api_photos_geo_surfaces_visual_status(app_and_db, monkeypatch):
     """Map endpoint must return the visual clause status so the filter
     bar can warn on fallback. Without this, choosing "Visually similar…"

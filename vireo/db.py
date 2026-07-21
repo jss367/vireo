@@ -15144,8 +15144,14 @@ class Database:
             # ``_filter_prediction_rows_by_rules`` can decide those per row
             # against the ORIGINAL tree — see r3618822252.
             scope_rules = self._relax_negated_prediction_leaves(rules)
+            # row_scoped=True selects broader candidate SQL for the negative
+            # prediction-field operators — the row filter below drops the
+            # matching sibling rows so we can safely widen photo selection.
+            # Photo-scoped callers (photo queries, saved collections) must
+            # keep the default False to preserve the NOT EXISTS semantics
+            # that include photos with no current predictions (r3619275290).
             r_folder_join, r_join_clause, r_where, r_params = (
-                self._build_query_from_rules(scope_rules)
+                self._build_query_from_rules(scope_rules, row_scoped=True)
             )
             base_conditions.append(
                 "p.id IN (SELECT DISTINCT p.id FROM photos p "
@@ -18481,7 +18487,8 @@ class Database:
             rules, include_offline_folders=include_offline_folders,
         )
 
-    def _build_query_from_rules(self, rules, include_offline_folders=False):
+    def _build_query_from_rules(self, rules, include_offline_folders=False,
+                                row_scoped=False):
         """Build SQL clauses from a smart-collection rule tree.
 
         Returns (folder_join, join_clause, where, params). Raises ValueError on
@@ -18493,6 +18500,18 @@ class Database:
         callers need. Pass ``include_offline_folders=True`` for metadata-only
         callers (e.g. Dashboard totals) that count photos even when their
         storage is currently missing.
+
+        ``row_scoped=True`` selects broader candidate SQL for the negative
+        prediction-field operators (``prediction_status is not/not_in``,
+        ``classifier_model is not``): ``EXISTS(status != X)`` rather than
+        ``NOT EXISTS(status = X)``. That widening is only safe when the
+        caller re-evaluates the rule per row afterwards, which
+        ``get_predictions`` does via ``_filter_prediction_rows_by_rules``.
+        Photo-scoped callers (``/api/photos/query``, saved-collection
+        evaluation, calendar/geo totals) MUST leave this False — the
+        broad ``NOT EXISTS(status = X)`` form is what includes photos
+        with no current predictions in "is not Rejected" results (see
+        review r3619275290).
 
         Backward compatibility: the original collection format was a flat list
         of rule objects, implicitly combined with AND. Newer collections may use
@@ -19017,17 +19036,27 @@ class Database:
                 if op in ("equals", "is"):
                     return _prediction_exists("pred.classifier_model = ?", [value])
                 if op == "is not":
-                    # Positive EXISTS ("photo has at least one prediction
-                    # whose classifier_model is NOT X"), not NOT EXISTS
-                    # ("photo has no predictions with classifier_model = X").
-                    # NOT EXISTS drops a photo the moment it has any sibling
-                    # from model X, hiding the other-model rows the visible
-                    # filter should keep — see r3618514362. Row-level
-                    # clean-up in ``_filter_prediction_rows_by_rules`` then
-                    # removes any sibling rows that use model X themselves.
-                    return _prediction_exists(
-                        "pred.classifier_model != ?", [value],
+                    # Splits by caller, mirroring prediction_status above:
+                    #   row_scoped=True (get_predictions) → positive EXISTS
+                    #     ("photo has at least one prediction whose model is
+                    #     NOT X"). NOT EXISTS would drop the whole photo the
+                    #     moment any sibling used model X, hiding the
+                    #     other-model rows the visible filter should keep
+                    #     (see r3618514362). Row-level clean-up in
+                    #     ``_filter_prediction_rows_by_rules`` removes the
+                    #     matching sibling rows.
+                    #   row_scoped=False (default; photo queries, saved
+                    #     collections) → broad NOT EXISTS so photos with no
+                    #     current predictions still satisfy ``is not X``
+                    #     (see r3619275290).
+                    if row_scoped:
+                        return _prediction_exists(
+                            "pred.classifier_model != ?", [value],
+                        )
+                    exists, params = _prediction_exists(
+                        "pred.classifier_model = ?", [value],
                     )
+                    return "NOT " + exists, params
                 if op == "contains":
                     # Escape LIKE metacharacters so a value like ``%`` or ``_``
                     # stays literal — matches the other advertised text
@@ -19039,14 +19068,21 @@ class Database:
                         "pred.classifier_model LIKE ? ESCAPE '\\'", [like]
                     )
             if field == "prediction_status":
-                # Negative predicates use a positive EXISTS ("photo has at
-                # least one prediction whose status is NOT X") rather than
-                # NOT EXISTS ("photo has no predictions matching X").
-                # NOT EXISTS drops a photo the moment it has any Rejected
-                # sibling, hiding pending rows the visible filter should
-                # keep — see r3618393423. Row-level clean-up in
-                # ``_filter_prediction_rows_by_rules`` then removes any
-                # sibling rows that don't match the predicate themselves.
+                # Negative predicates split by caller:
+                #   row_scoped=True (get_predictions) → positive EXISTS
+                #     ("photo has at least one prediction whose status is
+                #     NOT X"). NOT EXISTS would drop the whole photo the
+                #     moment any sibling matched X, hiding pending rows the
+                #     visible filter should keep (see r3618393423). The
+                #     row-level pass in ``_filter_prediction_rows_by_rules``
+                #     then removes the matching sibling rows.
+                #   row_scoped=False (default; photo queries, saved
+                #     collections) → broad NOT EXISTS ("photo has no
+                #     prediction whose status is X"). This preserves the
+                #     historical behavior where a photo with zero current
+                #     predictions still satisfies ``is not Rejected`` and
+                #     is included by /api/photos/query and collections
+                #     built on the same rule (see r3619275290).
                 if op in ("equals", "is"):
                     return _prediction_exists(
                         "COALESCE(prv.status, 'pending') = ?",
@@ -19054,22 +19090,43 @@ class Database:
                         review_join=True,
                     )
                 if op == "is not":
-                    return _prediction_exists(
-                        "COALESCE(prv.status, 'pending') != ?",
+                    if row_scoped:
+                        return _prediction_exists(
+                            "COALESCE(prv.status, 'pending') != ?",
+                            [value],
+                            review_join=True,
+                        )
+                    exists, params = _prediction_exists(
+                        "COALESCE(prv.status, 'pending') = ?",
                         [value],
                         review_join=True,
                     )
+                    return "NOT " + exists, params
                 if op in ("in", "not_in"):
                     values = list(value or [])
                     if not values:
                         return ("0" if op == "in" else "1"), []
                     placeholders = ",".join("?" * len(values))
-                    cmp_op = "IN" if op == "in" else "NOT IN"
-                    return _prediction_exists(
-                        f"COALESCE(prv.status, 'pending') {cmp_op} ({placeholders})",
+                    if op == "in":
+                        return _prediction_exists(
+                            f"COALESCE(prv.status, 'pending') IN ({placeholders})",
+                            values,
+                            review_join=True,
+                        )
+                    # not_in: row_scoped keeps a positive EXISTS on the
+                    # inverse set; photo-scoped stays broad via NOT EXISTS.
+                    if row_scoped:
+                        return _prediction_exists(
+                            f"COALESCE(prv.status, 'pending') NOT IN ({placeholders})",
+                            values,
+                            review_join=True,
+                        )
+                    exists, params = _prediction_exists(
+                        f"COALESCE(prv.status, 'pending') IN ({placeholders})",
                         values,
                         review_join=True,
                     )
+                    return "NOT " + exists, params
             if field == "needs_review":
                 exists, params = _prediction_exists(
                     "COALESCE(prv.status, 'pending') = 'pending'",
