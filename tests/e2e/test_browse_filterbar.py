@@ -166,6 +166,62 @@ def test_queued_collection_open_yields_to_later_keyword_click(live_server, page)
     assert page.evaluate("activeCollectionId") is None
 
 
+def test_deep_link_replay_yields_to_sidebar_click(live_server, page):
+    """?collection_id=A must not overwrite a sidebar click on collection B.
+
+    Browsing to /browse?collection_id=A registers a post-init
+    filterByCollection(activeCollectionId) as the deep-link replay. A sidebar
+    click on collection B while /api/filters/fields is still pending queues
+    behind the same init promise. Because the .then handler was registered
+    first, it resumes first and, before the fix, its unconditional
+    filterByCollection(A) call bumped browseScopeGen — invalidating B's
+    queued open, so A opened over the user's real click (Codex review
+    r3624637674).
+    """
+    collections_by_name = {c["name"]: c["id"] for c in live_server["db"].get_collections()}
+    # Both collections must return non-empty grids: All Photos matches the
+    # 5 seeded photos, Untagged matches the 3 without a keyword. Empty
+    # collections would leave #grid .grid-card missing and hang the page
+    # load before we even queue the sidebar click.
+    deep_link_id = collections_by_name["All Photos"]
+    clicked_id = collections_by_name["Untagged"]
+    assert deep_link_id != clicked_id
+
+    held_routes = []
+    page.route(
+        "**/api/filters/fields",
+        lambda route: held_routes.append(route),
+    )
+
+    page.goto(live_server["url"] + f"/browse?collection_id={deep_link_id}")
+    page.wait_for_selector("#grid .grid-card", timeout=15000)
+    for _ in range(50):
+        if held_routes:
+            break
+        page.wait_for_timeout(100)
+    assert held_routes, "filter-field request was never issued"
+    assert not page.evaluate("VireoFilter.isReady()")
+
+    # User clicks a different collection in the sidebar while init is still
+    # pending — this queues behind browseFilterInitPromise.
+    page.evaluate(
+        "collectionId => { window._userCollectionClick = "
+        "filterByCollection(collectionId); }",
+        clicked_id,
+    )
+    held_routes[0].continue_()
+
+    page.wait_for_function(
+        "clickedId => VireoFilter.isReady() && openedCollectionId === clickedId",
+        arg=clicked_id,
+        timeout=15000,
+    )
+    # The deep-link replay must have skipped itself — otherwise it would
+    # have reopened deep_link_id after B's queued open bailed as stale.
+    page.wait_for_timeout(200)
+    assert page.evaluate("openedCollectionId") == clicked_id
+
+
 def test_quick_rating_filter_and_chip_semantics(live_server, page):
     _open_browse(page, live_server)
     assert _total(page) == 5

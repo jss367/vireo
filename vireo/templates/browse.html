@@ -2959,7 +2959,21 @@ async function bootstrapBrowse() {
       },
       onCollectionSaved: function() { loadCollections(); },
     });
+    // Snapshot the scope generation BEFORE we register the .then so we can
+    // tell whether a user sidebar click advanced it while init was pending.
+    // The bootstrap deep-link/persisted replay below unconditionally called
+    // filterByCollection/resetAndLoad, which bumps browseScopeGen and made
+    // any queued sidebar click (e.g. collection B awaiting init) resume as
+    // stale \u2014 reopening the URL's collection A over the user's later
+    // selection (Codex review r3624637674).
+    var bootstrapScopeGen = browseScopeGen;
     browseFilterInitPromise.then(function() {
+      if (browseScopeGen !== bootstrapScopeGen) {
+        // A user sidebar click (folder/keyword/collection) already changed
+        // scope while init was pending; their newer selection is
+        // authoritative, so skip the URL-driven deep-link/persisted replay.
+        return;
+      }
       VireoFilter.setResultTotal(totalPhotos);
       // Collection deep links must open showing exactly that collection \u2014
       // whether plain (?collection_id=..., historical endpoint behavior) or
