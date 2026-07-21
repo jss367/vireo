@@ -19,7 +19,7 @@ DEFAULT_PAGES = [
     "/pipeline/review",
     "/variants",
     "/workspace",
-    "/compare",
+    "/id-conflicts",
     "/settings",
     "/shortcuts",
     "/keywords",

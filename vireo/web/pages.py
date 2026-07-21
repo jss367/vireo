@@ -18,7 +18,7 @@ _TEMPLATES = {
     "/pipeline/rapid-review": "pipeline_rapid_review.html",
     "/variants": "variants.html",
     "/workspace": "workspace.html",
-    "/compare": "compare.html",
+    "/id-conflicts": "id_conflicts.html",
     "/settings": "settings.html",
     "/storage": "storage.html",
     "/shortcuts": "shortcuts.html",
@@ -63,3 +63,8 @@ def map_page():
 @pages_blueprint.get("/stats")
 def legacy_stats():
     return redirect("/dashboard")
+
+
+@pages_blueprint.get("/compare")
+def legacy_compare():
+    return redirect("/id-conflicts")

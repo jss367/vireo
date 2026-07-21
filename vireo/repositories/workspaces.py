@@ -4,11 +4,16 @@ import json
 
 
 class WorkspaceRepository:
-    def __init__(self, conn, workspace_id, *, allowed_nav_ids, default_tabs):
+    def __init__(self, conn, workspace_id, *, allowed_nav_ids, default_tabs,
+                 nav_id_aliases=None):
         self.conn = conn
         self.workspace_id = workspace_id
         self.allowed_nav_ids = allowed_nav_ids
         self.default_tabs = list(default_tabs)
+        # Map of retired nav id -> current nav id, so a saved tab written
+        # under an old id (e.g. "compare" before it was renamed to
+        # "id_conflicts") is upgraded on read instead of silently dropped.
+        self.nav_id_aliases = dict(nav_id_aliases or {})
 
     def get_tabs(self):
         row = self.conn.execute(
@@ -22,10 +27,16 @@ class WorkspaceRepository:
             return list(self.default_tabs)
         if not isinstance(value, list):
             return list(self.default_tabs)
-        return [
-            tab for tab in value
-            if isinstance(tab, str) and tab in self.allowed_nav_ids
-        ]
+        result = []
+        seen = set()
+        for tab in value:
+            if not isinstance(tab, str):
+                continue
+            tab = self.nav_id_aliases.get(tab, tab)
+            if tab in self.allowed_nav_ids and tab not in seen:
+                seen.add(tab)
+                result.append(tab)
+        return result
 
     def set_tabs(self, tabs):
         if not isinstance(tabs, list):

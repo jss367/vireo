@@ -981,7 +981,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         stages = {
             "storage": {"status": "pending", "label": "Checking local storage"},
             "ingest": {"status": "pending", "count": 0, "label": "Importing photos"},
-            "scan": {"status": "pending", "count": 0, "label": "Scanning photos"},
+            "scan": {"status": "pending", "count": 0, "label": "Checking metadata"},
             "thumbnails": {"status": "pending", "count": 0, "label": "Generating thumbnails"},
             "previews": {"status": "pending", "count": 0, "label": "Generating previews"},
             "model_loader": {"status": "pending", "label": "Loading models"},
@@ -1043,7 +1043,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 step_defs.append({"id": "storage", "label": "Check local storage"})
             step_defs.append({"id": "ingest", "label": "Import photos"})
         step_defs.extend([
-            {"id": "scan", "label": "Scan photos"},
+            {"id": "scan", "label": "Check metadata"},
             {"id": "thumbnails", "label": "Generate thumbnails"},
             {"id": "previews", "label": "Generate previews"},
         ])
@@ -1312,6 +1312,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 vireo_dir=effective_vireo_dir,
                                 thumb_cache_dir=effective_thumb_cache_dir,
                                 cancel_check=cancel_check,
+                                register_restrict_dirs_as_roots=False,
+                                allow_photo_inserts=False,
                             )
                         except (OSError, RuntimeError) as e:
                             if isinstance(e, ScanCancelled) and (

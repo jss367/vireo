@@ -9,6 +9,7 @@ import pytest
 from xmp import (
     read_hierarchical_keywords,
     read_keywords,
+    read_sync_preview_metadata,
     remove_keywords,
     remove_vireo_gps_location,
     write_edit_recipe,
@@ -217,6 +218,49 @@ def test_remove_vireo_gps_location_restores_previous_gps(sample_xmp):
     assert "previousGPSLatitude" not in content
     assert "previousGPSLongitude" not in content
     assert "vireo:gpsSource" not in content
+
+
+def test_read_sync_preview_metadata_reports_current_and_previous_gps(sample_xmp):
+    """Sync review gets decimal before/after inputs from one sidecar parse."""
+    from xml.etree import ElementTree as ET
+
+    ns_rdf = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+    ns_exif = "http://ns.adobe.com/exif/1.0/"
+    tree = ET.parse(sample_xmp)
+    desc = tree.getroot().find(f".//{{{ns_rdf}}}Description")
+    desc.set(f"{{{ns_exif}}}GPSLatitude", "40,46.974000N")
+    desc.set(f"{{{ns_exif}}}GPSLongitude", "73,57.924000W")
+    tree.write(sample_xmp, xml_declaration=True, encoding="unicode")
+    write_gps_location(sample_xmp, 48.8566, 2.3522, source="keyword")
+    write_rating(sample_xmp, 4)
+    write_pick_flag(sample_xmp, "flagged")
+
+    metadata = read_sync_preview_metadata(sample_xmp)
+
+    assert metadata["status"] == "ok"
+    assert metadata["keywords"] == {"Bird", "Raptor"}
+    assert metadata["hierarchical_keywords"] == {
+        "Animals|Birds|Raptor",
+        "Location|Forest",
+    }
+    assert metadata["rating"] == "4"
+    assert metadata["rating_writable"] is True
+    assert metadata["flag"] == "flagged"
+    assert metadata["location"]["latitude"] == pytest.approx(48.8566)
+    assert metadata["location"]["longitude"] == pytest.approx(2.3522)
+    assert metadata["previous_location"]["latitude"] == pytest.approx(40.7829)
+    assert metadata["previous_location"]["longitude"] == pytest.approx(-73.9654)
+    assert metadata["location_source"] == "keyword"
+
+
+def test_read_sync_preview_metadata_distinguishes_missing_and_unreadable(tmp_path):
+    missing = read_sync_preview_metadata(tmp_path / "missing.xmp")
+    assert missing["status"] == "missing"
+    assert missing["rating_writable"] is False
+
+    corrupt = tmp_path / "corrupt.xmp"
+    corrupt.write_text("not xml")
+    assert read_sync_preview_metadata(corrupt)["status"] == "unreadable"
 
 
 def test_write_gps_location_rejects_out_of_range_coords(sample_xmp):

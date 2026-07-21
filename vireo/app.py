@@ -114,6 +114,7 @@ from web.photo_review import create_photo_review_blueprint
 from web.system import system_blueprint
 from web.workspaces import create_workspace_blueprint
 from werkzeug.exceptions import BadRequest
+from xmp import read_sync_preview_metadata
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -150,7 +151,8 @@ ALL_PAGES = [
     {"id": "storage",         "label": "Storage",         "href": "/storage"},
     {"id": "audit",           "label": "Audit",           "href": "/audit"},
     {"id": "move",            "label": "Move",            "href": "/move"},
-    {"id": "compare",         "label": "Compare",         "href": "/compare"},
+    {"id": "id_conflicts",    "label": "ID Conflicts",    "href": "/id-conflicts",
+     "keywords": "compare conflict prediction model disagreement species keyword classify review"},
     {"id": "settings",        "label": "Settings",        "href": "/settings"},
     {"id": "workspace",       "label": "Workspace",       "href": "/workspace"},
     {"id": "lightroom",       "label": "Lightroom",       "href": "/lightroom"},
@@ -202,6 +204,409 @@ class _QuietRequestFilter(logging.Filter):
 
 
 logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
+
+
+def _sync_preview_coordinate_text(location):
+    """Return a compact, truthful coordinate label for sync review."""
+    if not location:
+        return None
+    latitude = location.get("latitude")
+    longitude = location.get("longitude")
+    if latitude is not None and longitude is not None:
+        return f"{latitude:.5f}, {longitude:.5f}"
+    raw_latitude = location.get("raw_latitude")
+    raw_longitude = location.get("raw_longitude")
+    if raw_latitude is None and raw_longitude is None:
+        return None
+    return ", ".join(
+        str(value) for value in (raw_latitude, raw_longitude)
+        if value is not None
+    )
+
+
+def _sync_preview_location_name(location):
+    """Format a location keyword leaf and its parents from specific to broad."""
+    if not location:
+        return None
+    names = [location.get("name")]
+    names.extend(
+        parent.get("name")
+        for parent in reversed(location.get("parent_chain") or [])
+    )
+    result = []
+    seen = set()
+    for name in names:
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(name)
+    return ", ".join(result) or None
+
+
+def _sync_preview_absent_xmp_value(metadata, empty_value):
+    if metadata.get("status") == "missing":
+        return "No XMP sidecar"
+    if metadata.get("status") == "unreadable":
+        return "Unreadable XMP sidecar"
+    return empty_value
+
+
+_SYNC_PREVIEW_FIELD_LABELS = {
+    "keyword_add": "Keyword",
+    "keyword_remove": "Keyword",
+    "keyword_remove_flat": "Keyword",
+    "rating": "Rating",
+    "flag": "Flag",
+    "location": "Location",
+    "edit_recipe": "Photo edits",
+}
+
+
+def _sync_preview_folder_offline_presentation(change_type):
+    """Presentation for a change whose photo folder isn't accessible.
+
+    ``sync_to_xmp`` calls ``os.path.isdir(os.path.dirname(xmp_path))`` before
+    every write; when it returns False the photo is recorded as
+    ``folder not accessible`` and none of the writers run. Mirror that no-op
+    in the review so a NAS-offline or unmounted-folder photo does not appear
+    to promise XMP changes that will never happen.
+    """
+    field = _SYNC_PREVIEW_FIELD_LABELS.get(
+        change_type,
+        change_type.replace("_", " ").strip().title() or "Metadata",
+    )
+    placeholder = "Folder not accessible"
+    return {
+        "field": field,
+        "action": "unchanged",
+        "before": placeholder,
+        "after": placeholder,
+        "after_detail": (
+            "Sync will skip this photo because its folder is offline; "
+            "no XMP will be written"
+        ),
+    }
+
+
+def _sync_preview_rating_label(value):
+    if value in (None, "", "0", 0):
+        return "Unrated"
+    try:
+        rating = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{rating} star" if rating == 1 else f"{rating} stars"
+
+
+def _sync_preview_flag_label(value):
+    return {
+        None: "Unflagged",
+        "": "Unflagged",
+        "none": "Unflagged",
+        "flagged": "Picked",
+        "rejected": "Rejected",
+    }.get(value, str(value))
+
+
+def _sync_preview_presentation(
+    change, metadata, *, assigned_location=None, write_locations=False,
+    sidecar_will_exist=False, sync_flags=False, paired_keyword_rename=False,
+    paired_add_value=None, folder_offline=False,
+):
+    """Translate one internal pending row into user-facing XMP before/after data."""
+    change_type = change["change_type"]
+    value = change["value"]
+
+    if folder_offline:
+        return _sync_preview_folder_offline_presentation(change_type)
+
+    if change_type in {"keyword_add", "keyword_remove", "keyword_remove_flat"}:
+        existing = next(
+            (
+                keyword for keyword in metadata.get("keywords", set())
+                if keyword_match_key(keyword) == keyword_match_key(value)
+            ),
+            None,
+        )
+        # Solo keyword_remove routes through remove_keywords() with
+        # hierarchical=True in sync.py, which drops every
+        # lr:hierarchicalSubject whose segments match this key in addition
+        # to the flat dc:subject entry. Collect every hierarchy sync would
+        # touch so the review reflects the full deletion.
+        matching_hierarchies = []
+        if change_type == "keyword_remove":
+            matching_hierarchies = sorted(
+                keyword
+                for keyword in metadata.get("hierarchical_keywords", set())
+                if any(
+                    keyword_match_key(segment) == keyword_match_key(value)
+                    for segment in keyword.split("|")
+                )
+            )
+        hierarchy_display = [
+            keyword.replace("|", " › ") for keyword in matching_hierarchies
+        ]
+        if (
+            change_type == "keyword_remove"
+            and paired_keyword_rename
+            and hierarchy_display
+        ):
+            hierarchy_text = "; ".join(hierarchy_display)
+            return {
+                "field": "Keyword hierarchy",
+                "action": "unchanged",
+                "before": hierarchy_text,
+                "after": hierarchy_text,
+                "after_detail": (
+                    "The matching keyword addition replaces only the "
+                    "flat spelling; this hierarchy stays in XMP"
+                ),
+            }
+        # A paired flat-only rename (e.g. remove `‘apapane` + add `apapane`)
+        # is dispatched through the flat-only remove path in sync.py, and
+        # the paired write_sidecar then adds the clean spelling. Reporting
+        # the removal as `Not in XMP` hides that the keyword survives with
+        # a canonicalized flat spelling; show it as an unchanged keyword
+        # whose flat entry is being rewritten by the paired addition.
+        if (
+            change_type == "keyword_remove"
+            and paired_keyword_rename
+            and existing
+            and paired_add_value
+            and not hierarchy_display
+        ):
+            return {
+                "field": "Keyword",
+                "action": "unchanged",
+                "before": existing,
+                "after": paired_add_value,
+                "after_detail": (
+                    "The matching keyword addition rewrites this flat "
+                    "spelling; the keyword itself stays in XMP"
+                ),
+            }
+        xmp_value = existing or _sync_preview_absent_xmp_value(
+            metadata, "Not in XMP",
+        )
+        if change_type == "keyword_add":
+            return {
+                "field": "Keyword",
+                "action": "added",
+                "before": xmp_value,
+                "after": value,
+            }
+        if change_type == "keyword_remove" and not paired_keyword_rename:
+            removed_entries = []
+            if existing:
+                removed_entries.append(existing)
+            removed_entries.extend(hierarchy_display)
+            if removed_entries:
+                return {
+                    "field": "Keyword",
+                    "action": "removed",
+                    "before": "; ".join(removed_entries),
+                    "after": "Not in XMP",
+                }
+        if existing is None:
+            if metadata.get("status") == "unreadable":
+                detail = (
+                    f"{value} cannot be removed because the XMP sidecar "
+                    "is unreadable"
+                )
+            elif metadata.get("status") == "missing":
+                detail = f"No XMP sidecar contains {value} to remove"
+            else:
+                detail = f"{value} is not present in XMP"
+            return {
+                "field": "XMP keyword",
+                "action": "unchanged",
+                "before": xmp_value,
+                "after": xmp_value,
+                "after_detail": detail,
+            }
+        return {
+            "field": "Keyword",
+            "action": "removed",
+            "before": xmp_value,
+            "after": "Not in XMP",
+        }
+
+    if change_type == "rating":
+        before = _sync_preview_rating_label(metadata.get("rating"))
+        if not metadata.get("rating_writable") and not sidecar_will_exist:
+            before = _sync_preview_absent_xmp_value(metadata, before)
+            return {
+                "field": "XMP rating",
+                "action": "unchanged",
+                "before": before,
+                "after": before,
+                "after_detail": (
+                    f"{_sync_preview_rating_label(value)} stays in Vireo; "
+                    "rating sync only updates an existing, readable XMP sidecar"
+                ),
+            }
+        if not metadata.get("rating_writable"):
+            before = _sync_preview_absent_xmp_value(metadata, before)
+            return {
+                "field": "Rating",
+                "action": "updated",
+                "before": before,
+                "after": _sync_preview_rating_label(value),
+                "after_detail": (
+                    "Another selected change creates the XMP sidecar first"
+                ),
+            }
+        return {
+            "field": "Rating",
+            "action": "updated",
+            "before": before,
+            "after": _sync_preview_rating_label(value),
+        }
+
+    if change_type == "flag":
+        before = _sync_preview_flag_label(metadata.get("flag"))
+        if metadata.get("status") != "ok":
+            before = _sync_preview_absent_xmp_value(metadata, before)
+        if not sync_flags:
+            return {
+                "field": "XMP flag",
+                "action": "unchanged",
+                "before": before,
+                "after": before,
+                "after_detail": (
+                    f"{_sync_preview_flag_label(value)} stays in Vireo; "
+                    "flag sync to XMP is turned off"
+                ),
+            }
+        return {
+            "field": "Flag",
+            "action": "updated",
+            "before": before,
+            "after": _sync_preview_flag_label(value),
+        }
+
+    if change_type == "location":
+        current_coordinates = _sync_preview_coordinate_text(
+            metadata.get("location")
+        )
+        before = current_coordinates or _sync_preview_absent_xmp_value(
+            metadata, "No GPS in XMP",
+        )
+        location_coordinates = _sync_preview_coordinate_text(assigned_location)
+        location_name = _sync_preview_location_name(assigned_location)
+
+        if write_locations and location_coordinates:
+            return {
+                "field": "Location",
+                "action": "updated",
+                "before": before,
+                "after": location_name or location_coordinates,
+                "after_detail": (
+                    f"{location_coordinates} · from a location keyword"
+                ),
+            }
+
+        if metadata.get("location_source"):
+            restored_coordinates = _sync_preview_coordinate_text(
+                metadata.get("previous_location")
+            )
+            return {
+                "field": "Location",
+                "action": "cleared",
+                "before": before,
+                "after": restored_coordinates or "No GPS in XMP",
+                "after_detail": (
+                    "Restores the GPS that existed before Vireo"
+                    if restored_coordinates
+                    else "Removes Vireo-assigned GPS"
+                ),
+            }
+
+        return {
+            "field": "XMP location",
+            "action": "unchanged",
+            "before": before,
+            "after": before,
+            "after_detail": (
+                f"{location_name} stays in Vireo; writing its GPS to XMP is turned off"
+                if assigned_location and location_coordinates and not write_locations
+                else (
+                    f"{location_name or 'This location keyword'} has no GPS coordinates to write"
+                    if assigned_location and not location_coordinates
+                    else "No Vireo-assigned GPS needs to be removed"
+                )
+            ),
+        }
+
+    if change_type == "edit_recipe":
+        before = (
+            "Existing Vireo edits"
+            if metadata.get("edit_recipe")
+            else _sync_preview_absent_xmp_value(metadata, "No Vireo edits")
+        )
+        if not value and not metadata.get("edit_recipe"):
+            if metadata.get("status") == "unreadable":
+                detail = (
+                    "The Vireo edit marker cannot be cleared because the "
+                    "XMP sidecar is unreadable"
+                )
+            elif metadata.get("status") == "missing":
+                detail = "No XMP sidecar contains Vireo edits to clear"
+            else:
+                detail = "No Vireo edit marker exists in XMP to clear"
+            return {
+                "field": "XMP photo edits",
+                "action": "unchanged",
+                "before": before,
+                "after": before,
+                "after_detail": detail,
+            }
+        return {
+            "field": "Photo edits",
+            "action": "updated" if value else "cleared",
+            "before": before,
+            "after": "Updated Vireo edits" if value else "No Vireo edits",
+        }
+
+    field = change_type.replace("_", " ").strip().title() or "Metadata"
+    return {
+        "field": field,
+        "action": "updated",
+        "before": "Current XMP value",
+        "after": value or "Cleared",
+    }
+
+
+def _sync_preview_change_creates_sidecar(
+    change, *, sync_flags=False, write_locations=False, assigned_location=None,
+):
+    """Mirror sync operations that create a missing XMP sidecar before rating.
+
+    Matches the write order in ``sync.py``: ``write_sidecar`` (keyword_add),
+    ``write_pick_flag`` when flag sync is enabled, ``write_gps_location``
+    when location sync is enabled and the linked location has valid
+    coordinates, and ``write_edit_recipe`` with a non-empty payload all
+    create a missing sidecar via ``_load_or_create_xmp``. ``write_rating``
+    and the ``remove_*`` paths do not, so they are excluded.
+    """
+    change_type = change["change_type"]
+    if change_type == "keyword_add":
+        return True
+    if change_type == "flag":
+        return sync_flags
+    if change_type == "location":
+        if not write_locations or not assigned_location:
+            return False
+        return (
+            assigned_location.get("latitude") is not None
+            and assigned_location.get("longitude") is not None
+        )
+    if change_type == "edit_recipe":
+        return bool(change["value"])
+    return False
 
 
 def _rank01(value, values):
@@ -3368,6 +3773,10 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # verbatim. Add the new coordinate-source field only for that exact legacy
     # list; customized card layouts remain unchanged.
     cfg.migrate_browse_location_status_field()
+    # One-time rename of the "compare" navigation shortcut to "id_conflicts"
+    # after the Compare page became ID Conflicts, so a user's saved binding
+    # follows the page instead of being orphaned.
+    cfg.migrate_compare_nav_id_to_id_conflicts()
     # One-time rewrite of the previous encounter-grouping species weight
     # (0.10) to the new default (0.40) in both ~/.vireo/config.json and
     # workspace overrides. Without this, upgraded installs that had the
@@ -3543,6 +3952,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # over large network volumes. Values are per-spawn dicts; a new walk
     # replaces the key wholesale, so readers never see torn state.
     app._new_images_walk_progress = {}
+    # Import workers run on separate threads. Serialize execution of the same
+    # frozen snapshot so the second worker observes the first worker's catalog
+    # admissions and reports an idempotent replay instead of claiming them too.
+    app._new_images_snapshot_import_locks = {}
+    app._new_images_snapshot_import_locks_guard = threading.Lock()
     app._missing_originals_lock = threading.Lock()
     app._missing_originals_cache = {}
     app._missing_originals_inflight = {}
@@ -6739,6 +7153,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo_data = [{
                 "id": item["photo"]["id"],
                 "filename": item["photo"]["filename"],
+                "companion_path": item["photo"]["companion_path"],
                 "timestamp": item["photo"]["timestamp"],
                 "latitude": item["lat"],
                 "longitude": item["lng"],
@@ -9797,7 +10212,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/sync/preview")
     def api_sync_preview():
-        """Preview all pending changes grouped by photo."""
+        """Preview pending changes with the XMP values they will replace."""
         db = _get_db()
         changes = db.get_pending_changes()
         if not changes:
@@ -9824,9 +10239,160 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "value": c["value"],
             })
 
+        import config as cfg
+
+        effective_config = db.get_effective_config(cfg.load())
+        write_locations = bool(
+            effective_config.get("write_assigned_location_to_xmp", False)
+        )
+        sync_flags = bool(effective_config.get("sync_flags_to_xmp", False))
+        changes_by_id = {change["id"]: change for change in changes}
+        for photo in by_photo.values():
+            xmp_path = os.path.join(
+                photo["folder"],
+                os.path.splitext(photo["filename"])[0] + ".xmp",
+            )
+            # Mirror the folder-accessibility guard in ``sync_to_xmp``: if
+            # the photo's folder is offline (a common NAS case), sync
+            # records the photo as ``folder not accessible`` and never
+            # runs any writer, so the review must not present writes
+            # against it either.
+            folder_offline = bool(photo["folder"]) and not os.path.isdir(
+                photo["folder"]
+            )
+            photo["folder_offline"] = folder_offline
+            if folder_offline:
+                # Skip filesystem access entirely — an unreachable XMP path
+                # would just re-derive the same "no sidecar" fallback.
+                metadata = {
+                    "status": "folder_offline",
+                    "keywords": set(),
+                    "hierarchical_keywords": set(),
+                    "rating": None,
+                    "rating_writable": False,
+                    "flag": None,
+                    "location": None,
+                    "previous_location": None,
+                    "location_source": None,
+                    "edit_recipe": None,
+                }
+            else:
+                metadata = read_sync_preview_metadata(xmp_path)
+            assigned_location = None
+            if (
+                not folder_offline
+                and any(change["type"] == "location" for change in photo["changes"])
+            ):
+                assigned_location = _serialize_photo_location(
+                    db, photo["photo_id"],
+                )
+            # Map normalized-key -> original add value so a paired
+            # keyword_remove can display the clean spelling the paired
+            # ``write_sidecar`` will end up writing.
+            keyword_add_values_by_key = {}
+            for change in photo["changes"]:
+                if change["type"] == "keyword_add" and change["value"]:
+                    key = keyword_match_key(change["value"])
+                    if key:
+                        keyword_add_values_by_key.setdefault(
+                            key, change["value"],
+                        )
+            keyword_add_keys = set(keyword_add_values_by_key.keys())
+            for change in photo["changes"]:
+                pending = changes_by_id[change["id"]]
+                auto_includes_keyword_add = bool(
+                    change["type"] in {"keyword_remove", "keyword_remove_flat"}
+                    and keyword_match_key(change["value"]) in keyword_add_keys
+                )
+                change["auto_includes_keyword_add"] = (
+                    auto_includes_keyword_add
+                )
+                change["paired_keyword_rename"] = bool(
+                    change["type"] == "keyword_remove"
+                    and auto_includes_keyword_add
+                )
+                # An offline folder never runs any writer, so nothing
+                # creates a sidecar during that sync.
+                change["creates_xmp_sidecar"] = (
+                    not folder_offline
+                    and (
+                        auto_includes_keyword_add
+                        or _sync_preview_change_creates_sidecar(
+                            pending,
+                            sync_flags=sync_flags,
+                            write_locations=write_locations,
+                            assigned_location=assigned_location,
+                        )
+                    )
+                )
+
+            sidecar_will_exist = any(
+                change["creates_xmp_sidecar"] for change in photo["changes"]
+            )
+            for change in photo["changes"]:
+                pending = changes_by_id[change["id"]]
+                paired_add_value = None
+                if change["type"] == "keyword_remove" and change[
+                    "paired_keyword_rename"
+                ]:
+                    paired_add_value = keyword_add_values_by_key.get(
+                        keyword_match_key(change["value"])
+                    )
+                if (
+                    pending["change_type"] == "rating"
+                    and not folder_offline
+                    and not metadata.get("rating_writable")
+                ):
+                    change["rating_requires_sidecar"] = True
+                    change["presentation_without_sidecar"] = (
+                        _sync_preview_presentation(
+                            pending,
+                            metadata,
+                            assigned_location=assigned_location,
+                            write_locations=write_locations,
+                            sidecar_will_exist=False,
+                            sync_flags=sync_flags,
+                            paired_keyword_rename=change[
+                                "paired_keyword_rename"
+                            ],
+                            paired_add_value=paired_add_value,
+                        )
+                    )
+                    change["presentation_with_sidecar"] = (
+                        _sync_preview_presentation(
+                            pending,
+                            metadata,
+                            assigned_location=assigned_location,
+                            write_locations=write_locations,
+                            sidecar_will_exist=True,
+                            sync_flags=sync_flags,
+                            paired_keyword_rename=change[
+                                "paired_keyword_rename"
+                            ],
+                            paired_add_value=paired_add_value,
+                        )
+                    )
+                    change["presentation"] = change[
+                        "presentation_with_sidecar"
+                        if sidecar_will_exist
+                        else "presentation_without_sidecar"
+                    ]
+                    continue
+                change["presentation"] = _sync_preview_presentation(
+                    pending,
+                    metadata,
+                    assigned_location=assigned_location,
+                    write_locations=write_locations,
+                    sync_flags=sync_flags,
+                    paired_keyword_rename=change["paired_keyword_rename"],
+                    paired_add_value=paired_add_value,
+                    folder_offline=folder_offline,
+                )
+
         result = {
             "photos": list(by_photo.values()),
             "total_changes": len(changes),
+            "location_sync_enabled": write_locations,
         }
         _attach_nested_edit_recipes(db, result)
         return jsonify(result)
@@ -16301,12 +16867,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if snap is None:
             abort(404)
 
-        # Use only top-level mapped roots (not every auto-registered
-        # subfolder the scanner created) so grouping matches the user's
-        # source folders — otherwise longest-prefix match picks the
-        # deepest descendant and hides which source a file came from.
+        # Use user-facing roots (not every auto-linked descendant) so
+        # grouping matches the source folders. Include roots currently marked
+        # missing: a snapshot preview must retain the folder and unavailable
+        # file the banner promised instead of silently losing its provenance.
         from new_images import mapped_roots as _ni_mapped_roots
-        root_paths = [r["path"] for r in _ni_mapped_roots(db, db._active_workspace_id)]
+
+        root_paths = [
+            r["path"]
+            for r in _ni_mapped_roots(
+                db, db._active_workspace_id, include_missing=True,
+            )
+        ]
 
         # Build unique display names across roots by taking the shortest
         # trailing path segments that are unique — so /mnt/cardA/DCIM and
@@ -16347,10 +16919,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         files = []
         type_breakdown = {}
         total_size = 0
+        unavailable_count = 0
         for path in snap["file_paths"]:
             try:
                 stat = os.stat(path)
             except OSError:
+                unavailable_count += 1
+                ext = os.path.splitext(path)[1].lower()
+                files.append({
+                    "path": path,
+                    "filename": os.path.basename(path),
+                    "subfolder": _subfolder_for(path),
+                    "size": 0,
+                    "extension": ext,
+                    "mtime": None,
+                    "available": False,
+                    "error": "File is no longer available",
+                })
+                type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
                 continue
             ext = os.path.splitext(path)[1].lower()
             files.append({
@@ -16360,13 +16946,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "size": stat.st_size,
                 "extension": ext,
                 "mtime": stat.st_mtime,
+                "available": True,
                 "thumb_url": "/api/import/folder-preview/thumbnail?path=" + quote(path),
             })
             type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
             total_size += stat.st_size
 
         return jsonify({
-            "total_count": len(files),
+            "total_count": snap["file_count"],
+            "available_count": len(files) - unavailable_count,
+            "unavailable_count": unavailable_count,
             "total_size": total_size,
             "type_breakdown": type_breakdown,
             "duplicate_count": 0,
@@ -21698,16 +22287,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/jobs/import-in-place", methods=["POST"])
     def api_job_import_in_place():
-        """Import existing folders without copying files.
+        """Import existing folders or a new-images snapshot without copying.
 
         This is the in-place companion to ``/api/jobs/import-photos``: scan
         selected source folders into the active workspace, leave originals at
         their current paths, and optionally enqueue the same after-import
-        processing strategy used by archive-copy imports.
+        processing strategy used by archive-copy imports. Snapshot mode is the
+        catalog-admission boundary for files discovered below registered roots:
+        it scans only the frozen paths and never promotes their leaf folders to
+        additional workspace roots.
         """
         from image_loader import is_excluded_scan_path
 
         body = request.get_json(silent=True) or {}
+        source_snapshot_id = body.get("source_snapshot_id")
         if body.get("after_process_move") is not None:
             return json_error(
                 "after_process_move is not supported for import-in-place — "
@@ -21719,18 +22312,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         sources = body.get("sources")
         if isinstance(sources, str):
             sources = [sources]
-        if not sources or not isinstance(sources, list) or not all(
-            isinstance(s, str) and s for s in sources
-        ):
-            return json_error("sources must be a non-empty list of paths")
-        for s in sources:
-            if is_excluded_scan_path(s):
+        snapshot_paths = None
+
+        if source_snapshot_id is not None:
+            if sources:
                 return json_error(
-                    f"source is inside a macOS app-managed library and "
-                    f"cannot be imported: {s}"
+                    "source_snapshot_id cannot be combined with sources"
                 )
-            if not os.path.isdir(s):
-                return json_error(f"source directory not found: {s}")
+            if "new_workspace_name" in body:
+                return json_error(
+                    "a new-images snapshot belongs to the active workspace "
+                    "and cannot be imported into a new workspace"
+                )
+            if (
+                isinstance(source_snapshot_id, bool)
+                or not isinstance(source_snapshot_id, int)
+            ):
+                return json_error("source_snapshot_id must be an integer")
+        else:
+            if not sources or not isinstance(sources, list) or not all(
+                isinstance(s, str) and s for s in sources
+            ):
+                return json_error("sources must be a non-empty list of paths")
+            for s in sources:
+                if is_excluded_scan_path(s):
+                    return json_error(
+                        f"source is inside a macOS app-managed library and "
+                        f"cannot be imported: {s}"
+                    )
+                if not os.path.isdir(s):
+                    return json_error(f"source directory not found: {s}")
 
         recursive = bool(body.get("recursive", True))
         import_tags, location_from_gps, tag_options_err = (
@@ -21739,6 +22350,63 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if tag_options_err is not None:
             return tag_options_err
         db = _get_db()
+        if source_snapshot_id is not None:
+            snap = db.get_new_images_snapshot(source_snapshot_id)
+            if snap is None:
+                return json_error(
+                    f"source_snapshot_id {source_snapshot_id} not found",
+                    status=404,
+                )
+            snapshot_paths = list(snap["file_paths"])
+
+            # Resolve each frozen path to one of the workspace's registered
+            # roots. The snapshot was created from these roots, but validate
+            # again at enqueue time so a stale/crafted snapshot can never use
+            # Import as a path-admission escape hatch after workspace roots
+            # change.
+            from new_images import mapped_roots as _mapped_new_image_roots
+
+            registered_roots = sorted(
+                (
+                    (os.path.normpath(r["path"]), r["path"])
+                    for r in _mapped_new_image_roots(
+                        db, db._active_workspace_id, include_missing=True,
+                    )
+                ),
+                key=lambda item: len(item[0]),
+                reverse=True,
+            )
+
+            def _registered_root_for(path):
+                candidate = os.path.normpath(path)
+                for normalized_root, stored_root in registered_roots:
+                    try:
+                        if (
+                            os.path.commonpath([candidate, normalized_root])
+                            == normalized_root
+                        ):
+                            # Containment uses normalized paths, but scanner's
+                            # parent walk is lexical. Preserve the spelling
+                            # that produced the frozen snapshot paths so a
+                            # registered root containing ".." still meets its
+                            # restricted descendants exactly.
+                            return stored_root
+                    except ValueError:
+                        continue
+                return None
+
+            snapshot_paths_by_root = {}
+            for path in snapshot_paths:
+                root = _registered_root_for(path)
+                if root is None:
+                    return json_error(
+                        "new-images snapshot contains a path outside the "
+                        f"active workspace's registered folders: {path}"
+                    )
+                snapshot_paths_by_root.setdefault(root, []).append(path)
+            sources = sorted(snapshot_paths_by_root)
+        else:
+            snapshot_paths_by_root = None
         # Preflight an explicit after_import before creating a workspace so
         # a bad value doesn't leave an orphan Card Import behind. The
         # omitted branch has to wait until AFTER the workspace switch — see
@@ -21786,9 +22454,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_cache_dir)
+        snapshot_import_lock = None
+        if source_snapshot_id is not None:
+            snapshot_lock_key = (active_ws, source_snapshot_id)
+            with app._new_images_snapshot_import_locks_guard:
+                snapshot_import_lock = (
+                    app._new_images_snapshot_import_locks.setdefault(
+                        snapshot_lock_key, threading.Lock(),
+                    )
+                )
 
         def _chain_after_import(job, result):
             photo_ids = result.get("photo_ids") or []
+
+            # A frozen snapshot can still yield existing IDs through the
+            # scanner callback when it is replayed. Those IDs make tagging
+            # idempotent, but they must not create another import collection
+            # or enqueue an expensive Process run: this Import admitted
+            # nothing new.
+            if (
+                result.get("ok")
+                and result.get("source_snapshot_id") is not None
+                and result.get("imported") == 0
+            ):
+                result["after_import_skipped"] = (
+                    "import-only" if after_import is None else "no new photos"
+                )
+                return
+
             thread_db, col_id = _record_import_collection(result, active_ws)
 
             if after_import is None:
@@ -21828,7 +22521,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     f"failed to enqueue processing: {e}"
                 )
 
-        def work(job):
+        def _run_import_in_place(job):
             import config as cfg
             from scanner import ScanCancelled
             from scanner import scan as do_scan
@@ -21848,13 +22541,72 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             photo_ids = []
             seen_photo_ids = set()
+            indexed_paths = set()
             root_errors = []
             scan_acc = {"prior": 0, "last_current": 0, "last_total": 0}
+
+            snapshot_requested = len(snapshot_paths or [])
+            snapshot_missing = []
+            snapshot_unreadable = []
+            snapshot_eligible = set(snapshot_paths or [])
+            snapshot_known_before = {}
+
+            def active_photo_ids_by_path():
+                """Map primary and companion paths to active photo records."""
+                rows = thread_db.conn.execute(
+                    """SELECT p.id, p.filename, p.companion_path,
+                              f.path AS folder_path
+                       FROM photos p
+                       JOIN folders f ON f.id = p.folder_id
+                       JOIN workspace_folders wf ON wf.folder_id = f.id
+                       WHERE wf.workspace_id = ?""",
+                    (active_ws,),
+                ).fetchall()
+                result = {}
+                for row in rows:
+                    result[
+                        os.path.join(row["folder_path"], row["filename"])
+                    ] = row["id"]
+                    if row["companion_path"]:
+                        companion_path = row["companion_path"]
+                        if not os.path.isabs(companion_path):
+                            companion_path = os.path.join(
+                                row["folder_path"], companion_path,
+                            )
+                        result[companion_path] = row["id"]
+                return result
+
+            if snapshot_paths is not None:
+                # Freeze execution outcomes before scanning. Missing and
+                # unreadable files stay visible in the result instead of
+                # silently shrinking the banner's promised count.
+                snapshot_eligible.clear()
+                for path in snapshot_paths:
+                    if not os.path.isfile(path):
+                        snapshot_missing.append(path)
+                        continue
+                    try:
+                        with open(path, "rb") as fh:
+                            fh.read(1)
+                    except OSError:
+                        snapshot_unreadable.append(path)
+                        continue
+                    snapshot_eligible.add(path)
+
+                # Record active-workspace membership before the scan so a
+                # concurrent/repeated import is reported as idempotent rather
+                # than as a newly admitted photo.
+                snapshot_known_before = {
+                    path: photo_id
+                    for path, photo_id in active_photo_ids_by_path().items()
+                    if path in snapshot_eligible
+                }
 
             def photo_cb(photo_id, path):
                 if photo_id not in seen_photo_ids:
                     seen_photo_ids.add(photo_id)
                     photo_ids.append(photo_id)
+                indexed_paths.add(path)
                 runner.update_step(
                     job["id"], "scan", current_file=os.path.basename(path),
                 )
@@ -21903,6 +22655,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if cancel_check():
                     cancelled = True
                     break
+                restricted_files = None
+                restricted_dirs = None
+                if snapshot_paths_by_root is not None:
+                    restricted_files = {
+                        path for path in snapshot_paths_by_root[source]
+                        if path in snapshot_eligible
+                    }
+                    if not restricted_files:
+                        # The snapshot may consist entirely of files that
+                        # vanished after discovery. No scanner call will run,
+                        # but the cached banner count is still stale.
+                        try:
+                            _invalidate_new_images_after_scan(thread_db, source)
+                        except Exception:
+                            log.exception(
+                                "Failed to invalidate new-image cache for %s",
+                                source,
+                            )
+                        continue
+                    restricted_dirs = sorted(
+                        {os.path.dirname(path) for path in restricted_files}
+                    )
                 phase = (
                     f"Importing source {idx} of {len(sources)}: {source}"
                     if len(sources) > 1 else "Importing in place"
@@ -21923,9 +22697,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         photo_callback=photo_cb,
                         status_callback=status_cb,
                         recursive=recursive,
+                        restrict_dirs=restricted_dirs,
+                        restrict_files=restricted_files,
                         vireo_dir=vireo_dir,
                         thumb_cache_dir=thumb_cache_dir,
                         cancel_check=cancel_check,
+                        register_restrict_dirs_as_roots=(
+                            snapshot_paths_by_root is None
+                        ),
                     )
                 except Exception as exc:
                     if isinstance(exc, ScanCancelled) and cancel_check():
@@ -21966,7 +22745,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         )
                     advance_scan_acc()
 
+            if snapshot_paths is not None:
+                # Pairing can fold a newly scanned JPEG into an existing RAW
+                # row and delete the temporary JPEG row after photo_cb saw it.
+                # Resolve the frozen paths again so collections, tags, and a
+                # chained Process job receive durable catalog IDs rather than
+                # a deleted transient ID.
+                catalog_ids_after = active_photo_ids_by_path()
+                photo_ids = list(dict.fromkeys(
+                    catalog_ids_after[path]
+                    for path in snapshot_paths
+                    if path in indexed_paths and path in catalog_ids_after
+                ))
             indexed = len(photo_ids)
+            snapshot_unindexed = sorted(
+                snapshot_eligible - indexed_paths
+            ) if snapshot_paths is not None else []
             if cancelled or cancel_check():
                 runner.update_step(
                     job["id"], "scan", status="cancelled",
@@ -21982,6 +22776,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "errors": root_errors,
                     "photo_ids": photo_ids,
                 }
+                if snapshot_paths is not None:
+                    result.update({
+                        "source_snapshot_id": source_snapshot_id,
+                        "requested": snapshot_requested,
+                        "imported": len(
+                            indexed_paths - set(snapshot_known_before)
+                        ),
+                        "already_cataloged": len(
+                            indexed_paths & set(snapshot_known_before)
+                        ),
+                        "missing": len(snapshot_missing),
+                        "missing_paths": snapshot_missing[:100],
+                        "unreadable": len(snapshot_unreadable),
+                        "unreadable_paths": snapshot_unreadable[:100],
+                        "unindexed": len(snapshot_unindexed),
+                        "unindexed_paths": snapshot_unindexed[:100],
+                    })
                 _apply_import_tags(
                     active_ws, photo_ids, import_tags, location_from_gps,
                     result, job=job, runner=runner,
@@ -21992,22 +22803,64 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             summary = f"{indexed} photos"
             if metadata_warning:
                 summary += f" — {metadata_warning}"
+            snapshot_failures = (
+                len(snapshot_missing)
+                + len(snapshot_unreadable)
+                + len(snapshot_unindexed)
+            )
+            all_errors = list(root_errors)
+            if snapshot_missing:
+                all_errors.append(
+                    f"{len(snapshot_missing)} snapshot file"
+                    f"{'s were' if len(snapshot_missing) != 1 else ' was'} "
+                    "missing at import time"
+                )
+            if snapshot_unreadable:
+                all_errors.append(
+                    f"{len(snapshot_unreadable)} snapshot file"
+                    f"{'s were' if len(snapshot_unreadable) != 1 else ' was'} "
+                    "unreadable at import time"
+                )
+            if snapshot_unindexed:
+                all_errors.append(
+                    f"{len(snapshot_unindexed)} available snapshot file"
+                    f"{'s were' if len(snapshot_unindexed) != 1 else ' was'} "
+                    "not indexed"
+                )
             runner.update_step(
                 job["id"], "scan",
-                status="failed" if root_errors else "completed",
+                status="failed" if all_errors else "completed",
                 summary=summary,
-                error=root_errors[0] if root_errors else None,
-                error_count=len(root_errors) if root_errors else None,
+                error=all_errors[0] if all_errors else None,
+                error_count=len(all_errors) if all_errors else None,
             )
             result = {
                 "mode": "in_place",
-                "ok": not root_errors,
+                "ok": not all_errors,
                 "discovered": indexed,
                 "indexed": indexed,
-                "failed": len(root_errors),
-                "errors": root_errors,
+                "failed": (
+                    snapshot_failures
+                    if snapshot_paths is not None else len(root_errors)
+                ),
+                "errors": all_errors,
                 "photo_ids": photo_ids,
             }
+            if snapshot_paths is not None:
+                result.update({
+                    "source_snapshot_id": source_snapshot_id,
+                    "requested": snapshot_requested,
+                    "imported": len(indexed_paths - set(snapshot_known_before)),
+                    "already_cataloged": len(
+                        indexed_paths & set(snapshot_known_before)
+                    ),
+                    "missing": len(snapshot_missing),
+                    "missing_paths": snapshot_missing[:100],
+                    "unreadable": len(snapshot_unreadable),
+                    "unreadable_paths": snapshot_unreadable[:100],
+                    "unindexed": len(snapshot_unindexed),
+                    "unindexed_paths": snapshot_unindexed[:100],
+                })
             _apply_import_tags(
                 active_ws, photo_ids, import_tags, location_from_gps, result,
                 job=job, runner=runner,
@@ -22015,8 +22868,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _chain_after_import(job, result)
             return result
 
+        def work(job):
+            if snapshot_import_lock is None:
+                return _run_import_in_place(job)
+            with snapshot_import_lock:
+                return _run_import_in_place(job)
+
         job_config = {
             "sources": sources,
+            "source_snapshot_id": source_snapshot_id,
             "destination": None,
             "recursive": recursive,
             "after_import": after_import,
@@ -24891,11 +25751,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/jobs/pipeline", methods=["POST"])
     def api_job_pipeline():
-        """Streaming pipeline: scan -> thumbnails -> classify -> extract-masks -> regroup.
+        """Process cataloged photos through thumbnails and analysis stages.
 
         Overlaps I/O stages and interleaves detection with classification.
-        Imports are handled by /api/jobs/import-photos. This route processes
-        existing workspace photos by folder/snapshot/collection scope.
+        Import is the sole catalog-admission boundary; this route accepts only
+        existing workspace photos through folder or collection scope.
         """
         from pipeline_job import PipelineParams, run_pipeline_job
 
@@ -24956,6 +25816,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         sources = body.get("sources")
         collection_id = body.get("collection_id")
         source_snapshot_id = body.get("source_snapshot_id")
+
+        filesystem_scopes = []
+        if source:
+            filesystem_scopes.append("source")
+        if sources:
+            filesystem_scopes.append("sources")
+        if source_snapshot_id is not None:
+            filesystem_scopes.append("source_snapshot_id")
+        if filesystem_scopes:
+            return json_error(
+                "Process only accepts photos already in the workspace; "
+                "use Import for " + ", ".join(filesystem_scopes)
+            )
 
         # Folder scope: resolve folder_ids to their active-workspace subtrees
         # and materialize an ad-hoc collection, then proceed as a collection
@@ -25186,8 +26059,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             and not source_snapshot_id and pending_folder_collection is None
         ):
             return json_error(
-                "source, sources, collection_id, source_snapshot_id, "
-                "or folder_ids required"
+                "collection_id or folder_ids required"
             )
 
         # Validate type before touching SQLite. Non-integer bodies (objects,
