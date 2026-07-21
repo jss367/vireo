@@ -446,6 +446,23 @@ def _sync_preview_presentation(
             if metadata.get("edit_recipe")
             else _sync_preview_absent_xmp_value(metadata, "No Vireo edits")
         )
+        if not value and not metadata.get("edit_recipe"):
+            if metadata.get("status") == "unreadable":
+                detail = (
+                    "The Vireo edit marker cannot be cleared because the "
+                    "XMP sidecar is unreadable"
+                )
+            elif metadata.get("status") == "missing":
+                detail = "No XMP sidecar contains Vireo edits to clear"
+            else:
+                detail = "No Vireo edit marker exists in XMP to clear"
+            return {
+                "field": "XMP photo edits",
+                "action": "unchanged",
+                "before": before,
+                "after": before,
+                "after_detail": detail,
+            }
         return {
             "field": "Photo edits",
             "action": "updated" if value else "cleared",

@@ -622,6 +622,55 @@ def test_sync_preview_does_not_promise_removal_from_unreadable_xmp(
     }
 
 
+def test_sync_preview_does_not_promise_edit_clear_from_unreadable_xmp(
+    client_with_photo,
+):
+    """Clearing a Vireo edit marker cannot modify a corrupt sidecar."""
+    app, db, photo_id = client_with_photo
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    with open(os.path.join(folder, "test.xmp"), "w") as sidecar:
+        sidecar.write("not xml")
+    db.queue_change(photo_id, "edit_recipe", "")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP photo edits",
+        "action": "unchanged",
+        "before": "Unreadable XMP sidecar",
+        "after": "Unreadable XMP sidecar",
+        "after_detail": (
+            "The Vireo edit marker cannot be cleared because the XMP sidecar "
+            "is unreadable"
+        ),
+    }
+
+
+def test_sync_preview_treats_absent_edit_marker_clear_as_unchanged(
+    client_with_photo,
+):
+    """A clear against a missing sidecar accurately reports a no-op."""
+    app, db, photo_id = client_with_photo
+    db.queue_change(photo_id, "edit_recipe", "")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP photo edits",
+        "action": "unchanged",
+        "before": "No XMP sidecar",
+        "after": "No XMP sidecar",
+        "after_detail": "No XMP sidecar contains Vireo edits to clear",
+    }
+
+
 def test_edit_history_recorded_on_rating(app_and_db):
     """Setting a rating records an entry in edit_history."""
     app, db = app_and_db
