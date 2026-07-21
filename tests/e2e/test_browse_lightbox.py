@@ -994,6 +994,23 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
             const externalPanel = document.createElement('div');
             externalPanel.id = 'syncLightboxPanel';
             document.getElementById('lightboxOverlay').appendChild(externalPanel);
+            window.__lightboxTransformCallsWhilePending = 0;
+            window.__originalLightboxApplyTransform = window._lbApplyTransform;
+            window._lbApplyTransform = function() {
+                if (window._lbVisualTransitionPending) {
+                    window.__lightboxTransformCallsWhilePending += 1;
+                }
+                return window.__originalLightboxApplyTransform.apply(this, arguments);
+            };
+        }"""
+    )
+
+    # Queue the same delayed layout refresh that can be left behind when the
+    # bottom bar finishes laying out just before navigation starts.
+    page.evaluate(
+        """() => {
+            const wrap = document.getElementById('lightboxWrap');
+            wrap.style.height = `${wrap.clientHeight - 42}px`;
         }"""
     )
 
@@ -1052,6 +1069,11 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     page.evaluate("window.lightboxDelete()")
     expect(page.locator("#deleteModal")).not_to_have_class("modal-overlay open")
 
+    # The queued refresh must not re-clamp or move the outgoing bitmap while
+    # the next photo is still waiting to decode.
+    page.wait_for_timeout(150)
+    assert page.evaluate("window.__lightboxTransformCallsWhilePending") == 0
+
     while_loading = page.evaluate(
         """() => {
             const transform = document.getElementById('lightboxTransform');
@@ -1067,6 +1089,12 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
         "width": before["width"],
         "height": before["height"],
     }
+    page.evaluate(
+        """() => {
+            window._lbApplyTransform = window.__originalLightboxApplyTransform;
+            delete window.__originalLightboxApplyTransform;
+        }"""
+    )
 
     held_original.pop("route").fulfill(
         body=next_svg, content_type="image/svg+xml"
@@ -1097,6 +1125,141 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     carried = page.evaluate("window._lbViewportStateFromCurrent()")
     assert abs(carried["centerX"] - before["viewport"]["centerX"]) < 0.03
     assert abs(carried["centerY"] - before["viewport"]["centerY"]) < 0.03
+
+
+def test_browse_lightbox_resize_deferred_during_transition_reapplies_after_load(
+    live_server, page
+):
+    """A resize queued while a navigation transition is pending must re-run
+    once the incoming photo decodes; otherwise a DPR/viewport change made
+    just before navigation would leave the incoming image on a stale source
+    tier until the user triggers another resize or zoom.
+    """
+    first_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
+    )
+    next_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="3000" height="3000" '
+        'viewBox="0 0 3000 3000"><rect width="3000" height="3000" fill="#426"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=first_svg, content_type="image/svg+xml"),
+    )
+
+    url = live_server["url"]
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{url}/browse")
+    page.locator(".grid-card").nth(1).wait_for(state="visible")
+    next_id = page.evaluate("window.photos[1].id")
+    held_original = {}
+
+    def hold_next_original(route):
+        if f"/photos/{next_id}/original" in route.request.url:
+            held_original["route"] = route
+            return
+        route.fulfill(body=first_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", hold_next_original)
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 4000;
+        }"""
+    )
+
+    # Prime the outgoing viewport so navigation triggers a real transition.
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbCurrentSrcKey = 'original';
+            window._lbApplyViewportState({
+                zoom: window._lbNativeZoom,
+                centerX: 0.24,
+                centerY: 0.70,
+                oneToOne: true,
+            });
+            window._lbSaveViewportState(window._lightboxCurrentId);
+        }"""
+    )
+
+    # Instrument the deferred-refresh flush so we can verify it fires once the
+    # transition ends, and instrument _lbSetZoom so we can assert the frozen
+    # outgoing bitmap is never re-selected during the transition.
+    page.evaluate(
+        """() => {
+            window.__flushCalls = 0;
+            window.__originalFlush = window._lbFlushDeferredLightboxLayoutRefresh;
+            window._lbFlushDeferredLightboxLayoutRefresh = function() {
+                window.__flushCalls += 1;
+                return window.__originalFlush.apply(this, arguments);
+            };
+            window.__setZoomCallsWhilePending = 0;
+            window.__originalSetZoom = window._lbSetZoom;
+            window._lbSetZoom = function() {
+                if (window._lbVisualTransitionPending) {
+                    window.__setZoomCallsWhilePending += 1;
+                }
+                return window.__originalSetZoom.apply(this, arguments);
+            };
+        }"""
+    )
+
+    # Kick off navigation and, while the transition is pending, queue a
+    # resize-style refresh that requests a source-tier update. The 100ms
+    # debounce timer will fire before the incoming image decodes.
+    page.keyboard.press("ArrowRight")
+    page.wait_for_function("() => window._lbVisualTransitionPending === true")
+    page.evaluate(
+        """() => {
+            // Dispatch a window resize event; the lightbox resize handler
+            // calls scheduleLightboxLayoutRefresh(true).
+            window.dispatchEvent(new Event('resize'));
+        }"""
+    )
+
+    # Let the debounce timer fire while the transition is still pending. The
+    # early return preserves the deferred source-tier intent instead of
+    # calling _lbSetZoom on the frozen outgoing bitmap.
+    page.wait_for_timeout(200)
+    assert page.evaluate("window.__setZoomCallsWhilePending") == 0
+    assert page.evaluate("window.__flushCalls") == 0
+
+    # Complete the incoming image load.
+    held_original.pop("route").fulfill(
+        body=next_svg, content_type="image/svg+xml"
+    )
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return window._lbVisualTransitionPending === false
+                && img && img.complete && img.naturalWidth === 3000;
+        }"""
+    )
+
+    # handleInitialImageLoad drains the deferred refresh via the flush, which
+    # in turn reschedules the resize handler so the incoming photo picks up
+    # the queued source-tier update instead of dropping it on the floor.
+    page.wait_for_function(
+        "() => window.__flushCalls >= 1",
+        timeout=1000,
+    )
+    page.evaluate(
+        """() => {
+            window._lbSetZoom = window.__originalSetZoom;
+            delete window.__originalSetZoom;
+            window._lbFlushDeferredLightboxLayoutRefresh = window.__originalFlush;
+            delete window.__originalFlush;
+        }"""
+    )
 
 
 def test_browse_lightbox_mid_transition_save_keeps_navigation_handoff(
