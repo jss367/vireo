@@ -1331,7 +1331,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
     }
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, skip_working_copies=False, repair_missing_metadata=False, register_restrict_dirs_as_roots=True, allow_photo_inserts=True):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, skip_working_copies=False, repair_missing_metadata=False, register_restrict_dirs_as_roots=True, allow_photo_inserts=True, photo_created_callback=None):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -1344,6 +1344,13 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             fallback timestamp was available during the original scan
         extract_full_metadata: if True, store full ExifTool JSON in exif_data column
         photo_callback: optional callable(photo_id, path_str) called after each photo is committed
+        photo_created_callback: optional callable(photo_id, path_str) fired
+            only when THIS scan's INSERT actually inserted a new row for
+            the photo. Distinct from ``photo_callback`` (which fires for
+            every committed photo, including pre-existing rows this scan
+            merely re-touched). Used by concurrent snapshot imports to
+            attribute a row to the worker that admitted it — see
+            ``db.add_photo``'s ``return_created`` note.
         skip_paths: optional set of absolute path strings to exclude from scanning
         status_callback: optional callable(message) for phase status updates.
             Callers may also accept keyword-only ``phase_current``,
@@ -2107,7 +2114,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                     progress_callback(processed_count, total)
                 continue
 
-            photo_id = db.add_photo(
+            photo_id, row_created = db.add_photo(
                 folder_id=folder_id,
                 filename=image_path.name,
                 extension=image_path.suffix.lower(),
@@ -2117,6 +2124,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
                 timestamp=timestamp,
                 width=width,
                 height=height,
+                return_created=True,
             )
 
             # Update metadata columns (also fixes existing photos that were
@@ -2273,6 +2281,13 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
 
             if photo_callback:
                 photo_callback(photo_id, str(image_path))
+            if row_created and photo_created_callback:
+                # Per-connection attribution: only fires when THIS scan's
+                # INSERT actually admitted the row. Callers rely on this
+                # to distinguish "we admitted the file" from "a concurrent
+                # scan admitted it first and we just re-touched the row",
+                # which a path-membership check cannot see.
+                photo_created_callback(photo_id, str(image_path))
 
             processed_count += 1
             if progress_callback:

@@ -5852,6 +5852,92 @@ def test_import_in_place_snapshot_normalizes_raw_companion_and_replay(
     assert "process_job_id" not in replay_result
 
 
+def test_import_in_place_snapshot_credits_creator_under_concurrent_replay(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Regression for the PR #1340 Codex race: two ``import-in-place``
+    jobs replaying the same new-images snapshot run on separate threads.
+    Both capture their pre-scan workspace membership before either scan
+    commits, so the loser's ``INSERT OR IGNORE`` hits the winner's row.
+    Path-membership dedup can't see that (the path isn't in the loser's
+    pre-scan snapshot), so without per-connection attribution the loser
+    would report ``imported=1`` and ``_chain_after_import`` would create
+    a duplicate Import collection and enqueue Process for a photo it did
+    not admit. The fix relies on ``add_photo``'s cursor rowcount — this
+    test wedges a parallel commit in between via a fresh SQLite
+    connection so the scan's ``INSERT OR IGNORE`` sees the winner's row
+    and reports 0.
+    """
+    import sqlite3
+
+    from db import Database
+
+    app, db = app_and_db
+    root = tmp_path / "registered"
+    root.mkdir()
+    captured = root / "captured.jpg"
+    Image.new("RGB", (16, 16), "red").save(captured)
+    db.add_folder(str(root), name="registered")
+    snap_id = db.create_new_images_snapshot([str(captured)])
+    quick_look_id = _process_id(db, "Quick look")
+
+    db_path = db._db_path
+    original_add_photo = Database.add_photo
+    injected = threading.Event()
+
+    def racing_add_photo(self, *args, **kwargs):
+        # Simulate a parallel worker whose commit lands between our
+        # pre-scan capture and our INSERT: on the scan's first
+        # add_photo call, insert the row through an outside connection
+        # so our INSERT OR IGNORE hits an existing row.
+        if not injected.is_set():
+            injected.set()
+            other = sqlite3.connect(db_path)
+            try:
+                other.execute(
+                    "INSERT INTO photos (folder_id, filename, extension, "
+                    "file_size, file_mtime) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        kwargs["folder_id"], kwargs["filename"],
+                        kwargs["extension"], kwargs["file_size"],
+                        kwargs["file_mtime"],
+                    ),
+                )
+                other.commit()
+            finally:
+                other.close()
+        return original_add_photo(self, *args, **kwargs)
+
+    monkeypatch.setattr(Database, "add_photo", racing_add_photo)
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": quick_look_id,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    assert injected.is_set(), "parallel-commit hook never fired"
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["ok"] is True
+    assert result["requested"] == 1
+    assert result["imported"] == 0
+    assert result["already_cataloged"] == 1
+    assert result["after_import_skipped"] == "no new photos"
+    assert "collection_id" not in result
+    assert "process_job_id" not in result
+
+    # And exactly one photos row exists — the winning commit's — so a
+    # follow-up count doesn't reveal double insertion.
+    row_count = db.conn.execute(
+        "SELECT COUNT(*) FROM photos WHERE filename = ?",
+        (captured.name,),
+    ).fetchone()[0]
+    assert row_count == 1
+
+
 def test_import_in_place_snapshot_rejects_path_outside_registered_roots(
     app_and_db, tmp_path,
 ):

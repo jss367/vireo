@@ -5174,6 +5174,7 @@ class Database:
         height=None,
         xmp_mtime=None,
         file_hash=None,
+        return_created=False,
     ):
         """Insert a photo. Returns the photo id.
 
@@ -5182,6 +5183,14 @@ class Database:
         the duplicate auto-resolver runs and flags the loser(s) as rejected.
         The hook is wrapped in try/except so resolver bugs never break
         inserts.
+
+        When ``return_created`` is True, returns ``(photo_id, created)``
+        where ``created`` is True iff this call's INSERT actually inserted
+        a new row (i.e. no other writer got there first via a concurrent
+        scan). Callers that need to attribute a row to this specific
+        connection — for example, to distinguish "this worker admitted the
+        file" from "a parallel worker already admitted it" — must use this
+        signal rather than a path-membership check.
         """
         cur = execute_with_retry(
             self.conn,
@@ -5203,7 +5212,8 @@ class Database:
             ),
         )
         commit_with_retry(self.conn)
-        if cur.rowcount > 0:
+        created = cur.rowcount > 0
+        if created:
             photo_id = cur.lastrowid
         else:
             row = self.conn.execute(
@@ -5219,6 +5229,8 @@ class Database:
         if file_hash:
             self.check_and_resolve_duplicates_for_hash(file_hash)
 
+        if return_created:
+            return photo_id, created
         return photo_id
 
     def check_and_resolve_duplicates_for_hash(self, file_hash: str) -> dict | None:

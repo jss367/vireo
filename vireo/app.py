@@ -21900,6 +21900,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo_ids = []
             seen_photo_ids = set()
             indexed_paths = set()
+            # Paths whose row was actually inserted BY THIS worker's scan
+            # (as opposed to a concurrent worker committing first and this
+            # worker's INSERT OR IGNORE hitting the existing row). Populated
+            # by scanner's ``photo_created_callback`` so ``imported`` and
+            # ``_chain_after_import`` reflect what THIS job admitted, not
+            # what a parallel replay of the same snapshot happened to
+            # sneak in between our pre-scan membership snapshot and our
+            # first commit. See Codex feedback on PR #1340.
+            newly_created_paths = set()
             root_errors = []
             scan_acc = {"prior": 0, "last_current": 0, "last_total": 0}
 
@@ -21907,7 +21916,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             snapshot_missing = []
             snapshot_unreadable = []
             snapshot_eligible = set(snapshot_paths or [])
-            snapshot_known_before = {}
+            # Snapshot paths already represented in the workspace catalog
+            # before scanning — captured for both the primary filename
+            # and any RAW's ``companion_path``, so a replay whose
+            # ``_pair_raw_jpeg_companions`` step deletes and re-inserts a
+            # transient JPEG row for the SAME companion still counts as
+            # already-cataloged. Used to exclude these paths from
+            # ``imported`` even if this worker's ``add_photo`` created
+            # the transient row — companion-pair replay is idempotent
+            # from the user's perspective.
+            snapshot_known_before = set()
 
             def active_photo_ids_by_path():
                 """Map primary and companion paths to active photo records."""
@@ -21951,12 +21969,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         continue
                     snapshot_eligible.add(path)
 
-                # Record active-workspace membership before the scan so a
-                # concurrent/repeated import is reported as idempotent rather
-                # than as a newly admitted photo.
+                # Filter for the companion-replay case: a JPEG folded
+                # into a RAW's ``companion_path`` on a prior run is
+                # already represented in the catalog, but the transient
+                # JPEG row was deleted, so a replay's ``add_photo``
+                # re-inserts and reports created=True. Without this
+                # filter, replaying a paired-companion snapshot would
+                # falsely report ``imported=1`` and re-fire
+                # ``_chain_after_import``.
                 snapshot_known_before = {
-                    path: photo_id
-                    for path, photo_id in active_photo_ids_by_path().items()
+                    path
+                    for path in active_photo_ids_by_path()
                     if path in snapshot_eligible
                 }
 
@@ -21968,6 +21991,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 runner.update_step(
                     job["id"], "scan", current_file=os.path.basename(path),
                 )
+
+            def photo_created_cb(_photo_id, path):
+                newly_created_paths.add(path)
 
             def progress_cb(current, total):
                 scan_acc["last_current"] = current
@@ -22053,6 +22079,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                             "extract_full_metadata", True,
                         ),
                         photo_callback=photo_cb,
+                        photo_created_callback=photo_created_cb,
                         status_callback=status_cb,
                         recursive=recursive,
                         restrict_dirs=restricted_dirs,
@@ -22135,14 +22162,27 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "photo_ids": photo_ids,
                 }
                 if snapshot_paths is not None:
+                    # ``imported`` counts only rows THIS worker's scan
+                    # actually inserted AND that weren't already known
+                    # to the workspace (via primary or companion path).
+                    # The per-connection ``created`` signal handles the
+                    # concurrent-replay race — a loser worker's INSERT
+                    # OR IGNORE returns created=False so it can't
+                    # double-credit the winner's admission. The
+                    # ``snapshot_known_before`` subtraction handles the
+                    # companion-replay case where an idempotent replay
+                    # re-inserts a transient JPEG row that was already
+                    # visible via a RAW's ``companion_path``.
+                    imported_paths = (
+                        newly_created_paths & snapshot_eligible
+                    ) - snapshot_known_before
                     result.update({
                         "source_snapshot_id": source_snapshot_id,
                         "requested": snapshot_requested,
-                        "imported": len(
-                            indexed_paths - set(snapshot_known_before)
-                        ),
+                        "imported": len(imported_paths),
                         "already_cataloged": len(
-                            indexed_paths & set(snapshot_known_before)
+                            (indexed_paths & snapshot_eligible)
+                            - imported_paths
                         ),
                         "missing": len(snapshot_missing),
                         "missing_paths": snapshot_missing[:100],
@@ -22205,12 +22245,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "photo_ids": photo_ids,
             }
             if snapshot_paths is not None:
+                # See the cancelled-branch comment for the full
+                # rationale: per-connection ``created`` handles the
+                # concurrent-replay race, ``snapshot_known_before``
+                # handles the companion-replay idempotence case.
+                imported_paths = (
+                    newly_created_paths & snapshot_eligible
+                ) - snapshot_known_before
                 result.update({
                     "source_snapshot_id": source_snapshot_id,
                     "requested": snapshot_requested,
-                    "imported": len(indexed_paths - set(snapshot_known_before)),
+                    "imported": len(imported_paths),
                     "already_cataloged": len(
-                        indexed_paths & set(snapshot_known_before)
+                        (indexed_paths & snapshot_eligible)
+                        - imported_paths
                     ),
                     "missing": len(snapshot_missing),
                     "missing_paths": snapshot_missing[:100],
