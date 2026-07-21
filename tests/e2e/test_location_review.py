@@ -154,6 +154,10 @@ def test_location_review_photo_marker_opens_the_photo_preview(live_server, page)
                 (33.2550, -116.4050, photo_ids[1]),
             ],
         )
+        live_server["db"].conn.execute(
+            "UPDATE photos SET companion_path = ? WHERE id = ?",
+            ("bird1.jpg", photo_ids[0]),
+        )
 
     page.route("https://unpkg.com/**", _stub_leaflet)
     page.goto(f"{live_server['url']}/browse")
@@ -174,6 +178,12 @@ def test_location_review_photo_marker_opens_the_photo_preview(live_server, page)
         "src", f"/photos/{photo_ids[0]}/full"
     )
     expect(page.locator("#lightboxCounter")).to_contain_text("1 / 2")
+
+    page.evaluate("lightboxDelete()")
+    expect(page.locator("#deleteCompanionRow")).to_be_visible()
+    expect(page.locator("#deleteCompanionLabel")).to_have_text(
+        "Also delete 1 companion file"
+    )
 
 
 def test_location_review_thumbnail_opens_the_photo_preview(live_server, page):

@@ -6665,6 +6665,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             photo_data = [{
                 "id": item["photo"]["id"],
                 "filename": item["photo"]["filename"],
+                "companion_path": item["photo"]["companion_path"],
                 "timestamp": item["photo"]["timestamp"],
                 "latitude": item["lat"],
                 "longitude": item["lng"],
