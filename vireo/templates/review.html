@@ -916,6 +916,17 @@ async function loadCollectionFilter() {
         opt.disabled = true;
         opt.textContent = c.name + ' (unavailable — edit rules to fix)';
         opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
+      } else if (c.has_visual) {
+        // Visual collections resolve their result set through the filter
+        // bar's visual clause (see Browse). The Review picker funnels the
+        // selected collection through /api/collections/<id>/photos, which
+        // only evaluates ``rules`` — picking one here would silently
+        // widen the review scope to every metadata match. Disable with a
+        // tooltip so the option is visible but not usable, and the server
+        // already 400s the endpoint as a defense-in-depth backstop.
+        opt.disabled = true;
+        opt.textContent = c.name + ' (visual — open in Browse)';
+        opt.title = 'Visual collections can only be used from Browse, where the filter bar resolves the visual-search clause.';
       }
       sel.appendChild(opt);
     });

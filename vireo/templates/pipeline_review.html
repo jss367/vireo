@@ -4298,6 +4298,13 @@ function populateReviewScopeCollections(collections) {
       opt.disabled = true;
       opt.textContent = c.name + ' (unavailable — edit rules to fix)';
       opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
+    } else if (c.has_visual) {
+      // Reflow scopes to the collection via the rules-only reflow endpoint;
+      // a visual collection would silently widen the scope to every
+      // metadata match. Disable to match the server-side 400.
+      opt.disabled = true;
+      opt.textContent = c.name + ' (visual — open in Browse)';
+      opt.title = 'Visual collections can only be used from Browse, where the filter bar resolves the visual-search clause.';
     } else {
       var count = c.photo_count != null ? ' (' + c.photo_count + ')' : '';
       opt.textContent = c.name + count;

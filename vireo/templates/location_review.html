@@ -507,6 +507,13 @@ body {
       if (collection.count_error) {
         option.disabled = true;
         option.textContent = collection.name + ' (unavailable — edit rules to fix)';
+      } else if (collection.has_visual) {
+        // Location review consumes the collection via
+        // get_collection_photo_ids, which is rules-only. Match the
+        // server-side 400 by disabling with an explanatory label.
+        option.disabled = true;
+        option.textContent = collection.name + ' (visual — open in Browse)';
+        option.title = 'Visual collections can only be used from Browse, where the filter bar resolves the visual-search clause.';
       }
       select.appendChild(option);
     });

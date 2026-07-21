@@ -469,3 +469,96 @@ def test_collection_add_photos_deduplicates(app_and_db):
     )
     assert resp.status_code == 200
     assert resp.get_json()["total"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Visual collections must not be silently expanded by rules-only consumers.
+# See Codex review r3620423210 on PR #1343 — a visual-only saved expression
+# saved into ``collections.visual_json`` was still selectable by legacy
+# consumers (``/api/collections/<id>/photos``, pipeline stages), whose
+# ``get_collection_photos`` evaluates ``rules`` only. The consumer would
+# silently scope its run to every metadata match instead of the
+# visually-matched subset. These tests pin the boundary contract: pickers
+# see ``has_visual``, and every rules-only endpoint 400s a visual collection.
+# ---------------------------------------------------------------------------
+
+
+def _make_visual_collection(db, name="Visual", rules=None, prompt="a bird"):
+    """Insert a collection whose visual_json is set, mirroring what the
+    Save-as-Collection flow persists for expressions with a visual clause."""
+    if rules is None:
+        rules = [{"field": "rating", "op": ">=", "value": 3}]
+    return db.add_collection(
+        name,
+        json.dumps(rules),
+        visual_json=json.dumps({"prompt": prompt, "strength": "balanced"}),
+    )
+
+
+def test_list_collections_flags_visual(app_and_db):
+    """``/api/collections`` exposes ``has_visual`` so pickers can hide or
+    disable visual collections wherever the downstream path is rules-only."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    _make_visual_collection(db, name="Visual birds")
+    client.post(
+        "/api/collections",
+        json={"name": "Plain", "rules": [{"field": "rating", "op": ">=", "value": 3}]},
+    )
+
+    by_name = {c["name"]: c for c in client.get("/api/collections").get_json()}
+    assert by_name["Visual birds"]["has_visual"] is True
+    assert by_name["Plain"]["has_visual"] is False
+
+
+def test_collection_photos_rejects_visual_collection(app_and_db):
+    """``/api/collections/<id>/photos`` refuses visual collections. The
+    endpoint only evaluates ``rules``; without this reject the Review and
+    Pipeline pickers (which funnel through it) would silently scope their
+    workload to every metadata match instead of the visually-matched subset.
+    """
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    cid = _make_visual_collection(db)
+
+    resp = client.get(f"/api/collections/{cid}/photos")
+    assert resp.status_code == 400
+    assert "visual-search clause" in resp.get_json()["error"]
+
+
+def test_collection_photo_ids_rejects_visual_collection(app_and_db):
+    """``/api/collections/<id>/photo-ids`` refuses visual collections for
+    the same reason as ``/photos`` — rules-only expansion would widen the
+    caller's scope past the visual clause."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    cid = _make_visual_collection(db)
+
+    resp = client.get(f"/api/collections/{cid}/photo-ids")
+    assert resp.status_code == 400
+    assert "visual-search clause" in resp.get_json()["error"]
+
+
+def test_collection_photos_still_serves_plain_collection(app_and_db):
+    """The visual-rejection guard must not touch plain (rules-only)
+    collections — the /photos endpoint remains the normal path for them."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    resp = client.post(
+        "/api/collections",
+        json={"name": "Plain", "rules": [{"field": "rating", "op": ">=", "value": 3}]},
+    )
+    cid = resp.get_json()["id"]
+
+    resp = client.get(f"/api/collections/{cid}/photos")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "photos" in data and "total" in data

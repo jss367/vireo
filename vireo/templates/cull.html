@@ -433,6 +433,15 @@ async function loadCollections() {
         opt.disabled = true;
         opt.textContent = c.name + ' (unavailable — edit rules to fix)';
         opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
+      } else if (c.has_visual) {
+        // Cull consumes the collection via get_collection_photos, which
+        // is rules-only — picking a visual collection here would silently
+        // scope the analysis to every metadata match. The regroup-live
+        // endpoint 400s visual collections; disable the option so the
+        // user sees why up front.
+        opt.disabled = true;
+        opt.textContent = c.name + ' (visual — open in Browse)';
+        opt.title = 'Visual collections can only be used from Browse, where the filter bar resolves the visual-search clause.';
       }
       sel.appendChild(opt);
     });

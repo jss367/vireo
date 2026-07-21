@@ -7023,11 +7023,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return None, json_error("photo_ids or collection_id required", 400)
 
         row = db.conn.execute(
-            "SELECT id FROM collections WHERE id = ? AND workspace_id = ?",
+            "SELECT id, visual_json FROM collections "
+            "WHERE id = ? AND workspace_id = ?",
             (collection_id, db._ws_id()),
         ).fetchone()
         if row is None:
             return None, json_error("collection not found", 404)
+        # get_collection_photo_ids evaluates ``rules`` only; a visual-only
+        # collection would silently expand to every metadata match. The
+        # picker filters these out, but reject here as the boundary.
+        if row["visual_json"] is not None:
+            return None, json_error(_VISUAL_COLLECTION_MSG, 400)
         return db.get_collection_photo_ids(collection_id), None
 
     def _location_review_groups(photos, cluster_radius_m=750.0):
@@ -10485,6 +10491,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     )
                 except (TypeError, ValueError):
                     d["can_add_photos"] = False
+            # ``has_visual`` lets clients that funnel a collection through
+            # the legacy rules-only path (``/api/collections/<id>/photos``,
+            # ``/photo-ids``, pipeline/misses ``collection_id``) hide or
+            # disable visual collections in their pickers. Those paths
+            # evaluate ``rules`` only — a visual-only collection would
+            # otherwise silently widen the scope to every metadata match.
+            # Browse opens the same collection into the filter bar, where
+            # the visual clause IS resolved (see collectionsById /
+            # loadExpression), so surfacing the flag here lets the two
+            # flows behave differently without every caller re-parsing
+            # ``visual_json``.
+            d["has_visual"] = c["visual_json"] is not None
             result.append(d)
         return jsonify(result)
 
@@ -10677,10 +10695,54 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("collection not found", 404)
         return jsonify({"ok": True, "id": new_id})
 
+    def _collection_row(db, collection_id):
+        """Return the (workspace-scoped) collection row or None."""
+        return db.conn.execute(
+            "SELECT id, name, rules, visual_json FROM collections "
+            "WHERE id = ? AND workspace_id = ?",
+            (collection_id, db._ws_id()),
+        ).fetchone()
+
+    _VISUAL_COLLECTION_MSG = (
+        "This collection has a visual-search clause. The rules-only "
+        "endpoint would silently widen the scope to every metadata "
+        "match, so it is refused here. Open the collection from Browse "
+        "to see the visual results."
+    )
+
+    def _reject_visual_collection(db, collection_id):
+        """Return a 400 response if the collection is visual, else None.
+
+        The consumers that call ``db.get_collection_photos`` /
+        ``collection_photo_ids`` (pipeline stages, sharpness/cull/classify/
+        regroup/masks jobs, predictions-compare, misses filter, import
+        preview) evaluate ``rules`` only. A visual-only collection would
+        otherwise silently scope those runs to every metadata-matching
+        photo instead of the visually-matched subset — the fix Codex
+        flagged in review r3620423210. Pickers hide these collections too,
+        but this is the source-of-truth boundary check.
+        """
+        if collection_id is None:
+            return None
+        if not isinstance(collection_id, int) or isinstance(collection_id, bool):
+            return None
+        row = _collection_row(db, collection_id)
+        if row is not None and row["visual_json"] is not None:
+            return json_error(_VISUAL_COLLECTION_MSG, 400)
+        return None
+
     @app.route("/api/collections/<int:collection_id>/photos")
     def api_collection_photos(collection_id):
         import config as cfg
         db = _get_db()
+        # This endpoint evaluates ``rules`` only (see
+        # ``get_collection_photos`` → ``_build_collection_query``); reject
+        # visual collections up front so the pipeline/review/etc. consumers
+        # that hit it don't silently scope to every metadata-matching
+        # photo instead of the visually-matched subset.
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         page = request.args.get("page", 1, type=int)
         default_per_page = cfg.load().get("photos_per_page", 50)
         per_page = max(1, min(request.args.get("per_page", default_per_page, type=int), _MAX_PER_PAGE))
@@ -10715,6 +10777,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_collection_photo_ids(collection_id):
         """Return every photo ID matching a collection."""
         db = _get_db()
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         try:
             photo_ids = db.get_collection_photo_ids(collection_id)
         except ValueError as e:
@@ -13356,6 +13421,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         db = _get_db()
         collection_id = request.args.get("collection_id", None, type=int)
         status = request.args.get("status", None)
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         try:
             rules = _request_rules_arg()
             visual = _request_visual_arg()
@@ -13476,6 +13544,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         collection_id = request.args.get("collection_id", None, type=int)
         if not collection_id:
             return json_error("collection_id required")
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
 
         photos = db.get_collection_photos(collection_id, per_page=999999)
         photo_ids = [p["id"] for p in photos]
@@ -14308,9 +14379,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 flag=flag,
             ))
         if collection_id is not None:
-            valid_ids = {c["id"] for c in db.get_collections()}
-            if collection_id not in valid_ids:
+            # ``collection_photo_ids`` (like ``get_collection_photos``)
+            # evaluates ``rules`` only. Refuse a visual-only collection
+            # here so the Misses page does not silently widen its scope
+            # to every metadata match — the picker filter is the primary
+            # gate; this is defense-in-depth for API callers.
+            valid = {c["id"]: c for c in db.get_collections()}
+            if collection_id not in valid:
                 raise ValueError("collection not found")
+            if valid[collection_id]["visual_json"] is not None:
+                raise ValueError(
+                    "visual collections have no rules-only expansion; "
+                    "open the collection from Browse instead"
+                )
             collection_ids = db.collection_photo_ids(collection_id)
             photo_ids = (
                 collection_ids
@@ -17107,6 +17188,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             return json_error("collection_id required", 400)
 
         db = _get_db()
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         try:
             photos = db.get_collection_photos(collection_id, page=1, per_page=100000)
         except ValueError as e:
@@ -19986,8 +20070,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_job_previews():
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
+        db = _get_db()
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        active_ws = db._active_workspace_id
 
         def work(job):
             import contextlib
@@ -23670,9 +23758,13 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     def api_job_sharpness():
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
+        db = _get_db()
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
 
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        active_ws = db._active_workspace_id
 
         vireo_dir = os.path.dirname(app.config["THUMB_CACHE_DIR"])
 
@@ -23769,6 +23861,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         if not collection_id:
             return json_error("collection_id required")
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
 
         params = ClassifyParams(
             collection_id=collection_id,
@@ -24815,13 +24910,17 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """Run culling analysis as a background job."""
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
+        db = _get_db()
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         separate_file_types = body.get("separate_file_types", True)
         time_window = body.get("time_window", 60)
         phash_threshold = body.get("phash_threshold", 19)
         cross_bucket_merge = body.get("cross_bucket_merge", False)
 
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        active_ws = db._active_workspace_id
 
         def work(job):
             from culling import analyze_for_culling
@@ -25032,6 +25131,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
 
         db = _get_db()
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
         sam2_variant = pipeline_cfg.get("sam2_variant")
@@ -25360,14 +25462,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         """
         body = request.get_json(silent=True) or {}
         collection_id = body.get("collection_id")
+        db = _get_db()
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
 
         import config as cfg
 
-        effective_cfg = _get_db().get_effective_config(cfg.load())
+        effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = effective_cfg.get("pipeline", {})
 
         runner = app._job_runner
-        active_ws = _get_db()._active_workspace_id
+        active_ws = db._active_workspace_id
 
         def work(job):
             from pipeline import (
@@ -25901,6 +26007,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "Process only accepts photos already in the workspace; "
                 "use Import for " + ", ".join(filesystem_scopes)
             )
+
+        # Pipeline stages iterate ``thread_db.get_collection_photos(...)``
+        # (see pipeline_job / classify_job / sharpness / culling), which
+        # evaluates ``rules`` only. Reject visual collections here so a
+        # run isn't silently scoped to every metadata-matching photo
+        # instead of the visually-matched subset.
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
 
         # Folder scope: resolve folder_ids to their active-workspace subtrees
         # and materialize an ad-hoc collection, then proceed as a collection
@@ -27390,6 +27505,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
 
         db = _get_db()
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = {**effective_cfg.get("pipeline", {}), **overrides}
 
@@ -27468,6 +27586,9 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         import config as cfg
 
         db = _get_db()
+        err = _reject_visual_collection(db, collection_id)
+        if err is not None:
+            return err
         effective_cfg = db.get_effective_config(cfg.load())
         pipeline_cfg = {**effective_cfg.get("pipeline", {}), **overrides}
 

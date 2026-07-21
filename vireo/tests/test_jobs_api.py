@@ -3284,6 +3284,117 @@ def test_pipeline_miss_enabled_accepts_bools(app_and_db, monkeypatch):
             assert cfg["miss_enabled"] is value
 
 
+def _make_visual_collection(app):
+    """Insert a collection with a saved visual clause.
+
+    Pipeline stages iterate photos through ``get_collection_photos`` which
+    evaluates ``rules`` only — feeding a visual collection here would
+    silently scope the run to every metadata match instead of the
+    visually-matched subset (Codex review r3620423210 on PR #1343).
+    """
+    import json as json_mod
+
+    from db import Database
+
+    db = Database(app.config["DB_PATH"])
+    db.set_active_workspace(db._active_workspace_id)
+    return db.add_collection(
+        "Visual test",
+        json_mod.dumps([{"field": "rating", "op": ">=", "value": 3}]),
+        visual_json=json_mod.dumps({"prompt": "a bird", "strength": "balanced"}),
+    )
+
+
+def test_pipeline_rejects_visual_collection(app_and_db, monkeypatch):
+    """``/api/jobs/pipeline`` refuses a visual collection_id.
+
+    pipeline_job stages iterate ``thread_db.get_collection_photos(...)``,
+    which does not resolve ``visual_json``. Without a boundary check the
+    stages would silently process every metadata match instead of the
+    visually-matched subset.
+    """
+    app, _ = app_and_db
+    _fake_active_model(monkeypatch)
+    col_id = _make_visual_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/pipeline", json={"collection_id": col_id})
+        assert resp.status_code == 400, resp.get_json()
+        assert "visual-search clause" in resp.get_json()["error"]
+
+
+def test_jobs_sharpness_rejects_visual_collection(app_and_db):
+    """``/api/jobs/sharpness`` scores every photo returned by
+    ``get_collection_photos`` (see sharpness.score_collection_photos).
+    A visual collection would silently score every metadata match."""
+    app, _ = app_and_db
+    col_id = _make_visual_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/sharpness", json={"collection_id": col_id})
+        assert resp.status_code == 400, resp.get_json()
+        assert "visual-search clause" in resp.get_json()["error"]
+
+
+def test_jobs_classify_rejects_visual_collection(app_and_db):
+    """``/api/jobs/classify`` runs detection/classification per collection
+    photo (classify_job); a visual collection here would silently classify
+    every metadata match instead of the visual subset."""
+    app, _ = app_and_db
+    col_id = _make_visual_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/classify", json={"collection_id": col_id})
+        assert resp.status_code == 400, resp.get_json()
+        assert "visual-search clause" in resp.get_json()["error"]
+
+
+def test_jobs_cull_rejects_visual_collection(app_and_db):
+    """``/api/jobs/cull`` (culling.analyze_for_culling) reads
+    ``get_collection_photos``; a visual collection would silently analyze
+    every metadata match."""
+    app, _ = app_and_db
+    col_id = _make_visual_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/cull", json={"collection_id": col_id})
+        assert resp.status_code == 400, resp.get_json()
+        assert "visual-search clause" in resp.get_json()["error"]
+
+
+def test_jobs_regroup_rejects_visual_collection(app_and_db):
+    """``/api/jobs/regroup`` (pipeline.run_full_pipeline via
+    load_photo_features) reads ``get_collection_photos``; reject visual
+    collections at the boundary."""
+    app, _ = app_and_db
+    col_id = _make_visual_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/regroup", json={"collection_id": col_id})
+        assert resp.status_code == 400, resp.get_json()
+        assert "visual-search clause" in resp.get_json()["error"]
+
+
+def test_jobs_extract_masks_rejects_visual_collection(app_and_db):
+    """``/api/jobs/extract-masks`` (SAM2 mask extraction) reads
+    ``get_collection_photos``; reject visual collections at the boundary."""
+    app, _ = app_and_db
+    col_id = _make_visual_collection(app)
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/jobs/extract-masks", json={"collection_id": col_id},
+        )
+        assert resp.status_code == 400, resp.get_json()
+        assert "visual-search clause" in resp.get_json()["error"]
+
+
+def test_jobs_previews_rejects_visual_collection(app_and_db):
+    """``/api/jobs/previews`` iterates the collection to precompute preview
+    JPEGs; reject visual collections so previews aren't warmed for the
+    wider metadata set."""
+    app, _ = app_and_db
+    col_id = _make_visual_collection(app)
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/previews", json={"collection_id": col_id})
+        assert resp.status_code == 400, resp.get_json()
+        assert "visual-search clause" in resp.get_json()["error"]
+
+
 @pytest.mark.parametrize(
     "extra",
     [

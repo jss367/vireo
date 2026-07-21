@@ -578,10 +578,18 @@ async function loadCollections() {
         opt.disabled = true;
         opt.textContent = c.name + ' (unavailable — edit rules to fix)';
         opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
+      } else if (c.has_visual) {
+        // /api/predictions/compare consumes the collection via
+        // get_collection_photos, which is rules-only — a visual
+        // collection would silently widen the comparison to every
+        // metadata match. Match the server-side 400 in the picker.
+        opt.disabled = true;
+        opt.textContent = c.name + ' (visual — open in Browse)';
+        opt.title = 'Visual collections can only be used from Browse, where the filter bar resolves the visual-search clause.';
       }
       sel.appendChild(opt);
     });
-    var all = data.find(function(c) { return c.name === 'All Photos' && !c.count_error; });
+    var all = data.find(function(c) { return c.name === 'All Photos' && !c.count_error && !c.has_visual; });
     if (all) {
       sel.value = all.id;
       loadComparison();

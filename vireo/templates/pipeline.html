@@ -1199,17 +1199,25 @@ async function loadCollections() {
     var collections = await safeFetch('/api/collections', {}, { toast: false });
     if (!Array.isArray(collections)) return;
     collections.forEach(function(c) {
-      // count_error means /api/collections couldn't resolve this collection's
-      // rules — selecting it would 500 the downstream /photos endpoint and
-      // leave the pipeline advertising a source it can't actually run. Show
-      // it disabled with a hint so the user knows to edit the rules instead.
-      var disabled = c.count_error ? ' disabled' : '';
-      var label = c.count_error
-        ? escapeHtml(c.name) + ' (unavailable — edit rules to fix)'
-        : escapeHtml(c.name);
-      var title = c.count_error
-        ? ' title="This collection\'s rules could not be resolved. Edit it in Browse to make it usable."'
-        : '';
+      // Two reasons to disable an option:
+      //   count_error — /api/collections could not resolve this collection's
+      //   rules, so the downstream /photos endpoint would 500 and the
+      //   pipeline would advertise a source it can't actually run.
+      //   has_visual — visual collections resolve through the filter bar's
+      //   visual clause, but the pipeline consumes them via
+      //   get_collection_photos (rules-only). Selecting one here would
+      //   silently scope the run to every metadata-matching photo instead
+      //   of the visually-matched subset. Open it from Browse instead.
+      var disabled = (c.count_error || c.has_visual) ? ' disabled' : '';
+      var label = escapeHtml(c.name);
+      var title = '';
+      if (c.count_error) {
+        label += ' (unavailable — edit rules to fix)';
+        title = ' title="This collection\'s rules could not be resolved. Edit it in Browse to make it usable."';
+      } else if (c.has_visual) {
+        label += ' (visual — open in Browse)';
+        title = ' title="Visual collections can only be used from Browse, where the filter bar resolves the visual-search clause."';
+      }
       sel.innerHTML += '<option value="' + c.id + '"' + disabled + title + '>' + label + '</option>';
     });
   } catch(e) {
