@@ -2017,6 +2017,119 @@ def test_repair_misclassified_location_ancestors_keeps_distinct_place_roots(
     ]
 
 
+def test_place_upsert_avoids_ambiguous_place_bearing_root_parent(tmp_path):
+    """Distinct-place-id same-name roots must not silently claim children.
+
+    _merge_duplicate_location_roots keeps two same-name location roots with
+    distinct place_ids apart because they represent different Google
+    places. Google's per-component address_components do not carry
+    place_ids, so a later child place upsert whose address component just
+    says "Georgia" cannot tell the country and state roots apart. Rather
+    than attach the child under whichever ambiguous place-bearing root has
+    the lower id (silently misattributing photos to the wrong Georgia),
+    the parent-component upsert inserts a fresh coordless root and uses it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    state_id = db.add_keyword("Georgia", kw_type="location")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ? WHERE id = ?",
+        ("georgia-state", state_id),
+    )
+    country_id = db.add_keyword("Georgia", kw_type="taxonomy")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ?, type = 'location', is_species = 0, "
+        "taxon_id = NULL WHERE id = ?",
+        ("georgia-country", country_id),
+    )
+    db.conn.commit()
+
+    leaf_id = db.upsert_place_chain({
+        "place_id": "tbilisi-park",
+        "name": "Tbilisi Park",
+        "types": ["park"],
+        "lat": 41.7151,
+        "lng": 44.8271,
+        "address_components": [
+            {"name": "Georgia", "types": ["country"]},
+        ],
+    })
+
+    parent_id = db.conn.execute(
+        "SELECT parent_id FROM keywords WHERE id = ?", (leaf_id,),
+    ).fetchone()["parent_id"]
+    assert parent_id is not None
+    assert parent_id not in (state_id, country_id)
+    parent = db.conn.execute(
+        "SELECT name, type, place_id, parent_id FROM keywords WHERE id = ?",
+        (parent_id,),
+    ).fetchone()
+    assert dict(parent) == {
+        "name": "Georgia",
+        "type": "location",
+        "place_id": None,
+        "parent_id": None,
+    }
+    roots = db.conn.execute(
+        "SELECT id, place_id FROM keywords "
+        "WHERE name = ? AND parent_id IS NULL ORDER BY id",
+        ("Georgia",),
+    ).fetchall()
+    assert [(row["id"], row["place_id"]) for row in roots] == [
+        (state_id, "georgia-state"),
+        (country_id, "georgia-country"),
+        (parent_id, None),
+    ]
+
+
+def test_place_upsert_prefers_coordless_root_over_place_bearing_peer(tmp_path):
+    """When a coordless root already anchors the hierarchy, reuse it.
+
+    A coordless root is a safe shared anchor, so a child-place upsert
+    whose address component matches its name should attach under it even
+    if a separate place-bearing homonym exists (e.g. legacy Georgia country
+    with a place_id alongside a coordless Georgia hierarchy root).
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("Georgia", kw_type="location")
+    db.conn.execute(
+        "UPDATE keywords SET place_id = ? WHERE id = ?",
+        ("georgia-country", country_id),
+    )
+    coordless_id = db.add_keyword("Georgia", kw_type="taxonomy")
+    db.conn.execute(
+        "UPDATE keywords SET type = 'location', is_species = 0, "
+        "taxon_id = NULL WHERE id = ?",
+        (coordless_id,),
+    )
+    db.conn.commit()
+
+    leaf_id = db.upsert_place_chain({
+        "place_id": "atlanta-park",
+        "name": "Atlanta Park",
+        "types": ["park"],
+        "lat": 33.7501,
+        "lng": -84.3885,
+        "address_components": [
+            {"name": "Georgia", "types": ["administrative_area_level_1"]},
+        ],
+    })
+
+    parent_id = db.conn.execute(
+        "SELECT parent_id FROM keywords WHERE id = ?", (leaf_id,),
+    ).fetchone()["parent_id"]
+    assert parent_id == coordless_id
+    roots = db.conn.execute(
+        "SELECT COUNT(*) FROM keywords "
+        "WHERE name = ? AND parent_id IS NULL",
+        ("Georgia",),
+    ).fetchone()[0]
+    assert roots == 2
+
+
 def test_place_upsert_repairs_adjacent_location_ancestors_on_demand(
     tmp_path,
 ):

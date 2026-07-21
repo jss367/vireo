@@ -10337,14 +10337,40 @@ class Database:
 
         if parent_id is None:
             if reuse_location_component:
-                existing = self.conn.execute(
-                    "SELECT id, type FROM keywords "
+                # Google's address_components carry no per-component
+                # place_id, so when the DB has multiple same-name location
+                # roots with distinct non-null place_ids (e.g. Georgia the
+                # country and Georgia the state, which
+                # _merge_duplicate_location_roots intentionally leaves
+                # unmerged), we cannot tell which one the caller means.
+                # Prefer a coordless root — safe to use as a shared
+                # hierarchy anchor — and fall through to inserting a fresh
+                # coordless root rather than silently attaching under
+                # whichever place-bearing row happens to have the lower id.
+                candidates = self.conn.execute(
+                    "SELECT id, type, place_id FROM keywords "
                     "WHERE name = ? AND parent_id IS NULL "
                     "  AND type IN ('location', 'taxonomy') "
-                    "ORDER BY CASE WHEN type = 'location' THEN 0 ELSE 1 END, id "
-                    "LIMIT 1",
+                    "ORDER BY "
+                    "  CASE WHEN type = 'location' THEN 0 ELSE 1 END, "
+                    "  CASE WHEN place_id IS NULL THEN 0 ELSE 1 END, "
+                    "  id",
                     (name,),
-                ).fetchone()
+                ).fetchall()
+                existing = None
+                if candidates:
+                    top = candidates[0]
+                    if top["place_id"] is None:
+                        existing = top
+                    else:
+                        top_place = top["place_id"]
+                        conflicting = any(
+                            c["place_id"] is not None
+                            and c["place_id"] != top_place
+                            for c in candidates[1:]
+                        )
+                        if not conflicting:
+                            existing = top
             else:
                 existing = self.conn.execute(
                     "SELECT id, type FROM keywords "
