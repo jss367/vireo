@@ -602,10 +602,33 @@ body {
     group.captured_to = timestamps.length ? timestamps[timestamps.length - 1] : null;
   }
 
+  function dropPhotoFromSelectionSource(photoId) {
+    if (!state.source || !Array.isArray(state.source.photo_ids)) return;
+    if (state.source.photo_ids.indexOf(photoId) === -1) return;
+    state.source.photo_ids = state.source.photo_ids.filter(function(id) {
+      return id !== photoId;
+    });
+    try {
+      sessionStorage.setItem(
+        'vireoLocationReviewSource',
+        JSON.stringify({photo_ids: state.source.photo_ids.slice()})
+      );
+    } catch (e) {}
+    var selectionOption = document.querySelector(
+      '#locationReviewCollection option[value="__selection__"]'
+    );
+    if (selectionOption) {
+      selectionOption.textContent = 'Selected photos ('
+        + formatNumber(state.source.photo_ids.length) + ')';
+    }
+  }
+
   document.addEventListener('lightbox:photodeleted', function(event) {
     var photoId = Number(event.detail && event.detail.photoId);
+    if (!Number.isFinite(photoId)) return;
+    dropPhotoFromSelectionSource(photoId);
     var group = currentGroup();
-    if (!Number.isFinite(photoId) || !group || group.photo_ids.indexOf(photoId) === -1) return;
+    if (!group || group.photo_ids.indexOf(photoId) === -1) return;
     group.photos = group.photos.filter(function(photo) { return photo.id !== photoId; });
     group.photo_ids = group.photo_ids.filter(function(id) { return id !== photoId; });
     group.count = group.photos.length;

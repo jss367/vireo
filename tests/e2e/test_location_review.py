@@ -217,6 +217,74 @@ def test_location_review_photo_marker_opens_the_photo_preview(live_server, page)
     )
 
 
+def test_location_review_lightbox_delete_keeps_selection_source_in_sync(
+    live_server, page,
+):
+    """Deleting a photo through the lightbox removes it from the saved selection.
+
+    Without this sync, reopening the review page reposts the deleted ID to
+    ``/api/location-review/preview``, which returns 404 and blocks the remaining
+    photos from being reviewed.
+    """
+    photo_ids = live_server["data"]["photos"][:2]
+    with live_server["db"].conn:
+        live_server["db"].conn.executemany(
+            "UPDATE photos SET latitude = ?, longitude = ? WHERE id = ?",
+            [
+                (33.2550, -116.4050, photo_ids[0]),
+                (33.2550, -116.4050, photo_ids[1]),
+            ],
+        )
+
+    page.route("https://unpkg.com/**", _stub_leaflet)
+    page.goto(f"{live_server['url']}/browse")
+    page.evaluate(
+        "photoIds => sessionStorage.setItem('vireoLocationReviewSource', "
+        "JSON.stringify({photo_ids: photoIds}))",
+        photo_ids,
+    )
+    page.goto(f"{live_server['url']}/locations/review?source=selection")
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("2 photos")
+
+    page.evaluate("window.__locationReviewLeafletMarkers[0].fire('click')")
+    expect(page.locator("#lightboxOverlay")).to_have_class(
+        "lightbox-overlay active"
+    )
+
+    page.evaluate("lightboxDelete()")
+    page.evaluate(
+        """() => {
+          var callback = _deleteCallback;
+          hideDeleteModal();
+          callback({deleted: 1});
+          closeLightbox();
+        }"""
+    )
+
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
+
+    stored = page.evaluate(
+        "() => JSON.parse(sessionStorage.getItem('vireoLocationReviewSource'))"
+    )
+    assert stored == {"photo_ids": [photo_ids[1]]}
+    selection_label = page.evaluate(
+        """() => {
+          var option = document.querySelector(
+            '#locationReviewCollection option[value=\"__selection__\"]'
+          );
+          return option && option.textContent;
+        }"""
+    )
+    assert selection_label == "Selected photos (1)"
+
+    page.goto(f"{live_server['url']}/locations/review?source=selection")
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
+    expect(page.locator(".location-review-thumb")).to_have_count(1)
+    expect(
+        page.locator(f'.location-review-thumb[data-photo-id="{photo_ids[1]}"]')
+    ).to_be_visible()
+
+
 def test_location_review_thumbnail_opens_the_photo_preview(live_server, page):
     """The thumbnail strip offers the same preview affordance as map dots."""
     photo_id = live_server["data"]["photos"][0]
