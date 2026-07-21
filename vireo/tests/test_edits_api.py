@@ -622,6 +622,26 @@ def test_sync_preview_does_not_promise_removal_from_unreadable_xmp(
     }
 
 
+def test_sync_preview_treats_absent_keyword_removal_as_unchanged(
+    client_with_photo,
+):
+    """A keyword removal against a missing sidecar accurately reports a no-op."""
+    app, db, photo_id = client_with_photo
+    db.queue_change(photo_id, "keyword_remove", "Raptor")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP keyword",
+        "action": "unchanged",
+        "before": "No XMP sidecar",
+        "after": "No XMP sidecar",
+        "after_detail": "No XMP sidecar contains Raptor to remove",
+    }
+
+
 def test_sync_preview_does_not_promise_edit_clear_from_unreadable_xmp(
     client_with_photo,
 ):

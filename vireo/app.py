@@ -315,16 +315,22 @@ def _sync_preview_presentation(
                 "before": xmp_value,
                 "after": value,
             }
-        if metadata.get("status") == "unreadable":
+        if existing is None:
+            if metadata.get("status") == "unreadable":
+                detail = (
+                    f"{value} cannot be removed because the XMP sidecar "
+                    "is unreadable"
+                )
+            elif metadata.get("status") == "missing":
+                detail = f"No XMP sidecar contains {value} to remove"
+            else:
+                detail = f"{value} is not present in XMP"
             return {
                 "field": "XMP keyword",
                 "action": "unchanged",
                 "before": xmp_value,
                 "after": xmp_value,
-                "after_detail": (
-                    f"{value} cannot be removed because the XMP sidecar "
-                    "is unreadable"
-                ),
+                "after_detail": detail,
             }
         return {
             "field": "Keyword",
