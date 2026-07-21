@@ -10492,10 +10492,16 @@ class Database:
         they belong to a legacy location chain, so a location descendant
         alone is not enough evidence — a genuine taxonomy root with a
         mixed-hierarchy location descendant (e.g. ``Ardea`` → ``Backyard``)
-        would otherwise be retyped and lose its taxonomy metadata. Roots
-        need stronger evidence: an existing ``place_id`` or an explicit
-        Google component match via ``allow_leaf``. Clear stale taxonomy
-        metadata and restore the row's type when evidence is sufficient.
+        would otherwise be retyped and lose its taxonomy metadata. A bare
+        name collision from ``allow_leaf`` is also not enough: a genuine
+        root taxonomy homonym such as ``Turkey`` (the species) would be
+        clobbered when the user later saves the Google country ``Turkey``.
+        SQLite permits multiple ``parent_id IS NULL`` rows with the same
+        name, so the caller can safely insert a separate location root
+        instead. Roots therefore need stronger structural evidence: an
+        existing ``place_id`` or a location descendant reachable through
+        taxonomy rows. Clear stale taxonomy metadata and restore the
+        row's type when evidence is sufficient.
         """
         row = self.conn.execute(
             "WITH RECURSIVE descendants(id, type) AS ("
@@ -10512,12 +10518,16 @@ class Database:
             "  AND (k.parent_id IS NULL OR parent.type = 'location') "
             "  AND ("
             "    k.place_id IS NOT NULL "
-            "    OR ? "
-            "    OR (parent.type = 'location' AND EXISTS ("
+            "    OR (parent.type = 'location' AND ("
+            "      ? OR EXISTS ("
+            "        SELECT 1 FROM descendants WHERE type = 'location'"
+            "      )"
+            "    ))"
+            "    OR (? AND EXISTS ("
             "      SELECT 1 FROM descendants WHERE type = 'location'"
             "    ))"
             "  )",
-            (keyword_id, keyword_id, allow_leaf),
+            (keyword_id, keyword_id, allow_leaf, allow_leaf),
         ).fetchone()
         if row is None:
             return False

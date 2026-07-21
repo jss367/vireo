@@ -2733,6 +2733,65 @@ def test_place_upsert_repairs_coordless_taxonomy_leaf_component(tmp_path):
     ).fetchone()["parent_id"] == state_id
 
 
+def test_place_upsert_does_not_retype_root_taxonomy_homonym(tmp_path):
+    """Selecting a root admin place must not clobber a same-name root taxon.
+
+    Regression: a genuine root taxonomy keyword (e.g. the species ``Turkey``)
+    used to be retyped into a location when the user later selected the
+    Google country ``Turkey``. ``allow_leaf`` alone is not enough evidence
+    for a root row because SQLite permits multiple ``parent_id IS NULL``
+    rows with the same name — the upsert must leave the taxonomy row alone
+    and insert a separate location root so the existing photo tags keep
+    their species semantics.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    turkey_species = db.add_keyword("Turkey", kw_type="taxonomy")
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 1 WHERE id = ?", (turkey_species,),
+    )
+    db.conn.commit()
+
+    country_id = db.upsert_place_chain({
+        "place_id": "turkey-country",
+        "name": "Turkey",
+        "types": ["country"],
+        "lat": 38.9637,
+        "lng": 35.2433,
+        "address_components": [
+            {"name": "Turkey", "types": ["country"]},
+        ],
+    })
+
+    assert country_id != turkey_species
+    species_row = db.conn.execute(
+        "SELECT type, is_species, place_id FROM keywords WHERE id = ?",
+        (turkey_species,),
+    ).fetchone()
+    assert dict(species_row) == {
+        "type": "taxonomy",
+        "is_species": 1,
+        "place_id": None,
+    }
+    country_row = db.conn.execute(
+        "SELECT type, parent_id, place_id FROM keywords WHERE id = ?",
+        (country_id,),
+    ).fetchone()
+    assert dict(country_row) == {
+        "type": "location",
+        "parent_id": None,
+        "place_id": "turkey-country",
+    }
+    roots = db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE name = ? AND parent_id IS NULL",
+        ("Turkey",),
+    ).fetchone()[0]
+    assert roots == 2, (
+        "root taxonomy homonym must coexist with the new location root"
+    )
+
+
 def test_place_upsert_reconciles_suffixed_admin_duplicate_with_hierarchy_row(
     tmp_path,
 ):
