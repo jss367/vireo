@@ -192,6 +192,7 @@
 /* Filter bar */
 .filter-bar {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 16px;
   align-items: center;
@@ -209,6 +210,11 @@
 .filter-btn:hover { border-color: var(--text-muted); }
 .filter-btn.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .filter-btn .count { margin-left: 4px; opacity: 0.7; }
+.filter-btn.species-conflicts.active {
+  background: var(--warning);
+  border-color: var(--warning);
+  color: var(--accent-text);
+}
 .species-filter-wrap {
   display: flex;
   align-items: center;
@@ -372,6 +378,32 @@
   cursor: default;
 }
 .encounter-footer:hover { background: var(--bg-tertiary); }
+.group-reject-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--danger) 65%, var(--border-primary));
+  border-radius: 5px;
+  padding: 4px 8px;
+  background: transparent;
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+.group-reject-btn:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: var(--danger);
+}
+.group-reject-btn.all-rejected {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+.group-reject-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
 
 /* Burst strip */
 .burst-strip {
@@ -390,6 +422,13 @@
   writing-mode: vertical-lr;
   text-orientation: mixed;
   padding: 4px 0;
+  flex-shrink: 0;
+}
+.burst-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
   flex-shrink: 0;
 }
 
@@ -475,6 +514,82 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.species-conflict-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.species-conflict-badge.strong {
+  background: color-mix(in srgb, var(--danger) 18%, var(--bg-secondary));
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.species-conflict-badge.possible {
+  background: color-mix(in srgb, var(--warning) 16%, var(--bg-secondary));
+  border-color: var(--warning);
+  color: var(--warning);
+}
+.photo-species-conflict {
+  width: calc(100% - 12px);
+  margin: 0 6px 6px;
+  padding: 4px 7px;
+  justify-content: flex-start;
+  background-clip: padding-box;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.photo-species-conflict .species-conflict-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.encounter-species-conflict,
+.burst-species-conflict {
+  padding: 3px 8px;
+  cursor: help;
+  flex-shrink: 0;
+}
+.burst-conflict-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.burst-conflict-split {
+  border: 1px solid var(--warning);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: transparent;
+  color: var(--warning);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.burst-conflict-split:hover {
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+}
+.inspect-species-conflict {
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.inspect-species-conflict strong { color: var(--text-primary); }
+.inspect-species-conflict .species-conflict-explanation {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-weight: 400;
 }
 
 /* Slider controls */
@@ -618,6 +733,10 @@ input[type="range"]::-moz-range-thumb {
   /* Detector ran and found no subject — this isn't a "go embed it" prompt
      like trace-component-missing, it's signal that justified a low score. */
   color: rgba(180, 180, 180, 0.85);
+  font-style: italic;
+}
+.algo-trace .trace-component-uncertain {
+  color: rgba(90, 170, 220, 0.95);
   font-style: italic;
 }
 .algo-trace .trace-empty {
@@ -1142,6 +1261,59 @@ input[type="range"]::-moz-range-thumb {
   font-weight: 700;
   text-transform: uppercase;
 }
+.grm-card-subject-count {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  z-index: 4;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(18, 25, 38, 0.88);
+  border: 1px solid var(--accent);
+  color: var(--text-primary);
+  font-size: 10px;
+  font-weight: 700;
+  pointer-events: none;
+}
+.grm-subject-review {
+  margin: 10px 0 12px;
+  padding: 10px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+}
+.grm-subject-review-heading {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+}
+.grm-subject-review-hint,
+.grm-subject-review-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.grm-subject-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 9px 0 7px;
+}
+.grm-subject-chip {
+  padding: 5px 8px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.grm-subject-chip:hover { color: var(--text-primary); }
+.grm-subject-chip.selected {
+  border-color: var(--accent);
+  color: var(--text-primary);
+  box-shadow: 0 0 0 1px var(--accent);
+}
 
 .grm-footer {
   padding: 12px 20px;
@@ -1631,10 +1803,11 @@ input[type="range"]::-moz-range-thumb {
       <button class="filter-btn" data-filter="KEEP" onclick="setFilter('KEEP')">Keep<span class="count" id="countKeep"></span></button>
       <button class="filter-btn" data-filter="REVIEW" onclick="setFilter('REVIEW')">Review<span class="count" id="countReview"></span></button>
       <button class="filter-btn" data-filter="REJECT" onclick="setFilter('REJECT')">Reject<span class="count" id="countReject"></span></button>
+      <button class="filter-btn species-conflicts" data-filter="SPECIES_CONFLICT" onclick="setFilter('SPECIES_CONFLICT')" title="Show photos whose classification conflicts with the species suggested for their encounter or burst">Species conflicts<span class="count" id="countSpeciesConflict"></span></button>
       <button class="filter-btn" id="hideConfirmedBtn" onclick="toggleHideConfirmed()" title="Hide encounters/bursts whose species has been confirmed">Hide confirmed</button>
       <div class="species-filter-wrap">
         <div class="search-control">
-          <input type="text" id="speciesFilterInput" placeholder="Filter by species..." oninput="setSpeciesFilter(this.value)">
+          <input type="text" id="speciesFilterInput" placeholder="Search species or filename..." aria-label="Search process review by species or filename" oninput="setSpeciesFilter(this.value)">
           <button id="speciesFilterMatchCaseBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleSpeciesFilterSearchOption('match_case')" title="Match case">Aa</button>
           <button id="speciesFilterWholeWordBtn" class="search-option-btn" type="button" aria-pressed="false" onclick="toggleSpeciesFilterSearchOption('whole_word')" title="Match whole word">ab</button>
         </div>
@@ -1823,7 +1996,7 @@ var showPhotoLabels = false;
 var collapsedEncounters = new Set();
 var PIPELINE_SIDEBAR_STORAGE_KEY = 'vireo.pipelineReview.sidebarCollapsed';
 var PIPELINE_VIEW_STATE_STORAGE_KEY = 'vireo.pipelineReview.viewState';
-var PIPELINE_REVIEW_FILTERS = ['all', 'KEEP', 'REVIEW', 'REJECT'];
+var PIPELINE_REVIEW_FILTERS = ['all', 'KEEP', 'REVIEW', 'REJECT', 'SPECIES_CONFLICT'];
 var PIPELINE_ENCOUNTER_SORTS = ['default', 'photos_desc', 'photos_asc', 'bursts_desc', 'time_desc', 'time_asc'];
 // Display order for the encounter list. Does NOT reorder pipelineResults.encounters;
 // renderResults() iterates a sorted list of original indices so every encounter's
@@ -2243,13 +2416,161 @@ function clearSpeciesFilter() {
   renderResults();
 }
 
-function encounterMatchesSpecies(enc) {
+function encounterMatchesSearch(enc, photoMap) {
   if (!speciesFilter) return true;
-  if (!enc.species_predictions || enc.species_predictions.length === 0) return false;
   var threshold = minConfidence / 100;
-  return enc.species_predictions.some(function(sp) {
-    if (!VireoTextSearch.matchesFields(sp.species, speciesFilter, speciesFilterSearchOptions)) return false;
-    return (sp.models || []).some(function(m) { return m.confidence >= threshold; });
+  var fields = [];
+
+  // When Hide confirmed is on, the render loop below skips confirmed bursts
+  // (and their photos). Search must scope its burst-level fields — per-burst
+  // confirmed overrides, per-burst predictions, and per-photo filenames — to
+  // only the bursts that will actually render. Otherwise a query matching a
+  // hidden confirmed burst's species or filename surfaces the encounter and
+  // shows only the unrelated unconfirmed burst's content.
+  var bursts = enc.bursts || [];
+  function burstVisible(burst) {
+    return !hideConfirmed || !isBurstConfirmed(enc, burst);
+  }
+
+  // Manually assigned encounter label. The encounter widget still renders
+  // (even when some bursts hide), so it stays searchable — unless every burst
+  // that carries the label is hidden. For mixed/partial encounters the
+  // serializer keeps `confirmed_species` even when `species_confirmed` is
+  // false (for replacement flows), so the label may only be backed by a
+  // per-burst confirmed override; if that override is on a hidden burst the
+  // label must not surface the encounter.
+  var confirmedLabelHasVisibleBurst = true;
+  if (hideConfirmed && enc.confirmed_species && bursts.length > 0) {
+    confirmedLabelHasVisibleBurst = bursts.some(function(b) {
+      if (!burstVisible(b)) return false;
+      if (b && b.species_override && b.species_override.confirmed === true) {
+        return b.species_override.species === enc.confirmed_species;
+      }
+      // Bursts without an override inherit and display `enc.confirmed_species`
+      // whenever it is set (see renderSpeciesWidget's burst branch), including
+      // mixed encounters where the encounter itself is unconfirmed. Requiring
+      // `species_confirmed` here would hide the label from search even though
+      // the visible burst is still showing it as its own label.
+      return !(b && b.species_override);
+    });
+  }
+  if (confirmedLabelHasVisibleBurst) fields.push(enc.confirmed_species);
+
+  // Confirmed per-burst overrides — manual labels that always bypass the
+  // slider, but only from bursts that will render.
+  bursts.forEach(function(burst) {
+    if (!burstVisible(burst)) return;
+    if (burst.species_override && burst.species_override.confirmed === true) {
+      fields.push(burst.species_override.species);
+    }
+  });
+
+  // Classifier-derived species — including the encounter consensus label in
+  // enc.species and burst-level predictions that back unconfirmed overrides —
+  // flow through species_predictions with per-model confidence, so gate them
+  // behind the min-confidence slider. Adding enc.species[0] separately would
+  // bypass that gate and let low-confidence matches survive even after the
+  // user raised the threshold.
+  //
+  // The encounter-level aggregate is rolled up from every photo in the
+  // encounter, so under Hide confirmed it can carry a species contributed
+  // only by a hidden confirmed burst. Restrict aggregate species to those
+  // that at least one visible burst also predicts, so searching a species
+  // whose only evidence is inside a hidden burst can't surface an unrelated
+  // visible burst.
+  // Support means: a visible burst has evidence the search should follow. A
+  // confirmed burst override qualifies (manual label always counts), and so
+  // does a burst-level prediction whose confidence meets the slider — matching
+  // the gate applied to the aggregate below. Recording every visible burst
+  // species regardless of confidence would let a hidden burst's high-confidence
+  // prediction push the aggregate over the threshold while a below-threshold
+  // sighting on the visible burst quietly keeps the encounter searchable.
+  // Legacy raw bursts store `bursts` as arrays of photo IDs with no
+  // per-burst prediction data. Gating the encounter aggregate against a
+  // visible-burst set built from that shape would drop every
+  // encounter-level prediction whenever Hide confirmed is on — even
+  // though nothing is actually hidden. The strict gate is only sound
+  // when we can fully account for what every visible burst contributes
+  // to the aggregate, so require every VISIBLE burst to carry per-burst
+  // predictions before enabling it. Otherwise (all-raw, or a mix where
+  // a visible raw burst sits alongside an object burst — the GRM detach
+  // flow leaves the source burst as a raw array while appending a new
+  // object burst) at least one visible burst is opaque and could be the
+  // source of an aggregate species we would otherwise drop.
+  var visibleBursts = bursts.filter(burstVisible);
+  var visibleBurstsAllCarryPredictions = visibleBursts.length > 0
+    && visibleBursts.every(function(burst) {
+      return burst && Array.isArray(burst.species_predictions);
+    });
+  var visibleBurstSpecies = null;
+  if (hideConfirmed && visibleBurstsAllCarryPredictions) {
+    visibleBurstSpecies = new Set();
+    visibleBursts.forEach(function(burst) {
+      if (burst && burst.species_override && burst.species_override.confirmed === true
+          && burst.species_override.species) {
+        visibleBurstSpecies.add(burst.species_override.species);
+      }
+      (burst && burst.species_predictions || []).forEach(function(sp) {
+        if (!sp || !sp.species) return;
+        if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
+          visibleBurstSpecies.add(sp.species);
+        }
+      });
+    });
+  }
+  // In the fallback path — mixed shapes where at least one visible burst is a
+  // legacy raw photo-id array — we can't enumerate that burst's species. Do
+  // not drop aggregate species that only hidden object bursts back either:
+  // the GRM detach flow can leave the source burst raw while the detached
+  // object burst is confirmed to a species that the raw burst still carries
+  // (unconfirmed) in its own photos, so filtering that species out would
+  // silence a legitimate raw-burst match. The tradeoff is a small false-
+  // positive risk when the raw burst genuinely does not share the hidden
+  // burst's species — the encounter still renders only the visible raw
+  // burst, which the user can inspect.
+  (enc.species_predictions || []).forEach(function(sp) {
+    if (visibleBurstSpecies && !visibleBurstSpecies.has(sp.species)) return;
+    if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
+      fields.push(sp.species);
+    }
+  });
+  bursts.forEach(function(burst) {
+    if (!burstVisible(burst)) return;
+    (burst.species_predictions || []).forEach(function(sp) {
+      if ((sp.models || []).some(function(m) { return m.confidence >= threshold; })) {
+        fields.push(sp.species);
+      }
+    });
+  });
+
+  // Filename search remains encounter-level: finding one photo keeps its
+  // whole encounter visible so the surrounding burst context is not lost.
+  // Under Hide confirmed, restrict to photos in bursts that will render.
+  var filenamePids;
+  if (bursts.length > 0) {
+    filenamePids = [];
+    bursts.forEach(function(burst) {
+      if (!burstVisible(burst)) return;
+      (burst.photo_ids || burst || []).forEach(function(pid) {
+        filenamePids.push(pid);
+      });
+    });
+  } else if (hideConfirmed && enc.species_confirmed) {
+    filenamePids = [];
+  } else {
+    filenamePids = enc.photo_ids || [];
+  }
+  filenamePids.forEach(function(pid) {
+    var photo = photoMap && photoMap[pid];
+    if (photo) fields.push(photo.filename);
+  });
+
+  // Match the full query against each candidate field independently so a
+  // multi-token query like "Mute Swan" can't be satisfied by pairing "Mute"
+  // from one field (e.g. "Mute Grouse") with "Swan" from another (e.g.
+  // "Trumpeter Swan"). A single field must contain every token to match.
+  return fields.some(function(field) {
+    return VireoTextSearch.matchesFields(field, speciesFilter, speciesFilterSearchOptions);
   });
 }
 
@@ -2322,6 +2643,15 @@ function renderAlgorithmTrace() {
     var thrParts = [];
     if (typeof thr.hard_cut_score === 'number') thrParts.push('hard_cut_score=' + thr.hard_cut_score.toFixed(2));
     if (typeof thr.soft_cut_score === 'number') thrParts.push('soft_cut_score=' + thr.soft_cut_score.toFixed(2));
+    if (typeof thr.species_hard_cut_confidence === 'number') {
+      thrParts.push('species_confidence=' + thr.species_hard_cut_confidence.toFixed(2));
+    }
+    if (typeof thr.species_hard_cut_margin === 'number') {
+      thrParts.push('species_margin=' + thr.species_hard_cut_margin.toFixed(2));
+    }
+    if (typeof thr.weak_detection_confidence === 'number') {
+      thrParts.push('weak_detection=' + thr.weak_detection_confidence.toFixed(2));
+    }
     if (typeof thr.hard_cut_time === 'number') thrParts.push('hard_cut_time=' + thr.hard_cut_time + 's');
     if (thrParts.length) {
       html += '<div class="trace-thresholds">cut if: ' + thrParts.join(' · ') + '</div>';
@@ -2334,7 +2664,10 @@ function renderAlgorithmTrace() {
     else rowCls += ' kept';
     var dt = (t.dt_seconds === null || t.dt_seconds === undefined) ? '∞' : t.dt_seconds.toFixed(1) + 's';
     var score = (typeof t.score === 'number') ? t.score.toFixed(3) : '-';
-    var decision = t.decision || '?';
+    var decisionLabels = {
+      kept_weak_detection: 'kept · weak detection rescued'
+    };
+    var decision = decisionLabels[t.decision] || t.decision || '?';
     html += '<div class="' + rowCls + '">';
     html += '<span>pair ' + (i + 1) + ' · ' + dt + '</span>';
     html += '<span>S=' + score + '</span>';
@@ -2381,6 +2714,14 @@ function renderAlgorithmTrace() {
             // don't go re-embed photos that legitimately have no subject.
             parts.push('<span class="trace-component-absent">' + escapeHtml(k)
               + '=neutral (no subject on both, w=' + w + ')</span>');
+          } else if (c.uncertain_a || c.uncertain_b) {
+            var uncertainWho;
+            if (c.uncertain_a && c.uncertain_b) uncertainWho = 'both';
+            else if (c.uncertain_a) uncertainWho = nameA;
+            else uncertainWho = nameB;
+            parts.push('<span class="trace-component-uncertain">'
+              + escapeHtml(k) + '=context-rescued weak detection on '
+              + escapeHtml(uncertainWho) + ' (w=' + w + ')</span>');
           } else {
             var who;
             if (c.missing_a && c.missing_b) who = 'both';
@@ -2429,6 +2770,260 @@ function missingTimestampBadge(enc) {
     n + ' missing timestamp' + (n === 1 ? '' : 's') + '</span>';
 }
 
+// Species-conflict review aid. These thresholds are deliberately conservative:
+// a warning needs both a credible alternative and a meaningful margin over the
+// current encounter/burst suggestion. The values are classifier confidence,
+// not measured identification accuracy.
+var SPECIES_CONFLICT_THRESHOLDS = {
+  strongAlternative: 0.80,
+  strongExpectedMax: 0.20,
+  strongMargin: 0.60,
+  possibleAlternative: 0.55,
+  possibleExpectedMax: 0.35,
+  possibleMargin: 0.25,
+};
+
+function normalizedSpeciesName(name) {
+  return String(name || '').trim().toLocaleLowerCase().replace(/\s+/g, ' ');
+}
+
+function speciesCandidateForReviewUnit(enc, burst) {
+  var override = burst && burst.species_override;
+  if (override && override.species) return override.species;
+  if (enc && enc.confirmed_species) return enc.confirmed_species;
+  if (enc && enc.species && enc.species[0]) return enc.species[0];
+  return null;
+}
+
+function analyzePhotoSpeciesConflict(photo, expectedSpecies) {
+  var expectedKey = normalizedSpeciesName(expectedSpecies);
+  var top5 = (photo && photo.species_top5) || [];
+  if (!expectedKey || top5.length === 0) return null;
+
+  // A model may contribute several detections/crops. Retain its strongest
+  // confidence for each species so repeated detections do not inflate support.
+  var byModel = {};
+  top5.forEach(function(entry) {
+    if (!entry || entry.length < 2) return;
+    var species = String(entry[0] || '').trim();
+    var confidence = Number(entry[1]);
+    var model = String(entry[2] || 'unknown');
+    if (!species || !isFinite(confidence) || confidence < 0 || confidence > 1) return;
+    if (!byModel[model]) byModel[model] = {};
+    var prior = byModel[model][species];
+    if (prior == null || confidence > prior) byModel[model][species] = confidence;
+  });
+  var models = Object.keys(byModel);
+  if (models.length === 0) return null;
+
+  var speciesNames = {};
+  models.forEach(function(model) {
+    Object.keys(byModel[model]).forEach(function(species) {
+      if (normalizedSpeciesName(species) !== expectedKey) speciesNames[species] = true;
+    });
+  });
+
+  function averageSupport(speciesKey) {
+    var total = 0;
+    models.forEach(function(model) {
+      var best = 0;
+      Object.keys(byModel[model]).forEach(function(species) {
+        if (normalizedSpeciesName(species) === speciesKey) {
+          best = Math.max(best, byModel[model][species]);
+        }
+      });
+      total += best;
+    });
+    return total / models.length;
+  }
+
+  var expectedSupport = averageSupport(expectedKey);
+  var alternative = null;
+  var alternativeSupport = 0;
+  Object.keys(speciesNames).forEach(function(species) {
+    var support = averageSupport(normalizedSpeciesName(species));
+    if (support > alternativeSupport) {
+      alternative = species;
+      alternativeSupport = support;
+    }
+  });
+  if (!alternative) return {
+    expectedSpecies: expectedSpecies,
+    expectedSupport: expectedSupport,
+    modelCount: models.length,
+    severity: null,
+  };
+
+  var alternativeKey = normalizedSpeciesName(alternative);
+  var alternativeModelWins = 0;
+  models.forEach(function(model) {
+    var topSpecies = null;
+    var topConfidence = -1;
+    Object.keys(byModel[model]).forEach(function(species) {
+      var confidence = byModel[model][species];
+      if (confidence > topConfidence) {
+        topSpecies = species;
+        topConfidence = confidence;
+      }
+    });
+    if (normalizedSpeciesName(topSpecies) === alternativeKey) alternativeModelWins++;
+  });
+
+  var margin = alternativeSupport - expectedSupport;
+  var enoughModelAgreement = alternativeModelWins >= Math.ceil(models.length / 2);
+  var t = SPECIES_CONFLICT_THRESHOLDS;
+  var severity = null;
+  if (enoughModelAgreement &&
+      alternativeSupport >= t.strongAlternative &&
+      expectedSupport <= t.strongExpectedMax &&
+      margin >= t.strongMargin) {
+    severity = 'strong';
+  } else if (enoughModelAgreement &&
+             alternativeSupport >= t.possibleAlternative &&
+             expectedSupport <= t.possibleExpectedMax &&
+             margin >= t.possibleMargin) {
+    severity = 'possible';
+  }
+
+  return {
+    expectedSpecies: expectedSpecies,
+    expectedSupport: expectedSupport,
+    alternativeSpecies: alternative,
+    alternativeSupport: alternativeSupport,
+    alternativeModelWins: alternativeModelWins,
+    modelCount: models.length,
+    margin: margin,
+    severity: severity,
+  };
+}
+
+function buildSpeciesConflictEvidence(photoMap) {
+  var evidence = {};
+  (pipelineResults.encounters || []).forEach(function(enc) {
+    if (enc.bursts && enc.bursts.length > 0) {
+      enc.bursts.forEach(function(burst) {
+        var expected = speciesCandidateForReviewUnit(enc, burst);
+        (burst.photo_ids || burst || []).forEach(function(pid) {
+          var photo = photoMap[pid];
+          if (photo) evidence[pid] = analyzePhotoSpeciesConflict(photo, expected);
+        });
+      });
+    } else {
+      var expected = speciesCandidateForReviewUnit(enc, null);
+      (enc.photo_ids || []).forEach(function(pid) {
+        var photo = photoMap[pid];
+        if (photo) evidence[pid] = analyzePhotoSpeciesConflict(photo, expected);
+      });
+    }
+  });
+  return evidence;
+}
+
+function formatSpeciesConfidence(value) {
+  return Math.round((Number(value) || 0) * 100) + '%';
+}
+
+function speciesConflictTitle(issue) {
+  if (!issue || !issue.severity) return '';
+  var strength = issue.severity === 'strong' ? 'Strong' : 'Possible';
+  var classifiers = issue.modelCount + ' classifier' + (issue.modelCount === 1 ? '' : 's');
+  return strength + ' classification conflict: ' + classifiers +
+    (issue.modelCount === 1 ? ' averages ' : ' average ') +
+    issue.alternativeSpecies + ' at ' + formatSpeciesConfidence(issue.alternativeSupport) +
+    ', while ' + issue.expectedSpecies + ' averages ' +
+    formatSpeciesConfidence(issue.expectedSupport) + '. Click to inspect this photo and its review group.';
+}
+
+function summarizeSpeciesConflicts(photoIds, evidence) {
+  var classifiedCount = 0;
+  var issues = [];
+  (photoIds || []).forEach(function(pid) {
+    var item = evidence[pid];
+    if (item) classifiedCount++;
+    if (item && item.severity) issues.push(item);
+  });
+  if (issues.length === 0) return null;
+
+  var groups = {};
+  issues.forEach(function(issue) {
+    var key = normalizedSpeciesName(issue.alternativeSpecies);
+    if (!groups[key]) groups[key] = {species: issue.alternativeSpecies, count: 0, strong: 0};
+    groups[key].count++;
+    if (issue.severity === 'strong') groups[key].strong++;
+  });
+  var dominant = null;
+  Object.keys(groups).forEach(function(key) {
+    var group = groups[key];
+    if (!dominant || group.count > dominant.count ||
+        (group.count === dominant.count && group.strong > dominant.strong)) {
+      dominant = group;
+    }
+  });
+  return {
+    issueCount: issues.length,
+    classifiedCount: classifiedCount,
+    dominantSpecies: dominant.species,
+    dominantCount: dominant.count,
+    severity: dominant.strong > 0 ? 'strong' : 'possible',
+  };
+}
+
+function renderEncounterSpeciesConflict(enc, evidence, hiddenIds) {
+  // Match the set of photos that renderResults() will actually draw for this
+  // encounter: when hide-confirmed is on, confirmed bursts are skipped, so a
+  // conflict living only in a confirmed burst shouldn't be tallied here (the
+  // SPECIES_CONFLICT count already filters the same way).
+  var ids = enc.photo_ids || [];
+  if (hiddenIds && hiddenIds.size) {
+    ids = ids.filter(function(pid) { return !hiddenIds.has(pid); });
+  }
+  var summary = summarizeSpeciesConflicts(ids, evidence);
+  if (!summary) return '';
+  var mostPhotosConflict = summary.classifiedCount > 0 &&
+    summary.issueCount >= Math.ceil(summary.classifiedCount * 0.6) &&
+    summary.dominantCount >= Math.ceil(summary.issueCount * 0.7);
+  var title;
+  if (mostPhotosConflict) {
+    title = summary.issueCount + ' of ' + summary.classifiedCount +
+      ' classified photos conflict with this encounter suggestion; most suggest ' +
+      summary.dominantSpecies + '. The encounter species suggestion may be wrong.';
+  } else {
+    title = summary.issueCount + ' of ' + summary.classifiedCount +
+      ' classified photos conflict with this encounter suggestion. They may belong in a different group.';
+  }
+  return '<span class="species-conflict-badge encounter-species-conflict ' + summary.severity +
+    '" title="' + escapeAttr(title) + '">&#9888; ' + summary.issueCount +
+    ' species conflict' + (summary.issueCount === 1 ? '' : 's') + '</span>';
+}
+
+function renderBurstSpeciesConflict(enc, encIdx, burst, burstIdx, evidence) {
+  var ids = burst.photo_ids || burst || [];
+  var summary = summarizeSpeciesConflicts(ids, evidence);
+  // A burst marker should mean the burst itself has a consistent conflict,
+  // not merely that one unusual frame inside a long burst needs photo review.
+  if (!summary || ids.length < 2 || summary.dominantCount < 2 ||
+      summary.dominantCount < Math.ceil(summary.classifiedCount / 2)) return '';
+  var title = summary.dominantCount + ' of ' + summary.classifiedCount +
+    ' classified photos in this burst suggest ' + summary.dominantSpecies +
+    ' instead of the current species suggestion.';
+  var html = '<span class="burst-conflict-actions">';
+  html += '<span class="species-conflict-badge burst-species-conflict ' + summary.severity +
+    '" title="' + escapeAttr(title) + '">&#9888; ' + summary.dominantCount +
+    ' suggest ' + escapeHtml(summary.dominantSpecies) + '</span>';
+  if (enc.bursts && enc.bursts.length > 1) {
+    html += '<button class="burst-conflict-split" onclick="event.stopPropagation();detachBurst(' +
+      encIdx + ',' + burstIdx + ')" title="Move this burst into its own encounter">Split burst</button>';
+  }
+  html += '</span>';
+  return html;
+}
+
+function photoMatchesPipelineFilter(photo, issue) {
+  if (activeFilter === 'all') return true;
+  if (activeFilter === 'SPECIES_CONFLICT') return !!(issue && issue.severity);
+  return photo.label === activeFilter;
+}
+
 function renderResults() {
   if (!pipelineResults) return;
   var container = document.getElementById('encountersContainer');
@@ -2436,13 +3031,14 @@ function renderResults() {
   // Build photo lookup
   var photoMap = {};
   pipelineResults.photos.forEach(function(p) { photoMap[p.id] = p; });
+  var speciesConflictEvidence = buildSpeciesConflictEvidence(photoMap);
 
-  // Build encounter photo set for species-filtered encounters
+  // Build the photo set for encounters matching the species/filename search.
   var speciesVisibleIds = null;
   if (speciesFilter) {
     speciesVisibleIds = new Set();
     pipelineResults.encounters.forEach(function(enc) {
-      if (encounterMatchesSpecies(enc)) {
+      if (encounterMatchesSearch(enc, photoMap)) {
         (enc.photo_ids || []).forEach(function(pid) { speciesVisibleIds.add(pid); });
       }
     });
@@ -2467,23 +3063,30 @@ function renderResults() {
   }
 
   // Update filter counts (respecting species filter and hide-confirmed)
-  var counts = {all: 0, KEEP: 0, REVIEW: 0, REJECT: 0};
+  var counts = {all: 0, KEEP: 0, REVIEW: 0, REJECT: 0, SPECIES_CONFLICT: 0};
   pipelineResults.photos.forEach(function(p) {
     if (speciesVisibleIds && !speciesVisibleIds.has(p.id)) return;
     if (confirmedHiddenIds && confirmedHiddenIds.has(p.id)) return;
     counts.all++;
     if (p.label) counts[p.label] = (counts[p.label] || 0) + 1;
+    if (speciesConflictEvidence[p.id] && speciesConflictEvidence[p.id].severity) {
+      counts.SPECIES_CONFLICT++;
+    }
   });
   var ce = document.getElementById('countAll'); if (ce) ce.textContent = ' (' + counts.all + ')';
   ce = document.getElementById('countKeep'); if (ce) ce.textContent = ' (' + (counts.KEEP||0) + ')';
   ce = document.getElementById('countReview'); if (ce) ce.textContent = ' (' + (counts.REVIEW||0) + ')';
   ce = document.getElementById('countReject'); if (ce) ce.textContent = ' (' + (counts.REJECT||0) + ')';
+  ce = document.getElementById('countSpeciesConflict'); if (ce) ce.textContent = ' (' + counts.SPECIES_CONFLICT + ')';
 
   var html = '';
   // Track which encounter indices actually produced a card so focus
   // management below can pick a *visible* encounter (not one that was
   // filtered out by species filter, hide-confirmed, or label filter).
   var renderedIndices = [];
+  // Reset the click-time target cache; it's rebuilt below to mirror the exact
+  // set of photos each Reject/Clear button represents on screen.
+  pipelineReviewVisibleTargets = {};
   encounterSortOrder().forEach(function(ei) {
     var enc = pipelineResults.encounters[ei];
     var timeRange = '';
@@ -2493,26 +3096,24 @@ function renderResults() {
       timeRange = t0.substring(0,8) + (t1 ? ' - ' + t1.substring(0,8) : '');
     }
 
-    // Check if encounter passes species filter
-    if (!encounterMatchesSpecies(enc)) return;
+    // Check if the encounter passes the species/filename search.
+    if (!encounterMatchesSearch(enc, photoMap)) return;
 
-    // Hide confirmed: skip the whole encounter if every one of its photos is hidden
+    // Build the set of photos this encounter will actually draw: skip
+    // hide-confirmed photos and photos filtered out by the active label /
+    // species-conflict filter. The encounter card is rendered only if this
+    // set is non-empty, and the encounter-level Reject/Clear button targets
+    // exactly this set so it can never flip flags on photos the user can't
+    // see.
     var encPhotoIds = enc.photo_ids || [];
-    if (hideConfirmed) {
-      var anyVisible = encPhotoIds.some(function(pid) {
-        return !confirmedHiddenIds.has(pid);
-      });
-      if (!anyVisible) return;
-    }
-
-    // Check if any photo in this encounter passes the label filter
-    var hasVisible = encPhotoIds.some(function(pid) {
+    var visibleEncIds = encPhotoIds.filter(function(pid) {
       var p = photoMap[pid];
       if (!p) return false;
       if (confirmedHiddenIds && confirmedHiddenIds.has(pid)) return false;
-      return activeFilter === 'all' || p.label === activeFilter;
+      return photoMatchesPipelineFilter(p, speciesConflictEvidence[pid]);
     });
-    if (!hasVisible) return;
+    if (!visibleEncIds.length) return;
+    pipelineReviewVisibleTargets['encounter:' + ei] = visibleEncIds;
 
     renderedIndices.push(ei);
 
@@ -2528,15 +3129,27 @@ function renderResults() {
     if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
     if (timeRange) html += '<span>' + timeRange + '</span>';
     html += missingTimestampBadge(enc);
-    html += '</span></div>';
+    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
+    html += '</span>';
+    html += renderGroupRejectButton('encounter', ei, null, visibleEncIds, photoMap);
+    html += '</div>';
     html += '<div class="encounter-body" id="encBody' + ei + '"' + (isCollapsed ? ' style="display:none;"' : '') + '>';
 
     if (enc.bursts && enc.bursts.length > 0) {
       enc.bursts.forEach(function(burst, bi) {
         if (hideConfirmed && isBurstConfirmed(enc, burst)) return;
         var burstIds = burst.photo_ids || burst;
+        // Narrow the burst's Reject/Clear target to photos that actually
+        // render — the active label / species-conflict filter can hide
+        // frames inside a burst even though the burst strip itself is drawn.
+        var visibleBurstIds = burstIds.filter(function(pid) {
+          var p = photoMap[pid];
+          if (!p) return false;
+          return photoMatchesPipelineFilter(p, speciesConflictEvidence[pid]);
+        });
+        pipelineReviewVisibleTargets['burst:' + ei + ':' + bi] = visibleBurstIds;
         html += '<div class="burst-strip">';
-        html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">';
+        html += '<div class="burst-controls">';
         if (enc.bursts.length > 1) {
           html += '<span class="burst-label">B' + (bi+1) + '</span>';
         }
@@ -2547,13 +3160,15 @@ function renderResults() {
         if (!burst.species_override && enc.bursts.length > 1) {
           html += '<span class="burst-species-edit" onclick="toggleSpeciesDropdown(event,' + ei + ',' + bi + ',\'top\')">&#9998;</span>';
         }
+        html += renderBurstSpeciesConflict(enc, ei, burst, bi, speciesConflictEvidence);
+        html += renderGroupRejectButton('burst', ei, bi, visibleBurstIds, photoMap);
         html += '<button class="detach-btn" onclick="detachBurst(' + ei + ',' + bi + ')" title="Detach burst">&times;</button>';
         html += '</div>';
         burstIds.forEach(function(pid) {
           var p = photoMap[pid];
           if (!p) return;
-          if (activeFilter !== 'all' && p.label !== activeFilter) return;
-          html += renderPhotoCard(p, ei, bi);
+          if (!photoMatchesPipelineFilter(p, speciesConflictEvidence[pid])) return;
+          html += renderPhotoCard(p, ei, bi, speciesConflictEvidence[pid]);
         });
         html += '</div>';
       });
@@ -2562,8 +3177,8 @@ function renderResults() {
       encPhotoIds.forEach(function(pid) {
         var p = photoMap[pid];
         if (!p) return;
-        if (activeFilter !== 'all' && p.label !== activeFilter) return;
-        html += renderPhotoCard(p, null, null);
+        if (!photoMatchesPipelineFilter(p, speciesConflictEvidence[pid])) return;
+        html += renderPhotoCard(p, null, null, speciesConflictEvidence[pid]);
       });
     }
 
@@ -2576,6 +3191,7 @@ function renderResults() {
     if (enc.burst_count) html += '<span>' + enc.burst_count + ' bursts</span>';
     if (timeRange) html += '<span>' + timeRange + '</span>';
     html += missingTimestampBadge(enc);
+    html += renderEncounterSpeciesConflict(enc, speciesConflictEvidence, confirmedHiddenIds);
     html += '</span></div>';
 
     html += '</div></div>';
@@ -2600,7 +3216,7 @@ function renderResults() {
   }
 }
 
-function renderPhotoCard(p, encIdx, burstIdx) {
+function renderPhotoCard(p, encIdx, burstIdx, speciesConflict) {
   var label = (p.label || '').toLowerCase();
   var manualLabel = '';
   var visibleLabel = '';
@@ -2633,6 +3249,15 @@ function renderPhotoCard(p, encIdx, burstIdx) {
     html += '<div class="photo-info">' + escapeHtml(p.filename || '') + ' &middot; Q=' + q.toFixed(2) + '</div>';
   } else {
     html += '<div class="photo-info">' + escapeHtml(p.filename || '') + '</div>';
+  }
+  if (speciesConflict && speciesConflict.severity) {
+    var conflictTitle = escapeAttr(speciesConflictTitle(speciesConflict));
+    html += '<button class="species-conflict-badge photo-species-conflict ' + speciesConflict.severity +
+      '" data-species-conflict="' + speciesConflict.severity + '" onclick="event.stopPropagation();openInspect(' +
+      p.id + ')" title="' + conflictTitle + '" aria-label="' + conflictTitle + '">';
+    html += '<span aria-hidden="true">&#9888;</span><span class="species-conflict-label">' +
+      escapeHtml(speciesConflict.alternativeSpecies) + ' ' +
+      formatSpeciesConfidence(speciesConflict.alternativeSupport) + '</span></button>';
   }
   html += '</div>';
   return html;
@@ -2686,6 +3311,25 @@ function isBurstConfirmed(enc, burst) {
   var ovr = burst && burst.species_override;
   if (ovr) return !!ovr.confirmed;
   return !!(enc && enc.species_confirmed);
+}
+
+// Photo IDs the user currently sees inside this encounter's body. When
+// "Hide confirmed" is off, this is every photo in the encounter. When on,
+// photos belonging to confirmed bursts (or a confirmed no-burst encounter)
+// are excluded so encounter-level actions only touch what's on screen.
+function visibleEncounterPhotoIds(enc) {
+  var ids = (enc && enc.photo_ids) || [];
+  if (!hideConfirmed) return ids.slice();
+  if (enc.bursts && enc.bursts.length > 0) {
+    var hidden = new Set();
+    enc.bursts.forEach(function(burst) {
+      if (isBurstConfirmed(enc, burst)) {
+        (burst.photo_ids || burst || []).forEach(function(pid) { hidden.add(pid); });
+      }
+    });
+    return ids.filter(function(pid) { return !hidden.has(pid); });
+  }
+  return enc.species_confirmed ? [] : ids.slice();
 }
 
 function toggleHideConfirmed() {
@@ -3075,9 +3719,288 @@ function findEncounterForPhoto(photoId) {
 }
 
 var inspectPhotoId = null;
+var pipelineReviewGroupFlagInFlight = {};
+// Photo IDs that any in-flight bulk reject/clear is currently mutating. We
+// check for overlap in setPipelineReviewGroupFlag so an encounter-level
+// action and one of its burst-level actions can't run concurrently: each
+// snapshots previousFlags from its own /api/pipeline/group/state read, so
+// two overlapping writes would let the later Undo restore shared photos to
+// the pre-first-action state, silently rolling back part of the earlier
+// action. Non-overlapping bulk actions (different bursts, different
+// encounters) still proceed in parallel.
+var pipelineReviewGroupFlagInFlightPhotoIds = new Set();
+// Photo IDs each rendered bulk-reject button actually represents, keyed by the
+// same 'encounter:ei' / 'burst:ei:bi' strings that group flag targets use.
+// renderResults() rebuilds this every render so hide-confirmed AND the label /
+// species-conflict filter both narrow the target to what the user can see.
+// groupFlagTarget() reads from here so the click applies to the visible set,
+// not the raw underlying photo list.
+var pipelineReviewVisibleTargets = {};
 
 function pipelineReviewBareKey(e, key) {
   return !e.ctrlKey && !e.metaKey && !e.altKey && e.key && e.key.toLowerCase() === key;
+}
+
+function normalizedPipelineReviewFlag(flag) {
+  return flag === 'flagged' || flag === 'rejected' ? flag : 'none';
+}
+
+function updatePipelineReviewPhotoFlag(photo, flag) {
+  if (!photo) return;
+  photo.flag = flag;
+  // Rejected photos lose representative eligibility server-side
+  // (get_species_representatives(eligible_only=True) filters them out), so
+  // mirror that in the review cache immediately.
+  if (flag === 'rejected') {
+    if (photo.is_species_representative) photo.is_species_representative = false;
+    if (Array.isArray(photo.life_list)) {
+      photo.life_list.forEach(function(entry) {
+        if (!entry) return;
+        if (entry.is_current_photo) entry.is_current_photo = false;
+        if (entry.is_species_representative) entry.is_species_representative = false;
+      });
+    }
+  }
+}
+
+function renderGroupRejectButton(kind, encIdx, burstIdx, photoIds, photoMap) {
+  photoIds = Array.isArray(photoIds) ? photoIds : [];
+  var allRejected = photoIds.length > 0 && photoIds.every(function(pid) {
+    return photoMap[pid] && photoMap[pid].flag === 'rejected';
+  });
+  var noun = kind === 'burst' ? 'burst' : 'encounter';
+  var label = allRejected ? 'Clear rejects' : 'Reject ' + noun;
+  var title = allRejected
+    ? 'Clear the rejected flag from every photo in this ' + noun
+    : 'Mark every photo in this ' + noun + ' as rejected';
+  var handler = kind === 'burst'
+    ? 'toggleBurstRejected(event,' + encIdx + ',' + burstIdx + ')'
+    : 'toggleEncounterRejected(event,' + encIdx + ')';
+  var testId = kind === 'burst' ? 'reject-burst' : 'reject-encounter';
+  return '<button type="button" class="group-reject-btn' + (allRejected ? ' all-rejected' : '') +
+    '" data-testid="' + testId + '" onclick="' + handler + '" title="' + escapeAttr(title) +
+    '" aria-label="' + escapeAttr(label) + '"><span aria-hidden="true">&times;</span>' +
+    escapeHtml(label) + '</button>';
+}
+
+function groupFlagTarget(encIdx, burstIdx) {
+  if (!pipelineResults || !pipelineResults.encounters) return null;
+  var enc = pipelineResults.encounters[encIdx];
+  if (!enc) return null;
+  if (burstIdx == null) {
+    // Read the exact set of photos the encounter button represents on
+    // screen: renderResults() cached it under this key, and it already
+    // excludes photos hidden by Hide confirmed or by the active label /
+    // species-conflict filter so a click can't flip flags on photos the
+    // user can't see. Fall back to the hide-confirmed-only set only when
+    // the cache is missing (e.g. no render has happened yet).
+    var encKey = 'encounter:' + encIdx;
+    var encIds = pipelineReviewVisibleTargets[encKey];
+    if (!encIds) encIds = visibleEncounterPhotoIds(enc);
+    return {key: encKey, noun: 'encounter', photoIds: encIds};
+  }
+  var burst = enc.bursts && enc.bursts[burstIdx];
+  if (!burst) return null;
+  var burstKey = 'burst:' + encIdx + ':' + burstIdx;
+  var burstIds = pipelineReviewVisibleTargets[burstKey];
+  if (!burstIds) burstIds = burst.photo_ids || burst || [];
+  return {
+    key: burstKey,
+    noun: 'burst',
+    photoIds: burstIds,
+  };
+}
+
+function restorePipelineReviewFlags(previousFlags, noun) {
+  var byFlag = {none: [], flagged: [], rejected: []};
+  Object.keys(previousFlags).forEach(function(pid) {
+    var flag = normalizedPipelineReviewFlag(previousFlags[pid]);
+    byFlag[flag].push(parseInt(pid, 10));
+  });
+  var ids = Object.keys(previousFlags).map(function(pid) { return parseInt(pid, 10); });
+  // Undo is another bulk flag write and must hold the same photo-ID lock as
+  // the forward action. Otherwise a pick/reject started while these restore
+  // requests are running can be overwritten by the older snapshot.
+  var overlaps = ids.some(function(pid) {
+    return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+  });
+  if (overlaps) {
+    showToast('Another flag change is still finishing — try Undo again in a moment', 'error');
+    return Promise.resolve();
+  }
+  ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.add(pid); });
+  var sequence = Promise.resolve();
+  ['none', 'flagged', 'rejected'].forEach(function(flag) {
+    if (!byFlag[flag].length) return;
+    sequence = sequence.then(function() {
+      return safeFetch('/api/batch/flag', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({photo_ids: byFlag[flag], flag: flag}),
+      }).then(function() {
+        byFlag[flag].forEach(function(pid) {
+          updatePipelineReviewPhotoFlag(findPhotoInResults(pid), flag);
+        });
+      });
+    });
+  });
+  return sequence.then(function() {
+    renderResults();
+    showToast('Restored previous flags for ' + noun, 'success');
+    refreshLatestScopeSnapshotIfCurrent();
+  }).finally(function() {
+    ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.delete(pid); });
+  });
+}
+
+function setPipelineReviewGroupFlag(target, flag) {
+  if (!target || pipelineReviewGroupFlagInFlight[target.key]) return Promise.resolve();
+  if (isScopedReviewView()) {
+    notifyReadOnlyScopedView();
+    return Promise.resolve();
+  }
+  var ids = Array.from(new Set((target.photoIds || []).map(function(pid) {
+    return parseInt(pid, 10);
+  }).filter(function(pid) { return !!pid && !!findPhotoInResults(pid); })));
+  if (!ids.length) return Promise.resolve();
+
+  // Block bulk actions whose photos overlap an in-flight bulk action — e.g.,
+  // clicking Reject burst while the parent encounter's Reject is still
+  // running. Both requests would snapshot previousFlags from the pre-first
+  // DB read, and the later Undo could restore the shared photos to 'none',
+  // silently reverting part of the earlier action.
+  var overlaps = ids.some(function(pid) {
+    return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+  });
+  if (overlaps) {
+    showToast('Another bulk reject is still finishing — try again in a moment', 'error');
+    return Promise.resolve();
+  }
+
+  pipelineReviewGroupFlagInFlight[target.key] = true;
+  ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.add(pid); });
+  // pipelineResults.photos[].flag is a cache written when the pipeline ran;
+  // GET /api/pipeline/results serves it as-is without refreshing from the DB
+  // (unlike the GRM, which fetches /api/pipeline/group/state on open). If the
+  // user picked a photo in Browse after the cache was written, the cache can
+  // still read 'rejected' for it. Deriving changedIds and previousFlags from
+  // the stale cache would post flag: 'none' for that live pick on "Clear
+  // rejects", and Undo would restore the cached 'rejected' rather than the
+  // pick. Read live DB flags first and drive the decision off those.
+  return safeFetch('/api/pipeline/group/state', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({photo_ids: ids, species: ''}),
+  }).then(function(data) {
+    var live = (data && data.photos) || {};
+    var liveFlagFor = function(pid) {
+      return normalizedPipelineReviewFlag(live[pid] && live[pid].flag);
+    };
+    // Sync the review cache to the live snapshot so subsequent button
+    // labels and card badges reflect truth, not the cache's opening value.
+    ids.forEach(function(pid) {
+      var liveFlag = liveFlagFor(pid);
+      var photo = findPhotoInResults(pid);
+      if (photo && normalizedPipelineReviewFlag(photo.flag) !== liveFlag) {
+        updatePipelineReviewPhotoFlag(photo, liveFlag);
+      }
+    });
+    // "Reject" applies the reject flag to anything not already rejected —
+    // including live picks — because the user explicitly asked to reject the
+    // group. "Clear rejects" only touches photos that are actually rejected;
+    // it must never overwrite a live pick or an unflagged photo to 'none'.
+    var changedIds = ids.filter(function(pid) {
+      var liveFlag = liveFlagFor(pid);
+      if (flag === 'none') return liveFlag === 'rejected';
+      return liveFlag !== flag;
+    });
+    if (!changedIds.length) {
+      renderResults();
+      return;
+    }
+    var previousFlags = {};
+    changedIds.forEach(function(pid) {
+      previousFlags[pid] = liveFlagFor(pid);
+    });
+    return safeFetch('/api/batch/flag', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo_ids: changedIds, flag: flag}),
+    }).then(function() {
+      changedIds.forEach(function(pid) {
+        updatePipelineReviewPhotoFlag(findPhotoInResults(pid), flag);
+      });
+      renderResults();
+      refreshLatestScopeSnapshotIfCurrent();
+      var count = changedIds.length;
+      var message = flag === 'rejected'
+        ? 'Rejected ' + count + ' photo' + (count === 1 ? '' : 's') + ' in ' + target.noun
+        : 'Cleared rejects from ' + count + ' photo' + (count === 1 ? '' : 's') + ' in ' + target.noun;
+      showUndo(message, function() {
+        restorePipelineReviewFlags(previousFlags, target.noun);
+      });
+    });
+  }).finally(function() {
+    delete pipelineReviewGroupFlagInFlight[target.key];
+    ids.forEach(function(pid) { pipelineReviewGroupFlagInFlightPhotoIds.delete(pid); });
+  });
+}
+
+function toggleEncounterRejected(event, encIdx) {
+  if (event && event.stopPropagation) event.stopPropagation();
+  var target = groupFlagTarget(encIdx, null);
+  if (!target) return;
+  var allRejected = target.photoIds.length > 0 && target.photoIds.every(function(pid) {
+    var photo = findPhotoInResults(pid);
+    return photo && photo.flag === 'rejected';
+  });
+  setPipelineReviewGroupFlag(target, allRejected ? 'none' : 'rejected');
+}
+
+function toggleBurstRejected(event, encIdx, burstIdx) {
+  if (event && event.stopPropagation) event.stopPropagation();
+  var target = groupFlagTarget(encIdx, burstIdx);
+  if (!target) return;
+  var allRejected = target.photoIds.length > 0 && target.photoIds.every(function(pid) {
+    var photo = findPhotoInResults(pid);
+    return photo && photo.flag === 'rejected';
+  });
+  setPipelineReviewGroupFlag(target, allRejected ? 'none' : 'rejected');
+}
+
+// Native Photo menu commands prefer a page-level batchSetFlag helper. In the
+// burst modal, route those commands through the modal's pending zones (the
+// same behavior as its P/X/Space shortcuts) rather than writing directly to
+// /api/batch/flag behind the modal's Apply workflow.
+function batchSetFlag(flag) {
+  if (flag !== 'flagged' && flag !== 'rejected' && flag !== 'none') {
+    return Promise.resolve(false);
+  }
+  var overlay = document.getElementById('grmOverlay');
+  if (overlay && overlay.classList.contains('open') && grmState) {
+    var ids = _grmActionTargetIds();
+    var overlapsBulkFlagWrite = ids.some(function(pid) {
+      return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+    });
+    if (overlapsBulkFlagWrite) {
+      showToast('A bulk reject for the selected photos is still finishing — try again in a moment', 'error');
+      return Promise.resolve(false);
+    }
+    if (flag === 'flagged') grmMovePick();
+    else if (flag === 'rejected') grmMoveReject();
+    else grmMoveCandidate();
+    return Promise.resolve(true);
+  }
+
+  var activeIds = typeof nativeMenuActivePhotoIds === 'function'
+    ? nativeMenuActivePhotoIds()
+    : [];
+  if (!activeIds.length) return Promise.resolve(false);
+  return Promise.all(activeIds.map(function(pid) {
+    return setPipelineReviewFlag(pid, flag);
+  })).then(function(results) {
+    return results.every(function(result) { return result !== false; });
+  });
 }
 
 function setPipelineReviewFlag(photoId, flag) {
@@ -3088,6 +4011,18 @@ function setPipelineReviewFlag(photoId, flag) {
     notifyReadOnlyScopedView();
     return Promise.resolve();
   }
+  // A group action snapshots live flags before writing its batch. Allowing a
+  // per-photo pick/reject for one of those same IDs before the batch finishes
+  // would let the batch overwrite the newer choice, while its Undo would
+  // restore the older snapshot. Honor the group lock here as well as in the
+  // bulk path so every overlapping flag write is serialized.
+  if (pipelineReviewGroupFlagInFlightPhotoIds.has(photoId)) {
+    showToast('A bulk reject for this photo is still finishing — try again in a moment', 'error');
+    // The shared lightbox treats every resolved value except false as a
+    // successful write and updates its own cache/event listeners. Return an
+    // explicit failure so its UI stays on the last confirmed database flag.
+    return Promise.resolve(false);
+  }
 
   return safeFetch('/api/photos/' + photoId + '/flag', {
     method: 'POST',
@@ -3096,23 +4031,7 @@ function setPipelineReviewFlag(photoId, flag) {
   }).then(function() {
     var photo = findPhotoInResults(photoId);
     if (photo) {
-      photo.flag = flag;
-      // Rejected photos lose representative eligibility server-side
-      // (get_species_representatives(eligible_only=True) filters them out),
-      // so drop the cached representative fields — the pipeline grid renders
-      // the Representative badge from photo.is_species_representative and
-      // would otherwise keep displaying it on a photo that's just been
-      // rejected via the inspect shortcut or the shared lightbox reject.
-      if (flag === 'rejected') {
-        if (photo.is_species_representative) photo.is_species_representative = false;
-        if (Array.isArray(photo.life_list)) {
-          photo.life_list.forEach(function(entry) {
-            if (!entry) return;
-            if (entry.is_current_photo) entry.is_current_photo = false;
-            if (entry.is_species_representative) entry.is_species_representative = false;
-          });
-        }
-      }
+      updatePipelineReviewPhotoFlag(photo, flag);
     }
     renderResults();
     if (inspectPhotoId === photoId && document.getElementById('inspectOverlay').classList.contains('open')) {
@@ -3372,8 +4291,17 @@ function populateReviewScopeCollections(collections) {
   reviewScopeCollections.forEach(function(c) {
     var opt = document.createElement('option');
     opt.value = String(c.id);
-    var count = c.photo_count != null ? ' (' + c.photo_count + ')' : '';
-    opt.textContent = c.name + count;
+    // count_error collections have unresolvable rules; picking one would 400
+    // the pipeline reflow request. Show it disabled with a hint instead of
+    // offering a scope that can't run.
+    if (c.count_error) {
+      opt.disabled = true;
+      opt.textContent = c.name + ' (unavailable — edit rules to fix)';
+      opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
+    } else {
+      var count = c.photo_count != null ? ' (' + c.photo_count + ')' : '';
+      opt.textContent = c.name + count;
+    }
     sel.appendChild(opt);
   });
   updateReviewScopeControls();
@@ -4180,6 +5108,7 @@ var grmState = {
   removed: new Set(),
   selected: null,     // photo id
   selectedIds: new Set(),
+  selectedSubjectByPhoto: {}, // photo id -> detection id (multi-subject photos only)
   selectionAnchor: null,
   touched: new Set(), // photo ids changed by the user before DB seeding lands
   sessionId: 0,       // bumped on each openGroupReview; used to drop stale fetches
@@ -4461,6 +5390,7 @@ function openGroupReview(encIdx, burstIdx, selectPhotoId) {
     removed: new Set(),
     selected: initialSelectedId,
     selectedIds: initialSelectedIds,
+    selectedSubjectByPhoto: {},
     selectionAnchor: initialSelectedId,
     touched: new Set(),
     // Filled in by the /group/state fetch below. Keys: photo_id → {flag,
@@ -4779,6 +5709,60 @@ function grmKeywordBadgeHtml(p, stats) {
   return '<span class="grm-card-needs-tag" title="Missing species keyword; Apply will add it if Confirm species is checked">Needs tag</span>';
 }
 
+function grmPhotoSubjects(photo) {
+  return photo && Array.isArray(photo.subjects) ? photo.subjects : [];
+}
+
+function grmSubjectTopPrediction(subject) {
+  var predictions = subject && Array.isArray(subject.predictions)
+    ? subject.predictions : [];
+  if (!predictions.length) return null;
+  return predictions.reduce(function(best, entry) {
+    return !best || Number(entry[1] || 0) > Number(best[1] || 0) ? entry : best;
+  }, null);
+}
+
+function grmSubjectLabel(subject, index) {
+  var top = grmSubjectTopPrediction(subject);
+  return 'Subject ' + (index + 1) + ' · ' + (top ? top[0] : 'Unclassified');
+}
+
+function grmSubjectBadgeHtml(photo) {
+  var subjects = grmPhotoSubjects(photo);
+  if (subjects.length < 2) return '';
+  return '<span class="grm-card-subject-count" data-testid="multi-subject-badge" ' +
+    'title="Multiple detected subjects">' + subjects.length + ' subjects</span>';
+}
+
+function grmSelectedSubject(photo) {
+  var subjects = grmPhotoSubjects(photo);
+  if (!subjects.length) return null;
+  if (!grmState.selectedSubjectByPhoto) grmState.selectedSubjectByPhoto = {};
+  var selectedId = grmState.selectedSubjectByPhoto[photo.id];
+  var selected = subjects.find(function(subject) {
+    return String(subject.detection_id) === String(selectedId);
+  });
+  if (!selected) {
+    selected = subjects[0];
+    grmState.selectedSubjectByPhoto[photo.id] = selected.detection_id;
+  }
+  return selected;
+}
+
+function grmSelectSubject(photoId, detectionId) {
+  if (!grmState || !grmState.items) return;
+  var photo = grmState.items.find(function(item) { return item.id === photoId; });
+  if (!photo) return;
+  var subject = grmPhotoSubjects(photo).find(function(item) {
+    return String(item.detection_id) === String(detectionId);
+  });
+  if (!subject) return;
+  if (!grmState.selectedSubjectByPhoto) grmState.selectedSubjectByPhoto = {};
+  grmState.selectedSubjectByPhoto[photoId] = subject.detection_id;
+  grmState.selected = photoId;
+  grmRefreshSelectedLoupe();
+}
+
 function renderGroupModal() {
   var items = grmState.items.filter(function(p) { return !grmState.removed.has(p.id); });
   // Per-card badges are keyed off the *visible* items — a removed frame has
@@ -4808,6 +5792,7 @@ function renderGroupModal() {
     else if (dbFlag === 'rejected') flagHtml = '<span class="photo-flag-badge flag-rejected" title="Already rejected in library" style="bottom:auto;top:4px;left:4px;">X</span>';
 
     var kwHtml = grmKeywordBadgeHtml(p, keywordStats);
+    var subjectHtml = grmSubjectBadgeHtml(p);
     var repHtml = dbSt.is_species_representative
       ? '<span class="grm-card-representative">Representative</span>'
       : '';
@@ -4826,6 +5811,7 @@ function renderGroupModal() {
           ' onload="grmCardImgLoaded(this)" loading="lazy" draggable="false">' +
         flagHtml +
         kwHtml +
+        subjectHtml +
         repHtml +
       '</div>' +
       '<div class="grm-card-info">' +
@@ -5243,8 +6229,8 @@ function renderSpeciesBlock(title, rows) {
 // Group a single photo's raw species_top5 ([species, confidence, model] rows)
 // into the same {species, models} shape the aggregate uses, dropping models
 // below `threshold` and sorting by confidence descending.
-function buildPerPhotoSpeciesRows(photo, threshold) {
-  var top5 = (photo && photo.species_top5) || [];
+function buildSpeciesRows(top5, threshold) {
+  top5 = top5 || [];
   if (top5.length === 0) return [];
   var bySpecies = {};
   var order = [];
@@ -5262,6 +6248,47 @@ function buildPerPhotoSpeciesRows(photo, threshold) {
   });
   rows.sort(function(a, b) { return b.models[0].confidence - a.models[0].confidence; });
   return rows;
+}
+
+function buildPerPhotoSpeciesRows(photo, threshold) {
+  return buildSpeciesRows((photo && photo.species_top5) || [], threshold);
+}
+
+function buildMultiSubjectReviewHtml(photo, threshold) {
+  var subjects = grmPhotoSubjects(photo);
+  if (subjects.length < 2) return '';
+  var selected = grmSelectedSubject(photo);
+  if (!selected) return '';
+
+  var html = '<div class="grm-subject-review" data-testid="multi-subject-review">';
+  html += '<div class="grm-subject-review-heading">' + subjects.length + ' subjects detected</div>';
+  html += '<div class="grm-subject-review-hint">Choose a subject to see the prediction tied to that part of the photo.</div>';
+  html += '<div class="grm-subject-switcher">';
+  subjects.forEach(function(subject, index) {
+    var isSelected = String(subject.detection_id) === String(selected.detection_id);
+    html += '<button type="button" class="grm-subject-chip' + (isSelected ? ' selected' : '') +
+      '" data-testid="subject-chip" onclick="grmSelectSubject(' + photo.id + ', ' +
+      Number(subject.detection_id) + ')">' + escapeHtml(grmSubjectLabel(subject, index)) + '</button>';
+  });
+  html += '</div>';
+
+  var box = selected.box || {};
+  var conf = selected.detection_confidence;
+  var boxText = [box.x, box.y, box.w, box.h].every(function(value) { return value != null; })
+    ? ' · box x ' + Math.round(box.x * 100) + '–' + Math.round((box.x + box.w) * 100) +
+      '%, y ' + Math.round(box.y * 100) + '–' + Math.round((box.y + box.h) * 100) + '%'
+    : '';
+  html += '<div class="grm-subject-review-meta">Detector confidence ' +
+    (conf == null ? 'unknown' : Math.round(conf * 100) + '%') + boxText + '</div>';
+  html += '</div>';
+  html += renderSpeciesBlock(
+    'Selected subject predictions',
+    buildSpeciesRows(selected.predictions || [], threshold)
+  );
+  if (!selected.predictions || selected.predictions.length === 0) {
+    html += '<div class="grm-subject-review-hint" data-testid="subject-unclassified">No species prediction is available for this subject.</div>';
+  }
+  return html;
 }
 
 // Drop aggregate rows (and their models) below `threshold`.
@@ -5358,7 +6385,12 @@ function candidateSpeciesOverrideFromPhotos(photos) {
 function buildSpeciesPredictionsHtml(photo, consensusRows, consensusTitleText, threshold) {
   threshold = threshold || 0;
   var html = '';
-  html += renderSpeciesBlock('Species Predictions (this photo)', buildPerPhotoSpeciesRows(photo, threshold));
+  var subjects = grmPhotoSubjects(photo);
+  if (subjects.length > 1) {
+    html += buildMultiSubjectReviewHtml(photo, threshold);
+  } else {
+    html += renderSpeciesBlock('Species Predictions (this photo)', buildPerPhotoSpeciesRows(photo, threshold));
+  }
   if (consensusRows && consensusRows.length > 0) {
     html += renderSpeciesBlock(consensusTitleText, filterAggSpeciesRows(consensusRows, threshold));
   }
@@ -5385,6 +6417,26 @@ function buildPipelineMetadataHtml(photo) {
       html += '<div class="reject-reason">&#9888; ' + r + '</div>';
     });
     html += '</div>';
+  }
+
+  var conflictEnc = pipelineResults && pipelineResults.encounters &&
+    pipelineResults.encounters[grmState.encIdx];
+  var conflictBurst = conflictEnc && conflictEnc.bursts &&
+    conflictEnc.bursts[grmState.burstIdx];
+  var conflictExpected = speciesCandidateForReviewUnit(conflictEnc, conflictBurst);
+  var speciesConflict = analyzePhotoSpeciesConflict(photo, conflictExpected);
+  if (speciesConflict && speciesConflict.severity) {
+    var conflictHeading = speciesConflict.severity === 'strong'
+      ? 'Strong classification conflict'
+      : 'Possible classification conflict';
+    html += '<div class="species-conflict-badge inspect-species-conflict ' +
+      speciesConflict.severity + '"><span aria-hidden="true">&#9888;</span><span><strong>' +
+      conflictHeading + '</strong><span class="species-conflict-explanation">This photo averages ' +
+      escapeHtml(speciesConflict.alternativeSpecies) + ' at ' +
+      formatSpeciesConfidence(speciesConflict.alternativeSupport) + ', while the current suggestion ' +
+      escapeHtml(speciesConflict.expectedSpecies) + ' averages ' +
+      formatSpeciesConfidence(speciesConflict.expectedSupport) +
+      '. Review the burst before changing its grouping or species.</span></span></div>';
   }
 
   // Species predictions: this photo, then the consensus for the burst being
@@ -6286,11 +7338,33 @@ async function grmApply() {
   }
   if (grmState.applying) return;
   grmSetApplying(true);
+  var grmFlagLockIds = [];
 
   try {
     var diff = grmComputeDiff();
     var checks = grmResolveChecks(diff);
     var species = document.getElementById('grmSpecies').value.trim();
+
+    // GRM pick/reject writes use /api/pipeline/group/apply rather than the
+    // per-photo helper, so serialize them explicitly with bulk Reject/Clear
+    // and Undo. Holding the lock through the full apply also blocks a bulk
+    // action from starting after the modal write has begun.
+    if (checks.flags) {
+      var candidateFlagLockIds = grmState.items
+        .filter(function(p) { return !grmState.removed.has(p.id); })
+        .map(function(p) { return p.id; });
+      var overlapsBulkFlagWrite = candidateFlagLockIds.some(function(pid) {
+        return pipelineReviewGroupFlagInFlightPhotoIds.has(pid);
+      });
+      if (overlapsBulkFlagWrite) {
+        showToast('A bulk reject for this group is still finishing — try Apply again in a moment', 'error');
+        return;
+      }
+      grmFlagLockIds = candidateFlagLockIds;
+      grmFlagLockIds.forEach(function(pid) {
+        pipelineReviewGroupFlagInFlightPhotoIds.add(pid);
+      });
+    }
 
     // --- Flags side (picks/rejects/candidates + removed→detach) ---
     // Only committed when the "Apply picks/rejects" box is checked. Removals are
@@ -6526,6 +7600,9 @@ async function grmApply() {
       }, 0);
     });
   } finally {
+    grmFlagLockIds.forEach(function(pid) {
+      pipelineReviewGroupFlagInFlightPhotoIds.delete(pid);
+    });
     var overlay = document.getElementById('grmOverlay');
     if (overlay && overlay.classList.contains('open')) {
       grmSetApplying(false);

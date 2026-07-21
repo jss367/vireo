@@ -3264,11 +3264,12 @@ def test_detect_batch_prefers_cached_detections_over_db(monkeypatch):
     assert 42 in processed
 
 
-def test_pipeline_classify_passes_primary_detection_to_prepare_image(
+def test_pipeline_classify_passes_each_qualifying_detection_to_prepare_image(
     tmp_path, monkeypatch
 ):
-    """classify_stage must pass the primary detection dict (with box_x/y/w/h
-    keys) to _prepare_image, not the raw {photo_id: [dets]} det_map.
+    """classify_stage must pass every qualifying detection dict (with
+    box_x/y/w/h keys) to _prepare_image, not the raw {photo_id: [dets]}
+    det_map. Raw detections below the workspace threshold stay excluded.
 
     Regression: classify_stage called
         _prepare_image(photo, folders, det_map)
@@ -3276,8 +3277,8 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
     once any photo in a batch has a detection, _prepare_image entered its
     crop branch and evaluated det_map["box_w"] -> KeyError: 'box_w', aborting
     classify the moment the first detection came back.  The fix is to look
-    up the highest-confidence detection for this specific photo and pass
-    that (or None) to _prepare_image.
+    up the detections for this specific photo and pass each one (or None for
+    the full-image fallback) to _prepare_image.
     """
     import classifier as classifier_mod
     import classify_job
@@ -3308,11 +3309,24 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
         "box_x": 0.1, "box_y": 0.1, "box_w": 0.5, "box_h": 0.5,
         "confidence": 0.95, "category": "animal",
     }
+    secondary_det = {
+        "id": 78,
+        "box_x": 0.6, "box_y": 0.2, "box_w": 0.25, "box_h": 0.3,
+        "confidence": 0.45, "category": "animal",
+    }
+    below_threshold_det = {
+        "id": 79,
+        "box_x": 0.8, "box_y": 0.8, "box_w": 0.05, "box_h": 0.05,
+        "confidence": 0.1, "category": "animal",
+    }
 
     def fake_detect_batch(batch, folders, runner, job, reclassify, db_,
                           det_conf_threshold=None, already_detected_ids=None,
                           cached_detections=None):
-        det_map = {p["id"]: [primary_det] for p in batch}
+        det_map = {
+            p["id"]: [primary_det, secondary_det, below_threshold_det]
+            for p in batch
+        }
         return det_map, len(batch), {p["id"] for p in batch}
 
     monkeypatch.setattr(classify_job, "_detect_batch", fake_detect_batch)
@@ -3379,17 +3393,90 @@ def test_pipeline_classify_passes_primary_detection_to_prepare_image(
             f"_prepare_image received {det!r}; expected a detection dict "
             "with 'box_w' (or None), not the {photo_id: [dets]} map."
         )
-    # The fix should pass this photo's primary detection through.
-    assert any(
-        isinstance(d, dict) and d.get("box_w") == 0.5 for d in captured
-    ), (
-        f"Expected _prepare_image to receive the primary detection for "
-        f"photo {photo_id}, got {captured!r}."
+    captured_ids = [d.get("id") for d in captured if isinstance(d, dict)]
+    assert captured_ids == [77, 78], (
+        f"Expected both detections above the 0.2 workspace threshold, "
+        f"and no raw low-confidence detection; got {captured!r}."
     )
     # And the KeyError must not have leaked into job errors.
     assert not any("'box_w'" in e for e in job["errors"]), (
         f"KeyError 'box_w' leaked into job errors: {job['errors']}"
     )
+
+
+def test_pipeline_classifies_bracketed_weak_detection_without_lowering_threshold(
+    tmp_path, monkeypatch,
+):
+    """A weak box between two strong, tightly timed frames gets one targeted
+    classifier attempt even though the workspace threshold remains 0.20.
+    """
+    import classifier as classifier_mod
+    import classify_job
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+
+    photo_ids = []
+    for index, confidence in enumerate((0.9, 0.18, 0.9)):
+        filename = f"bird{index}.jpg"
+        photo_id = db.add_photo(
+            folder_id, filename, ".jpg", 12345, 1_000_000.0 + index,
+            timestamp=f"2026-07-18T08:36:3{index}",
+        )
+        _drop_jpeg(folder_path, filename)
+        db.write_detection_batch(
+            photo_id,
+            "megadetector-v6",
+            [{
+                "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                "confidence": confidence,
+                "category": "animal",
+            }],
+        )
+        photo_ids.append(photo_id)
+
+    collection_id = db.add_collection(
+        "Weak bridge",
+        json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+    model_id = _setup_fake_downloaded_model(tmp_path, monkeypatch)
+
+    captured = []
+
+    def capturing_prepare_image(photo, folders, detection, vireo_dir=None):
+        captured.append((photo["filename"], detection["confidence"]))
+        return None, "", ""
+
+    monkeypatch.setattr(classify_job, "_prepare_image", capturing_prepare_image)
+
+    class FakeClassifier:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(classifier_mod, "Classifier", FakeClassifier)
+
+    params = PipelineParams(
+        collection_id=collection_id,
+        model_ids=[model_id],
+        skip_extract_masks=True,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    job = _make_job()
+    with contextlib.suppress(RuntimeError):
+        run_pipeline_job(job, runner, db_path, ws_id, params)
+
+    assert ("bird1.jpg", 0.18) in captured
+    assert [name for name, _ in captured].count("bird1.jpg") == 1
 
 
 def test_pipeline_reclassify_purges_stale_detection_rows(tmp_path, monkeypatch):
@@ -7275,6 +7362,11 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
     ws_id = db._active_workspace_id
 
     events = []
+    pause_state = {
+        "requested": False,
+        "lock_held": False,
+        "wait_lock_states": [],
+    }
 
     real_acquire = pipeline_locks.acquire_workspace_regroup
 
@@ -7286,11 +7378,15 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
         def __enter__(self):
             events.append(("acquire", self._ws))
             self._inner.__enter__()
+            pause_state["lock_held"] = True
             return self
 
         def __exit__(self, *args):
             events.append(("release", self._ws))
-            return self._inner.__exit__(*args)
+            try:
+                return self._inner.__exit__(*args)
+            finally:
+                pause_state["lock_held"] = False
 
     monkeypatch.setattr(
         pj, "acquire_workspace_regroup",
@@ -7299,6 +7395,9 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
 
     def _ok_run(photos, config=None, emit_trace=False):
         events.append(("regroup_work", ws_id))
+        # Simulate Pause arriving during regroup work. The pipeline must defer
+        # its blocking wait until after the shared regroup/misses lock releases.
+        pause_state["requested"] = True
         return {"summary": {"groups": 1}, "photos": photos}
 
     monkeypatch.setattr(pipeline_mod, "run_full_pipeline", _ok_run)
@@ -7309,6 +7408,22 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
     )
 
     class TrackingRunner(FakeRunner):
+        def pause_requested(self, job_id):
+            return pause_state["requested"]
+
+        def cancellation_requested(self, job_id):
+            return False
+
+        def mark_paused(self, job_id):
+            return True
+
+        def wait_if_paused(self, job_id, *, publish_paused=False):
+            pause_state["wait_lock_states"].append(
+                pause_state["lock_held"],
+            )
+            pause_state["requested"] = False
+            return False
+
         def update_step(self, job_id, step_id, **kwargs):
             if step_id == "misses":
                 events.append(("miss_step", kwargs.get("status")))
@@ -7364,6 +7479,10 @@ def test_workspace_regroup_lock_spans_regroup_and_miss(tmp_path, monkeypatch):
         "miss step must run inside the same lock as regroup — otherwise "
         "a second same-workspace pipeline could sneak in and rewrite "
         f"grouping state between them. events: {interesting}"
+    )
+    assert pause_state["wait_lock_states"] == [False], (
+        "Pause must block only after the regroup/misses lock is released; "
+        f"wait states: {pause_state['wait_lock_states']}"
     )
 
 
@@ -8085,6 +8204,77 @@ def _stub_extract_masks_heavy_ops(monkeypatch):
     return state
 
 
+@pytest.mark.parametrize(
+    ("right_species", "expected_proxy_calls"),
+    (("Great-tailed Grackle", 3), ("Brown-headed Cowbird", 2)),
+)
+def test_extract_masks_stage_gates_weak_detection_on_matching_anchor_species(
+    tmp_path, monkeypatch, right_species, expected_proxy_calls,
+):
+    """Only a species-validated weak box enters the SAM mask worklist.
+
+    Classification already lowers its crop floor for a bracketed weak frame;
+    mask extraction must also apply grouping's matching-anchor-species gate.
+    """
+    import config as cfg
+    from db import Database
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_path = str(tmp_path / "photos")
+    os.makedirs(folder_path, exist_ok=True)
+    folder_id = db.add_folder(folder_path)
+
+    photo_ids = []
+    detection_ids = []
+    for index, confidence in enumerate((0.9, 0.18, 0.9)):
+        filename = f"bird{index}.jpg"
+        photo_id = db.add_photo(
+            folder_id, filename, ".jpg", 1000, 1_000_000.0 + index,
+            timestamp=f"2026-07-18T08:36:3{index}",
+        )
+        _drop_jpeg(folder_path, filename)
+        detection_id = db.write_detection_batch(
+            photo_id,
+            "megadetector-v6",
+            [{
+                "box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+                "confidence": confidence,
+                "category": "animal",
+            }],
+        )[0]
+        photo_ids.append(photo_id)
+        detection_ids.append(detection_id)
+
+    db.add_prediction(
+        detection_ids[0], "Great-tailed Grackle", 0.9, "inat21",
+    )
+    db.add_prediction(
+        detection_ids[-1], right_species, 0.9, "inat21",
+    )
+
+    collection_id = db.add_collection(
+        "Weak mask bridge",
+        json.dumps([{"field": "photo_ids", "value": photo_ids}]),
+    )
+    state = _stub_extract_masks_heavy_ops(monkeypatch)
+
+    params = PipelineParams(
+        collection_id=collection_id,
+        skip_classify=True,
+        skip_extract_masks=False,
+        skip_regroup=True,
+    )
+    runner = FakeRunner()
+    run_pipeline_job(_make_job(), runner, db_path, ws_id, params)
+
+    assert state["proxy_calls"] == expected_proxy_calls
+
+
 def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
     tmp_path, monkeypatch,
 ):
@@ -8226,6 +8416,7 @@ def test_pipeline_extract_masks_cancel_marks_stage_cancelled(
 
 def _run_extract_masks_for_test(
     tmp_path, monkeypatch, sam2_variant, photo_specs,
+    *, runner=None, on_generate_mask=None,
 ):
     """Drive a single pipeline run with extract_masks enabled and the heavy
     SAM2/DINOv2 calls stubbed.  Returns (db, runner, generate_mask_calls)
@@ -8286,6 +8477,8 @@ def _run_extract_masks_for_test(
         # Track every (variant, det_box) we get asked about — the cache
         # short-circuit must skip past this entirely on a hit.
         generate_mask_calls.append((variant, tuple(sorted(det_box.items()))))
+        if on_generate_mask is not None:
+            on_generate_mask()
         return np.ones((4, 4), dtype=bool)
 
     monkeypatch.setattr(masking, "render_proxy", fake_render_proxy)
@@ -8323,11 +8516,83 @@ def _run_extract_masks_for_test(
         skip_extract_masks=False,
         skip_regroup=True,
     )
-    runner = FakeRunner()
+    runner = runner or FakeRunner()
     job = _make_job()
     run_pipeline_job(job, runner, db_path, ws_id, params)
 
     return db, runner, generate_mask_calls, photo_ids
+
+
+def test_extract_masks_pause_waits_outside_photo_lock(tmp_path, monkeypatch):
+    """Pause may be requested under a photo lock but must wait after release."""
+    import pipeline_job as pj
+    import pipeline_locks
+
+    pause_state = {
+        "requested": False,
+        "lock_held": False,
+        "wait_lock_states": [],
+    }
+    real_acquire = pipeline_locks.acquire_photo_mask
+
+    class TrackingLock:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            self._inner.__enter__()
+            pause_state["lock_held"] = True
+            return self
+
+        def __exit__(self, *args):
+            try:
+                return self._inner.__exit__(*args)
+            finally:
+                pause_state["lock_held"] = False
+
+    monkeypatch.setattr(
+        pj, "acquire_photo_mask",
+        lambda photo_id: TrackingLock(real_acquire(photo_id)),
+    )
+
+    class PauseTrackingRunner(FakeRunner):
+        def pause_requested(self, job_id):
+            return pause_state["requested"]
+
+        def cancellation_requested(self, job_id):
+            return False
+
+        def mark_paused(self, job_id):
+            return True
+
+        def wait_if_paused(self, job_id, *, publish_paused=False):
+            pause_state["wait_lock_states"].append(
+                pause_state["lock_held"],
+            )
+            pause_state["requested"] = False
+            return False
+
+    def request_pause():
+        assert pause_state["lock_held"] is True
+        pause_state["requested"] = True
+
+    _run_extract_masks_for_test(
+        tmp_path,
+        monkeypatch,
+        "sam2-small",
+        [{
+            "filename": "a.jpg",
+            "box": (10, 20, 100, 200),
+            "model": "MegaDetector",
+        }],
+        runner=PauseTrackingRunner(),
+        on_generate_mask=request_pause,
+    )
+
+    assert pause_state["wait_lock_states"] == [False], (
+        "Pause must block only after the per-photo mask lock is released; "
+        f"wait states: {pause_state['wait_lock_states']}"
+    )
 
 
 def _apply_extract_masks_stubs(monkeypatch, generate_mask_calls):
@@ -9716,7 +9981,7 @@ def test_pipeline_eye_keypoints_per_run_optin_overrides_config_disabled(
     the visible checkbox on the Process page is a no-op until the user
     first flips Settings, which is the very "black box" the CLAUDE.md
     philosophy forbids. ``skip_eye_keypoints=False`` alone is NOT the
-    signal — ``resolve_strategy('full')`` also sets it to False as a
+    signal — ``the "Full" saved process`` also sets it to False as a
     base default (see ``test_pipeline_eye_keypoints_full_strategy_does_not_force_optin``).
     """
     import config as cfg
@@ -9805,7 +10070,7 @@ def test_pipeline_eye_keypoints_full_strategy_does_not_force_optin(
 ):
     """Codex thread 5 regression guard: a ``full``-strategy chain (e.g.
     after-import) reaches ``run_pipeline_job`` with
-    ``skip_eye_keypoints=False`` from ``resolve_strategy('full')`` — that
+    ``skip_eye_keypoints=False`` from ``the "Full" saved process`` — that
     is a strategy default, NOT an explicit user opt-in. When Settings has
     ``eye_detect_enabled=False`` (the new default) and no
     ``eye_detect_override`` is set, the stage-level preflight must skip
@@ -9856,10 +10121,10 @@ def test_pipeline_eye_keypoints_full_strategy_does_not_force_optin(
         fake_detect_eye_keypoints_stage,
     )
 
-    # Mirror what resolve_strategy("full") produces: skip_eye_keypoints=False
+    # Mirror what the "Full" saved process produces: skip_eye_keypoints=False
     # (base default), but no eye_detect_override (leave None so config wins).
-    from process_strategies import resolve_strategy
-    expanded = resolve_strategy("full")
+    from process_strategies import SEED_PROCESSES, seed_flags
+    expanded = seed_flags(next(s for s in SEED_PROCESSES if s["name"] == "Full"))
     assert expanded["skip_eye_keypoints"] is False
     params = PipelineParams(
         collection_id=col_id,
@@ -10020,8 +10285,8 @@ def test_pipeline_regroup_full_strategy_default_does_not_force_scoring_config(
         pipeline_mod, "run_full_pipeline", fake_run_full_pipeline,
     )
 
-    from process_strategies import resolve_strategy
-    expanded = resolve_strategy("full")
+    from process_strategies import SEED_PROCESSES, seed_flags
+    expanded = seed_flags(next(s for s in SEED_PROCESSES if s["name"] == "Full"))
     params = PipelineParams(
         collection_id=col_id,
         skip_classify=True,
@@ -10874,6 +11139,106 @@ def test_pipeline_previews_honor_raw_failure_marker_after_source_selection(
     assert previews["skipped"] == 1
     assert raw_loads == []
     assert db.preview_cache_get(photo_id, 1920) is None
+
+
+def test_pipeline_previews_warm_unedited_raw_from_camera_rendered_source(
+    tmp_path, monkeypatch,
+):
+    """Pipeline preview stage must warm from the RAW source, not the
+    highlight-preserving working copy. Otherwise the tracked preview cache
+    locks in the dark render and /photos/<id>/preview returns those cache
+    hits before its own RAW-source branch ever runs."""
+    import config as cfg
+    import image_loader
+    import scanner
+    import thumbnails
+    from db import Database
+    from PIL import Image
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+
+    photo_dir = tmp_path / "photos"
+    photo_dir.mkdir()
+    raw_path = photo_dir / "source.NEF"
+    raw_path.write_bytes(b"raw bytes decoded by the test double")
+    db_path = str(tmp_path / "test.db")
+    db = Database(db_path)
+    ws_id = db._active_workspace_id
+    folder_id = db.add_folder(str(photo_dir), name="photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="source.NEF",
+        extension=".nef",
+        file_size=raw_path.stat().st_size,
+        file_mtime=raw_path.stat().st_mtime,
+        width=800,
+        height=600,
+    )
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    working_path = working_dir / f"{photo_id}.jpg"
+    Image.new("RGB", (800, 600), (25, 25, 25)).save(str(working_path))
+    # Setting exif_data non-null keeps _find_broken_metadata_folders from
+    # flagging this row for a repair scan that would otherwise call
+    # extract_working_copy against the placeholder RAW bytes and mark the
+    # source as failed — masking the source-selection behavior we want to
+    # exercise here.
+    db.conn.execute(
+        "UPDATE photos SET working_copy_path=?, exif_data='{}' WHERE id=?",
+        (f"working/{photo_id}.jpg", photo_id),
+    )
+    db.conn.commit()
+    collection_id = db.add_collection("Test", json.dumps([]))
+
+    def fake_generate_thumbnail(photo_id, photo_path, cache_dir, size=300, **kwargs):
+        os.makedirs(cache_dir, exist_ok=True)
+        thumb_path = os.path.join(cache_dir, f"{photo_id}.jpg")
+        Image.new("RGB", (size, size), "green").save(thumb_path)
+        return thumb_path
+
+    monkeypatch.setattr(thumbnails, "generate_thumbnail", fake_generate_thumbnail)
+    monkeypatch.setattr(scanner, "extract_working_copy", lambda *args, **kwargs: False)
+
+    loaded = []
+
+    def tracking_load_image(file_path, max_size=1024, **kwargs):
+        loaded.append(os.fspath(file_path))
+        color = (
+            (220, 220, 220)
+            if os.path.abspath(str(file_path)) == os.path.abspath(str(raw_path))
+            else (25, 25, 25)
+        )
+        return Image.new("RGB", (800, 600), color)
+
+    monkeypatch.setattr(image_loader, "load_image", tracking_load_image)
+
+    result = run_pipeline_job(
+        _make_job(),
+        FakeRunner(),
+        db_path,
+        ws_id,
+        PipelineParams(
+            collection_id=collection_id,
+            skip_classify=True,
+            skip_extract_masks=True,
+            skip_regroup=True,
+            preview_max_size=1920,
+        ),
+    )
+
+    previews = result["stages"]["previews"]
+    assert previews["failed"] == 0
+    assert previews["generated"] == 1
+    # The warmer decoded the RAW source, not the dark working copy.
+    assert str(raw_path) in loaded
+    assert str(working_path) not in loaded
+    # base_dir = dirname(db_path) when no thumb_cache_dir override; matches
+    # the pipeline's effective_vireo_dir setup at pipeline_job.py:758.
+    preview_path = tmp_path / "previews" / f"{photo_id}_1920.jpg"
+    assert preview_path.exists()
+    with Image.open(preview_path) as warmed:
+        assert warmed.getpixel((400, 300))[0] > 200
 
 
 def test_pipeline_scan_thumbnails_use_recipe_source_before_live_raw(

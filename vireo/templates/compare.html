@@ -267,6 +267,9 @@ body { padding-bottom: 36px; }
 .category-pill.refinement { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary)); }
 .category-pill.broader { color: var(--info); border-color: color-mix(in srgb, var(--info) 45%, var(--border-primary)); }
 .category-pill.conflict { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 55%, var(--border-primary)); }
+.category-pill.additional { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 60%, var(--border-primary)); }
+.category-pill.models_disagree { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 55%, var(--border-primary)); }
+.category-pill.unclassified { color: var(--text-muted); }
 .category-pill.low_conflict { color: var(--text-muted); }
 .category-pill.new { color: var(--text-primary); }
 .category-pill.missing_prediction { color: var(--text-muted); }
@@ -297,6 +300,28 @@ body { padding-bottom: 36px; }
   border-bottom: 1px solid var(--border-subtle);
 }
 .pred:last-child { border-bottom: none; }
+.subject-prediction-group {
+  padding: 5px 0 8px;
+  border-bottom: 1px solid var(--border-primary);
+}
+.subject-prediction-group:last-child { border-bottom: none; }
+.subject-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+.subject-summary-list { margin-top: 6px; }
+.subject-summary {
+  padding: 4px 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.subject-summary strong { color: var(--text-secondary); }
 .pred.below-threshold { opacity: 0.72; }
 .pred-main {
   display: flex;
@@ -423,6 +448,7 @@ var FILTERS = [
   { id: 'missing_visible_model', label: 'Missing shown model' },
   { id: 'two_models', label: 'Two+ model predictions' },
   { id: 'needs_review', label: 'Needs review' },
+  { id: 'additional', label: 'Additional species' },
   { id: 'conflict', label: 'Conflicts' },
   { id: 'refinement', label: 'Refinements' },
   { id: 'broader', label: 'Broader' },
@@ -454,23 +480,37 @@ var EXCLUDES = [
 ];
 
 var CATEGORY_ORDER = {
-  conflict: 6,
+  models_disagree: 8,
+  conflict: 7,
+  additional: 6,
   refinement: 5,
   broader: 4,
   new: 3,
   missing_prediction: 2,
+  // ``unclassified`` marks a detected subject with no predictions at all
+  // (see photoSubjectAssessment). It needs the missing-prediction
+  // priority so that photoReviewStatus() surfaces the unclassified
+  // subject on multi-subject photos where another subject already
+  // matched — otherwise the matched subject (priority 1) would outrank
+  // the unclassified one and the row would render/sort as a Match,
+  // burying the subject that still needs classification unless the user
+  // manually selects the Missing predictions filter.
+  unclassified: 2,
   match: 1,
   low_conflict: 0,
 };
 
 var CATEGORY_LABELS = {
+  models_disagree: 'Models disagree about subject',
   conflict: 'Conflict',
+  additional: 'Additional species suggested',
   refinement: 'Refinement',
   broader: 'Broader',
   new: 'No species keyword',
   missing_prediction: 'Missing prediction',
   match: 'Match',
   low_conflict: 'Below threshold',
+  unclassified: 'Unclassified subject',
 };
 
 function clampConfidence(value) {
@@ -530,9 +570,18 @@ async function loadCollections() {
       var opt = document.createElement('option');
       opt.value = c.id;
       opt.textContent = c.name;
+      // count_error means /api/collections couldn't resolve this collection's
+      // rules — comparing against it would just 400 the downstream fetch.
+      // Show it disabled so the state is visible instead of offering a
+      // source that can't render.
+      if (c.count_error) {
+        opt.disabled = true;
+        opt.textContent = c.name + ' (unavailable — edit rules to fix)';
+        opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
+      }
       sel.appendChild(opt);
     });
-    var all = data.find(function(c) { return c.name === 'All Photos'; });
+    var all = data.find(function(c) { return c.name === 'All Photos' && !c.count_error; });
     if (all) {
       sel.value = all.id;
       loadComparison();
@@ -568,6 +617,14 @@ async function loadComparison() {
     compareData = data;
     populateModelSelects(data.models || []);
     populateSortSelect();
+    // Drop cached subject/photo signals before computing the summary that
+    // picks activeFilter. renderCompare() clears the cache too, but that
+    // fires AFTER effectiveSummary() reads through it — so without this
+    // reset, a reload following predictionAction() can reuse the pre-action
+    // assessment and keep activeFilter='needs_review' while the freshly
+    // rendered rows have nothing pending, showing an empty Needs review
+    // table.
+    signalCache = new Map();
     activeFilter = effectiveSummary().needs_review > 0 ? 'needs_review' : 'all';
     renderCompare();
   } catch(e) {
@@ -635,6 +692,7 @@ function renderSummary() {
     ['needs_review', 'Needs review'],
     ['model_disagreements', 'Models disagree', signals.model_disagreements],
     ['keyword_model_conflicts', 'Keyword vs models', signals.keyword_model_conflicts],
+    ['additional', 'Additional species'],
     ['conflicts', 'Conflicts'],
     ['refinements', 'Refinements'],
     ['broader', 'Broader'],
@@ -732,7 +790,19 @@ function photoMatchesFilter(photo, filter) {
   if (filter === 'missing_visible_model') return signal.missing_visible_model_count > 0;
   if (filter === 'two_models') return signal.top_prediction_count >= 2;
   if (filter === 'needs_review') return !!status.needs_review;
+  if (filter === 'additional') return signal.additional_subject_count > 0;
   if (filter === 'reviewed') return hasReviewedPrediction(photo);
+  if (filter === 'missing_prediction') {
+    // Detected subjects with no predictions surface as ``unclassified``
+    // statuses. Photos with no compare subjects at all (no qualifying
+    // detection and no full-image prediction) have an empty statuses
+    // array, so ``photoReviewStatus()`` falls back to
+    // ``missing_prediction``; fall back to that too or those photos
+    // disappear from the Missing predictions filter.
+    var assessment = photoSubjectAssessment(photo);
+    if (assessment.statuses.some(function(item) { return item.category === 'unclassified'; })) return true;
+    return status.category === 'missing_prediction';
+  }
   return status.category === filter;
 }
 
@@ -858,9 +928,11 @@ function renderTable(rows) {
 
   rows.forEach(function(photo) {
     var status = photoReviewStatus(photo);
+    var multiSubject = photoSubjects(photo).length > 1;
     html += '<tr data-photo-id="' + photo.photo_id + '">' +
       '<td><input type="checkbox" ' + (selectedRows.has(photo.photo_id) ? 'checked' : '') +
-      ' onchange="toggleRow(' + photo.photo_id + ', this.checked)"></td>' +
+      (multiSubject ? ' disabled title="Use the subject-specific actions for multi-subject photos"' :
+        ' onchange="toggleRow(' + photo.photo_id + ', this.checked)"') + '></td>' +
       '<td>' + renderPhotoCell(photo) + '</td>' +
       '<td><span class="category-pill ' + escapeAttr(status.category) + '">' +
       escapeHtml(status.label) + '</span></td>' +
@@ -883,54 +955,225 @@ function usablePrediction(pred) {
   return pred && pred.status !== 'rejected';
 }
 
-function bestPredictionForModel(photo, model) {
-  var preds = ((photo.predictions || {})[model] || []).filter(usablePrediction);
+function photoSubjects(photo) {
+  if (photo && Array.isArray(photo.subjects)) return photo.subjects;
+  var byDetection = {};
+  Object.keys((photo && photo.predictions) || {}).forEach(function(model) {
+    (photo.predictions[model] || []).forEach(function(pred) {
+      var key = pred.detection_id == null ? 'photo' : String(pred.detection_id);
+      if (!byDetection[key]) {
+        byDetection[key] = {
+          detection_id: pred.detection_id,
+          kind: 'legacy',
+          box: {x: pred.box_x, y: pred.box_y, w: pred.box_w, h: pred.box_h},
+          predictions: {},
+        };
+      }
+      if (!byDetection[key].predictions[model]) byDetection[key].predictions[model] = [];
+      byDetection[key].predictions[model].push(pred);
+    });
+  });
+  return Object.keys(byDetection).map(function(key) { return byDetection[key]; });
+}
+
+function bestSubjectPredictionForModel(subject, model) {
+  var preds = ((subject.predictions || {})[model] || []).filter(usablePrediction);
   if (!preds.length) return null;
   return preds.slice().sort(function(a, b) {
     return desc(a.confidence, b.confidence) || textAsc(a.species, b.species);
   })[0];
 }
 
-function photoReviewStatus(photo) {
+function subjectSignal(subject, photoId, subjectIndex) {
+  // Legacy / full-image subjects can carry a null ``detection_id``. Keying
+  // the cache only on ``detection_id`` would collapse every such subject
+  // across the whole page into a single entry, so later photos would
+  // inherit an earlier photo's category, filter state, summary, and
+  // action type. Fall back to (photoId, subjectIndex) whenever the
+  // detection identity isn't stable so per-photo state stays per-photo.
+  var identity = subject.detection_id == null
+    ? 'photo|' + String(photoId) + '|subject|' + String(subjectIndex)
+    : 'detection|' + String(subject.detection_id);
+  var cacheKey = 'subject|' + identity + '|' + visibleModels().join('|');
+  if (signalCache.has(cacheKey)) return signalCache.get(cacheKey);
   var models = visibleModels();
-  var pendingCategory = null;
-  var highestCategory = null;
-  var sawPrediction = false;
+  var topPreds = [];
+  var allPreds = [];
+  var missing = 0;
+  var keywordConflictScore = 0;
+  var keywordConflictCount = 0;
+  var maxKeywordConflictConfidence = 0;
+  var keywordSupportScore = 0;
+  var keywordSupportCount = 0;
   var sawLowConflict = false;
+  var maxConfidence = 0;
+  var minConfidence = null;
 
   models.forEach(function(model) {
-    ((photo.predictions || {})[model] || []).forEach(function(pred) {
-      sawPrediction = true;
+    var preds = ((subject.predictions || {})[model] || []).filter(usablePrediction);
+    if (!preds.length) {
+      missing += 1;
+      return;
+    }
+    preds.forEach(function(pred) {
+      allPreds.push(pred);
+      var confidence = pred.confidence || 0;
       var category = effectivePredictionCategory(pred);
       if (category === 'low_conflict') {
         sawLowConflict = true;
-        return;
-      }
-      if (!highestCategory || (CATEGORY_ORDER[category] || 0) > (CATEGORY_ORDER[highestCategory] || 0)) {
-        highestCategory = category;
-      }
-      if (pred.status === 'pending' && (
-        !pendingCategory
-        || (CATEGORY_ORDER[category] || 0) > (CATEGORY_ORDER[pendingCategory] || 0)
-      )) {
-        pendingCategory = category;
+      } else if (category === 'conflict') {
+        keywordConflictCount += 1;
+        keywordConflictScore += confidence;
+        maxKeywordConflictConfidence = Math.max(maxKeywordConflictConfidence, confidence);
+      } else if (pred.category === 'match' || pred.category === 'refinement' || pred.category === 'broader') {
+        keywordSupportCount += 1;
+        keywordSupportScore += confidence;
       }
     });
+    var best = bestSubjectPredictionForModel(subject, model);
+    if (!best) return;
+    var conf = best.confidence || 0;
+    topPreds.push({model: model, species: best.species || '', confidence: conf, pred: best});
+    maxConfidence = Math.max(maxConfidence, conf);
+    minConfidence = minConfidence === null ? conf : Math.min(minConfidence, conf);
   });
 
-  var category = pendingCategory || highestCategory;
-  if (!category) category = sawLowConflict ? 'low_conflict' : 'missing_prediction';
-  // Any pending prediction means the user hasn't decided yet — including
-  // pending "match" predictions kept deliberately for ambiguous multi-species
-  // photo-level matches by classify_job. Excluding "match" here would hide
-  // those from the Needs review count/filter even though the backend
-  // deliberately kept them pending for review.
-  var needsReview = !!pendingCategory;
+  var speciesGroups = {};
+  topPreds.forEach(function(item) {
+    var key = normalizedSpecies(item.species);
+    if (!speciesGroups[key]) speciesGroups[key] = {species: item.species, count: 0, confidence: 0};
+    speciesGroups[key].count += 1;
+    speciesGroups[key].confidence += item.confidence;
+  });
+  var groups = Object.keys(speciesGroups).map(function(key) { return speciesGroups[key]; });
+  groups.sort(function(a, b) {
+    return desc(a.count, b.count) || desc(a.confidence, b.confidence) || textAsc(a.species, b.species);
+  });
+
+  var disagreementPair = null;
+  var disagreementScore = 0;
+  for (var i = 0; i < topPreds.length; i++) {
+    for (var j = i + 1; j < topPreds.length; j++) {
+      if (normalizedSpecies(topPreds[i].species) === normalizedSpecies(topPreds[j].species)) continue;
+      var pairScore = Math.min(topPreds[i].confidence || 0, topPreds[j].confidence || 0) * 100;
+      if (!disagreementPair || pairScore > disagreementScore) {
+        disagreementPair = [topPreds[i], topPreds[j]];
+        disagreementScore = pairScore;
+      }
+    }
+  }
+
+  var signal = {
+    all_predictions: allPreds,
+    top_predictions: topPreds,
+    top_prediction_count: topPreds.length,
+    unique_top_species_count: groups.length,
+    missing_visible_model_count: missing,
+    model_disagreement_score: disagreementScore,
+    model_disagreement_pair: disagreementPair,
+    keyword_conflict_count: keywordConflictCount,
+    keyword_conflict_score: keywordConflictScore * 100,
+    max_keyword_conflict_confidence: maxKeywordConflictConfidence,
+    keyword_support_count: keywordSupportCount,
+    keyword_support_score: keywordSupportScore * 100,
+    consensus_species: groups.length ? groups[0].species : '',
+    consensus_count: groups.length ? groups[0].count : 0,
+    max_confidence: maxConfidence,
+    min_confidence: minConfidence,
+    saw_low_conflict: sawLowConflict,
+  };
+  signalCache.set(cacheKey, signal);
+  return signal;
+}
+
+function photoSubjectAssessment(photo) {
+  var cacheKey = 'assessment|' + photo.photo_id + '|' + visibleModels().join('|');
+  if (signalCache.has(cacheKey)) return signalCache.get(cacheKey);
+  var subjects = photoSubjects(photo);
+  var signals = subjects.map(function(subject, index) {
+    return subjectSignal(subject, photo.photo_id, index);
+  });
+  var detectedCount = subjects.filter(function(subject) { return subject.kind !== 'full_image'; }).length;
+  var supporting = signals.map(function(signal) { return signal.keyword_support_count > 0; });
+  var statuses = subjects.map(function(subject, index) {
+    var signal = signals[index];
+    var hasPending = signal.all_predictions.some(function(pred) { return pred.status === 'pending'; });
+    var category = null;
+    var label = null;
+
+    if (!signal.all_predictions.length) {
+      category = 'unclassified';
+    } else if (signal.model_disagreement_score > 0) {
+      category = 'models_disagree';
+    } else if (signal.keyword_support_count > 0) {
+      var supported = signal.all_predictions.filter(function(pred) {
+        return pred.category === 'match' || pred.category === 'refinement' || pred.category === 'broader';
+      }).sort(function(a, b) {
+        return desc(CATEGORY_ORDER[a.category] || 0, CATEGORY_ORDER[b.category] || 0);
+      });
+      category = supported.length ? supported[0].category : 'match';
+    } else {
+      var anotherSubjectAccountsForKeyword = supporting.some(function(value, otherIndex) {
+        return otherIndex !== index && value;
+      });
+      if (
+        detectedCount > 1
+        && anotherSubjectAccountsForKeyword
+        && signal.keyword_conflict_count > 0
+        && signal.consensus_species
+      ) {
+        category = 'additional';
+        label = signal.consensus_count >= 2
+          ? 'Additional species suggested'
+          : 'Possible additional species';
+      } else if (signal.keyword_conflict_count > 0) {
+        category = 'conflict';
+      } else if (signal.saw_low_conflict) {
+        category = 'low_conflict';
+      } else {
+        var firstCategory = signal.all_predictions.length
+          ? effectivePredictionCategory(signal.all_predictions[0]) : null;
+        category = firstCategory || 'unclassified';
+      }
+    }
+    return {
+      category: category,
+      label: label || CATEGORY_LABELS[category] || category,
+      needs_review: hasPending,
+      has_prediction: signal.all_predictions.length > 0,
+      signal: signal,
+    };
+  });
+  var result = {subjects: subjects, signals: signals, statuses: statuses};
+  signalCache.set(cacheKey, result);
+  return result;
+}
+
+function photoReviewStatus(photo) {
+  var assessment = photoSubjectAssessment(photo);
+  // Keep ``unclassified`` statuses alongside pending ones: an ``unclassified``
+  // subject has no predictions at all, so ``needs_review`` (which tracks
+  // pending predictions) is false, but the subject still needs classification.
+  // Without this, a multi-subject photo with one pending match plus one
+  // unclassified subject would drop the unclassified one before sorting and
+  // the row would render/sort as the pending match instead of surfacing the
+  // higher-priority ``unclassified`` category (see CATEGORY_ORDER).
+  var candidates = assessment.statuses.filter(function(status) {
+    return status.needs_review || status.category === 'unclassified';
+  });
+  if (!candidates.length) candidates = assessment.statuses.slice();
+  candidates.sort(function(a, b) {
+    return desc(CATEGORY_ORDER[a.category] || 0, CATEGORY_ORDER[b.category] || 0);
+  });
+  if (!candidates.length) {
+    return {category: 'missing_prediction', label: CATEGORY_LABELS.missing_prediction, needs_review: false, has_prediction: false};
+  }
+  var chosen = candidates[0];
   return {
-    category: category,
-    label: CATEGORY_LABELS[category] || category,
-    needs_review: needsReview,
-    has_prediction: sawPrediction,
+    category: chosen.category,
+    label: chosen.label,
+    needs_review: assessment.statuses.some(function(status) { return status.needs_review; }),
+    has_prediction: assessment.statuses.some(function(status) { return status.has_prediction; }),
   };
 }
 
@@ -942,6 +1185,7 @@ function effectiveSummary() {
     refinements: 0,
     broader: 0,
     conflicts: 0,
+    additional: 0,
     new: 0,
     missing_predictions: 0,
     needs_review: 0,
@@ -950,26 +1194,31 @@ function effectiveSummary() {
   (compareData.photos || []).forEach(function(photo) {
     var status = photoReviewStatus(photo);
     if (status.needs_review) s.needs_review += 1;
-    if (status.category === 'missing_prediction') s.missing_predictions += 1;
-    visibleModels().forEach(function(model) {
-      ((photo.predictions || {})[model] || []).forEach(function(pred) {
-        var category = effectivePredictionCategory(pred);
-        if (category === 'match') s.matches += 1;
-        else if (category === 'refinement') s.refinements += 1;
-        else if (category === 'broader') s.broader += 1;
-        else if (category === 'conflict') s.conflicts += 1;
-        else if (category === 'new') s.new += 1;
-      });
+    var assessment = photoSubjectAssessment(photo);
+    // Mirror the ``missing_prediction`` filter: unclassified subject rows
+    // count, and subjectless photos (empty statuses → status falls back
+    // to ``missing_prediction``) count too. Otherwise the filter and the
+    // pill counter disagree on how many photos need a prediction.
+    if (
+      assessment.statuses.some(function(item) { return item.category === 'unclassified'; })
+      || status.category === 'missing_prediction'
+    ) s.missing_predictions += 1;
+    assessment.statuses.forEach(function(item) {
+      if (item.category === 'match') s.matches += 1;
+      else if (item.category === 'refinement') s.refinements += 1;
+      else if (item.category === 'broader') s.broader += 1;
+      else if (item.category === 'conflict') s.conflicts += 1;
+      else if (item.category === 'additional') s.additional += 1;
+      else if (item.category === 'new') s.new += 1;
     });
   });
   return s;
 }
 
 function photoSignal(photo) {
-  var cacheKey = photo.photo_id + '|' + visibleModels().join('|');
+  var cacheKey = 'photo|' + photo.photo_id + '|' + visibleModels().join('|');
   if (signalCache.has(cacheKey)) return signalCache.get(cacheKey);
-  var models = visibleModels();
-  var topPreds = [];
+  var assessment = photoSubjectAssessment(photo);
   var missing = 0;
   var keywordConflictScore = 0;
   var keywordConflictCount = 0;
@@ -977,72 +1226,58 @@ function photoSignal(photo) {
   var keywordSupportScore = 0;
   var maxConfidence = 0;
   var minConfidence = null;
-
-  models.forEach(function(model) {
-    var preds = ((photo.predictions || {})[model] || []).filter(usablePrediction);
-    if (!preds.length) {
-      missing += 1;
-      return;
-    }
-    preds.forEach(function(pred) {
-      var predConf = pred.confidence || 0;
-      if (effectivePredictionCategory(pred) === 'conflict') {
-        keywordConflictCount += 1;
-        keywordConflictScore += predConf;
-        maxKeywordConflictConfidence = Math.max(maxKeywordConflictConfidence, predConf);
-      } else if (pred.category === 'match' || pred.category === 'refinement') {
-        keywordSupportScore += predConf;
-      }
-    });
-    var best = bestPredictionForModel(photo, model);
-    if (!best) {
-      missing += 1;
-      return;
-    }
-    var conf = best.confidence || 0;
-    topPreds.push({ model: model, species: best.species || '', confidence: conf, pred: best });
-    maxConfidence = Math.max(maxConfidence, conf);
-    minConfidence = minConfidence === null ? conf : Math.min(minConfidence, conf);
-  });
-
-  var speciesGroups = {};
-  topPreds.forEach(function(item) {
-    var key = normalizedSpecies(item.species);
-    if (!speciesGroups[key]) speciesGroups[key] = { species: item.species, count: 0, confidence: 0, max_confidence: 0 };
-    speciesGroups[key].count += 1;
-    speciesGroups[key].confidence += item.confidence;
-    speciesGroups[key].max_confidence = Math.max(speciesGroups[key].max_confidence, item.confidence);
-  });
-  var groupList = Object.keys(speciesGroups).map(function(key) { return speciesGroups[key]; });
-  groupList.sort(function(a, b) {
-    return desc(a.count, b.count) || desc(a.confidence, b.confidence) || textAsc(a.species, b.species);
-  });
-
   var disagreementPair = null;
   var modelDisagreementScore = 0;
-  for (var i = 0; i < topPreds.length; i++) {
-    for (var j = i + 1; j < topPreds.length; j++) {
-      if (normalizedSpecies(topPreds[i].species) === normalizedSpecies(topPreds[j].species)) continue;
-      var pairScore = Math.min(topPreds[i].confidence || 0, topPreds[j].confidence || 0) * 100;
-      if (!disagreementPair || pairScore > modelDisagreementScore) {
-        modelDisagreementScore = pairScore;
-        disagreementPair = [topPreds[i], topPreds[j]];
-      }
+  var consensusSpecies = '';
+  var consensusCount = 0;
+  var maxTopPredictionCount = 0;
+  var maxUniqueSpecies = 0;
+  var additionalCount = 0;
+
+  assessment.signals.forEach(function(subjectSignalValue, index) {
+    var status = assessment.statuses[index];
+    missing += subjectSignalValue.missing_visible_model_count;
+    keywordSupportScore += subjectSignalValue.keyword_support_score;
+    maxConfidence = Math.max(maxConfidence, subjectSignalValue.max_confidence || 0);
+    if (subjectSignalValue.min_confidence !== null) {
+      minConfidence = minConfidence === null
+        ? subjectSignalValue.min_confidence
+        : Math.min(minConfidence, subjectSignalValue.min_confidence);
     }
-  }
+    maxTopPredictionCount = Math.max(maxTopPredictionCount, subjectSignalValue.top_prediction_count);
+    maxUniqueSpecies = Math.max(maxUniqueSpecies, subjectSignalValue.unique_top_species_count);
+    if (subjectSignalValue.consensus_count > consensusCount) {
+      consensusCount = subjectSignalValue.consensus_count;
+      consensusSpecies = subjectSignalValue.consensus_species;
+    }
+    if (subjectSignalValue.model_disagreement_score > modelDisagreementScore) {
+      modelDisagreementScore = subjectSignalValue.model_disagreement_score;
+      disagreementPair = subjectSignalValue.model_disagreement_pair;
+    }
+    if (status.category === 'additional') additionalCount += 1;
+    if (status.category !== 'additional') {
+      keywordConflictCount += subjectSignalValue.keyword_conflict_count;
+      keywordConflictScore += subjectSignalValue.keyword_conflict_score;
+      maxKeywordConflictConfidence = Math.max(
+        maxKeywordConflictConfidence,
+        subjectSignalValue.max_keyword_conflict_confidence
+      );
+    }
+  });
 
   var signal = {
-    top_prediction_count: topPreds.length,
-    unique_top_species_count: groupList.length,
+    top_prediction_count: maxTopPredictionCount,
+    unique_top_species_count: maxUniqueSpecies,
     missing_visible_model_count: missing,
     model_disagreement_score: modelDisagreementScore,
     model_disagreement_pair: disagreementPair,
     keyword_conflict_count: keywordConflictCount,
-    keyword_conflict_score: keywordConflictScore * 100,
+    keyword_conflict_score: keywordConflictScore,
     max_keyword_conflict_confidence: maxKeywordConflictConfidence,
-    keyword_support_score: keywordSupportScore * 100,
-    consensus_species: groupList.length ? groupList[0].species : '',
-    consensus_count: groupList.length ? groupList[0].count : 0,
+    keyword_support_score: keywordSupportScore,
+    consensus_species: consensusSpecies,
+    consensus_count: consensusCount,
+    additional_subject_count: additionalCount,
     max_confidence: maxConfidence,
     min_confidence: minConfidence,
   };
@@ -1071,7 +1306,15 @@ function signalSummary() {
 
 function renderSignalCell(photo) {
   var signal = photoSignal(photo);
+  var assessment = photoSubjectAssessment(photo);
   var pills = [];
+  if (assessment.subjects.length > 1) {
+    pills.push('<span class="signal-pill">' + assessment.subjects.length + ' subjects</span>');
+  }
+  if (signal.additional_subject_count > 0) {
+    pills.push('<span class="signal-pill match">' + signal.additional_subject_count +
+      ' additional species suggestion' + (signal.additional_subject_count === 1 ? '' : 's') + '</span>');
+  }
   if (signal.model_disagreement_score > 0) {
     pills.push('<span class="signal-pill hot" title="' + escapeAttr(signal.model_disagreement_label) +
       '">Models ' + Math.round(signal.model_disagreement_score) + '</span>');
@@ -1092,9 +1335,21 @@ function renderSignalCell(photo) {
   }
   var detail = [];
   if (signal.model_disagreement_label) detail.push(signal.model_disagreement_label);
+  assessment.statuses.forEach(function(status, index) {
+    if (status.category === 'additional' && status.signal.consensus_species) {
+      detail.push('Subject ' + (index + 1) + ': ' + status.signal.consensus_species);
+    }
+  });
   if (signal.consensus_count >= 2 && signal.consensus_species) detail.push('Consensus: ' + signal.consensus_species);
   return '<div class="signal-list">' + pills.join('') + '</div>' +
     (detail.length ? '<div class="signal-note">' + escapeHtml(detail.join(' · ')) + '</div>' : '');
+}
+
+function subjectBoxLabel(subject) {
+  var box = (subject && subject.box) || {};
+  if ([box.x, box.y, box.w, box.h].some(function(value) { return value == null; })) return '';
+  return 'box x ' + Math.round(box.x * 100) + '–' + Math.round((box.x + box.w) * 100) +
+    '%, y ' + Math.round(box.y * 100) + '–' + Math.round((box.y + box.h) * 100) + '%';
 }
 
 function renderPhotoCell(photo) {
@@ -1107,12 +1362,27 @@ function renderPhotoCell(photo) {
   if (photo.flag && photo.flag !== 'none') meta.push(photo.flag);
   if (photo.wildlife_excluded) meta.push('not wildlife');
   if (photo.miss_no_subject || photo.miss_clipped || photo.miss_oof) meta.push('marked miss');
+  var assessment = photoSubjectAssessment(photo);
+  var subjectSummary = '';
+  if (assessment.subjects.length > 1) {
+    subjectSummary = '<div class="subject-summary-list">' + assessment.subjects.map(function(subject, index) {
+      var status = assessment.statuses[index];
+      var signal = assessment.signals[index];
+      var species = signal.consensus_species ? ' · ' + escapeHtml(signal.consensus_species) : '';
+      var location = subjectBoxLabel(subject);
+      return '<div class="subject-summary"><strong>Subject ' + (index + 1) + '</strong>' + species +
+        ' · <span class="category-pill ' + escapeAttr(status.category) + '">' +
+        escapeHtml(status.label) + '</span>' +
+        (location ? '<div>' + escapeHtml(location) + '</div>' : '') + '</div>';
+    }).join('') + '</div>';
+  }
   return '<div class="photo-cell">' +
     '<button type="button" class="photo-thumb-button" title="View larger" onclick="openCompareLightbox(' +
     photo.photo_id + ')"><img src="' + escapeAttr(thumbUrl) + '" loading="lazy" alt="' +
     escapeAttr(photo.filename) + '"></button>' +
     '<div><div class="photo-name">' + escapeHtml(photo.filename) + '</div>' +
     '<div class="photo-meta">' + escapeHtml(meta.join(' · ')) + '</div>' +
+    subjectSummary +
     '<div class="pred-actions"><a class="inline-btn" href="/browse?photo_id=' +
     encodeURIComponent(photo.photo_id) + '">Browse</a></div></div></div>';
 }
@@ -1147,9 +1417,11 @@ function openCompareLightbox(photoId) {
 }
 
 function isSpeciesKeyword(k) {
-  // Mirror the backend species definition (get_species_keywords_for_photos):
-  // upgraded/legacy taxonomy tags can be type='taxonomy' with is_species=0.
-  return !!k.is_species || k.type === 'taxonomy';
+  // Mirror the backend species definition. A linked family/genus is a
+  // taxonomy keyword, but not a species; unresolved legacy tags retain the
+  // old flag/type fallback.
+  var markedTaxonomy = !!k.is_species || k.type === 'taxonomy';
+  return markedTaxonomy && (!k.taxon_rank || k.taxon_rank === 'species');
 }
 
 function renderKeywordCell(photo) {
@@ -1174,28 +1446,55 @@ function renderKeywordCell(photo) {
 }
 
 function renderPredictionCell(photo, model) {
-  var preds = (photo.predictions || {})[model] || [];
-  if (!preds.length) return '<span class="empty-cell">No prediction</span>';
-  return preds.map(function(pred) {
-    var status = pred.status || 'pending';
+  var assessment = photoSubjectAssessment(photo);
+  if (!assessment.subjects.length) return '<span class="empty-cell">No prediction</span>';
+  return assessment.subjects.map(function(subject, subjectIndex) {
+    var preds = (subject.predictions || {})[model] || [];
+    var subjectStatus = assessment.statuses[subjectIndex];
+    var heading = assessment.subjects.length > 1
+      ? '<div class="subject-heading"><span>Subject ' + (subjectIndex + 1) + '</span>' +
+        '<span class="category-pill ' + escapeAttr(subjectStatus.category) + '">' +
+        escapeHtml(subjectStatus.label) + '</span></div>'
+      : '';
+    if (!preds.length) {
+      return '<div class="subject-prediction-group">' + heading +
+        '<span class="empty-cell">No prediction for this subject</span></div>';
+    }
+    var predictionsHtml = preds.map(function(pred) {
+      var status = pred.status || 'pending';
     var disabled = status !== 'pending' ? ' disabled' : '';
     var detail = pred.category_detail || '';
     var belowThreshold = isBelowConflictThreshold(pred);
+    var displayedCategory = subjectStatus.category === 'additional' && pred.category === 'conflict'
+      ? 'additional' : pred.category;
+    var displayedLabel = displayedCategory === 'additional'
+      ? subjectStatus.label : pred.category_label;
     if (pred.matched_keyword) detail += ' Keyword: ' + pred.matched_keyword + '.';
     if (pred.shared_rank) detail += ' Shared ' + pred.shared_rank + '.';
     if (belowThreshold) detail += ' Below conflict threshold.';
+    if (displayedCategory === 'additional') {
+      detail = 'A different detected subject accounts for the current species keyword. ' +
+        'This prediction may identify another species in the photo.';
+    }
+    var acceptLabel = displayedCategory === 'additional' ? 'Add additional species' : 'Add keyword';
+    var acceptAction = displayedCategory === 'additional' ? 'accept_subject' : 'accept';
+    var replaceButton = assessment.subjects.length === 1
+      ? '<button class="inline-btn primary" onclick="predictionAction(' + pred.id + ', \'replace\')"' + disabled + '>Replace keyword</button>'
+      : '';
     return '<div class="pred' + (belowThreshold ? ' below-threshold' : '') + '">' +
       '<div class="pred-main"><span class="pred-species">' + escapeHtml(pred.species) + '</span>' +
       '<span class="pred-confidence">' + Math.round((pred.confidence || 0) * 100) + '%</span>' +
-      '<span class="category-pill ' + escapeAttr(pred.category) + '">' + escapeHtml(pred.category_label) + '</span>' +
+      '<span class="category-pill ' + escapeAttr(displayedCategory) + '">' + escapeHtml(displayedLabel) + '</span>' +
       '<span class="status-pill ' + escapeAttr(status) + '">' + escapeHtml(status) + '</span></div>' +
       '<div class="pred-detail">' + escapeHtml(detail) + '</div>' +
       '<div class="pred-actions">' +
-      '<button class="inline-btn primary" onclick="predictionAction(' + pred.id + ', \'accept\')"' + disabled + '>Add keyword</button>' +
-      '<button class="inline-btn primary" onclick="predictionAction(' + pred.id + ', \'replace\')"' + disabled + '>Replace keyword</button>' +
+      '<button class="inline-btn primary" onclick="predictionAction(' + pred.id + ', \'' + acceptAction + '\')"' + disabled + '>' + acceptLabel + '</button>' +
+      replaceButton +
       '<button class="inline-btn danger" onclick="predictionAction(' + pred.id + ', \'reject\')"' + disabled + '>Reject</button>' +
       '<button class="inline-btn" onclick="predictionAction(' + pred.id + ', \'reviewed\')"' + disabled + '>Reviewed</button>' +
       '</div></div>';
+    }).join('');
+    return '<div class="subject-prediction-group">' + heading + predictionsHtml + '</div>';
   }).join('');
 }
 
@@ -1207,6 +1506,7 @@ function toggleRow(photoId, checked) {
 
 function toggleAllRows(checked) {
   filteredRows().forEach(function(photo) {
+    if (photoSubjects(photo).length > 1) return;
     if (checked) selectedRows.add(photo.photo_id);
     else selectedRows.delete(photo.photo_id);
   });
@@ -1227,6 +1527,7 @@ function updateBatchControls() {
 }
 
 function bestPrediction(photo) {
+  if (photoSubjects(photo).length > 1) return null;
   var models = visibleModels();
   var best = null;
   models.forEach(function(model) {
@@ -1254,6 +1555,7 @@ async function predictionAction(predId, action) {
 
 function endpointForAction(action) {
   if (action === 'accept') return 'accept';
+  if (action === 'accept_subject') return 'accept-subject';
   if (action === 'replace') return 'replace-keywords';
   if (action === 'reject') return 'reject';
   return 'reviewed';

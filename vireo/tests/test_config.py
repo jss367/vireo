@@ -2,6 +2,8 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
@@ -591,6 +593,100 @@ def test_migrate_legacy_miss_thresholds_rewrites_workspace_overrides(
     assert custom_overrides["pipeline"]["miss_det_confidence_burst"] == 0.18
 
 
+def test_migrate_legacy_w_species_default_rewrites_exact_value(
+    tmp_path, monkeypatch
+):
+    """An install with the previous default (0.10) persisted gets rewritten
+    to the new default (0.40)."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"w_species": 0.10}})
+
+    assert cfg.migrate_legacy_w_species_default() is True
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["w_species"] == 0.40
+    assert cfg.MIGRATION_W_SPECIES_DEFAULT in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_w_species_default_preserves_customized(
+    tmp_path, monkeypatch
+):
+    """A user who tuned w_species to something other than the legacy default
+    is left alone."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"w_species": 0.25}})
+
+    assert cfg.migrate_legacy_w_species_default() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["w_species"] == 0.25
+    assert cfg.MIGRATION_W_SPECIES_DEFAULT in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_w_species_default_is_one_time(tmp_path, monkeypatch):
+    """Once the marker is set, a user who explicitly re-saves 0.10 via the
+    slider is NOT silently rewritten on next load."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"w_species": 0.10}})
+    cfg.migrate_legacy_w_species_default()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    raw["pipeline"]["w_species"] = 0.10
+    _write_raw(cfg.CONFIG_PATH, raw)
+
+    assert cfg.migrate_legacy_w_species_default() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["w_species"] == 0.10
+
+
+def test_migrate_legacy_w_species_default_no_config_file(tmp_path, monkeypatch):
+    """No config.json yet — migration stamps the marker and returns False."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    assert cfg.migrate_legacy_w_species_default() is False
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert cfg.MIGRATION_W_SPECIES_DEFAULT in raw["_migrations_applied"]
+
+
+def test_migrate_legacy_w_species_default_rewrites_workspace_overrides(
+    tmp_path, monkeypatch
+):
+    """Workspace overrides carrying the exact legacy value are rewritten;
+    customized workspace overrides are left alone."""
+    import json as _json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    ws_id = db.create_workspace(
+        "Legacy",
+        config_overrides={"pipeline": {"w_species": 0.10}},
+    )
+    db.create_workspace(
+        "Customized",
+        config_overrides={"pipeline": {"w_species": 0.25}},
+    )
+
+    cfg.migrate_legacy_w_species_default(db)
+
+    legacy_overrides = _json.loads(
+        db.get_workspace(ws_id)["config_overrides"]
+    )
+    assert legacy_overrides["pipeline"]["w_species"] == 0.40
+
+    custom_ws_id = next(
+        w["id"] for w in db.get_workspaces() if w["name"] == "Customized"
+    )
+    custom_overrides = _json.loads(
+        db.get_workspace(custom_ws_id)["config_overrides"]
+    )
+    assert custom_overrides["pipeline"]["w_species"] == 0.25
+
+
 def test_migrate_toggle_ui_h_conflict_blanks_when_h_taken(tmp_path, monkeypatch):
     """A user upgrading with `browse.flag` already bound to `h` gets
     `browse.toggle_ui` blanked to `""` so the newly added default doesn't
@@ -716,6 +812,35 @@ def test_migrate_toggle_ui_h_conflict_no_config_file(tmp_path, monkeypatch):
     assert cfg.migrate_toggle_ui_h_conflict() is False
     raw = _read_raw(cfg.CONFIG_PATH)
     assert cfg.MIGRATION_TOGGLE_UI_H_CONFLICT in raw["_migrations_applied"]
+
+
+def test_migrate_browse_location_status_rewrites_exact_legacy_default(
+    tmp_path, monkeypatch
+):
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "browse_card_fields": ["filename", "rating", "flag", "sharpness"],
+    })
+
+    assert cfg.migrate_browse_location_status_field() is True
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["browse_card_fields"] == [
+        "filename", "location_status", "rating", "flag", "sharpness"
+    ]
+    assert cfg.MIGRATION_BROWSE_LOCATION_STATUS in raw["_migrations_applied"]
+
+
+def test_migrate_browse_location_status_preserves_custom_layout(
+    tmp_path, monkeypatch
+):
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    custom = ["filename", "species"]
+    _write_raw(cfg.CONFIG_PATH, {"browse_card_fields": custom})
+
+    assert cfg.migrate_browse_location_status_field() is False
+    assert _read_raw(cfg.CONFIG_PATH)["browse_card_fields"] == custom
 
 
 def test_migrate_eye_detect_default_off_rewrites_legacy_true(
@@ -1034,6 +1159,205 @@ def test_migrate_eye_detect_default_off_chunks_workspace_invalidation(
         )
 
 
+def test_migrate_default_strategy_to_process_id_rewrites_global(
+    tmp_path, monkeypatch
+):
+    """The global config file's legacy ``pipeline.default_strategy`` is
+    rewritten to ``pipeline.default_process_id`` at the matching seed id.
+
+    Without this rewrite, an upgraded install with a global after-import
+    default set the old way silently falls back to import-only because the
+    import endpoints and ``get_effective_config`` now only read
+    ``pipeline.default_process_id``.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {"default_strategy": "identify"},
+    })
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        identify_id = next(
+            p["id"] for p in db.get_saved_processes()
+            if p["name"] == "Identify birds"
+        )
+        assert cfg.migrate_default_strategy_to_process_id(db) is True
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["default_process_id"] == identify_id
+    assert "default_strategy" not in raw["pipeline"]
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in raw["_migrations_applied"]
+    )
+
+
+def test_migrate_default_strategy_to_process_id_unknown_name_becomes_null(
+    tmp_path, monkeypatch
+):
+    """An unknown/removed legacy strategy name maps to null (import only).
+    The old key is still dropped and the marker is stamped so we don't try
+    again on the next boot."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {"default_strategy": "some_deleted_preset"},
+    })
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is True
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert "default_strategy" not in raw["pipeline"]
+    assert "default_process_id" not in raw["pipeline"]
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in raw["_migrations_applied"]
+    )
+
+
+def test_migrate_default_strategy_to_process_id_is_one_time(
+    tmp_path, monkeypatch
+):
+    """After the marker is stamped, a user who later hand-adds
+    ``default_strategy`` back is not silently rewritten — respecting a
+    deliberate manual edit."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {
+        "pipeline": {"default_strategy": "full"},
+    })
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is True
+
+        # User hand-edits the (now-legacy) key back in after upgrade.
+        raw = _read_raw(cfg.CONFIG_PATH)
+        raw["pipeline"]["default_strategy"] = "cull_ready"
+        _write_raw(cfg.CONFIG_PATH, raw)
+
+        assert cfg.migrate_default_strategy_to_process_id(db) is False
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["default_strategy"] == "cull_ready"
+
+
+def test_migrate_default_strategy_to_process_id_no_config_file(
+    tmp_path, monkeypatch
+):
+    """Fresh install (no config.json yet) — nothing to rewrite; just the
+    marker gets stamped."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+
+    db = Database(str(tmp_path / "vireo.db"))
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is False
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in raw["_migrations_applied"]
+    )
+
+
+def test_migrate_default_strategy_defers_when_saved_processes_absent(
+    tmp_path, monkeypatch
+):
+    """The low-level migration function must DEFER when passed a
+    schema-less connection (return False, keep the legacy key, not stamp
+    the marker) instead of crashing with 'no such table: saved_processes'.
+
+    ``create_app`` itself now opens a schema-initializing handle for this
+    migration so it completes on the first boot after upgrade (see
+    ``test_create_app_completes_default_strategy_migration_on_first_boot``);
+    the defer path here is the safety net when a caller passes a
+    ``initialize_schema=False`` handle directly, ensuring the migration is
+    still recoverable on a later boot rather than blowing up startup.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"default_strategy": "identify"}})
+    from db import Database
+
+    db_path = str(tmp_path / "vireo.db")
+    # Simulate a pre-saved_processes upgrade: a DB with the older tables but no
+    # saved_processes. Build the full schema, then drop the new table.
+    seed_db = Database(db_path)
+    seed_db.conn.execute("DROP TABLE saved_processes")
+    seed_db.conn.commit()
+    seed_db.close()
+
+    # init_db-style handle: no schema initialization on this connection.
+    db = Database(db_path, initialize_schema=False)
+    try:
+        assert cfg.migrate_default_strategy_to_process_id(db) is False
+    finally:
+        db.close()
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    assert raw["pipeline"]["default_strategy"] == "identify"  # legacy key kept
+    assert "default_process_id" not in raw["pipeline"]
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID
+        not in raw.get("_migrations_applied", [])
+    )
+
+
+def test_create_app_completes_default_strategy_migration_on_first_boot(
+    tmp_path, monkeypatch
+):
+    """create_app's startup init_db uses initialize_schema=False, but the
+    global default_strategy migration still needs the seeded
+    saved_processes table to resolve legacy strategy names to ids. Without
+    a schema-initializing pass gated on the migration marker, the
+    migration silently defers on the first boot after upgrade — any
+    import in that session inheriting the legacy default falls back to
+    import-only. create_app must open a targeted schema-initializing
+    handle so the migration completes on the very first boot.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    _write_raw(cfg.CONFIG_PATH, {"pipeline": {"default_strategy": "identify"}})
+
+    from app import create_app
+
+    db_path = str(tmp_path / "vireo.db")
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    # First boot after upgrade: DB file didn't exist before this call.
+    app = create_app(db_path, str(thumb_dir))
+    assert app is not None
+
+    raw = _read_raw(cfg.CONFIG_PATH)
+    # Legacy key must be gone and the migration marker stamped so the
+    # next boot doesn't re-run.
+    assert "default_strategy" not in raw.get("pipeline", {}), raw
+    assert (
+        cfg.MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID
+        in raw.get("_migrations_applied", [])
+    )
+    # The seeded "Identify birds" process should exist and be pointed at.
+    pid = raw["pipeline"].get("default_process_id")
+    assert isinstance(pid, int) and pid > 0, raw
+    from db import Database
+    seeded = Database(db_path).get_saved_process(pid)
+    assert seeded is not None
+    assert seeded["name"] == "Identify birds"
+
+
 def test_default_subject_types_includes_taxonomy_individual_genre(tmp_path, monkeypatch):
     """Default subject_types is the set of keyword types that count as
     'identifying' a photo — taxonomy + individual + genre by default."""
@@ -1138,3 +1462,146 @@ class _FakeWin32Sys:
     branch in ``config._replace_with_windows_retry`` exercises on POSIX CI."""
 
     platform = "win32"
+
+
+# --------------------------------------------------------------------------
+# remote_targets: local_archive_root
+# --------------------------------------------------------------------------
+
+def _base_target(**over):
+    t = {"host": "nas", "user": "julius", "remote_path": "/volume1/Photos",
+         "mount_path": "/Volumes/Photos"}
+    t.update(over)
+    return t
+
+
+def test_remote_target_local_archive_root_passthrough(tmp_path, monkeypatch):
+    """A valid absolute local_archive_root outside mount_path survives the
+    save -> get_remote_targets() round trip verbatim."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    archive_root = str(tmp_path / "archive")
+    cfg.save({"remote_targets": [_base_target(
+        local_archive_root=archive_root,
+    )]})
+
+    targets = cfg.get_remote_targets()
+    assert len(targets) == 1
+    assert targets[0]["local_archive_root"] == archive_root
+
+
+def test_remote_target_local_archive_root_defaults_empty(tmp_path, monkeypatch):
+    """A saved target with no local_archive_root key coerces to ""."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    cfg.save({"remote_targets": [_base_target()]})
+
+    targets = cfg.get_remote_targets()
+    assert len(targets) == 1
+    assert targets[0]["local_archive_root"] == ""
+
+
+def test_remote_target_local_archive_root_rejects_relative(tmp_path, monkeypatch):
+    """A relative local_archive_root is blanked to "" but the rest of the
+    target (host/user/remote_path/mount_path) is still valid — invalid
+    values are blanked rather than dropping the whole target."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    cfg.save({"remote_targets": [_base_target(local_archive_root="Photos")]})
+
+    targets = cfg.get_remote_targets()
+    assert len(targets) == 1
+    assert targets[0]["local_archive_root"] == ""
+    assert targets[0]["host"] == "nas"
+    assert targets[0]["mount_path"] == "/Volumes/Photos"
+
+
+def test_remote_target_local_archive_root_rejects_inside_mount(tmp_path, monkeypatch):
+    """local_archive_root pointed inside mount_path is blanked — mount_path
+    is the destination view of the NAS, so archiving into it would "move"
+    files onto themselves."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    mount = str(tmp_path / "mount")
+    sub = str(tmp_path / "mount" / "sub")
+    coerced = cfg._coerce_remote_target(_base_target(
+        mount_path=mount, local_archive_root=sub,
+    ))
+    assert coerced is not None
+    assert coerced["local_archive_root"] == ""
+    assert coerced["mount_path"] == mount
+
+
+def test_remote_target_relative_mount_path_keeps_archive_root(tmp_path, monkeypatch):
+    """A relative mount_path must not blank a valid local_archive_root: the
+    inside-mount containment check would otherwise realpath the mount against
+    the server's CWD, making the outcome depend on where the server was
+    launched."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+
+    archive_root = str(tmp_path / "archive")
+    # Relative mount spelled so a CWD of tmp_path would make archive_root
+    # look nested inside it.
+    monkeypatch.chdir(tmp_path)
+    coerced = cfg._coerce_remote_target(_base_target(
+        mount_path=".", local_archive_root=archive_root,
+    ))
+    assert coerced is not None
+    assert coerced["local_archive_root"] == archive_root
+
+
+def test_remote_target_archive_root_case_alias_of_mount_is_blanked(
+    tmp_path, monkeypatch,
+):
+    """On a case-insensitive volume, a local_archive_root that differs from
+    mount_path only by case is the same directory: the archive root must be
+    blanked so the target does not later fail chained moves as a
+    source/destination overlap. A byte-wise commonpath compare would miss
+    this alias."""
+    import config as cfg
+
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("requires a case-insensitive filesystem")
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    mount = tmp_path / "Photos"
+    mount.mkdir()
+    alias_archive = str(tmp_path / "photos")  # same directory, different case
+    coerced = cfg._coerce_remote_target(_base_target(
+        mount_path=str(mount), local_archive_root=alias_archive,
+    ))
+    assert coerced is not None
+    assert coerced["local_archive_root"] == ""
+    assert coerced["mount_path"] == str(mount)
+
+
+def test_remote_target_archive_root_inside_mount_via_case_alias_is_blanked(
+    tmp_path, monkeypatch,
+):
+    """A local_archive_root strictly *inside* the mount via a case-alias
+    ancestor (mount `/Volumes/Photos`, archive `/volumes/photos/staging`)
+    must be blanked too — same directory-tree overlap as the equal case."""
+    import config as cfg
+
+    probe = tmp_path / "CaseProbe"
+    probe.mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("requires a case-insensitive filesystem")
+
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    mount = tmp_path / "Photos"
+    (mount / "staging").mkdir(parents=True)
+    alias_sub = str(tmp_path / "photos" / "staging")
+    coerced = cfg._coerce_remote_target(_base_target(
+        mount_path=str(mount), local_archive_root=alias_sub,
+    ))
+    assert coerced is not None
+    assert coerced["local_archive_root"] == ""
+    assert coerced["mount_path"] == str(mount)

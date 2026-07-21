@@ -9,6 +9,7 @@ so they stay meaningful regardless of the current ``SLOT_CAP`` value.
 """
 
 import threading
+import time
 
 from db import Database
 from wait import wait_for_job_via_runner
@@ -202,6 +203,59 @@ def test_enqueue_beyond_slot_cap_stays_queued(tmp_path):
     assert extra_started.wait(timeout=2.0), (
         "extra pipeline did not promote after slots cleared"
     )
+    wait_for_job_via_runner(runner, extra_id)
+
+
+def test_paused_pipeline_keeps_its_scheduler_slot(tmp_path):
+    """Pausing must not let the queue exceed the pipeline concurrency cap."""
+    from jobs import SLOT_CAP
+
+    runner, _ = _make_runner_with_db(tmp_path)
+    release = threading.Event()
+    started_events = [threading.Event() for _ in range(SLOT_CAP)]
+    occupant_ids = []
+
+    for started in started_events:
+        def work(job, _started=started):
+            _started.set()
+            while not release.is_set():
+                if runner.is_cancelled(job["id"]):
+                    break
+                time.sleep(0.005)
+            return {}
+
+        occupant_ids.append(runner.enqueue_pipeline(
+            work_fn=work, config={}, workspace_id=1,
+        ))
+
+    for index, started in enumerate(started_events):
+        assert started.wait(timeout=2), f"occupant {index} never started"
+
+    paused_id = occupant_ids[0]
+    assert runner.get(paused_id)["pausable"] is True
+    assert runner.pause_job(paused_id) is True
+    deadline = time.monotonic() + 2
+    while runner.get(paused_id)["status"] != "paused" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert runner.get(paused_id)["status"] == "paused"
+
+    extra_started = threading.Event()
+
+    def extra_work(job):
+        extra_started.set()
+        return {}
+
+    extra_id = runner.enqueue_pipeline(
+        work_fn=extra_work, config={}, workspace_id=1,
+    )
+    assert runner.get(extra_id)["status"] == "queued"
+    assert not extra_started.wait(timeout=0.1)
+
+    assert runner.resume_job(paused_id) is True
+    release.set()
+    for occupant_id in occupant_ids:
+        wait_for_job_via_runner(runner, occupant_id)
+    assert extra_started.wait(timeout=2)
     wait_for_job_via_runner(runner, extra_id)
 
 

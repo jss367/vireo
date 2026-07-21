@@ -9,6 +9,22 @@ import re
 from playwright.sync_api import expect
 
 
+def _seed_large_hawk_life_list(live_server, count=101):
+    db = live_server["db"]
+    folder_id = live_server["data"]["folders"][0]
+    keyword_id = db.add_keyword("Red-tailed Hawk", is_species=True)
+    for i in range(count):
+        photo_id = db.add_photo(
+            folder_id=folder_id,
+            filename=f"hawk-extra-{i}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=100.0 + i,
+            timestamp=f"2024-03-10T09:{i // 60:02d}:{i % 60:02d}",
+        )
+        db.tag_photo(photo_id, keyword_id)
+
+
 def test_browse_menu_sets_representative(live_server, page):
     url = live_server["url"]
     hawk = live_server["data"]["photos"][0]
@@ -184,3 +200,133 @@ def test_sort_and_numbering_preferences_persist(live_server, page):
     expect(page.locator("#renumberView")).to_be_checked()
     expect(page.locator(".species-name").first).to_have_text("American Robin")
     expect(page.locator(".lifer-number").first).to_have_text("#1")
+
+
+def test_taxonomic_group_and_identification_level_filters(live_server, page):
+    db = live_server["db"]
+    folder_id = live_server["data"]["folders"][0]
+
+    aves = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
+        ("Aves", "Birds", "class"),
+    ).lastrowid
+    mammalia = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank) VALUES (?, ?, ?)",
+        ("Mammalia", "Mammals", "class"),
+    ).lastrowid
+    hawk_taxon = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank, parent_id) "
+        "VALUES (?, ?, ?, ?)",
+        ("Buteo jamaicensis", "Red-tailed Hawk", "species", aves),
+    ).lastrowid
+    accipiter_taxon = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank, parent_id) "
+        "VALUES (?, ?, ?, ?)",
+        ("Accipiter", None, "genus", aves),
+    ).lastrowid
+    fox_taxon = db.conn.execute(
+        "INSERT INTO taxa (name, common_name, rank, parent_id) "
+        "VALUES (?, ?, ?, ?)",
+        ("Vulpes vulpes", "Red Fox", "species", mammalia),
+    ).lastrowid
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ?, type = 'taxonomy' WHERE name = ?",
+        (hawk_taxon, "Red-tailed Hawk"),
+    )
+
+    for name, taxon_id in (("Accipiter", accipiter_taxon),
+                           ("Red Fox", fox_taxon)):
+        keyword_id = db.add_keyword(name, kw_type="taxonomy")
+        db.conn.execute(
+            "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+            (taxon_id, keyword_id),
+        )
+        photo_id = db.add_photo(
+            folder_id=folder_id,
+            filename=f"{name.lower().replace(' ', '-')}.jpg",
+            extension=".jpg",
+            file_size=1000,
+            file_mtime=500.0 + taxon_id,
+            timestamp="2024-06-01T12:00:00",
+        )
+        db.tag_photo(photo_id, keyword_id)
+    db.conn.commit()
+
+    page.goto(f"{live_server['url']}/life-list")
+    page.locator(".species-card").first.wait_for(state="visible")
+
+    group = page.locator("#taxonomicGroupSelect")
+    rank = page.locator("#identificationRankSelect")
+    expect(group.locator("option", has_text="Birds")).to_have_count(1)
+    expect(group.locator("option", has_text="Mammals")).to_have_count(1)
+
+    group.select_option(str(aves))
+    expect(page.locator(".species-name")).to_have_count(2)
+    expect(page.locator(".species-name")).to_contain_text([
+        "Accipiter", "Red-tailed Hawk",
+    ])
+
+    rank.select_option("species")
+    expect(page.locator(".species-name")).to_have_count(1)
+    expect(page.locator(".species-name")).to_have_text(["Red-tailed Hawk"])
+    expect(page.locator("#meta")).to_contain_text("1 shown")
+
+    group.select_option(str(mammalia))
+    expect(page.locator(".species-name")).to_have_text(["Red Fox"])
+
+    rank.select_option("all")
+    group.select_option("unknown")
+    expect(page.locator(".species-name")).to_have_text(["American Robin"])
+
+
+def test_life_list_loads_more_than_initial_100(live_server, page):
+    _seed_large_hawk_life_list(live_server)
+    page.goto(f"{live_server['url']}/life-list")
+
+    hawk_card = page.locator('.species-card[data-species="Red-tailed Hawk"]')
+    hawk_card.wait_for(state="visible")
+    load_more = hawk_card.locator(".lifelist-load-more")
+    expect(load_more).to_have_text("Load 2 more photos")
+
+    with page.expect_response(
+        lambda response: "/api/life-list/species" in response.url
+        and response.status == 200
+    ):
+        load_more.click()
+
+    page.wait_for_function(
+        """() => {
+          const entry = currentData.species.find(e => e.species === 'Red-tailed Hawk');
+          return entry && entry.photos.length === 102 && entry.has_more === false;
+        }"""
+    )
+    expect(hawk_card.locator(".lifelist-load-more")).to_have_count(0)
+
+
+def test_life_list_lightbox_continues_across_page_boundary(live_server, page):
+    _seed_large_hawk_life_list(live_server)
+    page.goto(f"{live_server['url']}/life-list")
+    page.locator('.species-card[data-species="Red-tailed Hawk"]').wait_for(
+        state="visible"
+    )
+
+    initial_last_id = page.evaluate(
+        """() => {
+          const entry = currentData.species.find(e => e.species === 'Red-tailed Hawk');
+          const last = entry.photos[entry.photos.length - 1];
+          lifeListLightboxSpecies = entry.species;
+          openLightbox(last.id, last.filename, entry.photos);
+          lightboxNav(1);
+          return last.id;
+        }"""
+    )
+
+    page.wait_for_function(
+        """(oldId) => {
+          const entry = currentData.species.find(e => e.species === 'Red-tailed Hawk');
+          return entry && entry.photos.length === 102 && !entry.has_more
+            && window._lightboxCurrentId !== oldId;
+        }""",
+        arg=initial_last_id,
+    )
+    assert page.evaluate("window._lightboxPhotoList.length") == 102

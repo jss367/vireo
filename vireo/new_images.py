@@ -13,42 +13,33 @@ from image_loader import (
 
 log = logging.getLogger(__name__)
 
-# Mirror ``vireo/scanner.py`` ``_pair_raw_jpeg_companions``: a JPG sitting next
-# to a RAW with the same basename in the same folder is the RAW's working-copy
-# companion, not a separate photo. Keeping these sets in sync with the scanner
-# is what guarantees the detector and the ingest path agree on what counts as
-# a new image.
-_RAW_EXTS = {".nef", ".cr2", ".cr3", ".arw", ".raf", ".dng", ".rw2", ".orf"}
-_JPEG_EXTS = {".jpg", ".jpeg"}
-
-
 def _known_paths_for_workspace(db, workspace_id):
-    """Return the set of absolute paths of photos already ingested into the workspace."""
+    """Return absolute primary and companion paths already ingested.
+
+    A newly-created same-stem JPEG is intentionally *not* known until a scan
+    attaches it to the RAW record. It therefore appears once in New Images,
+    giving the user a visible path to ingest the developed file. After pairing,
+    ``companion_path`` makes the same walk converge to zero instead of leaving
+    a stuck banner.
+    """
     rows = db.conn.execute(
-        """SELECT f.path AS folder_path, p.filename
+        """SELECT f.path AS folder_path, p.filename, p.companion_path
            FROM photos p
            JOIN folders f ON f.id = p.folder_id
            JOIN workspace_folders wf ON wf.folder_id = f.id
            WHERE wf.workspace_id = ?""",
         (workspace_id,),
     ).fetchall()
-    return {os.path.join(r["folder_path"], r["filename"]) for r in rows}
-
-
-def _known_raw_stems_for_workspace(db, workspace_id):
-    """Return the set of ``(folder_path, stem)`` pairs for already-imported
-    RAW photos in the workspace, used to suppress JPG working-copy companions
-    from the "new images" count."""
-    rows = db.conn.execute(
-        """SELECT f.path AS folder_path, p.filename
-           FROM photos p
-           JOIN folders f ON f.id = p.folder_id
-           JOIN workspace_folders wf ON wf.folder_id = f.id
-           WHERE wf.workspace_id = ?
-             AND lower(p.extension) IN ('.nef','.cr2','.cr3','.arw','.raf','.dng','.rw2','.orf')""",
-        (workspace_id,),
-    ).fetchall()
-    return {(r["folder_path"], Path(r["filename"]).stem) for r in rows}
+    known = set()
+    for row in rows:
+        known.add(os.path.join(row["folder_path"], row["filename"]))
+        if row["companion_path"]:
+            companion = row["companion_path"]
+            known.add(
+                companion if os.path.isabs(companion)
+                else os.path.join(row["folder_path"], companion)
+            )
+    return known
 
 
 def mapped_roots(db, workspace_id, *, include_missing=False):
@@ -127,7 +118,6 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
     needing to refactor the walk.
     """
     known = _known_paths_for_workspace(db, workspace_id)
-    known_raw_stems = _known_raw_stems_for_workspace(db, workspace_id)
     roots = mapped_roots(db, workspace_id)
 
     per_root = []
@@ -193,14 +183,6 @@ def count_new_images_for_workspace(db, workspace_id, sample_limit=5,
                 # (os.path.isfile == False). Counting them as "new" would
                 # leave the banner stuck on files no scan can clear.
                 if not os.path.isfile(full):
-                    _maybe_emit()
-                    continue
-                # Suppress JPG working-copy companions of already-imported
-                # RAWs in the same folder. The scanner pairs them as
-                # ``companion_path`` rather than create a new primary photo,
-                # so flagging them as "new" misleads the user into thinking
-                # there's something to ingest.
-                if ext in _JPEG_EXTS and (dirpath, Path(name).stem) in known_raw_stems:
                     _maybe_emit()
                     continue
                 if full in seen_new_paths:

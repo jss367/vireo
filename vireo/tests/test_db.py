@@ -2,6 +2,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
@@ -911,6 +913,34 @@ def test_count_photos_for_rules_unsaved(tmp_path):
     assert len(db.get_collections()) == 0
 
 
+def test_smart_collection_can_select_photos_with_jpeg_companions(tmp_path):
+    """Paired JPEG availability is a first-class smart-collection rule even
+    though the pair remains one RAW-primary catalog record."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    paired = db.add_photo(
+        folder_id=fid, filename="paired.nef", extension=".nef",
+        file_size=100, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=fid, filename="raw-only.nef", extension=".nef",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='paired.jpg' WHERE id=?", (paired,),
+    )
+    db.conn.commit()
+
+    yes = [{"field": "has_jpeg_companion", "op": "equals", "value": 1}]
+    no = [{"field": "has_jpeg_companion", "op": "equals", "value": 0}]
+    assert db.count_photos_for_rules(yes) == 1
+    assert db.count_photos_for_rules(no) == 1
+
+
 def test_count_photos_for_rules_rejects_malformed_input(tmp_path):
     """The preview helper raises on input that isn't a list of rule dicts —
     the API route relies on this to return a 400 instead of 500.
@@ -1009,7 +1039,9 @@ def test_collection_recent_days_rule(tmp_path):
 
 
 def test_collection_timestamp_between_subsec(tmp_path):
-    """Collection timestamp 'between' rule includes sub-second photos."""
+    """Collection ``between`` upper: bare-date bound covers the whole day
+    (sub-second photos included); a precise-instant bound is treated as
+    an exact instant (sub-second photos after it are excluded)."""
     import json
 
     from db import Database
@@ -1023,12 +1055,22 @@ def test_collection_timestamp_between_subsec(tmp_path):
     db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
                  file_size=100, file_mtime=1.0, timestamp='2024-06-15T12:00:00')
 
-    rules = [{"field": "timestamp", "op": "between",
-              "value": ["2024-06-15", "2024-06-15T23:59:59"]}]
-    cid = db.add_collection('June 15', json.dumps(rules))
+    # Bare-date upper covers the full named day, including sub-second
+    # photos in ``23:59:59``.
+    bare_rules = [{"field": "timestamp", "op": "between",
+                   "value": ["2024-06-15", "2024-06-15"]}]
+    cid_bare = db.add_collection('June 15 bare', json.dumps(bare_rules))
+    assert len(db.get_collection_photos(cid_bare)) == 2
 
-    photos = db.get_collection_photos(cid)
-    assert len(photos) == 2
+    # A precise-instant upper ``2024-06-15T23:59:59`` is treated as
+    # exactly that instant — a photo at ``23:59:59.500000`` is strictly
+    # after it and must be excluded, matching the semantics of ``<=``
+    # on precise instants.
+    precise_rules = [{"field": "timestamp", "op": "between",
+                      "value": ["2024-06-15", "2024-06-15T23:59:59"]}]
+    cid_precise = db.add_collection('June 15 precise', json.dumps(precise_rules))
+    matched = {p['filename'] for p in db.get_collection_photos(cid_precise)}
+    assert matched == {'b.jpg'}
 
 
 def test_collection_timestamp_rules_match_ui_shape(tmp_path):
@@ -1360,6 +1402,60 @@ def test_has_subject_rule_ignores_legacy_is_species_when_taxonomy_excluded(tmp_p
     )
 
 
+def test_has_subject_rule_rejects_invalid_op_when_subject_types_empty(tmp_path, monkeypatch):
+    """When subject_types is empty, a malformed has_subject rule (e.g.
+    ``op='contains'``) must still surface as a ValueError so the API
+    layer returns 400 — not silently drop the rule with ``None, []``.
+    Mirrors the operator guard the other advertised boolean fields get
+    via ``_boolean_predicate``.
+    """
+    import config as cfg
+    import pytest
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": []})
+
+    with pytest.raises(ValueError):
+        db._build_query_from_rules(
+            [{"field": "has_subject", "op": "contains", "value": 1}]
+        )
+
+
+def test_has_subject_rule_empty_subject_types_value_zero_matches_all(tmp_path, monkeypatch):
+    """When subject_types is empty, ``has_subject is false`` should match
+    every photo (nothing counts as identifying, so nothing has a subject).
+    Prior implementation returned ``None, []`` here — semantically the
+    same for a lone rule, but the new fail-closed guard routes through
+    ``_boolean_predicate`` so we assert the affirmative-matches-all
+    branch too.
+    """
+    import json
+
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.create_workspace("ws")
+    db.set_active_workspace(ws_id)
+    db.update_workspace(ws_id, config_overrides={"subject_types": []})
+
+    fid = db.add_folder('/photos', name='photos')
+    db.add_photo(folder_id=fid, filename='p1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='p2.jpg', extension='.jpg',
+                 file_size=200, file_mtime=2.0)
+
+    cid = db.add_collection(
+        "Missing Subject (empty types)",
+        json.dumps([{"field": "has_subject", "op": "equals", "value": 0}]),
+    )
+    photos = db.get_collection_photos(cid, per_page=999)
+    assert len(photos) == 2
+
+
 def test_add_keyword_is_species(tmp_path):
     """add_keyword with is_species=True marks the keyword."""
     from db import Database
@@ -1417,6 +1513,59 @@ def test_mark_species_keywords_sets_type_taxonomy(tmp_path):
     ).fetchone()
     assert row['is_species'] == 1
     assert row['type'] == 'taxonomy'
+
+
+def test_mark_species_keywords_preserves_explicit_location_homonym(tmp_path):
+    """A location name that is also a taxon must remain a location.
+
+    ``California`` is both a geographic name and a plant genus. Retyping a
+    location hierarchy node as taxonomy makes subsequent Google Place chain
+    upserts fail with ``name_conflict``.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    location_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="location",
+    )
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            if name == "California":
+                return {"taxon_id": 123, "scientific_name": "California"}
+            return None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+
+    assert updated == 0
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (location_id,),
+    ).fetchone()
+    assert dict(row) == {
+        "type": "location",
+        "is_species": 0,
+        "taxon_id": None,
+    }
+
+    leaf_id = db.upsert_place_chain({
+        "place_id": "test-california-park",
+        "name": "Test California Park",
+        "types": ["park"],
+        "lat": 32.9,
+        "lng": -117.2,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+            {
+                "name": "California",
+                "types": ["administrative_area_level_1"],
+            },
+        ],
+    })
+    leaf = db.conn.execute(
+        "SELECT type, parent_id FROM keywords WHERE id = ?", (leaf_id,),
+    ).fetchone()
+    assert dict(leaf) == {"type": "location", "parent_id": location_id}
 
 
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
@@ -2052,6 +2201,153 @@ def test_get_dashboard_stats_with_data(tmp_path):
     assert hours[8] == 1
 
 
+def test_dashboard_scope_combines_folder_collection_and_dates(tmp_path):
+    """Dashboard, coverage, and Browse use the same intersected scope."""
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    park = db.add_folder("/photos/park", name="park")
+    yard = db.add_folder("/photos/yard", name="yard")
+    db.add_workspace_folder(ws_id, park)
+    db.add_workspace_folder(ws_id, yard)
+
+    march = db.add_photo(
+        folder_id=park, filename="march.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-03-10T08:00:00",
+    )
+    june_park = db.add_photo(
+        folder_id=park, filename="june-park.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
+    )
+    june_yard = db.add_photo(
+        folder_id=yard, filename="june-yard.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
+    )
+    collection_id = db.add_collection(
+        "June picks",
+        json.dumps([{"field": "photo_ids", "value": [march, june_park, june_yard]}]),
+    )
+
+    scope = {
+        "collection_id": collection_id,
+        "date_from": "2024-06-01",
+        "date_to": "2024-06-30",
+    }
+    stats = db.get_dashboard_stats(**scope)
+    assert stats["total_photos"] == 2
+    assert stats["folder_count"] == 2
+    assert stats["photos_by_month"] == [{"month": "2024-06", "count": 2}]
+    assert db.get_coverage_stats(**scope)["total"] == 2
+    assert {row["path"] for row in db.get_folder_coverage_stats(**scope)} == {
+        "/photos/park", "/photos/yard",
+    }
+
+    browse = db.get_photos(folder_id=yard, **scope)
+    assert [photo["id"] for photo in browse] == [june_yard]
+    assert db.get_photo_ids(folder_id=yard, **scope) == [june_yard]
+    assert db.count_filtered_photos(folder_id=yard, **scope) == 1
+
+
+def test_dashboard_collection_scope_preserves_offline_photos(tmp_path):
+    """Dashboard totals for a collection scope keep photos in offline folders.
+
+    The unscoped Dashboard intentionally counts photos in missing folders
+    (metadata-only aggregates like total_photos, photos_by_month, etc.).
+    Scoping by a collection whose rules match those photos must not
+    silently drop them via the collection subquery's folder-status filter.
+    """
+    import json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    ok_folder = db.add_folder("/photos/ok", name="ok")
+    gone_folder = db.add_folder("/photos/gone", name="gone")
+    db.add_workspace_folder(ws_id, ok_folder)
+    db.add_workspace_folder(ws_id, gone_folder)
+
+    visible = db.add_photo(
+        folder_id=ok_folder, filename="here.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-10T08:00:00",
+    )
+    offline = db.add_photo(
+        folder_id=gone_folder, filename="offline.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-06-11T08:00:00",
+    )
+    collection_id = db.add_collection(
+        "All photos",
+        json.dumps([{"field": "photo_ids", "value": [visible, offline]}]),
+    )
+
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (gone_folder,),
+    )
+    db.conn.commit()
+
+    stats = db.get_dashboard_stats(collection_id=collection_id)
+    assert stats["total_photos"] == 2, (
+        "Dashboard totals must count the offline photo when scoped by "
+        f"a collection that matches it; got {stats['total_photos']}"
+    )
+    assert stats["accessible_photos"] == 1
+    assert stats["missing_folder_count"] == 1
+    assert stats["attention"]["unclassified"] == 1
+    assert stats["attention"]["missing_location"] == 1
+    months = {row["month"]: row["count"] for row in stats["photos_by_month"]}
+    assert months.get("2024-06") == 2
+
+    # Coverage still restricts to accessible folders in its outer join, so
+    # the collection scope must not further shrink that count either.
+    assert db.get_coverage_stats(collection_id=collection_id)["total"] == 1
+
+    # Regression guard: Browse and pipeline callers must still filter out
+    # photos in offline folders even when the collection rules match them.
+    assert db.count_collection_photos(collection_id) == 1
+    assert [p["id"] for p in db.get_collection_photos(collection_id)] == [visible]
+
+
+def test_dashboard_attention_counts_actionable_gaps_in_scope(tmp_path):
+    """Needs Attention cards report preview, sync, location, and duplicate work."""
+    db, pids = _make_workspace_with_photos(tmp_path, [
+        {"timestamp": "2024-06-01T08:00:00", "file_hash": "same"},
+        {"timestamp": "2024-06-02T08:00:00", "file_hash": "same"},
+        {"timestamp": "2024-07-01T08:00:00", "file_hash": "other"},
+    ])
+    det_ids = db.save_detections(pids[0], [{
+        "box": {"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.4},
+        "confidence": 0.9,
+        "category": "animal",
+    }], detector_model="MDV6")
+    db.add_prediction(det_ids[0], "Robin", 0.95, "test")
+    db.preview_cache_insert(pids[0], 1920, 100)
+    db.conn.execute(
+        "INSERT INTO pending_changes "
+        "(photo_id, change_type, value, change_token, workspace_id) "
+        "VALUES (?, 'rating', '4', 'token', ?)",
+        (pids[1], db._ws_id()),
+    )
+    db.conn.commit()
+
+    attention = db.get_dashboard_stats(
+        date_from="2024-06-01", date_to="2024-06-30",
+    )["attention"]
+    assert attention == {
+        "unclassified": 1,
+        "missing_location": 2,
+        "missing_previews": 1,
+        "preview_size": 1920,
+        "preview_enabled": True,
+        "pending_sync": 1,
+        "duplicate_groups": 1,
+    }
+
+
 # --- Cluster 2b: Coverage Stats ---
 
 def test_get_coverage_stats_empty_workspace(tmp_path):
@@ -2163,6 +2459,40 @@ def test_get_folder_coverage_stats_per_folder_totals(tmp_path):
     assert by_path['/B']['total'] == 2
     assert by_path['/B']['thumbnail'] == 0
     assert by_path['/B']['phash'] == 0
+
+
+def test_folder_coverage_keeps_zero_match_folders_with_scopes(tmp_path):
+    """Photo filters keep in-scope folders visible while folder scope narrows rows."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    folder_a = db.add_folder("/A", name="A")
+    folder_b = db.add_folder("/B", name="B")
+    db.add_workspace_folder(ws_id, folder_a)
+    db.add_workspace_folder(ws_id, folder_b)
+    db.add_photo(
+        folder_id=folder_a, filename="a.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-01-01T00:00:00",
+    )
+    db.add_photo(
+        folder_id=folder_b, filename="b.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2024-01-02T00:00:00",
+    )
+
+    no_matches = db.get_folder_coverage_stats(date_from="2024-02-01")
+    assert {row["path"]: row["total"] for row in no_matches} == {
+        "/A": 0,
+        "/B": 0,
+    }
+
+    folder_scoped = db.get_folder_coverage_stats(
+        folder_id=folder_a, date_from="2024-02-01",
+    )
+    assert [(row["path"], row["total"]) for row in folder_scoped] == [
+        ("/A", 0),
+    ]
 
 
 # --- Cluster 3: Prediction Management ---
@@ -5128,6 +5458,982 @@ def test_accept_prediction_tags_photo(tmp_path):
     assert result["species"] == "Elk"
     kws = db.get_photo_keywords(pid)
     assert any(k["name"] == "Elk" for k in kws)
+
+
+def test_replace_prediction_preserves_equivalent_hierarchy_target(tmp_path):
+    """Replacing stale species leaves an equivalent hierarchical target in
+    place instead of flattening it to the root keyword."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    stale = db.add_keyword("Sparrow", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, stale)
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Verdin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    root = result["keyword_id"]
+    tagged = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged
+    assert root not in tagged
+    assert stale not in tagged
+
+
+def test_replace_prediction_records_affected_when_only_removals_occur(tmp_path):
+    """Replace Keywords on a photo that already carries the accepted target
+    via a hierarchy leaf must still record the photo in ``affected`` when
+    stale species are removed.
+
+    ``/api/predictions/<id>/replace-keywords`` builds its edit-history items
+    from ``result['affected']`` alone, so a photo that gets stale species
+    stripped but no new tag added must still surface; otherwise the removed
+    species has no audit entry and undo cannot restore it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    stale = db.add_keyword("Sparrow", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, stale)
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Verdin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    # Even though no new tag was added (hierarchy leaf already satisfies the
+    # target), the stale Sparrow removal must be visible in ``affected`` so
+    # the API layer can record it.
+    assert len(result["affected"]) == 1
+    entry = result["affected"][0]
+    assert entry["photo_id"] == pid
+    assert entry["old_species"] == ["Sparrow"]
+    # And the keyword_remove pending change was actually queued.
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Sparrow") in removed
+
+
+def test_replace_prediction_migrates_curation_from_canonical_root_of_alias(tmp_path):
+    """When Replace Keywords strips a hierarchy alias whose taxon has curation
+    keyed on the canonical root spelling, highlights and representative
+    preferences must migrate onto the newly-tagged species.
+
+    ``repair_duplicate_photo_species`` leaves the alias leaf attached (say
+    ``Desert Verdin`` under ``Penduline tits``) and detaches the top-level
+    ``Verdin`` — but curation was preserved under the canonical root name
+    ``Verdin`` because that is where ``_canonical_curation_species`` keeps
+    it. Renaming the curation from only the raw alias ``Desert Verdin``
+    would leave ``species_highlights`` / ``photo_preferences`` stranded
+    under ``Verdin`` after the photo is retagged to a different species.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(
+        db,
+        [
+            (2912, "Auriparus flaviceps", "Verdin"),
+            (19860, "Campylorhynchus brunneicapillus", "Cactus Wren"),
+        ],
+    )
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "verdin.jpg", ".jpg", 100, 1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    # Root species row exists (canonical curation key) but is NOT tagged on
+    # the photo — the post-repair layout after the redundant root was
+    # detached.
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+
+    # Curation lives under the canonical root spelling that repair kept as
+    # the species key, not under the raw hierarchy alias name.
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+             (workspace_id, purpose, species, photo_id)
+           VALUES (?, ?, ?, ?)""",
+        (ws_id, "highlights", "Verdin", pid),
+    )
+    db.conn.execute(
+        """INSERT INTO species_highlights
+             (workspace_id, species, photo_id, rank,
+              created_at, updated_at)
+           VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))""",
+        (ws_id, "Verdin", pid),
+    )
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Cactus Wren", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Cactus Wren" in names
+    assert "Desert Verdin" not in names
+
+    # Sidecar remove still uses the raw alias name (XMP carries it, not the
+    # canonical root spelling).
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Desert Verdin") in removed
+    assert result["affected"][0]["old_species"] == ["Desert Verdin"]
+
+    # Curation migrated from the canonical root Verdin onto Cactus Wren.
+    pref_species = {
+        row["species"] for row in db.conn.execute(
+            "SELECT species FROM photo_preferences WHERE photo_id = ?",
+            (pid,),
+        ).fetchall()
+    }
+    assert "Cactus Wren" in pref_species
+    assert "Verdin" not in pref_species
+
+    hl_species = {
+        row["species"] for row in db.conn.execute(
+            "SELECT species FROM species_highlights WHERE photo_id = ?",
+            (pid,),
+        ).fetchall()
+    }
+    assert "Cactus Wren" in hl_species
+    assert "Verdin" not in hl_species
+
+
+def test_replace_prediction_removes_ambiguous_legacy_homonym_row(tmp_path):
+    """When Replace Keywords accepts a linked target and the photo carries
+    an unlinked same-key homonym row, the ambiguous row must be treated as
+    a stale species and removed.
+
+    Regression: the target-species check treated any NULL-taxon same-key row
+    as equivalent to the linked target, so with a legacy ``Robin`` alongside
+    taxonomy ``robin``/``ROBIN`` bound to different taxa, the legacy row was
+    kept while the correct linked target was added, leaving the wrong
+    species attached.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (18001, "Erithacus rubecula", "European Robin"),
+            (18002, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "robin.jpg", ".jpg", 100, 1.0)
+
+    # Two distinct linked species keywords share the NOCASE match key
+    # "robin" but resolve to different taxa. add_keyword dedupes case-
+    # insensitively so INSERT directly to preserve both rows.
+    european = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["European Robin"],),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    )
+    # An unlinked, typed legacy row with the same match key. It could be
+    # either species; Replace Keywords must not treat it as authoritatively
+    # equivalent to the target and must strip it as a stale species.
+    legacy = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('ROBIN', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    db.tag_photo(pid, legacy)
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "robin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    result = db.accept_prediction(prediction_id, replace_species=True)
+
+    tagged = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert european in tagged, (
+        "Linked target must be attached even though a same-key legacy row "
+        "existed"
+    )
+    assert legacy not in tagged, (
+        "Ambiguous NULL-taxon same-key row must be removed — its identity "
+        "cannot be assumed to equal the linked target"
+    )
+    assert len(result["affected"]) == 1
+    entry = result["affected"][0]
+    assert entry["photo_id"] == pid
+    assert "ROBIN" in entry["old_species"]
+
+
+def test_replace_prediction_unlinked_target_preserves_linked_homonym(tmp_path):
+    """When the accept target is an unlinked legacy species row and the
+    photo also carries a distinct LINKED same-key homonym, Replace Keywords
+    must not fold the linked row into the target.
+
+    Regression: the target-species check treated any same-key row as the
+    target in the unlinked-target branch, so a linked ``robin`` on the
+    photo was silently kept as "already the target" (excluded from
+    ``to_remove``) while the intended unlinked target was added alongside,
+    leaving the wrong species attached.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (18101, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(fid, "robin.jpg", ".jpg", 100, 1.0)
+
+    # An unlinked legacy species keyword — this is the accept target.
+    legacy_target = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    # A distinct linked same-key row exists in the catalog and is
+    # attached to the photo. Its identity is a different species; the
+    # unlinked target cannot claim it.
+    linked_homonym = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    ).lastrowid
+    db.tag_photo(pid, linked_homonym)
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Robin", 0.95, "bioclip")
+    prediction_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?", (detection_id,),
+    ).fetchone()["id"]
+
+    # ``add_keyword`` NOCASE-dedupes among same-parent taxonomy rows and
+    # tie-breaks by id, so the earlier-inserted ``legacy_target`` wins and
+    # becomes the resolved accept target ``kid``. The replace-species
+    # branch must recognise that the linked ``robin`` on the photo is a
+    # distinct species, not the unlinked target — and untag it.
+    db.accept_prediction(prediction_id, replace_species=True)
+
+    tagged = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert legacy_target in tagged, (
+        "Unlinked accept target must be attached to the photo"
+    )
+    assert linked_homonym not in tagged, (
+        "Linked same-key homonym is a distinct species and must not be "
+        "folded into the unlinked target: it must be included in "
+        "to_remove and untagged from the photo"
+    )
+
+
+def test_accept_subject_species_preserves_existing_tag_and_accepts_models(tmp_path):
+    """An additional subject species is added without replacing the original.
+
+    Agreeing predictions from different models on the same detection are
+    resolved together.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    folder_id = db.add_folder("/photos")
+    photo_id = db.add_photo(
+        folder_id=folder_id, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    wigeon_id = db.add_keyword("American Wigeon", is_species=True)
+    db.tag_photo(photo_id, wigeon_id)
+    detection_id = db.save_detections(
+        photo_id,
+        [{
+            "box": {"x": 0.5, "y": 0.4, "w": 0.2, "h": 0.2},
+            "confidence": 0.6,
+            "category": "animal",
+        }],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(
+        detection_id, "Blue-winged Teal", 0.91, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        detection_id, "Blue-winged Teal", 0.87, "inat",
+        labels_fingerprint="fp",
+    )
+    target = next(
+        row for row in db.get_predictions()
+        if row["classifier_model"] == "bioclip"
+    )
+
+    result = db.accept_subject_species(target["id"])
+
+    assert result["species"] == "Blue-winged Teal"
+    assert len(result["prediction_ids"]) == 2
+    # Each underlying accept_prediction call reports an entry: the first
+    # tags Blue-winged Teal (``changed_tag=True``), the second sees the
+    # photo already carrying it and records a status-only accept
+    # (``changed_tag=False``) so the aggregate accept-subject history
+    # can still reverse every sibling status on undo.
+    assert len(result["affected"]) == 2
+    changed = [a["changed_tag"] for a in result["affected"]]
+    assert changed.count(True) == 1
+    assert changed.count(False) == 1
+    assert {row["name"] for row in db.get_photo_keywords(photo_id)} >= {
+        "American Wigeon", "Blue-winged Teal",
+    }
+    statuses = {
+        row["classifier_model"]: row["status"]
+        for row in db.get_predictions(photo_ids=[photo_id])
+    }
+    assert statuses == {"bioclip": "accepted", "inat": "accepted"}
+
+
+def test_replace_species_preserves_other_subject_on_multi_detection_photo(tmp_path):
+    """Replacing one subject's species must not strip a species that belongs
+    to a different detection (subject) on the same photo.
+
+    Regression: accept_prediction(replace_species=True) deleted every species
+    keyword on the photo, so correcting the teal box's ID wiped the American
+    Wigeon confirmed on the other box.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    wigeon = db.add_keyword("American Wigeon", is_species=True)
+    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, wigeon)
+    db.tag_photo(pid, stale_teal)
+
+    d_wigeon, d_teal = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # The wigeon box keeps a live prediction naming the wigeon; the teal box's
+    # real identity is Blue-winged Teal.
+    db.add_prediction(
+        d_wigeon, "American Wigeon", 0.99, "bioclip", labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_teal, "Blue-winged Teal", 0.95, "bioclip", labels_fingerprint="fp",
+    )
+    teal_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_teal
+    )
+
+    result = db.accept_prediction(teal_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names        # this subject's corrected ID
+    assert "American Wigeon" in names          # other subject preserved
+    assert "Green-winged Teal" not in names    # this subject's stale ID gone
+    # The stripped species is reported (and only it), so the sidecar remove is
+    # queued for the stale teal but not the still-tagged wigeon.
+    assert result["affected"][0]["old_species"] == ["Green-winged Teal"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+    assert (pid, "American Wigeon") not in removed
+
+
+def test_replace_species_ignores_stale_fingerprint_predictions_on_neighbour(tmp_path):
+    """The protected-species query must only consider the neighbouring
+    detection's *current* labels_fingerprint. A re-classified detection can
+    still carry pending predictions from an older label set naming a species
+    that the current run no longer produces; those stale rows must not
+    shield an obsolete species keyword from replace_species.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # The photo carries a stale species tag left over from when the neighbour
+    # was previously classified as Green-winged Teal.
+    fresh_wigeon = db.add_keyword("American Wigeon", is_species=True)
+    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, fresh_wigeon)
+    db.tag_photo(pid, stale_teal)
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # Neighbour's *old* fingerprint still has a pending row naming the stale
+    # species — the kind of row get_predictions() filters out.
+    db.add_prediction(
+        d_neighbour, "Green-winged Teal", 0.90, "bioclip",
+        labels_fingerprint="fp_old",
+    )
+    # Neighbour's *current* fingerprint names the wigeon; the target box was
+    # classified as the wrong teal and needs correction to Blue-winged Teal.
+    db.add_prediction(
+        d_neighbour, "American Wigeon", 0.95, "bioclip",
+        labels_fingerprint="fp_new",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp_new",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "American Wigeon" in names          # protected by current fp
+    assert "Green-winged Teal" not in names    # stale fp must not protect it
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+
+
+def test_replace_species_normalizes_protected_species_before_matching(tmp_path):
+    """The neighbour's *live* prediction species must be folded through the
+    same keyword-normalization as the photo's stored keyword before deciding
+    what to protect.
+
+    Regression: predictions.species stores the raw model output (e.g.
+    `‘apapane` with a leading edge quote), while add_keyword normalizes on
+    write so the photo actually carries the clean keyword `apapane`. A
+    naive `lower(trim(species))` fold on the SQL side would leave the raw
+    edge quote in place, `keyword.name.strip().lower() not in protected`
+    would be True, and replace_species would queue a keyword_remove for
+    the still-live neighbouring subject.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries the neighbour's species under the normalized (clean)
+    # spelling — the shape add_keyword actually writes.
+    apapane = db.add_keyword("apapane", is_species=True)
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, apapane)
+    db.tag_photo(pid, stale)
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # Neighbour's live prediction still carries the raw edge-quote form
+    # that predictions.species records verbatim.
+    db.add_prediction(
+        d_neighbour, "‘apapane", 0.95, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "apapane" in names                  # protected across normalization
+    assert "Green-winged Teal" not in names    # this subject's stale ID gone
+    assert result["affected"][0]["old_species"] == ["Green-winged Teal"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+    assert (pid, "apapane") not in removed
+
+
+def test_replace_species_ignores_alternative_prediction_on_neighbour(tmp_path):
+    """The protected set must exclude neighbour predictions whose review
+    status is ``'alternative'`` — Compare drops those rows explicitly, so a
+    stale species keyword that only survives via an alternative row is not
+    "still tagged by another subject", it's just an out-of-band species
+    tag that replace should strip.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries a stale species tag whose only backing on the neighbour
+    # is an 'alternative' prediction row.
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, stale)
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.8, "category": "animal"},
+    ], detector_model="MDV6")
+    # Neighbour: primary picks a wigeon, alternative names the stale teal.
+    db.add_prediction(
+        d_neighbour, "American Wigeon", 0.95, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_neighbour, "Green-winged Teal", 0.40, "bioclip",
+        status="alternative", labels_fingerprint="fp",
+    )
+    # Target box: wrong teal, needs correction to Blue-winged Teal.
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target and r["status"] != "alternative"
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "Green-winged Teal" not in names    # alternative must not protect it
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+
+
+def test_replace_species_ignores_below_threshold_neighbour(tmp_path):
+    """The protected set must exclude neighbour predictions whose detection
+    sits below the workspace's ``detector_confidence`` threshold — Compare
+    treats those as dormant and hides them, so a stale species keyword that
+    only survives via a below-threshold neighbour is not "another visible
+    subject" and replace must strip it.
+    """
+    import config as cfg
+    from db import Database
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"detector_confidence": 0.5})
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries a stale species tag whose only backing on the neighbour
+    # is a below-threshold detection.
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, stale)
+
+    d_target, d_dormant = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        # Below the 0.5 workspace threshold — Compare treats as dormant.
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.2, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(
+        d_dormant, "Green-winged Teal", 0.95, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    # Dormant (below-threshold) neighbour must not protect the stale tag.
+    assert "Green-winged Teal" not in names
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+
+
+def test_replace_species_preserves_neighbour_above_threshold(tmp_path):
+    """Companion to the below-threshold test: an above-threshold neighbour
+    with a non-alternative prediction MUST still protect its species even
+    when the workspace's detector_confidence is set high enough that the
+    default 0.2 would have hidden neighbours in the earlier test. This
+    guards against the visibility filter accidentally protecting nothing.
+    """
+    import config as cfg
+    from db import Database
+
+    cfg.CONFIG_PATH = str(tmp_path / "config.json")
+    cfg.save({"detector_confidence": 0.5})
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    wigeon = db.add_keyword("American Wigeon", is_species=True)
+    stale = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, wigeon)
+    db.tag_photo(pid, stale)
+
+    d_target, d_wigeon = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        # Comfortably above the 0.5 workspace threshold.
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(
+        d_wigeon, "American Wigeon", 0.99, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Blue-winged Teal", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Blue-winged Teal" in names
+    assert "American Wigeon" in names          # visible neighbour still protects
+    assert "Green-winged Teal" not in names
+
+
+def test_replace_species_protects_taxonomy_ancestor_of_neighbour_prediction(
+    tmp_path, monkeypatch,
+):
+    """A broader taxonomy keyword (e.g. Anatidae) supported by a neighbouring
+    subject's prediction under the taxonomy — not just by exact text — must
+    survive replace_species and its curation must not be migrated onto the
+    new species.
+
+    Regression: the protected set only contained ``keyword_match_key(pr.species)``
+    so a multi-detection photo carrying a family-level keyword like Anatidae
+    alongside the neighbour's American Wigeon still had Anatidae deleted when
+    a different box was replaced, and the ``rename_*_species`` migration then
+    rebound Anatidae's curation onto the corrected species — the wrong
+    subject.
+    """
+    import json as _json
+
+    import taxonomy as taxonomy_mod
+    from db import Database
+    from taxonomy import Taxonomy
+
+    # Minimal taxonomy: Anatidae family + three species inside it. Enough for
+    # Compare's relationship rules to fire:
+    #   * Anatidae vs American Wigeon -> ancestor / refinement (must protect)
+    #   * Green-winged Teal vs American Wigeon -> sibling / conflict (must not)
+    tax_path = tmp_path / "taxonomy.json"
+    with open(tax_path, "w") as f:
+        _json.dump({
+            "last_updated": "2026-07-18",
+            "source": "test",
+            "taxa_by_common": {
+                "american wigeon": {
+                    "taxon_id": 1,
+                    "scientific_name": "Mareca americana",
+                    "common_name": "American Wigeon",
+                    "rank": "species",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae", "Mareca", "Mareca americana",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order",
+                        "family", "genus", "species",
+                    ],
+                },
+                "green-winged teal": {
+                    "taxon_id": 2,
+                    "scientific_name": "Anas crecca",
+                    "common_name": "Green-winged Teal",
+                    "rank": "species",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae", "Anas", "Anas crecca",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order",
+                        "family", "genus", "species",
+                    ],
+                },
+                "wood duck": {
+                    "taxon_id": 3,
+                    "scientific_name": "Aix sponsa",
+                    "common_name": "Wood Duck",
+                    "rank": "species",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae", "Aix", "Aix sponsa",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order",
+                        "family", "genus", "species",
+                    ],
+                },
+                "anatidae": {
+                    "taxon_id": 4,
+                    "scientific_name": "Anatidae",
+                    "common_name": "Anatidae",
+                    "rank": "family",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order", "family",
+                    ],
+                },
+            },
+            "taxa_by_scientific": {
+                "anatidae": {
+                    "taxon_id": 4,
+                    "scientific_name": "Anatidae",
+                    "common_name": "Anatidae",
+                    "rank": "family",
+                    "lineage_names": [
+                        "Animalia", "Chordata", "Aves", "Anseriformes",
+                        "Anatidae",
+                    ],
+                    "lineage_ranks": [
+                        "kingdom", "phylum", "class", "order", "family",
+                    ],
+                },
+            },
+        }, f)
+    fake_tax = Taxonomy(str(tax_path))
+    monkeypatch.setattr(
+        taxonomy_mod, "load_local_taxonomy", lambda: fake_tax,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="ducks.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries the neighbour's species AND a broader family taxonomy
+    # keyword — the shape a photo picks up from a prior curation pass. It
+    # also carries an unrelated stale species that only the target box's
+    # (soon-to-be-replaced) old identity supported.
+    wigeon = db.add_keyword("American Wigeon", is_species=True)
+    anatidae = db.add_keyword("Anatidae", kw_type="taxonomy")
+    stale_teal = db.add_keyword("Green-winged Teal", is_species=True)
+    db.tag_photo(pid, wigeon)
+    db.tag_photo(pid, anatidae)
+    db.tag_photo(pid, stale_teal)
+
+    # Seed curation state on the family keyword so we can verify it is NOT
+    # migrated onto the new species when Anatidae survives replace.
+    ws_id = db._ws_id()
+    db.conn.execute(
+        """INSERT INTO photo_preferences
+             (workspace_id, purpose, species, photo_id)
+           VALUES (?, ?, ?, ?)""",
+        (ws_id, "highlights", "Anatidae", pid),
+    )
+    db.conn.commit()
+
+    d_target, d_neighbour = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2},
+         "confidence": 0.9, "category": "animal"},
+        {"box": {"x": 0.6, "y": 0.5, "w": 0.2, "h": 0.2},
+         "confidence": 0.85, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(
+        d_neighbour, "American Wigeon", 0.99, "bioclip",
+        labels_fingerprint="fp",
+    )
+    db.add_prediction(
+        d_target, "Wood Duck", 0.92, "bioclip",
+        labels_fingerprint="fp",
+    )
+    target_pred = next(
+        r for r in db.get_predictions(photo_ids=[pid])
+        if r["detection_id"] == d_target
+    )
+
+    result = db.accept_prediction(target_pred["id"], replace_species=True)
+
+    names = {k["name"] for k in db.get_photo_keywords(pid)}
+    assert "Wood Duck" in names                # target's corrected identity
+    assert "American Wigeon" in names           # exact-text neighbour survives
+    assert "Anatidae" in names                  # taxonomy ancestor survives
+    assert "Green-winged Teal" not in names     # target's stale ID gone
+    # Anatidae must not appear in old_species: it wasn't stripped, so no
+    # keyword_remove was queued and the curation migration was skipped.
+    assert "Anatidae" not in result["affected"][0]["old_species"]
+    assert "Green-winged Teal" in result["affected"][0]["old_species"]
+    removed = {
+        (c["photo_id"], c["value"])
+        for c in db.get_pending_changes()
+        if c["change_type"] == "keyword_remove"
+    }
+    assert (pid, "Green-winged Teal") in removed
+    assert (pid, "Anatidae") not in removed
+    assert (pid, "American Wigeon") not in removed
+    # Anatidae's curation stayed on Anatidae — not silently rebound to the
+    # newly-added Wood Duck.
+    prefs = db.conn.execute(
+        "SELECT species FROM photo_preferences WHERE photo_id = ?",
+        (pid,),
+    ).fetchall()
+    pref_species = {row["species"] for row in prefs}
+    assert "Anatidae" in pref_species
+    assert "Wood Duck" not in pref_species
+
+
+def test_accept_prediction_queues_normalized_species(tmp_path):
+    """When the prediction's species carries stray edge quotes (e.g.
+    `‘apapane`), accept_prediction must tag the photo with the normalized
+    row AND queue the pending sidecar keyword_add / return the payload
+    using the stored (clean) spelling. Without this, the DB tag points to
+    `apapane` while pending changes and the response payload use
+    `‘apapane`, so a later delete queues the clean name, pending changes
+    stop cancelling, and XMP sync persists the stray-quote label."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    det_ids = db.save_detections(pid, [
+        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+         "confidence": 0.9, "category": "animal"},
+    ], detector_model="MDV6")
+    db.add_prediction(det_ids[0], species="‘apapane",
+                      confidence=0.9, model="bioclip")
+    pred = db.get_predictions()[0]
+
+    result = db.accept_prediction(pred["id"])
+    # The stored keyword name is the normalized (clean) spelling.
+    row = db.conn.execute(
+        "SELECT name FROM keywords WHERE id = ?", (result["keyword_id"],)
+    ).fetchone()
+    assert row["name"] == "apapane"
+    # Response payload uses the stored spelling too.
+    assert result["species"] == "apapane"
+    # Pending keyword_add uses the clean spelling — a later remove of the
+    # stored keyword can then cancel the queued add.
+    pending = db.get_pending_changes()
+    add_values = [
+        c["value"] for c in pending if c["change_type"] == "keyword_add"
+    ]
+    assert "apapane" in add_values
+    assert "‘apapane" not in add_values
 
 
 def test_accept_prediction_commit_false_preserves_caller_transaction_on_error(
@@ -8910,6 +10216,44 @@ def test_folder_under_rule_matches_backslash_paths(tmp_path, monkeypatch):
 
     under_sib = [{"field": "folder", "op": "under", "value": "C:/Photos/2023-trip"}]
     assert db.count_photos_for_rules(under_sib) == 1
+
+
+def test_folder_legacy_is_op_resolves_like_under(tmp_path, monkeypatch):
+    """Folder collections saved with the pre-'under' vocabulary use op 'is'
+    (and 'is not'). Those legacy ops must resolve as aliases for
+    'under'/'not_under' instead of raising 'unsupported field/op', which
+    previously 500'd the whole /api/collections list and blanked every
+    collection dropdown."""
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    f_2023 = db.add_folder("/photos/2023", name="2023")
+    f_sub = db.add_folder("/photos/2023/trip", name="trip", parent_id=f_2023)
+    f_sib = db.add_folder("/photos/2023-trip", name="2023-trip")
+    for fid, name in [(f_2023, "a"), (f_sub, "b"), (f_sib, "c")]:
+        db.add_photo(folder_id=fid, filename=f"{name}.jpg", extension=".jpg",
+                     file_size=100, file_mtime=1.0)
+
+    legacy_is = [{"field": "folder", "op": "is", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_is) == 2  # folder + descendant
+
+    legacy_is_not = [{"field": "folder", "op": "is not", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_is_not) == 1  # only the sibling
+
+    # 'equals' is the third legacy alias; it also resolves like 'under'
+    # (the folder plus its descendants), matching how the rule behaved
+    # when the older UI wrote it.
+    legacy_equals = [{"field": "folder", "op": "equals", "value": "/photos/2023"}]
+    assert db.count_photos_for_rules(legacy_equals) == 2
+
+    # count_collection_photos (used by /api/collections) must not raise.
+    import json
+    cid = db.add_collection("Legacy Folder", json.dumps(legacy_is))
+    assert db.count_collection_photos(cid) == 2
 
 
 def test_check_filename_collisions(db):
@@ -13011,6 +14355,1417 @@ def test_get_species_keywords_includes_taxonomy_typed_without_is_species(tmp_pat
     assert db.get_species_keywords_for_photos([pid]) == {pid: ["Lesser Scaup"]}
 
 
+def test_species_queries_use_taxon_rank_and_dedupe_hierarchy_by_taxon(tmp_path):
+    """A hierarchy ancestor is taxonomy, not a species badge; duplicate
+    hierarchy/root leaves for one species collapse by taxon identity."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (2912, "Auriparus flaviceps", "Verdin"),
+    ])
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank) "
+        "VALUES (38595, 'Remizidae', 'Penduline tits', 'family')"
+    )
+    db.conn.commit()
+
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    birds = db.add_keyword("1Birds")
+    family = db.add_keyword("Penduline tits", parent_id=birds)
+    nested = db.add_keyword("Verdin", parent_id=family)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, family)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+
+    assert db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (root,)
+    ).fetchone()["taxon_id"] == taxa["Verdin"]
+    assert db.is_keyword_species(family) is False
+    assert db.is_keyword_species(nested) is True
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+    assert db.get_photos_with_equivalent_species([pid], root) == {pid}
+
+    rows = {row["id"]: row for row in db.get_keywords_for_photos([pid])[pid]}
+    assert rows[family]["taxon_rank"] == "family"
+    assert rows[nested]["taxon_rank"] == "species"
+
+
+def test_equivalent_species_matches_unlinked_legacy_hierarchy_by_name(tmp_path):
+    """A linked root target still matches a typed legacy hierarchy leaf whose
+    taxon link has not yet been backfilled."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL, is_species = 1, "
+        "type = 'taxonomy' WHERE id = ?",
+        (nested,),
+    )
+    db.tag_photo(pid, nested)
+
+    assert db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (root,),
+    ).fetchone()["taxon_id"] == taxa["Verdin"]
+    assert db.get_photos_with_equivalent_species([pid], root) == {pid}
+
+
+def test_equivalent_species_skips_unlinked_row_when_homonym_taxon_exists(tmp_path):
+    """When two distinct taxonomy rows share a NOCASE match key but link to
+    different taxa (legacy `Robin` vs taxonomy `robin`), an unlinked same-key
+    row on a photo must not satisfy the target species — the row is ambiguous
+    and treating it as equivalent would let accept/confirm skip tagging the
+    intended species keyword."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (18001, "Erithacus rubecula", "European Robin"),
+            (18002, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Two intentionally-distinct linked species keywords share the NOCASE
+    # match key "robin" but resolve to different taxa. add_keyword dedupes
+    # case-insensitively so INSERT directly to preserve both rows.
+    european = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["European Robin"],),
+    ).lastrowid
+    american = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    ).lastrowid
+    # An unlinked, typed legacy row with the same match key. The user
+    # tagged this row before taxonomy was populated; it could be either
+    # species, so equivalence lookups must not accept it as the target.
+    legacy = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('ROBIN', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    db.tag_photo(pid, legacy)
+
+    # Neither linked target should treat the unlinked homonym as equivalent.
+    assert db.get_photos_with_equivalent_species([pid], european) == set()
+    assert db.get_photos_with_equivalent_species([pid], american) == set()
+
+    # Once the ambiguous legacy row is linked to the taxon that the target
+    # resolves to, equivalence is authoritative again.
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], legacy),
+    )
+    assert db.get_photos_with_equivalent_species([pid], american) == {pid}
+    assert db.get_photos_with_equivalent_species([pid], european) == set()
+
+
+def test_equivalent_species_unlinked_target_skips_linked_homonym(tmp_path):
+    """When the accept target is an unlinked legacy species keyword and a
+    distinct taxonomy-linked keyword shares its NOCASE match key (e.g.
+    upgraded/offline catalog with legacy ``Robin`` alongside taxonomy
+    ``robin``), the name-only fallback must not treat the linked homonym on
+    a photo as the target. Folding them would let accept/confirm skip
+    ``tag_photo``/``queue_change`` for the unlinked target while marking the
+    prediction accepted, leaving the intended keyword row absent."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(19001, "Turdus migratorius", "American Robin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Distinct linked taxonomy row that intentionally shares the match key
+    # with the unlinked legacy target below.
+    linked = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('robin', 'taxonomy', 1, ?)",
+        (taxa["American Robin"],),
+    ).lastrowid
+    # An intentionally-preserved legacy row with no taxon_id — the target.
+    legacy_target = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Robin', 'taxonomy', 1, NULL)"
+    ).lastrowid
+    # The photo carries the LINKED homonym, not the legacy target.
+    db.tag_photo(pid, linked)
+
+    # Accepting/confirming the unlinked legacy target must not fold in the
+    # linked homonym row, or the confirm would skip tagging.
+    assert db.get_photos_with_equivalent_species(
+        [pid], legacy_target,
+    ) == set()
+
+    # If the same photo actually carries the legacy target row, that
+    # exact-row match is still recognized.
+    other = db.add_photo(
+        folder_id=fid, filename="b.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.tag_photo(other, legacy_target)
+    assert db.get_photos_with_equivalent_species(
+        [pid, other], legacy_target,
+    ) == {other}
+
+
+def test_species_display_name_resolves_hierarchy_alias_through_taxon(tmp_path):
+    """A differently-spelled hierarchy leaf canonicalizes to the root species
+    row linked to the same unique taxon."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+
+    assert db.resolve_species_display_name("Desert Verdin") == "Verdin"
+
+
+def test_species_keywords_canonicalize_hierarchy_leaf_to_root_spelling(tmp_path):
+    """After repair leaves only a differently-spelled hierarchy leaf, the
+    per-photo species list must still surface the canonical root spelling so
+    `_attach_species_representatives` can match `species_representatives`
+    rows keyed on that root. Otherwise browse/review/pipeline cards drop the
+    representative badge for a taxon that is still eligibly attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+
+    # Only the leaf is attached (repair detached the redundant root), but
+    # both root and leaf share the taxon — the returned name must be the
+    # canonical root spelling used by species_representatives.
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+
+
+def test_species_keywords_preserves_attached_root_alias_spelling(tmp_path):
+    """When a photo carries a top-level species alias root for a taxon that
+    also has a differently-spelled sibling root row, the returned name must
+    be the *attached* root's stored spelling, not whichever sibling root
+    happens to sort first. Curation writes still go through
+    ``resolve_species_display_name()``, which preserves an exact root-name
+    match, so Browse/Compare and representative attachment would otherwise
+    report the sibling root while representative/highlight rows are keyed
+    under the actually attached alias. Only hierarchy leaves need the root
+    fallback; attached root rows should keep their own stored spelling."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Create the sibling root first so it has the lower id and would win a
+    # naive ``ORDER BY id`` canonicalization.
+    db.add_keyword("Verdin", is_species=True)
+    sci_root = db.add_keyword("Auriparus flaviceps", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], sci_root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, sci_root)
+
+    # The attached row's own stored spelling wins so downstream curation
+    # lookups match the actually-attached name.
+    assert db.get_species_keywords_for_photos([pid]) == {
+        pid: ["Auriparus flaviceps"]
+    }
+
+
+def test_species_keywords_preserves_unlinked_case_variant_spellings(tmp_path):
+    """A photo carrying two NULL-taxon species rows that differ only by
+    SQLite NOCASE spelling (root ``Foo`` plus hierarchy leaf ``foo``) must
+    surface both names. The repair path deliberately leaves those attached
+    because unlinked eligibility compares exact ``k.name``; folding them
+    by ``keyword_match_key`` here would drop the root spelling, so
+    ``_attach_species_representatives``/highlight lookups miss the
+    curation stored under ``Foo``."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    nested = db.add_keyword("foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+
+    # Both distinct spellings survive the dedup so downstream lookups
+    # (species_representatives, species_highlights) can match either key.
+    result = db.get_species_keywords_for_photos([pid])
+    assert set(result[pid]) == {"Foo", "foo"}
+
+
+def test_photo_life_list_species_canonicalizes_hierarchy_leaf_to_root_spelling(
+    tmp_path,
+):
+    """After repair leaves only a differently-spelled hierarchy leaf, the
+    photo-detail life-list species must still surface the canonical root
+    spelling. Otherwise ``api_photo_detail`` compares the leaf spelling
+    against ``get_species_representative_lists`` (keyed on the root) and the
+    lightbox/context menu drops the "current representative" flag and offers
+    to set it again for a taxon that is still eligibly attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.add_keyword("Verdin", is_species=True)
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+
+    assert db.get_photo_life_list_species(pid) == ["Verdin"]
+
+
+def test_photo_life_list_species_preserves_attached_root_alias(tmp_path):
+    """When a photo is tagged with an attached top-level alias for a taxon
+    (for example ``Auriparus flaviceps``) and another root row for the same
+    taxon (``Verdin``) exists but is not attached, ``api_photo_detail`` must
+    report the actually attached spelling. Curation writes preserve exact
+    root-name matches, so rewriting the attached alias to the arbitrarily
+    first same-taxon root would make representative/highlight state keyed to
+    the attached name appear missing (or be updated under the wrong species).
+    Only hierarchy leaves should fall back to the canonical root spelling."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Root alias (attached to the photo) must survive dedup; ``add_keyword``
+    # would collapse the second same-key row, so create the two roots with
+    # distinct spellings and back-link both to the same taxon directly.
+    alias = db.add_keyword("Auriparus flaviceps", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], alias),
+    )
+    other_root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], other_root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, alias)
+
+    assert db.get_photo_life_list_species(pid) == ["Auriparus flaviceps"]
+
+
+def test_species_display_name_uses_leaf_spelling_when_no_root_exists(tmp_path):
+    """When a linked hierarchy leaf's canonical taxon has no top-level
+    root keyword (for example a hierarchy-only accept whose top-level
+    ``Black Phoebe`` was never created), ``resolve_species_display_name``
+    must return the matched leaf's stored spelling. The case-convention
+    fallback would otherwise mint ``Black Phoebe`` from a submitted
+    ``black phoebe`` while the photo only carries the leaf ``black
+    phoebe``, so highlight / preference eligibility (still keyed on
+    exact ``k.name`` for hierarchy-only tags) would drop the bucket on
+    reload."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db, [(9876, "Sayornis nigricans", "Black Phoebe")]
+    )
+    parent = db.add_keyword("Tyrant flycatchers")
+    leaf = db.add_keyword("black phoebe", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Black Phoebe"], leaf),
+    )
+    db.conn.commit()
+
+    assert db.resolve_species_display_name("black phoebe") == "black phoebe"
+
+
+def test_photo_life_list_species_preserves_linked_homonyms(tmp_path):
+    """When a photo carries two linked species rows whose canonical
+    roots share a SQLite-NOCASE key but point at different taxa (for
+    example a legacy ``Robin`` bound to the American robin taxon and a
+    taxonomy ``robin`` bound to the European robin taxon), both must
+    surface in the per-photo life-list species so ``api_photo_detail``
+    can match either against its ``species_representative_lists`` /
+    ``species_highlights`` state. Folding by an ASCII-case-fold match
+    key would hide one taxon even though its keyword remains
+    attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    taxa = _seed_taxa(
+        db,
+        [
+            (5001, "Turdus migratorius", "American Robin"),
+            (5002, "Erithacus rubecula", "European Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # ``add_keyword`` collapses NOCASE duplicates through its typed
+    # lookup, so create the two homonym rows directly to reproduce a
+    # legacy catalog that preserved both distinct spellings.
+    upper = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES (?, 'taxonomy', 1, ?)",
+        ("Robin", taxa["American Robin"]),
+    ).lastrowid
+    lower = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES (?, 'taxonomy', 1, ?)",
+        ("robin", taxa["European Robin"]),
+    ).lastrowid
+    db.conn.commit()
+    db.tag_photo(pid, upper)
+    db.tag_photo(pid, lower)
+
+    assert set(db.get_photo_life_list_species(pid)) == {"Robin", "robin"}
+
+
+def test_photo_life_list_species_preserves_unlinked_case_variants(tmp_path):
+    """A photo carrying two NULL-taxon species rows that differ only by
+    SQLite-NOCASE spelling (root ``Foo`` plus hierarchy leaf ``foo``,
+    both preserved by the duplicate-repair path) must surface both
+    names. Unlinked highlight / representative curation compares by
+    exact ``k.name``; folding by ASCII case-fold here would drop one
+    spelling and strand its curation lookups even though the keyword
+    remains attached."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    nested = db.add_keyword("foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+
+    assert set(db.get_photo_life_list_species(pid)) == {"Foo", "foo"}
+
+
+def test_repair_duplicate_photo_species_keeps_hierarchical_association(tmp_path):
+    """The one-shot repair detaches only the redundant root association."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder('/photos', name='photos')
+    pid = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    # Simulate the legacy confirmed-species insert path, which left root
+    # taxonomy rows unlinked even when the local taxon was known.
+    db.conn.execute("UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,))
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.queue_change(pid, "keyword_add", "Verdin")
+    keyword_edit_id = db.record_edit(
+        "keyword_add", 'Confirmed species "Verdin"', str(root),
+        [{"photo_id": pid, "old_value": "", "new_value": str(root)}],
+    )
+    rating_edit_id = db.record_edit(
+        "rating", "Changed rating", "5",
+        [{
+            "photo_id": pid,
+            "old_value": str(root),
+            "new_value": str(root),
+        }],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+    assert db.conn.execute(
+        "SELECT 1 FROM keywords WHERE id = ?", (root,)
+    ).fetchone() is not None
+    assert not [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid and row["value"] == "Verdin"
+    ]
+    history_item = db.conn.execute(
+        "SELECT new_value FROM edit_history_items WHERE edit_id = ?",
+        (keyword_edit_id,),
+    ).fetchone()
+    assert history_item is None
+    rating_item = db.conn.execute(
+        "SELECT old_value, new_value FROM edit_history_items WHERE edit_id = ?",
+        (rating_edit_id,),
+    ).fetchone()
+    assert dict(rating_item) == {
+        "old_value": str(root),
+        "new_value": str(root),
+    }
+    assert db.repair_duplicate_photo_species() == 0
+
+
+def test_repair_duplicate_photo_species_drops_root_redo_history(tmp_path):
+    """Undo/redo after repair must not recreate the detached root species."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.record_edit(
+        "keyword_add", 'Confirmed species "Verdin"', str(root),
+        [{"photo_id": pid, "old_value": "", "new_value": str(root)}],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    assert db.get_edit_history() == []
+    assert db.undo_last_edit() is None
+    assert db.redo_last_undo() is None
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+
+
+def test_repair_duplicate_photo_species_preserves_no_tag_prediction_accepts(tmp_path):
+    """A ``prediction_accept`` recorded with a ``no_tag`` JSON old_value
+    already skips tag mutations on undo/redo (see the ``_skip_tag_undo``
+    / ``_skip_tag_redo`` branches keyed by ``old_meta['no_tag']``), so
+    keeping the item cannot reattach the detached root. Deleting it
+    would erase the only audit/undo record of the accepted prediction-
+    status flip — the repair must leave those items intact."""
+    import json as _json
+
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Simulate an accept where the photo already carried the equivalent
+    # hierarchy leaf: the API records ``prediction_accept`` with
+    # ``old_value`` = JSON payload including ``no_tag: true``. Its
+    # ``new_value`` still points at the root keyword id so it would
+    # match the repair's numeric filter without the no_tag guard.
+    payload = _json.dumps({"prediction_id": 42, "no_tag": True})
+    no_tag_edit_id = db.record_edit(
+        "prediction_accept", 'Accepted "Verdin"', str(root),
+        [{"photo_id": pid, "old_value": payload,
+          "new_value": str(root)}],
+    )
+    # A regular tag-mutating prediction_accept for the same root must
+    # still be dropped so its undo/redo cannot reattach the detached
+    # root.
+    regular_edit_id = db.record_edit(
+        "prediction_accept", 'Accepted "Verdin" (tagged)', str(root),
+        [{"photo_id": pid, "old_value": "17",
+          "new_value": str(root)}],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+    # The no_tag accept survives — its audit/undo path is intact.
+    surviving = db.conn.execute(
+        "SELECT old_value, new_value FROM edit_history_items "
+        "WHERE edit_id = ? AND photo_id = ?",
+        (no_tag_edit_id, pid),
+    ).fetchone()
+    assert surviving is not None
+    assert surviving["old_value"] == payload
+    assert surviving["new_value"] == str(root)
+    # The tag-mutating accept is dropped so redo can't reattach root.
+    dropped = db.conn.execute(
+        "SELECT 1 FROM edit_history_items "
+        "WHERE edit_id = ? AND photo_id = ?",
+        (regular_edit_id, pid),
+    ).fetchone()
+    assert dropped is None
+
+
+def test_repair_duplicate_photo_species_guards_against_unlinked_homonyms(tmp_path):
+    """A legacy NULL-taxon leaf whose key collides with a linked root but
+    represents a different species (e.g. legacy ``Robin`` alongside
+    taxonomy ``Robin`` linked to a different taxon) must not be folded
+    into the linked root's group and cause the repair to detach the
+    accepted taxonomy species."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(
+        db,
+        [
+            (100, "Erithacus rubecula", "Robin"),
+            (200, "Turdus migratorius", "American Robin"),
+        ],
+    )
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Linked accepted species (Erithacus rubecula / Robin).
+    root_linked = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Robin"], root_linked),
+    )
+    # A DIFFERENT species (American Robin) also exists in the catalog under
+    # the same normalized display key — legacy hierarchy leaves under the
+    # same name were common before disambiguation.
+    other_root = db.add_keyword("Robin", parent_id=None, is_species=True)
+    # Manually make the "other_root" a taxonomy-linked homonym pointing at
+    # a different taxon. add_keyword may already have merged into the
+    # existing "Robin" row; if so, seed a separate linked keyword.
+    other_root_row = db.conn.execute(
+        "SELECT id FROM keywords WHERE name = ? AND parent_id IS NULL "
+        "AND id != ?",
+        ("Robin", root_linked),
+    ).fetchone()
+    if other_root_row is None:
+        db.conn.execute(
+            "INSERT INTO keywords (name, is_species, type, taxon_id) "
+            "VALUES (?, 1, 'taxonomy', ?)",
+            ("Robin (alt)", taxa["American Robin"]),
+        )
+        other_row = db.conn.execute(
+            "SELECT id FROM keywords WHERE name = ?", ("Robin (alt)",)
+        ).fetchone()
+        # Restore the same match_key so the ambiguity guard triggers.
+        db.conn.execute(
+            "UPDATE keywords SET name = ? WHERE id = ?",
+            ("Robin", other_row["id"]),
+        )
+    parent = db.add_keyword("Songbirds")
+    # An unlinked hierarchy leaf named "Robin" under Songbirds — intent
+    # ambiguous, could be either taxon.
+    unlinked_leaf = db.add_keyword("Robin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET is_species = 1, type = 'taxonomy', "
+        "taxon_id = NULL WHERE id = ?",
+        (unlinked_leaf,),
+    )
+    db.tag_photo(pid, root_linked)
+    db.tag_photo(pid, unlinked_leaf)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    # The repair must leave the linked root attached; the unlinked leaf
+    # cannot safely be folded into the linked group because the key is a
+    # known homonym.
+    db.repair_duplicate_photo_species()
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert root_linked in tagged_ids
+
+
+def test_repair_duplicate_photo_species_deletes_json_species_replace_history(tmp_path):
+    """species_replace items can store ``old_value`` as JSON with
+    ``keyword_ids``. A bare-string equality misses those, so undo/redo
+    of that entry would re-tag the detached root. The repair must parse
+    JSON payloads and delete species_replace items that reference any
+    of the removed root keyword ids."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute("UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,))
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Craft a species_replace item whose old_value is a JSON payload
+    # referencing the redundant root via ``keyword_ids``.
+    import json as _json
+    new_kw = db.add_keyword("Sparrow", is_species=True)
+    edit_id = db.record_edit(
+        "species_replace", "swap species", str(new_kw),
+        [{
+            "photo_id": pid,
+            "old_value": _json.dumps({"keyword_ids": [root, 999]}),
+            "new_value": str(new_kw),
+        }],
+    )
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    # The species_replace item that referenced the detached root via JSON
+    # must be dropped so undo/redo cannot re-tag the root.
+    remaining = db.conn.execute(
+        "SELECT COUNT(*) AS n FROM edit_history_items WHERE edit_id = ?",
+        (edit_id,),
+    ).fetchone()["n"]
+    assert remaining == 0
+
+
+def test_repair_duplicate_photo_species_queues_sidecar_remove_for_orphaned_alias(tmp_path):
+    """When the surviving hierarchy leaf is spelled differently from the
+    detached root (e.g. root ``Verdin`` and nested ``Desert Verdin`` for
+    the same taxon), a previously synced ``dc:subject: Verdin`` in the
+    sidecar would let a later re-scan re-attach the root. The repair must
+    queue a ``keyword_remove`` for the orphaned root spelling so
+    ``sync_to_xmp`` can clear it."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    removes = [
+        row for row in pending
+        if row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ]
+    assert len(removes) == 1, (
+        f"expected a queued keyword_remove for 'Verdin', got: {pending}"
+    )
+    # The surviving alias must not be scheduled for removal.
+    assert not [
+        row for row in pending
+        if row["change_type"] == "keyword_remove"
+        and row["value"] == "Desert Verdin"
+    ]
+
+
+def test_repair_duplicate_photo_species_skips_sidecar_remove_when_survivor_matches(tmp_path):
+    """When the surviving hierarchy leaf shares a normalized name with
+    the detached root (both ``Verdin``), the scanner's per-photo dedup
+    already skips the flat entry on re-import — queueing a keyword_remove
+    would let ``sync_to_xmp`` hierarchically strip the surviving
+    ``Birds|Verdin`` from the sidecar too."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("Verdin", parent_id=parent)
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+    assert not [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid and row["change_type"] == "keyword_remove"
+    ]
+
+
+def test_repair_duplicate_photo_species_skips_remove_when_survivor_ancestor_matches(tmp_path):
+    """When the surviving hierarchy leaf has a distinct leaf name but the
+    detached root's spelling matches one of its ancestor segments (e.g.
+    root ``Verdin`` detached while ``Verdin|Desert Verdin`` is kept), the
+    repair must NOT queue a plain ``keyword_remove`` for ``Verdin``:
+    ``sync_to_xmp`` applies keyword_remove hierarchically (``remove_keywords``
+    strips any ``lr:hierarchicalSubject`` whose segment matches), so the
+    next sync would delete the very ``Verdin|Desert Verdin`` hierarchy the
+    repair kept in the DB. Queue a ``keyword_remove_flat`` instead so the
+    stale ``dc:subject: Verdin`` still gets stripped — otherwise the
+    scanner reimports it on the next XMP scan (its per-photo dedup only
+    considers attached leaf names, not ancestor segments) and recreates
+    the duplicate root."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Surviving hierarchy: Verdin -> Desert Verdin. The leaf is what
+    # gets tagged, but the parent chain includes the ``Verdin`` segment.
+    hier_parent = db.add_keyword("Verdin")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=hier_parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in tagged_ids
+    assert root not in tagged_ids
+
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    assert not [
+        row for row in pending
+        if row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ], (
+        f"expected no plain keyword_remove for 'Verdin' (it appears as "
+        f"an ancestor segment of the preserved 'Verdin|Desert Verdin' "
+        f"hierarchy — a hierarchical sync remove would strip that "
+        f"preserved entry from the sidecar), got: {pending}"
+    )
+    # A flat-only cleanup must still be queued so ``sync_to_xmp`` strips
+    # the stale ``dc:subject: Verdin`` line without touching the
+    # preserved hierarchical entry. Without it, the next XMP scan
+    # reimports ``Verdin`` and reattaches the duplicate root.
+    flat_removes = [
+        row for row in pending
+        if row["change_type"] == "keyword_remove_flat"
+        and row["value"] == "Verdin"
+    ]
+    assert flat_removes, (
+        f"expected a queued keyword_remove_flat for 'Verdin' to strip "
+        f"the stale flat root from dc:subject without touching the "
+        f"preserved 'Verdin|Desert Verdin' hierarchy, got: {pending}"
+    )
+
+
+def test_repair_duplicate_photo_species_cancels_unsynced_root_add(tmp_path):
+    """When a still-unsynced ``keyword_add`` for the detached root name
+    is pending, the repair must cancel it and NOT queue a
+    ``keyword_remove`` — the sidecar has not received the flat root, so
+    there is nothing to strip and a stale remove would only cause
+    unnecessary XMP churn."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.queue_change(pid, "keyword_add", "Verdin")
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    assert not [row for row in pending if row["value"] == "Verdin"], (
+        f"expected the pending Verdin add to be cancelled with no "
+        f"replacement remove, got: {pending}"
+    )
+
+
+def test_repair_duplicate_photo_species_preserves_leaf_pending_add(tmp_path):
+    """A pending ``keyword_add`` for a surviving hierarchy leaf must not
+    be cancelled when the repair detaches the redundant root. Cancelling
+    the leaf's add would leave ``sync_to_xmp`` writing only the root
+    cleanup and never surfacing the preserved hierarchy in XMP; a
+    subsequent scan would then see the DB and sidecar diverge."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # The leaf's add is still pending sidecar sync when repair fires.
+    db.queue_change(pid, "keyword_add", "Desert Verdin")
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    pending = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+    ]
+    leaf_adds = [
+        row for row in pending
+        if row["change_type"] == "keyword_add"
+        and row["value"] == "Desert Verdin"
+    ]
+    assert len(leaf_adds) == 1, (
+        f"expected the preserved leaf's pending keyword_add to survive "
+        f"the repair, got: {pending}"
+    )
+
+
+def test_repair_duplicate_photo_species_queues_sidecar_remove_in_photo_workspace(tmp_path):
+    """When the photo's folder lives only in a workspace other than the
+    active one, the sidecar ``keyword_remove`` must be queued under that
+    workspace. ``get_pending_changes`` filters by the active workspace,
+    so a remove queued under the wrong workspace would leave the stale
+    root spelling in the sidecar for the real workspace's next sync."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace("Other")
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    # Move the folder out of the active workspace and into "Other".
+    db.remove_workspace_folder(active_ws, fid)
+    db.add_workspace_folder(other_ws, fid)
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    # No remove should appear in the active workspace's queue…
+    assert not [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+        and row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ], (
+        "expected no queued remove in the (empty) active workspace"
+    )
+
+    # …but the "Other" workspace (which actually contains the photo)
+    # must have exactly one queued keyword_remove for the orphaned root.
+    db.set_active_workspace(other_ws)
+    removes = [
+        row for row in db.get_pending_changes()
+        if row["photo_id"] == pid
+        and row["change_type"] == "keyword_remove"
+        and row["value"] == "Verdin"
+    ]
+    assert len(removes) == 1, (
+        f"expected a queued keyword_remove for 'Verdin' in the "
+        f"photo's workspace, got: {removes}"
+    )
+
+
+def test_repair_duplicate_photo_species_queues_sidecar_remove_in_every_photo_workspace(tmp_path):
+    """When a photo's folder is shared across multiple workspaces, the
+    sidecar keyword_remove must be queued in each so any workspace that
+    later syncs strips the orphaned root spelling from the sidecar."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace("Other")
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    db.add_workspace_folder(other_ws, fid)
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Birds")
+    nested = db.add_keyword(
+        "Desert Verdin", parent_id=parent, is_species=True,
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id IN (?, ?)",
+        (taxa["Verdin"], nested, root),
+    )
+    db.conn.commit()
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    for ws_id in (active_ws, other_ws):
+        db.set_active_workspace(ws_id)
+        removes = [
+            row for row in db.get_pending_changes()
+            if row["photo_id"] == pid
+            and row["change_type"] == "keyword_remove"
+            and row["value"] == "Verdin"
+        ]
+        assert len(removes) == 1, (
+            f"workspace {ws_id} should have exactly one queued "
+            f"keyword_remove for 'Verdin', got: {removes}"
+        )
+
+
+def test_repair_duplicate_photo_species_waits_for_local_taxa(tmp_path):
+    """An empty taxa table must not consume the one-shot repair marker."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 0
+    assert db.get_meta(db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY) is None
+
+
+def test_repair_duplicate_photo_species_keeps_curation_on_root_key(tmp_path):
+    """Hierarchy spelling differences do not move curation away from the
+    canonical root species key used by subsequent API requests."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.add_species_highlight("Verdin", pid)
+    db.set_photo_preference("highlights", "Verdin", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    for table in (
+        "species_highlights", "photo_preferences", "species_representatives",
+    ):
+        species = {
+            row["species"] for row in db.conn.execute(
+                f"SELECT species FROM {table} WHERE photo_id = ?", (pid,),
+            ).fetchall()
+        }
+        assert species == {"Verdin"}
+
+
+def test_repair_duplicate_photo_species_preserves_curation_eligibility(tmp_path):
+    """Root-key curation stays eligible after repair when the surviving
+    hierarchy leaf's stored spelling differs from the root.
+
+    ``get_species_representative_lists(eligible_only=True)`` and the
+    life-list preference validator previously required an exact
+    ``k.name = sr.species`` match. After repair detaches the redundant
+    root row but leaves the hierarchical leaf attached with a differently
+    spelled name, an existing "Verdin" representative would be silently
+    dropped and updating the preserved root-key preference would fail
+    eligibility even though the same taxon is still attached via
+    hierarchy.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], root),
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.set_species_representative("Verdin", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    # Root keyword row is no longer attached, only the differently-spelled
+    # hierarchy leaf remains.
+    attached_names = {
+        row["name"] for row in db.conn.execute(
+            """SELECT k.name FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pk.photo_id = ?""",
+            (pid,),
+        ).fetchall()
+    }
+    assert "verdin" in attached_names
+    assert "Verdin" not in attached_names
+
+    # The stored representative under the canonical "Verdin" key must
+    # still surface under eligible_only=True even though only the lower-
+    # cased hierarchy leaf is attached.
+    eligible = db.get_species_representative_lists(eligible_only=True)
+    assert eligible.get("Verdin") == [pid]
+    assert db.get_species_representatives(eligible_only=True) == {"Verdin": pid}
+
+    # The life-list preference validator that gates /api/photo-preferences
+    # writes must accept the same photo for the preserved root key so a
+    # user updating their "Verdin" representative doesn't get an
+    # eligibility error after repair.
+    from app import create_app  # noqa: WPS433 (test-scoped import)
+
+    app = create_app(str(tmp_path / "test.db"), str(tmp_path / "thumbs"))
+    with app.test_client() as client:
+        resp = client.post(
+            "/api/photo-preferences",
+            json={
+                "purpose": "species_representative",
+                "species": "Verdin",
+                "photo_id": pid,
+            },
+        )
+        assert resp.status_code == 200, resp.get_json()
+
+
+def test_repair_duplicate_photo_species_skips_unlinked_case_variants(tmp_path):
+    """Unlinked (NULL-taxon) same-key duplicates with different spellings
+    must stay attached. Curation/eligibility for unlinked species keys is
+    compared with exact ``k.name`` — there is no taxon fallback that maps
+    a differently-spelled leaf back to the root spelling. Detaching root
+    ``Foo`` while only leaf ``foo`` remains would strand the
+    representative/highlight stored under ``Foo``. Same-spelling unlinked
+    duplicates are still repaired because the surviving leaf carries the
+    exact root name.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    # A species row is required so the repair's early-exit does not fire;
+    # the seeded taxon is unrelated to the unlinked "Foo" keywords under
+    # test.
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    # Unlinked hierarchy leaf spelled "foo"; taxonomy-typed without a
+    # taxon link (mark_species_keywords stamps this on legacy upgrades).
+    nested = db.add_keyword("foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    # Unlinked root spelled "Foo" — different spelling, same match_key.
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Curation stored under the root spelling — the exact string the
+    # unlinked eligibility queries compare against.
+    db.set_species_representative("Foo", pid)
+    db.add_species_highlight("Foo", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    # The unlinked case-variant duplicate is left alone — there is no
+    # safe canonicalization when both rows have NULL taxon_id.
+    assert db.repair_duplicate_photo_species() == 0
+    attached_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert root in attached_ids, (
+        "unlinked root spelling must stay attached so exact-name curation "
+        "keeps applying"
+    )
+    assert nested in attached_ids
+
+    # Root-spelled representative and highlight remain eligible because
+    # the exact ``k.name = 'Foo'`` row is still attached.
+    assert db.get_species_representatives(eligible_only=True) == {"Foo": pid}
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights.get("Foo", {})
+
+
+def test_repair_duplicate_photo_species_repairs_unlinked_same_spelling(tmp_path):
+    """Unlinked duplicates whose root and surviving leaf share the same
+    exact spelling are still repaired: the leaf carries the same
+    ``k.name`` after the root is detached, so exact-name eligibility keeps
+    matching.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Something")
+    nested = db.add_keyword("Foo", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, "
+        "taxon_id = NULL WHERE id = ?",
+        (nested,),
+    )
+    root = db.add_keyword("Foo", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = NULL WHERE id = ?", (root,)
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    db.set_species_representative("Foo", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+    attached_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert nested in attached_ids
+    assert root not in attached_ids
+    # The surviving leaf carries the same "Foo" name, so root-spelled
+    # curation still resolves.
+    assert db.get_species_representatives(eligible_only=True) == {"Foo": pid}
+
+
 def test_update_keyword_rename_general_no_match_stays_general(tmp_path):
     """Renaming a 'general' keyword to a name with no taxon match leaves
     it as 'general' with NULL taxon_id."""
@@ -13126,6 +15881,50 @@ def test_update_keyword_no_name_change_does_not_touch_type(tmp_path):
     assert row["name"] == "Backyard"
     assert row["type"] == "location"
     assert row["taxon_id"] is None
+
+
+def test_update_keyword_explicit_location_type_clears_species_flag(tmp_path):
+    """Demoting a taxonomy homonym without a merge peer clears is_species.
+
+    The Keywords UI sends only ``type`` for this edit. Leaving the legacy flag
+    set would make species queries continue to treat the location as taxonomy
+    even though taxonomy marking now preserves explicit non-taxonomy types.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    kid = db.add_keyword("California", kw_type="taxonomy")
+    before = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,),
+    ).fetchone()
+    assert dict(before) == {"type": "taxonomy", "is_species": 1}
+
+    effective_id = db.update_keyword(kid, type="location")
+
+    assert effective_id == kid
+    after = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,),
+    ).fetchone()
+    assert dict(after) == {"type": "location", "is_species": 0}
+
+
+def test_update_keyword_noop_general_type_preserves_legacy_species_flag(tmp_path):
+    """Re-selecting General must not erase a legacy species marker."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species) "
+        "VALUES ('Robin', 'general', 1)"
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    effective_id = db.update_keyword(kid, type="general")
+
+    assert effective_id == kid
+    row = db.conn.execute(
+        "SELECT type, is_species FROM keywords WHERE id = ?", (kid,),
+    ).fetchone()
+    assert dict(row) == {"type": "general", "is_species": 1}
 
 
 def test_update_keyword_explicit_type_and_taxon_id_kwargs_win(tmp_path):
@@ -13366,9 +16165,11 @@ def test_update_keyword_same_name_retype_merges_into_peer(tmp_path):
         assert effective_id == taxonomy_id
 
         # Exactly one top-level taxonomy `apapane` row must remain.
+        # Stored names are always normalized, so a plain name comparison
+        # is exact.
         rows = db.conn.execute(
             "SELECT id FROM keywords "
-            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "WHERE name = 'apapane' COLLATE NOCASE "
             "AND parent_id IS NULL AND type = 'taxonomy'"
         ).fetchall()
         assert [r["id"] for r in rows] == [taxonomy_id]
@@ -13383,24 +16184,24 @@ def test_update_keyword_same_name_retype_merges_into_peer(tmp_path):
 
 def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
     """A type-only PUT (no `name` kwarg) must still run the same-slot peer
-    check. Otherwise, changing a clean general `apapane` row's type to
-    `taxonomy` via the Browse/Keywords type dropdown while a legacy
-    edge-quoted `‘apapane` taxonomy peer exists leaves two normalized-equal
-    taxonomy rows at the top level (UNIQUE(name, parent_id) treats NULL
-    parents as distinct), so later calls bind to either id at random.
+    check. Otherwise, changing a general `apapane` row's type to
+    `taxonomy` via the Browse/Keywords type dropdown while a taxonomy
+    `apapane` peer already exists at the same (NULL) parent leaves two
+    same-name taxonomy rows at the top level (UNIQUE(name, parent_id)
+    treats NULL parents as distinct), so later calls bind to either id at
+    random.
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        # Legacy edge-quoted taxonomy row at the top level (imported/
-        # upgraded DB shape).
+        # Clean top-level taxonomy row (stored rows are always normalized).
         cur = db.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type) "
             "VALUES (?, NULL, 1, 'taxonomy')",
-            ("‘apapane",),
+            ("apapane",),
         )
         taxonomy_id = cur.lastrowid
-        # Clean general peer at the same slot.
+        # General peer at the same slot.
         general_id = db.add_keyword("apapane", kw_type="general")
         assert general_id != taxonomy_id
 
@@ -13408,11 +16209,11 @@ def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
         effective_id = db.update_keyword(general_id, type="taxonomy")
         assert effective_id == taxonomy_id
 
-        # Exactly one top-level taxonomy row must remain for the normalized
-        # name, and it must be the pre-existing taxonomy row.
+        # Exactly one top-level taxonomy row must remain for the name, and
+        # it must be the pre-existing taxonomy row.
         rows = db.conn.execute(
             "SELECT id FROM keywords "
-            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
+            "WHERE name = 'apapane' COLLATE NOCASE "
             "AND parent_id IS NULL AND type = 'taxonomy'"
         ).fetchall()
         assert [r["id"] for r in rows] == [taxonomy_id]
@@ -13425,299 +16226,580 @@ def test_update_keyword_type_only_put_merges_into_normalized_peer(tmp_path):
         db.close()
 
 
-def test_update_keyword_merge_canonicalizes_legacy_peer_name(tmp_path):
-    """When update_keyword merges a clean row into a legacy edge-quote peer,
-    the survivor's stored name must be the canonical spelling and any
-    pending sidecar changes queued under the legacy spelling must be
-    retargeted to the clean name. Without this, the merge preserves the
-    legacy `‘apapane` as the survivor and _merge_keyword_into rewrites the
-    source's pending changes onto that quoted value, so the keyword remains
-    visible/exported as `‘apapane` even though the requested rename was
-    `apapane`.
+def test_update_keyword_retype_to_nontaxonomy_does_not_leak_is_species(tmp_path):
+    """Retyping a taxonomy row to a non-taxonomy type that already has a
+    same-name peer must not copy is_species=1 (or the taxon link) onto the
+    surviving peer. Otherwise species queries — `is_species = 1 OR type =
+    'taxonomy'` — would keep matching photos tagged with the survivor
+    (e.g. an ``individual`` row), silently mis-tagging every photo already
+    on it. Guards `_merge_keyword_into`'s destination-side flag propagation.
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        ws_id = db.ensure_default_workspace()
-        db.set_active_workspace(ws_id)
-        fid = db.add_folder('/photos', name='photos')
-        p1 = db.add_photo(
-            folder_id=fid, filename='a.jpg', extension='.jpg',
+        # Simulate a real folder + photos so tag rows are well-formed.
+        fid = db.add_folder("/photos", name="photos")
+        pid_src = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        p2 = db.add_photo(
-            folder_id=fid, filename='b.jpg', extension='.jpg',
+        pid_dst = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        # Legacy edge-quoted taxonomy row at the top level (imported/
-        # upgraded DB shape). One photo is tagged with it, and its
-        # pending sidecar add is queued under the legacy spelling.
+
+        # Taxonomy `Robin` (species=1) at the top level.
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+            "VALUES (?, NULL, 1, 'taxonomy', NULL)",
+            ("Robin",),
+        )
+        taxonomy_id = cur.lastrowid
+        db.tag_photo(pid_src, taxonomy_id)
+
+        # Existing individual `Robin` peer at the same slot, is_species=0.
         cur = db.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type) "
-            "VALUES (?, NULL, 1, 'taxonomy')",
-            ("‘apapane",),
+            "VALUES (?, NULL, 0, 'individual')",
+            ("Robin",),
         )
-        legacy_id = cur.lastrowid
-        db.tag_photo(p1, legacy_id)
-        db.queue_change(p1, 'keyword_add', '‘apapane')
-        # Clean general peer at the same slot, tagged on the other photo.
-        general_id = db.add_keyword("apapane", kw_type="general")
-        db.tag_photo(p2, general_id)
-        assert general_id != legacy_id
+        individual_id = cur.lastrowid
+        db.tag_photo(pid_dst, individual_id)
 
-        # PUT-style retype: turn the clean general row into taxonomy. The
-        # peer lookup finds the legacy row and merges the clean row into
-        # it. The survivor must end up as clean `apapane`, not `‘apapane`.
-        effective_id = db.update_keyword(general_id, type="taxonomy")
-        assert effective_id == legacy_id
+        # Retype the taxonomy row to 'individual'. update_keyword must merge
+        # into the individual peer and return its id.
+        effective_id = db.update_keyword(taxonomy_id, type="individual")
+        assert effective_id == individual_id
 
-        # Survivor's stored name must be the canonical spelling.
-        row = db.conn.execute(
-            "SELECT name FROM keywords WHERE id = ?", (legacy_id,)
+        # The taxonomy row is gone.
+        assert db.conn.execute(
+            "SELECT id FROM keywords WHERE id = ?", (taxonomy_id,)
+        ).fetchone() is None
+
+        # Critically: the surviving individual row must NOT have inherited
+        # is_species=1 or a taxon_id from the taxonomy source.
+        survivor = db.conn.execute(
+            "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+            (individual_id,),
         ).fetchone()
-        assert row is not None
-        assert row["name"] == "apapane"
+        assert survivor["type"] == "individual"
+        assert survivor["is_species"] == 0, (
+            "is_species must not leak into a non-taxonomy destination"
+        )
+        assert survivor["taxon_id"] is None, (
+            "taxon_id must not leak into a non-taxonomy destination"
+        )
 
-        # Pending change queued under the legacy spelling must now
-        # reference the canonical name so sync_to_xmp doesn't leak the
-        # stray-quote spelling back into the sidecar.
-        pending = db.conn.execute(
-            "SELECT value FROM pending_changes "
-            "WHERE photo_id = ? AND change_type = 'keyword_add'",
-            (p1,),
-        ).fetchall()
-        values = sorted(r["value"] for r in pending)
-        assert values == ["apapane"], values
+        # Photos from both sides are retained on the survivor.
+        tagged = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (individual_id,),
+            ).fetchall()
+        }
+        assert tagged == {pid_src, pid_dst}
     finally:
         db.close()
 
 
-def test_update_keyword_merge_canonicalizes_non_root_peer_name(tmp_path):
-    """The peer-merge canonicalization must work for child keywords too.
-
-    Regression: for non-root rows the surviving `(name, parent_id)` slot is
-    UNIQUE-constrained. Normalizing the peer's stored spelling in place
-    while the clean source still occupies that slot silently no-ops on
-    ``IntegrityError``, so ``_merge_keyword_into`` then deletes the clean
-    source and leaves a legacy-spelled survivor ``Parent > ‘Hawk``. The fix
-    merges first (freeing the slot) and normalizes the peer afterwards, so
-    the surviving child row stores the canonical name.
+def test_update_keyword_retype_legacy_general_is_species_does_not_leak(tmp_path):
+    """Legacy `type='general', is_species=1` rows upgraded from pre-invariant
+    databases still count as species-bearing to the rest of the app
+    (`is_species = 1 OR type = 'taxonomy'`). Retyping such a row into an
+    existing individual/general peer must not stamp is_species=1 or a taxon
+    link onto the non-taxonomy survivor. Extends
+    ``test_update_keyword_retype_to_nontaxonomy_does_not_leak_is_species``
+    to cover the general-source variant flagged by Codex.
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        ws_id = db.ensure_default_workspace()
-        db.set_active_workspace(ws_id)
-        fid = db.add_folder('/photos', name='photos')
-        p1 = db.add_photo(
-            folder_id=fid, filename='a.jpg', extension='.jpg',
+        fid = db.add_folder("/photos", name="photos")
+        pid_src = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        p2 = db.add_photo(
-            folder_id=fid, filename='b.jpg', extension='.jpg',
+        pid_dst = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
             file_size=100, file_mtime=1.0,
         )
-        parent_id = db.add_keyword("Parent", kw_type="general")
-        # Legacy edge-quoted taxonomy child (imported/upgraded DB shape).
-        # One photo carries it and its pending sidecar add references the
-        # legacy spelling.
+
+        # Legacy general row with is_species=1 and a taxon link — the shape
+        # upgraded DBs can carry before mark_species_keywords retypes them.
+        cur = db.conn.execute(
+            "INSERT INTO taxa (name, rank) VALUES (?, ?)",
+            ("Turdus migratorius", "species"),
+        )
+        taxon_row_id = cur.lastrowid
+        cur = db.conn.execute(
+            "INSERT INTO keywords (name, parent_id, is_species, type, taxon_id) "
+            "VALUES (?, NULL, 1, 'general', ?)",
+            ("Robin", taxon_row_id),
+        )
+        general_id = cur.lastrowid
+        db.tag_photo(pid_src, general_id)
+
+        # Existing individual `Robin` peer at the same slot, no species flag.
         cur = db.conn.execute(
             "INSERT INTO keywords (name, parent_id, is_species, type) "
-            "VALUES (?, ?, 1, 'taxonomy')",
-            ("‘Hawk", parent_id),
+            "VALUES (?, NULL, 0, 'individual')",
+            ("Robin",),
         )
-        legacy_id = cur.lastrowid
-        db.tag_photo(p1, legacy_id)
-        db.queue_change(p1, 'keyword_add', '‘Hawk')
-        # Clean general child at the same parent, tagged on the other photo.
-        general_id = db.add_keyword("Hawk", parent_id=parent_id, kw_type="general")
-        db.tag_photo(p2, general_id)
-        assert general_id != legacy_id
+        individual_id = cur.lastrowid
+        db.tag_photo(pid_dst, individual_id)
 
-        # PUT-style retype: turn the clean general child into taxonomy. The
-        # peer lookup finds the legacy child at the same parent and merges
-        # the clean row into it. The survivor must end up as clean `Hawk`,
-        # not `‘Hawk` -- otherwise the UNIQUE(name, parent_id) collision
-        # inside _normalize_keyword_row_name silently leaves the legacy
-        # spelling in place.
-        effective_id = db.update_keyword(general_id, type="taxonomy")
-        assert effective_id == legacy_id
+        # Retype the legacy general row to 'individual'. update_keyword must
+        # merge into the individual peer.
+        effective_id = db.update_keyword(general_id, type="individual")
+        assert effective_id == individual_id
 
-        # Survivor's stored name must be the canonical spelling.
-        row = db.conn.execute(
-            "SELECT name, parent_id, type FROM keywords WHERE id = ?",
-            (legacy_id,),
-        ).fetchone()
-        assert row is not None
-        assert row["name"] == "Hawk", row["name"]
-        assert row["parent_id"] == parent_id
-        assert row["type"] == "taxonomy"
-
-        # Exactly one child row must remain for the normalized name under
-        # this parent.
-        rows = db.conn.execute(
-            "SELECT id FROM keywords "
-            "WHERE vireo_normalize_keyword(name) = 'hawk' COLLATE NOCASE "
-            "AND parent_id = ? AND type = 'taxonomy'",
-            (parent_id,),
-        ).fetchall()
-        assert [r["id"] for r in rows] == [legacy_id]
-        # The old general row must be gone (merged away).
-        gone = db.conn.execute(
+        assert db.conn.execute(
             "SELECT id FROM keywords WHERE id = ?", (general_id,)
-        ).fetchone()
-        assert gone is None
+        ).fetchone() is None
 
-        # Pending change queued under the legacy spelling must now
-        # reference the canonical name so sync_to_xmp doesn't leak the
-        # stray-quote spelling back into the sidecar.
-        pending = db.conn.execute(
-            "SELECT value FROM pending_changes "
-            "WHERE photo_id = ? AND change_type = 'keyword_add'",
-            (p1,),
-        ).fetchall()
-        values = sorted(r["value"] for r in pending)
-        assert values == ["Hawk"], values
+        # Critically: is_species and taxon_id must NOT leak onto the
+        # non-taxonomy survivor even though the source was type='general'
+        # (not 'taxonomy').
+        survivor = db.conn.execute(
+            "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+            (individual_id,),
+        ).fetchone()
+        assert survivor["type"] == "individual"
+        assert survivor["is_species"] == 0, (
+            "legacy is_species=1 general source must not stamp survivor"
+        )
+        assert survivor["taxon_id"] is None
+
+        tagged = {
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM photo_keywords WHERE keyword_id = ?",
+                (individual_id,),
+            ).fetchall()
+        }
+        assert tagged == {pid_src, pid_dst}
     finally:
         db.close()
 
 
-def test_add_keyword_species_prefers_taxonomy_peer_over_general_exact_match(tmp_path):
-    """When both a clean `general` row `apapane` and a legacy `taxonomy`
-    edge-quote row `‘apapane` exist at the same slot, add_keyword('apapane',
-    is_species=True) must resolve to the taxonomy peer. Otherwise the fast
-    exact-match query returns the general row and the promotion path stamps
-    a second taxonomy row with the same normalized name — silently
-    duplicating the species keyword and letting later calls bind to either
-    id at random.
+def test_merge_keyword_into_retargets_edit_history(tmp_path):
+    """When _merge_keyword_into deletes the source keyword row, any
+    edit_history entry referring to it as a keyword id must be retargeted
+    onto the survivor. Otherwise undo of a recent keyword_add / _remove /
+    prediction_accept / species_replace looks up the deleted id, finds
+    nothing, and marks the entry undone without reversing the tag — the
+    photo keeps the survivor's tag with no way to undo it. Covers the
+    Codex finding on the one-shot normalization migration.
     """
+    import json as _json
+
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        # Legacy edge-quoted taxonomy row that survived normalization on
-        # insert (the UDF fallback is only consulted for casing/quote
-        # variants of the requested name; here we insert directly to
-        # simulate the imported-DB shape Codex flagged).
-        cur = db.conn.execute(
-            "INSERT INTO keywords (name, parent_id, is_species, type) "
-            "VALUES (?, NULL, 1, 'taxonomy')",
-            ("‘apapane",),
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
         )
-        taxonomy_id = cur.lastrowid
-        # A clean general row also exists at the same slot.
-        general_id = db.add_keyword("apapane", kw_type='general')
-        assert general_id != taxonomy_id
+        pid_replace = db.add_photo(
+            folder_id=fid, filename="b.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
 
-        resolved = db.add_keyword("apapane", is_species=True)
-        assert resolved == taxonomy_id
+        # Survivor and about-to-be-merged source of the same type.
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        # Both photos are tagged with merge_id so undo has something to hit.
+        db.tag_photo(pid, merge_id)
+        db.tag_photo(pid_replace, merge_id)
 
-        # Guard against the silent-duplicate: we must NOT have promoted the
-        # general row into a second taxonomy row.
-        rows = db.conn.execute(
-            "SELECT id, type FROM keywords "
-            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
-            "AND parent_id IS NULL AND type = 'taxonomy'"
-        ).fetchall()
-        assert [r["id"] for r in rows] == [taxonomy_id]
-        general_row = db.conn.execute(
-            "SELECT type FROM keywords WHERE id = ?", (general_id,)
+        # 1) A bare-id keyword_add edit whose new_value points at merge_id.
+        eid_add = db.record_edit(
+            "keyword_add", "Added keyword", str(merge_id),
+            [{"photo_id": pid, "old_value": "", "new_value": str(merge_id)}],
+        )
+        # 2) A keyword_remove edit whose item.old_value carries the bare id.
+        db.tag_photo(pid, merge_id)  # ensure tagged before recording remove
+        eid_remove = db.record_edit(
+            "keyword_remove", "Removed keyword", str(merge_id),
+            [{"photo_id": pid, "old_value": str(merge_id), "new_value": ""}],
+        )
+        # 3) A species_replace edit with JSON metadata carrying keyword_id +
+        #    keyword_ids that reference merge_id.
+        payload = _json.dumps(
+            {"keyword_id": merge_id, "keyword_ids": [merge_id]},
+            sort_keys=True,
+        )
+        eid_replace = db.record_edit(
+            "species_replace", "Replaced species", str(merge_id),
+            [{
+                "photo_id": pid_replace,
+                "old_value": payload,
+                "new_value": str(merge_id),
+            }],
+        )
+
+        # Merge merge_id into keep_id (mirrors the migration's convergence
+        # loop, and update_keyword's retype-into-peer path).
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        # edit_history.new_value retargeted for all three action types.
+        for eid in (eid_add, eid_remove, eid_replace):
+            row = db.conn.execute(
+                "SELECT new_value FROM edit_history WHERE id = ?", (eid,)
+            ).fetchone()
+            assert row["new_value"] == str(keep_id), (
+                f"edit_history #{eid}.new_value not retargeted"
+            )
+
+        # Bare-id item columns retargeted.
+        add_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_add,),
         ).fetchone()
-        assert general_row["type"] == "general"
+        assert add_item["new_value"] == str(keep_id)
+
+        remove_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_remove,),
+        ).fetchone()
+        assert remove_item["old_value"] == str(keep_id)
+
+        # JSON payload rewritten in place.
+        replace_item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid_replace,),
+        ).fetchone()
+        assert replace_item["new_value"] == str(keep_id)
+        parsed = _json.loads(replace_item["old_value"])
+        assert parsed["keyword_id"] == keep_id
+        assert parsed["keyword_ids"] == [keep_id]
     finally:
         db.close()
 
 
-def test_add_keyword_untyped_prefers_taxonomy_peer_over_general_auto_promote(
-    tmp_path,
-):
-    """Untyped `add_keyword('apapane')` must not silently promote the clean
-    general row to taxonomy when a legacy edge-quote taxonomy peer exists
-    at the same slot. The fast exact-match query returns the general row
-    (raw name matches under COLLATE NOCASE) and the auto-promote branch
-    below would stamp it with type='taxonomy' via
-    `_lookup_taxon_id_for_keyword` — producing two normalized-equal
-    taxonomy rows at the same slot. Untyped callers (typing into a
-    generic keyword input) would then bind to either at random.
+def test_merge_keyword_into_dedupes_keyword_ids_after_retarget(tmp_path):
+    """A species_replace payload whose keyword_ids list already contains
+    the destination id must not end up with a duplicate after retarget.
+    Otherwise undo would re-tag the survivor twice for the same keyword id.
     """
+    import json as _json
+
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        # Seed a taxon so `_lookup_taxon_id_for_keyword('apapane')` matches
-        # and would otherwise trigger the auto-promote path.
-        db.conn.execute(
-            "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
-            "VALUES (1, 'Himatione sanguinea', 'apapane', 'species', 'Animalia')"
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
         )
-        # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
-        cur = db.conn.execute(
-            "INSERT INTO keywords (name, parent_id, is_species, type) "
-            "VALUES (?, NULL, 1, 'taxonomy')",
-            ("‘apapane",),
+
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid, merge_id)
+
+        payload = _json.dumps(
+            {"keyword_id": merge_id, "keyword_ids": [keep_id, merge_id]},
+            sort_keys=True,
         )
-        taxonomy_id = cur.lastrowid
-        # A clean general row exists at the same slot.
-        general_id = db.add_keyword("apapane", kw_type='general')
-        assert general_id != taxonomy_id
+        eid = db.record_edit(
+            "species_replace", "Replaced species", str(merge_id),
+            [{
+                "photo_id": pid,
+                "old_value": payload,
+                "new_value": str(merge_id),
+            }],
+        )
 
-        # Untyped call from a generic keyword path — no is_species, no
-        # kw_type.
-        resolved = db.add_keyword("apapane")
-        assert resolved == taxonomy_id
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
 
-        # Guard against the silent-duplicate: the general row must NOT
-        # have been promoted into a second taxonomy row.
-        taxonomy_rows = db.conn.execute(
-            "SELECT id FROM keywords "
-            "WHERE vireo_normalize_keyword(name) = 'apapane' COLLATE NOCASE "
-            "AND parent_id IS NULL AND type = 'taxonomy'"
-        ).fetchall()
-        assert [r["id"] for r in taxonomy_rows] == [taxonomy_id]
-        general_row = db.conn.execute(
-            "SELECT type FROM keywords WHERE id = ?", (general_id,)
+        replace_item = db.conn.execute(
+            "SELECT old_value FROM edit_history_items WHERE edit_id = ?",
+            (eid,),
         ).fetchone()
-        assert general_row["type"] == "general"
+        parsed = _json.loads(replace_item["old_value"])
+        assert parsed["keyword_ids"] == [keep_id], (
+            "duplicate destination id after retarget"
+        )
     finally:
         db.close()
 
 
-def test_add_keyword_untyped_prefers_higher_priority_peer_over_individual_exact(
-    tmp_path,
-):
-    """Untyped `add_keyword('apapane')` must not bind to an exact clean
-    lower-priority typed row when a legacy edge-quote higher-priority peer
-    exists at the same slot. The fast exact-match query returns the
-    individual row (raw name matches under COLLATE NOCASE) and the earlier
-    fix only checked for a taxonomy peer when the exact match was
-    'general' — leaving the individual/location/genre exact-match case
-    silently binding to the wrong row and contradicting the
-    taxonomy > genre > individual > location > general priority.
+def test_merge_keyword_into_preserves_prediction_accept_old_value(tmp_path):
+    """`_merge_keyword_into`'s bare-string rewrite of
+    edit_history_items.old_value must skip prediction_accept entries.
+    api_accept_prediction records item.old_value = str(prediction_id),
+    and _edit_prediction_id falls back to that raw value. If the merged
+    keyword id happens to equal a stored prediction id, a blanket rewrite
+    would silently retarget undo/redo onto a different prediction.
     """
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     try:
-        # Legacy edge-quoted taxonomy row (imported/upgraded DB shape).
-        cur = db.conn.execute(
-            "INSERT INTO keywords (name, parent_id, is_species, type) "
-            "VALUES (?, NULL, 1, 'taxonomy')",
-            ("‘apapane",),
+        fid = db.add_folder("/photos", name="photos")
+        pid = db.add_photo(
+            folder_id=fid, filename="a.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
         )
-        taxonomy_id = cur.lastrowid
-        # A clean individual row also exists at the same slot (e.g. a
-        # person tag). This is a deliberate lower-priority type.
-        individual_id = db.add_keyword("apapane", kw_type='individual')
-        assert individual_id != taxonomy_id
 
-        # Untyped call from a generic keyword path — no is_species, no
-        # kw_type.
-        resolved = db.add_keyword("apapane")
-        assert resolved == taxonomy_id
+        keep_id = db.add_keyword("Sparrow", kw_type="general")
+        merge_id = db.add_keyword("sparrow variant", kw_type="general")
 
-        # The individual row must remain individual — no silent type
-        # rewrite.
-        individual_row = db.conn.execute(
-            "SELECT type FROM keywords WHERE id = ?", (individual_id,)
+        # Contrive a prediction_accept edit whose item.old_value (the
+        # prediction id per api_accept_prediction) numerically equals the
+        # keyword row about to be merged — the exact collision the
+        # CodeRabbit finding calls out. The prediction row itself is not
+        # required for the rewrite pass; the retarget operates purely on
+        # edit_history_items.
+        prediction_id = merge_id
+        eid = db.record_edit(
+            "prediction_accept", "Accepted prediction", str(merge_id),
+            [{
+                "photo_id": pid,
+                "old_value": str(prediction_id),
+                "new_value": str(merge_id),
+            }],
+        )
+
+        db.tag_photo(pid, merge_id)
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        item = db.conn.execute(
+            "SELECT old_value, new_value FROM edit_history_items "
+            "WHERE edit_id = ?", (eid,),
         ).fetchone()
-        assert individual_row["type"] == "individual"
+        # new_value (keyword id) IS retargeted onto the survivor.
+        assert item["new_value"] == str(keep_id)
+        # old_value is the prediction id — MUST stay unchanged even
+        # though it numerically equals src_id.
+        assert item["old_value"] == str(merge_id), (
+            "prediction_accept.old_value (prediction id) was incorrectly "
+            "rewritten as if it were a keyword id"
+        )
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_preserves_preexisting_survivor_tag(tmp_path):
+    """When a `keyword_add(src_id)` edit references a photo that already
+    carried dst_id at merge time, retargeting the edit onto dst_id would
+    let a later undo call untag_photo(dst_id) and strip the user's
+    survivor tag — which was never part of that add. `_merge_keyword_into`
+    must drop such items so undo iterates only over the items whose photos
+    did NOT pre-existingly hold the survivor. Covers the Codex finding on
+    the retargeting pass.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+
+        # pid_had_both already carries the survivor before the add.
+        db.tag_photo(pid_had_both, keep_id)
+        # Both photos then get tagged with the variant that will be merged.
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # A batch keyword_add edit records the variant tag on both photos.
+        eid = db.record_edit(
+            "keyword_add", "Added variant to 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": "",
+                 "new_value": str(merge_id)},
+                {"photo_id": pid_only_src, "old_value": "",
+                 "new_value": str(merge_id)},
+            ],
+            is_batch=True,
+        )
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        # The item for pid_had_both must be gone — retargeting it would
+        # let undo strip the survivor tag that pre-existed.
+        remaining = db.conn.execute(
+            "SELECT photo_id, new_value FROM edit_history_items "
+            "WHERE edit_id = ? ORDER BY photo_id", (eid,),
+        ).fetchall()
+        remaining_pids = [r["photo_id"] for r in remaining]
+        assert pid_had_both not in remaining_pids, (
+            "keyword_add item for a photo that pre-existingly held the "
+            "survivor tag should be dropped, not retargeted"
+        )
+        assert pid_only_src in remaining_pids
+        # Surviving item is retargeted onto the survivor id.
+        [only_src_item] = [r for r in remaining if r["photo_id"] == pid_only_src]
+        assert only_src_item["new_value"] == str(keep_id)
+
+        # End-to-end: undo the edit and confirm the pre-existing survivor
+        # tag on pid_had_both is preserved.
+        db.undo_last_edit()
+        keep_tags_had_both = {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }
+        assert keep_id in keep_tags_had_both, (
+            "undo removed the pre-existing survivor tag from pid_had_both"
+        )
+        # And pid_only_src, whose add was legitimately retargeted, no
+        # longer carries the survivor tag after undo.
+        keep_tags_only_src = {
+            r["id"] for r in db.get_photo_keywords(pid_only_src)
+        }
+        assert keep_id not in keep_tags_only_src
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_preserves_preexisting_survivor_for_keyword_remove(tmp_path):
+    """A `keyword_remove(src_id)` edit retargeted onto dst_id must not let
+    redo strip a pre-existing survivor tag. undo of keyword_remove tags on
+    entry.new_value (INSERT OR IGNORE — no-op if dst pre-existed), but
+    redo calls untag_photo(pid, entry.new_value); if entry.new_value was
+    retargeted to dst_id and pid already carried dst_id, redo removes
+    the user's survivor tag.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid_had_both, keep_id)
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # Record a keyword_remove edit for the variant on both photos.
+        # keyword_remove convention: item.old_value = str(kid), new_value = ''.
+        eid = db.record_edit(
+            "keyword_remove", "Removed variant from 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": str(merge_id),
+                 "new_value": ""},
+                {"photo_id": pid_only_src, "old_value": str(merge_id),
+                 "new_value": ""},
+            ],
+            is_batch=True,
+        )
+        # Simulate the untag the original edit performed.
+        db.untag_photo(pid_had_both, merge_id)
+        db.untag_photo(pid_only_src, merge_id)
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        remaining_pids = [
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (eid,),
+            ).fetchall()
+        ]
+        assert pid_had_both not in remaining_pids, (
+            "keyword_remove item for a photo that pre-existingly held the "
+            "survivor tag should be dropped so redo does not remove it"
+        )
+        assert pid_only_src in remaining_pids
+
+        # Undo (tags with entry.new_value=dst_id; no-op for pid_had_both
+        # because survivor was already there).
+        db.undo_last_edit()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }
+        # Redo (would untag survivor from pid_had_both without the fix).
+        db.redo_last_undo()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }, "redo of keyword_remove stripped the pre-existing survivor tag"
+    finally:
+        db.close()
+
+
+def test_merge_keyword_into_preserves_preexisting_survivor_for_prediction_accept(tmp_path):
+    """A `prediction_accept(src_id)` edit retargeted onto dst_id must not
+    let undo strip a pre-existing survivor tag. prediction_accept shares
+    the keyword_add branch in _apply_undo — the untag_photo call would
+    remove the survivor. The migration drops such items; prediction-
+    status restoration for those specific items is intentionally
+    sacrificed to preserve the user's tag (see _merge_keyword_into).
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws = db.ensure_default_workspace()
+        db.set_active_workspace(ws)
+        fid = db.add_folder("/photos", name="photos")
+        pid_had_both = db.add_photo(
+            folder_id=fid, filename="both.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        pid_only_src = db.add_photo(
+            folder_id=fid, filename="src.jpg", extension=".jpg",
+            file_size=100, file_mtime=1.0,
+        )
+        keep_id = db.add_keyword("Robin", kw_type="general")
+        merge_id = db.add_keyword("robin variant", kw_type="general")
+        db.tag_photo(pid_had_both, keep_id)
+        db.tag_photo(pid_had_both, merge_id)
+        db.tag_photo(pid_only_src, merge_id)
+
+        # prediction_accept convention:
+        # entry.new_value = str(kid), item.old_value = str(pred_id),
+        # item.new_value = str(kid).
+        eid = db.record_edit(
+            "prediction_accept", "Accepted prediction for 2 photos", str(merge_id),
+            [
+                {"photo_id": pid_had_both, "old_value": "42",
+                 "new_value": str(merge_id)},
+                {"photo_id": pid_only_src, "old_value": "43",
+                 "new_value": str(merge_id)},
+            ],
+            is_batch=True,
+        )
+
+        db._merge_keyword_into(merge_id, keep_id)
+        db.conn.commit()
+
+        remaining_pids = [
+            r["photo_id"] for r in db.conn.execute(
+                "SELECT photo_id FROM edit_history_items WHERE edit_id = ?",
+                (eid,),
+            ).fetchall()
+        ]
+        assert pid_had_both not in remaining_pids, (
+            "prediction_accept item for a photo that pre-existingly held "
+            "the survivor tag should be dropped so undo does not untag it"
+        )
+        assert pid_only_src in remaining_pids
+
+        db.undo_last_edit()
+        assert keep_id in {
+            r["id"] for r in db.get_photo_keywords(pid_had_both)
+        }, "undo of prediction_accept stripped the pre-existing survivor tag"
     finally:
         db.close()
 
@@ -13791,8 +16873,10 @@ def _add_one_detection(db, photo_id, detector_model="test-det", conf=0.9):
 
 def test_count_classifier_runs_filters_by_model_and_fingerprint(tmp_path):
     """count_classifier_runs returns the number of distinct photos in the
-    given id list that have at least one detection with a classifier_runs
-    row matching the given (model, fingerprint)."""
+    given id list where every qualifying detection has a classifier_runs
+    row matching the given (model, fingerprint). Photo-scoped to match
+    the classify loop's ``cached`` bucket: a photo is only "cached" when
+    no detection would need fresh inference."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
     fid = db.add_folder("/photos", name="photos")
@@ -13822,9 +16906,18 @@ def test_count_classifier_runs_filters_by_model_and_fingerprint(tmp_path):
     # Empty input returns 0.
     assert db.count_classifier_runs([], "BioCLIP-2.5", "fp-a") == 0
 
-    # Photo with multiple detections, only one cached, still counts as 1.
+    # Photo with multiple detections, only one cached, does NOT count:
+    # the runtime would still need to infer the uncached detection, and the
+    # photo would end up in ``count`` (inferred), not ``cached``.
     d2b = _add_one_detection(db, p2)
     db.record_classifier_run(d2b, "BioCLIP-2.5", "fp-a", prediction_count=1)
+    assert db.count_classifier_runs(
+        [p1, p2, p3], "BioCLIP-2.5", "fp-a"
+    ) == 1  # only p1 — p2 still has d2 (fp-b) with no matching run key
+
+    # Once every qualifying detection on p2 has a matching run key, p2
+    # counts too.
+    db.record_classifier_run(d2, "BioCLIP-2.5", "fp-a", prediction_count=1)
     assert db.count_classifier_runs(
         [p1, p2, p3], "BioCLIP-2.5", "fp-a"
     ) == 2  # p1 and p2
@@ -13892,14 +16985,63 @@ def test_count_classifier_runs_excludes_full_image_and_below_threshold(tmp_path)
     ) == 1
 
 
+def test_count_classifier_runs_ignores_non_animal_detections(tmp_path):
+    """Non-animal detector boxes (person, vehicle) are skipped by the
+    classify loop before inference — so an uncached non-animal box on an
+    otherwise cache-served photo must not force that photo out of the
+    ``cached`` bucket. Mirrors pipeline_job.py's ``category == 'animal'``
+    filter on both the cache- and DB-read detection paths.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    fid = db.add_folder("/photos", name="photos")
+    p1 = db.add_photo(folder_id=fid, filename="a.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+    p2 = db.add_photo(folder_id=fid, filename="b.jpg", extension=".jpg",
+                     file_size=1, file_mtime=1.0, timestamp=None,
+                     width=1, height=1)
+
+    # p1: one animal detection (cached) + one uncached person detection.
+    # The person box gets skipped at runtime so p1 IS fully cache-served.
+    d1_animal = _add_one_detection(db, p1, conf=0.9)
+    db.record_classifier_run(d1_animal, "BioCLIP-2.5", "fp-a", prediction_count=1)
+    db.conn.execute(
+        """INSERT INTO detections
+             (photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category)
+           VALUES (?, 'test-det', 0.0, 0.0, 1.0, 1.0, 0.9, 'person')""",
+        (p1,),
+    )
+    db.conn.commit()
+
+    # p2: only a person detection has a matching run key. Person boxes
+    # aren't classifier targets, so p2 has zero classifiable detections —
+    # it falls through to the empty-detections/full-image branch and is
+    # not counted here.
+    cur = db.conn.execute(
+        """INSERT INTO detections
+             (photo_id, detector_model, box_x, box_y, box_w, box_h,
+              detector_confidence, category)
+           VALUES (?, 'test-det', 0.0, 0.0, 1.0, 1.0, 0.9, 'vehicle')""",
+        (p2,),
+    )
+    db.conn.commit()
+    db.record_classifier_run(cur.lastrowid, "BioCLIP-2.5", "fp-a", prediction_count=1)
+
+    assert db.count_classifier_runs(
+        [p1, p2], "BioCLIP-2.5", "fp-a",
+    ) == 1
+
+
 def test_all_nav_ids_covers_every_page():
     from db import ALL_NAV_IDS
     expected = {
         "import",
         "pipeline", "jobs", "pipeline_review", "pipeline_rapid_review", "review", "cull",
-        "misses", "highlights", "life_list", "browse", "edit", "map", "variants",
+        "misses", "highlights", "life_list", "browse", "edit", "map", "location_review", "variants",
         "dashboard", "storage", "audit", "move", "compare",
-        "settings", "workspace", "shortcuts",
+        "settings", "workspace", "lightroom", "shortcuts",
         "keywords", "duplicates", "logs",
     }
     assert expected == ALL_NAV_IDS
@@ -15742,42 +18884,2652 @@ def test_best_photo_by_taxon(db):
     assert best[ids['Melospiza melodia']]['filename'] == 'high.jpg'
 
 
-def test_accept_prediction_queues_normalized_species(tmp_path):
-    """When the prediction's species carries stray edge quotes (e.g.
-    `‘apapane`), accept_prediction must tag the photo with the normalized
-    row AND queue the pending sidecar keyword_add / return the payload
-    using the stored (clean) spelling. Without this, the DB tag points to
-    `apapane` while pending changes and the response payload use
-    `‘apapane`, so a later delete queues the clean name, pending changes
-    stop cancelling, and XMP sync persists the stray-quote label."""
+def test_apply_case_convention_preserves_mixed_case_eponym(tmp_path):
+    """The 'lower' convention must not mangle mixed-case first words:
+    `McKay's bunting` keeps its internal capital, ALL-CAPS label-file
+    spellings sentence-case, plain words capitalize as before."""
     from db import Database
     db = Database(str(tmp_path / "test.db"))
+    try:
+        conv = db._apply_case_convention
+        assert conv("McKay's bunting", "lower") == "McKay's bunting"
+        assert conv("MALLARD DUCK", "lower") == "Mallard duck"
+        assert conv("black phoebe", "lower") == "Black phoebe"
+        assert conv("mallard", "lower") == "Mallard"
+    finally:
+        db.close()
+
+
+def test_curation_setters_canonicalize_species_casing(tmp_path):
+    """Curation writes with a prediction-cased label key on the stored
+    keyword spelling, and removal finds the row under any casing."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    try:
+        ws_id = db.ensure_default_workspace()
+        db.set_active_workspace(ws_id)
+        fid = db.add_folder('/photos', name='photos')
+        pid = db.add_photo(
+            folder_id=fid, filename='a.jpg', extension='.jpg',
+            file_size=100, file_mtime=1.0,
+        )
+        db.conn.execute(
+            "INSERT INTO keywords (name, type, is_species) "
+            "VALUES ('Common waxbill', 'taxonomy', 1)"
+        )
+        db.conn.commit()
+
+        db.set_photo_preference("life_list", "Common Waxbill", pid)
+        prefs = db.conn.execute(
+            "SELECT DISTINCT species FROM photo_preferences"
+        ).fetchall()
+        assert {r["species"] for r in prefs} == {"Common waxbill"}
+
+        rank = db.add_species_highlight("Common Waxbill", pid)
+        assert rank == 1
+        rows = db.conn.execute(
+            "SELECT species FROM species_highlights"
+        ).fetchall()
+        assert [r["species"] for r in rows] == ["Common waxbill"]
+
+        # Re-adding under yet another casing reuses the canonical row
+        # instead of appending a second rank.
+        assert db.add_species_highlight("COMMON WAXBILL", pid) == 1
+
+        removed = db.remove_species_highlight("Common Waxbill", pid)
+        assert removed == 1
+    finally:
+        db.close()
+
+
+def test_add_species_keyword_prefers_species_rank_over_genus_homonym(tmp_path):
+    """Adding an is_species=True keyword whose name matches both a species
+    and a higher-rank homonym (e.g. species Puma vs genus Puma) must bind
+    the row to the species-rank taxon. Otherwise Life List, Compare, and
+    Explorer queries — which filter on ``t.rank = 'species'`` — silently
+    drop photos carrying the just-added keyword.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Puma", is_species=True)
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert dict(row) == {
+        "is_species": 1, "type": "taxonomy", "taxon_id": species_taxon,
+    }
+
+
+def test_add_general_keyword_promoted_to_species_prefers_species_rank(tmp_path):
+    """When add_keyword auto-detects a general name as taxonomy via a
+    taxa lookup, the resulting is_species=1 row must still land on a
+    species-rank taxon so the rank-filtered queries don't drop it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Puma")
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon
+
+
+def test_rename_keyword_to_matching_taxon_prefers_species_rank(tmp_path):
+    """Renaming a general keyword to a name that matches both a species
+    and a higher-rank homonym auto-promotes to taxonomy on the
+    species-rank taxon so rank-filtered queries still see the row.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Cougar")
+    db.update_keyword(kid, name="Puma")
+
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon
+
+
+def test_add_species_rebinds_existing_row_from_higher_rank_to_species(tmp_path):
+    """A pre-existing keyword row already bound to a higher-rank taxon
+    (e.g. a legacy catalog that stamped ``Puma`` with the genus taxon
+    before ``prefer_species`` existed) must be rebound to the species-
+    rank taxon on the next species accept. Without the rebind the row
+    stays flagged is_species/taxonomy while its taxon_id points at the
+    genus, and every downstream ``t.rank = 'species'`` filter (Life
+    List, Compare, Explorer) silently drops photos carrying it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    # Legacy row: correctly typed taxonomy species but bound to the
+    # non-species-rank genus taxon.
+    kid = db.add_keyword("Puma", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (genus_taxon, kid),
+    )
+    db.conn.commit()
+    pre = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert pre["taxon_id"] == genus_taxon
+
+    # Accepting the species again should rebind onto the species-rank
+    # taxon rather than leaving the higher-rank homonym in place.
+    same = db.add_keyword("Puma", is_species=True)
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["is_species"] == 1
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == species_taxon
+
+
+def test_add_species_preserves_species_taxon_over_species_taxon(tmp_path):
+    """A row already bound to a species-rank taxon must NOT be rebound
+    when a different species-rank taxon shares the name — same-NOCASE
+    homonyms preserved by the migration are genuinely different species,
+    so the existing binding is authoritative.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, 'species', 'Animalia')",
+        [
+            (7000, "Aythya affinis", "Robin"),
+            (7001, "Turdus migratorius", "Robin"),
+        ],
+    )
+    db.conn.commit()
+    original_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE inat_id = 7000"
+    ).fetchone()["id"]
+
+    kid = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (original_taxon, kid),
+    )
+    db.conn.commit()
+
+    same = db.add_keyword("Robin", is_species=True)
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["taxon_id"] == original_taxon
+
+
+def test_promote_general_row_with_higher_rank_taxon_rebinds_to_species(tmp_path):
+    """A legacy 'general' row already carrying a higher-rank taxon_id
+    is promoted to taxonomy on the next taxonomy lookup and its
+    taxon_id must be rebound to the species-rank homonym. Without the
+    rebind the promoted row would be stamped is_species=1/taxonomy but
+    still bound to the genus, and Life List/Compare rank filters would
+    drop photos tagged with it.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    # Simulate a legacy general row bound to the genus taxon. add_keyword
+    # normally auto-promotes on insert, so bypass it with direct SQL.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'general', 0, ?)",
+        (genus_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    same = db.add_keyword("Puma")
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon
+
+
+def test_add_species_prefers_alternate_common_name_over_higher_rank_direct(tmp_path):
+    """When a submitted label collides with a higher-rank taxon on the
+    direct ``taxa`` lookup but also appears in ``taxa_common_names`` as an
+    alternate for a species-rank taxon, the species-rank alternate must
+    win. Otherwise the new rank filters (Life List, Compare) silently drop
+    every photo carrying the accepted keyword even though the accept
+    reported success.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    # Direct match on `Boa` is the genus; the species Boa constrictor
+    # registers `Boa` as an alternate English name via taxa_common_names.
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank, kingdom) "
+        "VALUES (1, 'Boa', 'Boa', 'genus', 'Animalia')"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa (id, name, common_name, rank, kingdom) "
+        "VALUES (2, 'Boa constrictor', 'Boa Constrictor', 'species', 'Animalia')"
+    )
+    db.conn.execute(
+        "INSERT INTO taxa_common_names (taxon_id, name) VALUES (2, 'Boa')"
+    )
+    db.conn.commit()
+
+    kid = db.add_keyword("Boa", is_species=True)
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == 2
+
+
+def test_add_species_leaves_taxon_null_when_only_higher_rank_matches(tmp_path):
+    """When a species-typed add finds only a higher-rank taxon (no
+    species-rank direct or common-name match), ``taxon_id`` must be left
+    NULL. Binding the row to a genus/family would satisfy the caller's
+    reconciliation (``is_species = 1``/``type = 'taxonomy'`` still get
+    stamped) while making the row invisible to every rank-filtered reader
+    (Life List, Compare, Explorer, highlight/preference eligibility) that
+    restricts to ``t.rank = 'species' OR t.rank IS NULL``.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (10001, "Corvidae", "Corvids", "family"),
+        ],
+    )
+    db.conn.commit()
+
+    kid = db.add_keyword("Corvidae", is_species=True)
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] is None
+
+
+def test_add_species_preserves_higher_rank_taxon_when_no_species_match(tmp_path):
+    """A pre-existing keyword row bound to a valid higher-rank taxon
+    (e.g. a ``Corvidae`` family observation) must keep that
+    ``taxon_id`` when the next species-typed accept cannot find a
+    species-rank match. ``get_life_list_candidates`` and
+    ``get_life_list_locations`` now surface linked higher-rank
+    identifications so their ``taxon_rank`` / ``scientific_name`` /
+    ``taxonomic_class`` metadata powers the new genus / family /
+    class Life List filters; clearing the ``taxon_id`` here would
+    strip that metadata on the next normal keyword edit and silently
+    break those filters — mirroring the preservation guarantee that
+    :meth:`mark_species_keywords` gives on startup.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (10001, "Corvidae", "Corvids", "family"),
+        ],
+    )
+    db.conn.commit()
+    family_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'family'"
+    ).fetchone()["id"]
+
+    # Fully typed taxonomy row linked to a valid higher-rank taxon.
+    # ``add_keyword`` is species-preferring on insert, so bypass it
+    # with direct SQL to simulate the upgraded catalog.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Corvidae', 'taxonomy', 1, ?)",
+        (family_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    # Re-adding as a taxonomy keyword must NOT clear the family link.
+    same = db.add_keyword("Corvidae", is_species=True)
+    assert same == kid
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["is_species"] == 1
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == family_taxon
+
+    # The same guarantee must hold for the kw_type='taxonomy' variant
+    # taken by other callers.
+    same_typed = db.add_keyword("Corvidae", kw_type="taxonomy")
+    assert same_typed == kid
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["is_species"] == 1
+    assert row["type"] == "taxonomy"
+    assert row["taxon_id"] == family_taxon
+
+
+def test_mark_species_keywords_rebinds_higher_rank_taxonomy_link(tmp_path):
+    """A keyword row already typed ``taxonomy`` and linked by the old
+    species-agnostic lookup to a genus/family taxon must be rebound to a
+    species-rank taxon on the next ``mark_species_keywords`` pass. Without
+    the rebind, upgraded catalogs keep the higher-rank binding and the new
+    ``t.rank = 'species'`` filter (Life List, Compare, Explorer) silently
+    drops every photo carrying the accepted keyword.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    # Simulate a legacy row: fully typed taxonomy but bound to the
+    # non-species-rank genus taxon. add_keyword normally auto-promotes on
+    # insert, so bypass it with direct SQL.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'taxonomy', 1, ?)",
+        (genus_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        def lookup(self, name):
+            if name.lower() == "puma":
+                return {"taxon_id": 41963}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 1
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == species_taxon
+
+
+def test_mark_species_keywords_leaves_taxon_null_when_only_higher_rank_available(tmp_path):
+    """A legacy accepted species keyword (``type='taxonomy'``,
+    ``is_species=1``, ``taxon_id=NULL``) whose name only resolves to a
+    higher-rank taxon (genus/family) must NOT be bound to that
+    non-species taxon on the next ``mark_species_keywords`` pass. Binding
+    the row to a genus/family would satisfy the marking pass while making
+    the row invisible to every rank-filtered reader (Life List, Compare,
+    highlight/preference eligibility) that restricts to
+    ``t.rank = 'species' OR t.rank IS NULL``, so upgraded catalogs would
+    silently lose every photo carrying the accepted keyword.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+        ],
+    )
+    db.conn.commit()
+
+    # Simulate an accepted species keyword created before the local taxa
+    # table was populated: fully typed as species but with a NULL taxon
+    # link. add_keyword's species path already refuses to bind to a
+    # higher-rank taxon, so bypass it with direct SQL.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'taxonomy', 1, NULL)",
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        # Only the genus is known — no species-rank alternative exists.
+        def lookup(self, name):
+            if name.lower() == "puma":
+                return {"taxon_id": 46272}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 0
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] is None
+
+
+def test_mark_species_keywords_keeps_species_taxon_when_only_higher_rank_available(tmp_path):
+    """``mark_species_keywords`` must not clobber an existing species-rank
+    binding just because the taxonomy lookup only resolves to a higher-rank
+    homonym. A row already correctly bound stays bound and no update fires.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Puma', 'taxonomy', 1, ?)",
+        (species_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        # Taxonomy only knows the genus id here — the rebind must NOT fire
+        # because there is no species-rank alternative.
+        def lookup(self, name):
+            if name.lower() == "puma":
+                return {"taxon_id": 46272}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 0
+    row = db.conn.execute(
+        "SELECT taxon_id FROM keywords WHERE id = ?", (kid,)
+    ).fetchone()
+    assert row["taxon_id"] == species_taxon
+
+
+def test_mark_species_keywords_preserves_higher_rank_taxon_when_no_species_match(tmp_path):
+    """A fully typed taxonomy row already linked to a higher-rank taxon
+    (genus/family/class) must retain that link on the next
+    ``mark_species_keywords`` pass when no species-rank replacement is
+    available. ``get_life_list_candidates`` and ``get_life_list_locations``
+    now surface linked higher-rank identifications so their
+    ``taxon_rank`` / ``scientific_name`` / ``taxonomic_class`` metadata
+    powers the new genus / family / class Life List filters; clearing
+    the ``taxon_id`` on startup would strip that metadata and silently
+    break those filters after the first restart.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (10001, "Corvidae", "Corvids", "family"),
+        ],
+    )
+    db.conn.commit()
+    family_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'family'"
+    ).fetchone()["id"]
+
+    # Fully typed taxonomy row linked to a valid higher-rank taxon (a
+    # ``Corvidae`` family observation the user has accepted). add_keyword
+    # is species-preferring on insert, so bypass it with direct SQL to
+    # simulate the upgraded catalog.
+    cur = db.conn.execute(
+        "INSERT INTO keywords (name, type, is_species, taxon_id) "
+        "VALUES ('Corvidae', 'taxonomy', 1, ?)",
+        (family_taxon,),
+    )
+    kid = cur.lastrowid
+    db.conn.commit()
+
+    class FakeTaxonomy:
+        # Only the family is known — no species-rank alternative exists.
+        def lookup(self, name):
+            if name.lower() == "corvidae":
+                return {"taxon_id": 10001}
+            return None
+
+        def is_taxon(self, name):
+            return self.lookup(name) is not None
+
+    updated = db.mark_species_keywords(FakeTaxonomy())
+    assert updated == 0
+    row = db.conn.execute(
+        "SELECT is_species, type, taxon_id FROM keywords WHERE id = ?",
+        (kid,),
+    ).fetchone()
+    assert row["type"] == "taxonomy"
+    assert row["is_species"] == 1
+    assert row["taxon_id"] == family_taxon
+
+
+def test_repair_duplicate_photo_species_preserves_highlight_eligibility(tmp_path):
+    """After ``repair_duplicate_photo_species`` detaches the redundant
+    root, ``get_species_highlights(eligible_only=True)`` must still
+    surface highlights stored under the canonical root name for a
+    photo whose only remaining species keyword is a differently-cased
+    hierarchy leaf (``verdin`` vs ``Verdin``). The taxon-linked
+    fallback matches the leaf back to the root without loosening the
+    ambiguous-homonym boundary.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], root),
+    )
+    db.tag_photo(pid, nested)
+    db.tag_photo(pid, root)
+    # Highlight stored under the canonical root spelling — the same
+    # string curation is keyed on and the photo carried via the root
+    # tag before repair detached it.
+    db.add_species_highlight("Verdin", pid)
+    db.conn.execute(
+        "DELETE FROM db_meta WHERE key = ?",
+        (db._DUPLICATE_PHOTO_SPECIES_REPAIR_KEY,),
+    )
+    db.conn.commit()
+
+    assert db.repair_duplicate_photo_species() == 1
+
+    # Only the differently-spelled hierarchy leaf remains attached.
+    attached_names = {
+        row["name"] for row in db.conn.execute(
+            """SELECT k.name FROM photo_keywords pk
+               JOIN keywords k ON k.id = pk.keyword_id
+               WHERE pk.photo_id = ?""",
+            (pid,),
+        ).fetchall()
+    }
+    assert "verdin" in attached_names
+    assert "Verdin" not in attached_names
+
+    # Highlight under the canonical root name still applies.
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights.get("Verdin", {}), (
+        "highlight under root spelling must remain eligible for a photo "
+        "whose only species keyword is a differently-spelled hierarchy leaf"
+    )
+    # Same result via the single-species selector used by the UI.
+    single = db.get_species_highlights(species="Verdin", eligible_only=True)
+    assert pid in single.get("Verdin", {})
+
+
+def test_get_species_highlights_canonicalizes_prediction_alias(tmp_path):
+    """``resolve_species_display_name`` routes a linked hierarchy alias
+    (e.g. ``Desert Verdin`` bound to the ``Verdin`` species taxon) to the
+    canonical root spelling, so ``add_species_highlight`` /
+    ``_collect_highlight_buckets`` store an unconfirmed prediction's
+    highlight under ``Verdin``. The prediction-fallback branch of
+    ``get_species_highlights(eligible_only=True)`` must apply the same
+    canonicalization when it looks up the photo's top prediction —
+    otherwise the highlight vanishes on reload because ``pr.species``
+    is still the raw ``Desert Verdin`` label.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Root "Verdin" + hierarchy leaf "Desert Verdin" both bound to the
+    # same species taxon. resolve_species_display_name canonicalizes
+    # "Desert Verdin" through the shared taxon to root "Verdin".
+    root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], root),
+    )
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], leaf),
+    )
+
+    # Photo has NO species keyword tagged (unconfirmed) but has a top
+    # classifier prediction labelled with the hierarchy alias.
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Desert Verdin', 0.95)",
+        (did,),
+    )
+    db.conn.commit()
+
+    # add_species_highlight canonicalizes the label via
+    # resolve_species_display_name — the leaf's linked taxon resolves
+    # back to root "Verdin", so the highlight lands under "Verdin".
+    db.add_species_highlight("Desert Verdin", pid)
+    stored = db.conn.execute(
+        "SELECT species FROM species_highlights WHERE photo_id = ?", (pid,)
+    ).fetchone()
+    assert stored["species"] == "Verdin"
+
+    # Prediction-fallback eligibility must canonicalize pr.species the
+    # same way, so the stored highlight remains eligible on reload.
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights.get("Verdin", {}), (
+        "highlight canonicalized to root spelling must still match a photo "
+        "whose top prediction is the linked hierarchy alias"
+    )
+    single = db.get_species_highlights(species="Verdin", eligible_only=True)
+    assert pid in single.get("Verdin", {})
+
+
+def test_get_species_highlights_prediction_fallback_rejects_wrong_taxon(tmp_path):
+    """Canonicalizing pr.species through the leaf's taxon must not
+    loosen the taxon boundary: an unconfirmed photo whose top prediction
+    is a leaf linked to taxon A must NOT satisfy a highlight stored
+    under a canonical root name resolving to taxon B, even when the
+    strings would collide after case-folding.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (2912, "Auriparus flaviceps", "Verdin"),
+        (7000, "Turdus migratorius", "American Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Leaf "Desert Verdin" bound to the Verdin species taxon.
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], leaf),
+    )
+    verdin_root = db.add_keyword("Verdin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["Verdin"], verdin_root),
+    )
+    # Unrelated root "American Robin" bound to a different species taxon.
+    robin_root = db.add_keyword("American Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], robin_root),
+    )
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Desert Verdin', 0.95)",
+        (did,),
+    )
+    # A highlight under a different root — must not become eligible for
+    # a photo whose top prediction canonicalizes to another root.
+    db.add_species_highlight("American Robin", pid)
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(
+        species="American Robin", eligible_only=True,
+    )
+    assert "American Robin" not in highlights, (
+        "prediction-fallback canonicalization must respect the taxon "
+        "boundary — a highlight under 'American Robin' must not be "
+        "eligible for a photo whose top prediction resolves to 'Verdin'"
+    )
+
+
+def test_get_species_highlights_prediction_fallback_skips_ambiguous_alias(tmp_path):
+    """When multiple linked hierarchy leaves share a predicted label but point
+    at DIFFERENT taxa, the prediction-fallback canonicalization must NOT pick
+    an arbitrary root for the alias — that would silently promote an
+    ambiguous prediction into a specific root bucket. ``_collect_highlight_buckets``
+    keeps such ambiguous labels raw, so the eligibility reload path must too:
+    highlights saved under either root name must not become eligible for a
+    photo whose top prediction is the ambiguous shared label.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (30001, "Turdus migratorius", "American Robin"),
+        (30002, "Erithacus rubecula", "European Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Two hierarchy leaves both named "Robin" but linked to distinct taxa.
+    parent_a = db.add_keyword("Old World")
+    leaf_a = db.add_keyword("Robin", parent_id=parent_a)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["European Robin"], leaf_a),
+    )
+    parent_b = db.add_keyword("New World")
+    leaf_b = db.add_keyword("Robin", parent_id=parent_b)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["American Robin"], leaf_b),
+    )
+    # Corresponding roots for each linked taxon.
+    american_root = db.add_keyword("American Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], american_root),
+    )
+    european_root = db.add_keyword("European Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["European Robin"], european_root),
+    )
+    # A prediction on the photo carries the ambiguous shared label.
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Robin', 0.95)",
+        (did,),
+    )
+    # Simulate highlights saved directly under each root's canonical name.
+    db.conn.execute(
+        "INSERT INTO species_highlights (species, photo_id, rank, workspace_id) "
+        "VALUES ('American Robin', ?, 0, 1)",
+        (pid,),
+    )
+    db.conn.execute(
+        "INSERT INTO species_highlights (species, photo_id, rank, workspace_id) "
+        "VALUES ('European Robin', ?, 0, 1)",
+        (pid,),
+    )
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid not in highlights.get("American Robin", {}), (
+        "ambiguous prediction label must not silently canonicalize to an "
+        "arbitrary root — the 'American Robin' highlight must not become "
+        "eligible when the top prediction 'Robin' resolves to multiple taxa"
+    )
+    assert pid not in highlights.get("European Robin", {}), (
+        "ambiguous prediction label must not silently canonicalize to an "
+        "arbitrary root — the 'European Robin' highlight must not become "
+        "eligible when the top prediction 'Robin' resolves to multiple taxa"
+    )
+
+
+def test_get_species_highlights_rejects_taxon_mismatch(tmp_path):
+    """The new taxon-linked fallback must only match the leaf back to a
+    root whose taxon_id shares identity with the leaf's taxon_id. A
+    photo whose only species keyword links to taxon A must not satisfy
+    a highlight whose canonical root name resolves to taxon B, even if
+    the leaf keyword's spelling happens to match the root name.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (2912, "Auriparus flaviceps", "Verdin"),
+        (7000, "Turdus migratorius", "American Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # Photo carries only a Verdin hierarchy leaf.
+    parent = db.add_keyword("Penduline tits")
+    nested = db.add_keyword("verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["Verdin"], nested),
+    )
+    db.tag_photo(pid, nested)
+    # Root named "American Robin" bound to that species' taxon — its
+    # taxon_id does NOT match the leaf's taxon, so the taxon-linked
+    # fallback must reject the pairing.
+    robin_root = db.add_keyword("American Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], robin_root),
+    )
+    db.add_species_highlight("American Robin", pid)
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(
+        species="American Robin", eligible_only=True,
+    )
+    assert "American Robin" not in highlights, (
+        "highlight stored under one species must not become eligible "
+        "for a photo whose only species keyword links to a different taxon"
+    )
+
+
+def test_get_species_highlights_prediction_fallback_prefers_same_name_root(tmp_path):
+    """The prediction-only highlight fallback must mirror
+    ``resolve_species_display_name``'s root-first preference: when a
+    top-level species root shares the prediction label with a hierarchy
+    leaf that points at a different taxon, the reload canonicalization
+    must return the root's stored spelling, not the leaf's root spelling.
+
+    Without this, ``add_species_highlight`` stores the highlight under
+    the root name (case 1) but the eligibility reload canonicalizes
+    through the mismatched leaf's taxon and drops the saved highlight.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    taxa = _seed_taxa(db, [
+        (40001, "Turdus migratorius", "American Robin"),
+        (40002, "Erithacus rubecula", "European Robin"),
+    ])
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    db.conn.execute(
+        "UPDATE photos SET quality_score = 0.9 WHERE id = ?", (pid,)
+    )
+    # Top-level species root named "Robin" linked to the American Robin
+    # taxon (this is the row ``resolve_species_display_name`` case 1
+    # returns for the label "Robin").
+    root = db.add_keyword("Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["American Robin"], root),
+    )
+    # A hierarchy leaf also named "Robin" but linked to a DIFFERENT taxon
+    # (European Robin), plus a canonical root for that taxon whose
+    # stored spelling differs from the prediction label.
+    parent = db.add_keyword("Old World")
+    leaf = db.add_keyword("Robin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (taxa["European Robin"], leaf),
+    )
+    european_root = db.add_keyword("European Robin", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (taxa["European Robin"], european_root),
+    )
+    # The photo carries only the American Robin root — its taxon matches
+    # the "Robin" root and highlights saved under "Robin" belong to it.
+    db.tag_photo(pid, root)
+    # A prediction on the photo carries the shared label "Robin"; the
+    # reload canonicalization runs against this string.
+    did = db.conn.execute(
+        "INSERT INTO detections (photo_id, detector_confidence) VALUES (?, 0.9)",
+        (pid,),
+    ).lastrowid
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence) "
+        "VALUES (?, 'test', 'fp1', 'Robin', 0.95)",
+        (did,),
+    )
+    # ``add_species_highlight`` funnels through
+    # ``resolve_species_display_name``, which returns "Robin" (root-first)
+    # for the label "Robin".
+    db.add_species_highlight("Robin", pid)
+    db.conn.commit()
+
+    highlights = db.get_species_highlights(
+        species="Robin", eligible_only=True,
+    )
+    assert pid in highlights.get("Robin", {}), (
+        "highlight stored under root 'Robin' must remain eligible when "
+        "the prediction label 'Robin' also matches a hierarchy leaf "
+        "pointing at a different taxon — the reload path must prefer the "
+        "same-name root rather than canonicalizing through the leaf"
+    )
+
+
+def test_curation_eligibility_higher_rank_taxonomy_homonym(tmp_path):
+    """A linked higher-rank taxonomy keyword (e.g. a genus row named
+    ``Puma``) is eligible for the identification-name-keyed
+    representative curation row that shares its stored spelling, but
+    not for the species-only ordered-highlights row keyed on the same
+    name.
+
+    Representative eligibility mirrors the widened
+    :meth:`get_life_list_candidates`, :meth:`get_photo_life_list_species`,
+    and ``_photo_can_be_life_list_preference`` write path — the Life
+    List renders higher-rank identifications so their photos must
+    survive the ``eligible_only=True`` read that ``GET /api/photos/<id>``
+    uses to decide whether the shared Set-Representative button is
+    current. ``get_species_highlights`` remains species-only, because
+    the Highlights page still only surfaces species buckets.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    db.conn.executemany(
+        "INSERT INTO taxa (inat_id, name, common_name, rank, kingdom) "
+        "VALUES (?, ?, ?, ?, 'Animalia')",
+        [
+            (46272, "Puma", "Puma", "genus"),
+            (41963, "Puma concolor", "Puma", "species"),
+        ],
+    )
+    db.conn.commit()
+    genus_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'genus'"
+    ).fetchone()["id"]
+
+    fid = db.add_folder("/photos", name="photos")
+    pid = db.add_photo(
+        folder_id=fid, filename="a.jpg", extension=".jpg",
+        file_size=100, file_mtime=1.0,
+    )
+    # A pre-existing keyword row named "Puma" bound to the genus (as if
+    # stamped by a legacy catalog before ``prefer_species`` existed and
+    # not yet rebound). ``mark_species_keywords`` would rebind it during
+    # a startup pass, but until then it stays higher-rank while still
+    # flagged is_species/taxonomy.
+    kid = db.add_keyword("Puma")
+    db.conn.execute(
+        "UPDATE keywords SET type = 'taxonomy', is_species = 1, taxon_id = ? "
+        "WHERE id = ?",
+        (genus_taxon, kid),
+    )
+    db.tag_photo(pid, kid)
+
+    # Curation rows stored under the "Puma" identification key.
+    db.set_species_representative("Puma", pid)
+    db.add_species_highlight("Puma", pid)
+    db.conn.commit()
+
+    # Representative eligibility matches the widened Life List siblings:
+    # the higher-rank homonym is a valid representative for the "Puma"
+    # entry the user actually renders under on the Life List.
+    reps = db.get_species_representative_lists(eligible_only=True)
+    assert reps.get("Puma") == [pid], (
+        "higher-rank homonym 'Puma' must satisfy 'Puma' representative "
+        "eligibility, matching the widened life-list write path"
+    )
+    assert db.get_species_representatives(eligible_only=True) == {"Puma": pid}
+
+    # Highlights remain species-only. The Highlights page surfaces
+    # species buckets, so a genus-rank keyword named 'Puma' must not
+    # keep the species 'Puma' highlight eligible.
+    highlights = db.get_species_highlights(eligible_only=True)
+    assert pid not in highlights.get("Puma", {}), (
+        "genus-rank taxonomy row named 'Puma' must not satisfy species "
+        "'Puma' highlight eligibility"
+    )
+    single = db.get_species_highlights(species="Puma", eligible_only=True)
+    assert pid not in single.get("Puma", {})
+
+    # Sanity check: when the row is rebound to the species-rank taxon,
+    # even the species-only highlight eligibility flips on.
+    species_taxon = db.conn.execute(
+        "SELECT id FROM taxa WHERE rank = 'species'"
+    ).fetchone()["id"]
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id = ? WHERE id = ?",
+        (species_taxon, kid),
+    )
+    db.conn.commit()
+
+    reps_after = db.get_species_representative_lists(eligible_only=True)
+    assert reps_after.get("Puma") == [pid]
+    highlights_after = db.get_species_highlights(eligible_only=True)
+    assert pid in highlights_after.get("Puma", {})
+
+
+def test_accept_prediction_replace_migrates_each_case_variant_curation_row(tmp_path):
+    """Replace Keywords must migrate curation for every distinct removed
+    row's exact spelling. Legacy ``Robin`` and taxonomy ``robin`` coexist
+    as separate keyword rows (the ``UNIQUE(name, parent_id)`` index on
+    ``keywords`` is case-sensitive), and both can carry
+    ``species_highlights`` / ``photo_preferences`` rows keyed by the
+    exact stored name. Deduping the curation-source list by
+    ``keyword_match_key`` — an ASCII-only NOCASE fold — collapses those
+    two spellings into one, so only one migrates onto the new species
+    and the other stays stranded under a species keyword the photo no
+    longer carries after ``replace_species``.
+    """
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._ws_id()
     fid = db.add_folder("/photos")
     pid = db.add_photo(
         folder_id=fid, filename="a.jpg", extension=".jpg",
         file_size=100, file_mtime=1.0,
     )
-    det_ids = db.save_detections(pid, [
-        {"box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
-         "confidence": 0.9, "category": "animal"},
-    ], detector_model="MDV6")
-    db.add_prediction(det_ids[0], species="‘apapane",
-                      confidence=0.9, model="bioclip")
-    pred = db.get_predictions()[0]
+    # Two DISTINCT NULL-taxon species keyword rows differing only by
+    # ASCII case. Insert directly to bypass ``add_keyword``'s NOCASE
+    # dedupe and confirm ``keywords`` allows both to coexist.
+    upper_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('Robin', NULL, 1, 'general')"
+    ).lastrowid
+    lower_id = db.conn.execute(
+        "INSERT INTO keywords (name, parent_id, is_species, type) "
+        "VALUES ('robin', NULL, 1, 'general')"
+    ).lastrowid
+    db.tag_photo(pid, upper_id)
+    db.tag_photo(pid, lower_id)
 
-    result = db.accept_prediction(pred["id"])
-    # The stored keyword name is the normalized (clean) spelling.
-    row = db.conn.execute(
-        "SELECT name FROM keywords WHERE id = ?", (result["keyword_id"],)
-    ).fetchone()
-    assert row["name"] == "apapane"
-    # Response payload uses the stored spelling too.
-    assert result["species"] == "apapane"
-    # Pending keyword_add uses the clean spelling — a later remove of the
-    # stored keyword can then cancel the queued add.
-    pending = db.get_pending_changes()
-    add_values = [
-        c["value"] for c in pending if c["change_type"] == "keyword_add"
+    # Curation rows keyed to BOTH exact stored names. ``species_highlights``
+    # has PK (workspace_id, species, photo_id) with case-sensitive TEXT,
+    # so both can coexist.
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'Robin', ?, 0)",
+        (ws_id, pid),
+    )
+    db.conn.execute(
+        "INSERT INTO species_highlights (workspace_id, species, photo_id, rank) "
+        "VALUES (?, 'robin', ?, 1)",
+        (ws_id, pid),
+    )
+    db.conn.commit()
+
+    detection_id = db.save_detections(
+        pid,
+        [{"box": {"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5},
+          "confidence": 0.9, "category": "animal"}],
+        detector_model="MDV6",
+    )[0]
+    db.add_prediction(detection_id, "Sparrow", 0.95, "bioclip")
+    pred_id = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id = ?",
+        (detection_id,),
+    ).fetchone()["id"]
+
+    db.accept_prediction(pred_id, replace_species=True)
+
+    # Both stale Robin rows must have been detached.
+    tagged_ids = {row["id"] for row in db.get_photo_keywords(pid)}
+    assert upper_id not in tagged_ids
+    assert lower_id not in tagged_ids
+
+    remaining_species = {
+        row["species"] for row in db.conn.execute(
+            "SELECT species FROM species_highlights "
+            "WHERE workspace_id = ? AND photo_id = ?",
+            (ws_id, pid),
+        ).fetchall()
+    }
+    # Under the ``keyword_match_key`` dedup only one of ``Robin`` /
+    # ``robin`` would land in curation_sources, so the other exact
+    # spelling would still appear here. Neither may survive: both
+    # highlight rows must migrate onto the new species.
+    assert "Robin" not in remaining_species, (
+        "'Robin' highlight row must have migrated onto 'Sparrow'"
+    )
+    assert "robin" not in remaining_species, (
+        "'robin' highlight row must have migrated onto 'Sparrow' — "
+        "an ASCII case-fold dedup would collapse 'Robin' and 'robin' "
+        "so only one of the two distinct spellings got renamed"
+    )
+    assert "Sparrow" in remaining_species
+
+
+# ---------------------------------------------------------------------------
+# Universal filter engine (Phase 1) — new fields, ops, and value suggestions.
+# Design: docs/plans/2026-07-19-universal-filters-design.md
+# ---------------------------------------------------------------------------
+
+
+def _filter_db(tmp_path):
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    return db, fid
+
+
+def test_universal_filter_numeric_fields_and_between(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    small = db.add_photo(folder_id=fid, filename='small.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    big = db.add_photo(folder_id=fid, filename='big.jpg', extension='.jpg',
+                       file_size=9000, file_mtime=1.0)
+    db.conn.execute(
+        "UPDATE photos SET width=8640, height=5760, focal_length=600, "
+        "iso=3200, aperture=6.3, shutter_speed=0.0004 WHERE id=?", (big,))
+    db.conn.execute(
+        "UPDATE photos SET width=4000, height=3000, focal_length=300, "
+        "iso=200, aperture=2.8, shutter_speed=0.008 WHERE id=?", (small,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "file_size", "op": ">", "value": 500}]) == 1
+    assert count([{"field": "width", "op": ">=", "value": 8000}]) == 1
+    assert count([{"field": "height", "op": "<", "value": 4000}]) == 1
+    assert count([{"field": "iso", "op": "between", "value": [100, 400]}]) == 1
+    assert count([{"field": "focal_length", "op": "between", "value": [200, 700]}]) == 2
+    assert count([{"field": "aperture", "op": "is", "value": 2.8}]) == 1
+    assert count([{"field": "shutter_speed", "op": "<", "value": 0.001}]) == 1
+    # rating between rides the same generalized numeric path
+    db.update_photo_rating(small, 2)
+    db.update_photo_rating(big, 5)
+    assert count([{"field": "rating", "op": "between", "value": [4, 5]}]) == 1
+
+
+def test_universal_filter_filename_text_ops(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    db.add_photo(folder_id=fid, filename='Owl_2101.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=fid, filename='eagle_2102.cr3', extension='.cr3',
+                 file_size=100, file_mtime=1.0)
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "filename", "op": "contains", "value": "owl"}]) == 1
+    assert count([{"field": "filename", "op": "contains", "value": "owl",
+                   "case": True}]) == 0
+    assert count([{"field": "filename", "op": "contains", "value": "Owl",
+                   "case": True}]) == 1
+    assert count([{"field": "filename", "op": "not_contains", "value": "owl"}]) == 1
+    assert count([{"field": "filename", "op": "starts_with", "value": "eagle"}]) == 1
+    assert count([{"field": "filename", "op": "ends_with", "value": ".cr3"}]) == 1
+    assert count([{"field": "filename", "op": "is", "value": "owl_2101.jpg"}]) == 1
+    assert count([{"field": "filename", "op": "is", "value": "owl_2101.jpg",
+                   "case": True}]) == 0
+    # LIKE wildcards in user input must be literal
+    assert count([{"field": "filename", "op": "contains", "value": "%"}]) == 0
+
+
+def test_universal_filter_flag_null_is_unflagged(tmp_path):
+    """Legacy rows store NULL for unflagged; the Unflagged chip must still
+    return them (plan step 4 regression guard)."""
+    db, fid = _filter_db(tmp_path)
+    null_flag = db.add_photo(folder_id=fid, filename='legacy.jpg', extension='.jpg',
+                             file_size=100, file_mtime=1.0)
+    picked = db.add_photo(folder_id=fid, filename='picked.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET flag=NULL WHERE id=?", (null_flag,))
+    db.conn.execute("UPDATE photos SET flag='flagged' WHERE id=?", (picked,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "flag", "op": "is", "value": "none"}]) == 1
+    assert count([{"field": "flag", "op": "is not", "value": "none"}]) == 1
+    assert count([{"field": "flag", "op": "in", "value": ["none", "flagged"]}]) == 2
+    assert count([{"field": "flag", "op": "in", "value": ["rejected"]}]) == 0
+    assert count([{"field": "flag", "op": "not_in", "value": ["flagged"]}]) == 1
+
+
+def test_universal_filter_in_not_in_enums(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    red = db.add_photo(folder_id=fid, filename='red.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    yellow = db.add_photo(folder_id=fid, filename='yellow.cr3', extension='.cr3',
+                          file_size=100, file_mtime=1.0)
+    plain = db.add_photo(folder_id=fid, filename='plain.nef', extension='.nef',
+                         file_size=100, file_mtime=1.0)
+    ws = db._ws_id()
+    db.conn.execute(
+        "INSERT INTO photo_color_labels(photo_id, workspace_id, color) VALUES (?,?,?)",
+        (red, ws, 'red'))
+    db.conn.execute(
+        "INSERT INTO photo_color_labels(photo_id, workspace_id, color) VALUES (?,?,?)",
+        (yellow, ws, 'yellow'))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "color_label", "op": "in", "value": ["red", "yellow"]}]) == 2
+    assert count([{"field": "color_label", "op": "in", "value": ["green"]}]) == 0
+    # not_in: photos without any label from the set — unlabeled photos match
+    assert count([{"field": "color_label", "op": "not_in", "value": ["red"]}]) == 2
+    assert count([{"field": "extension", "op": "in", "value": [".jpg", ".NEF"]}]) == 2
+    assert count([{"field": "extension", "op": "not_in", "value": [".cr3"]}]) == 2
+    # empty selections: in [] matches nothing, not_in [] excludes nothing
+    assert count([{"field": "flag", "op": "in", "value": []}]) == 0
+    assert count([{"field": "flag", "op": "not_in", "value": []}]) == 3
+
+
+def test_universal_filter_empty_in_preserves_any_none_semantics(tmp_path):
+    """Constant-true/false leaves must stay in their group; dropping them
+    would invert any/none semantics (prototype review regression)."""
+    db, fid = _filter_db(tmp_path)
+    p = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+    db.update_photo_rating(p, 5)
+
+    count = db.count_photos_for_rules
+    # any(in [], rating >= 4): first clause false, second true -> matches
+    assert count({"mode": "any", "rules": [
+        {"field": "flag", "op": "in", "value": []},
+        {"field": "rating", "op": ">=", "value": 4},
+    ]}) == 1
+    # none(not_in []): the clause is always true -> none-group matches nothing
+    assert count({"mode": "none", "rules": [
+        {"field": "flag", "op": "not_in", "value": []},
+    ]}) == 0
+
+
+def test_universal_filter_timestamp_recent_and_comparisons(tmp_path):
+    from datetime import UTC, datetime, timedelta
+    db, fid = _filter_db(tmp_path)
+    fresh = db.add_photo(folder_id=fid, filename='fresh.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    old = db.add_photo(folder_id=fid, filename='old.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    now = datetime.now(UTC)
+    # Scanner writes ``datetime.isoformat()``, so timestamps carry the ``T``
+    # separator in real DBs. The recent-cutoff must be formatted to match;
+    # a space-separated cutoff against a T-separated timestamp is a lexical
+    # mismatch where every photo on the cutoff day slips past ``>=`` (``T``
+    # sorts after space), regressing "last N days" by nearly a day.
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ((now - timedelta(days=2)).isoformat(timespec='seconds'), fresh))
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2020-06-01T12:00:00', old))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 7, "unit": "days"}}]) == 1
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 1, "unit": "days"}}]) == 0
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 10, "unit": "years"}}]) == 2
+    assert count([{"field": "timestamp", "op": ">=", "value": "2021-01-01"}]) == 1
+    assert count([{"field": "timestamp", "op": "<", "value": "2021-01-01"}]) == 1
+    # <= is inclusive of the named day
+    assert count([{"field": "timestamp", "op": "<=", "value": "2020-06-01"}]) == 1
+
+
+def test_universal_filter_timestamp_precise_upper_bounds_stay_exact(tmp_path):
+    """``<=`` and ``between`` upper bounds only pad bare ``YYYY-MM-DD``.
+
+    A precise-instant upper ``2024-01-01T12:00:00`` means exactly that
+    instant, not the whole clock second — padding it to ``.999999``
+    would spuriously include ``12:00:00.500000`` photos that are strictly
+    after the requested instant. Bare-date bounds still cover the full
+    named day so the UI's ``<input type="date">`` output stays inclusive.
+    """
+    db, fid = _filter_db(tmp_path)
+    early = db.add_photo(folder_id=fid, filename='early.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    on_second = db.add_photo(folder_id=fid, filename='on.jpg', extension='.jpg',
+                             file_size=100, file_mtime=1.0)
+    subsec = db.add_photo(folder_id=fid, filename='subsec.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2024-01-01T11:59:59', early))
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2024-01-01T12:00:00', on_second))
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    ('2024-01-01T12:00:00.500000', subsec))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # ``<=`` on a precise instant is exact: matches the pre-instant photo
+    # and the instant itself, excludes ``.500000`` which is strictly after.
+    assert count([{"field": "timestamp", "op": "<=",
+                   "value": "2024-01-01T12:00:00"}]) == 2
+    # Same for ``between`` — precise upper excludes sub-second photos
+    # in the same clock second.
+    assert count([{"field": "timestamp", "op": "between",
+                   "value": ["2024-01-01T00:00:00",
+                             "2024-01-01T12:00:00"]}]) == 2
+    # Bare-date upper still covers the whole day.
+    assert count([{"field": "timestamp", "op": "<=",
+                   "value": "2024-01-01"}]) == 3
+    assert count([{"field": "timestamp", "op": "between",
+                   "value": ["2024-01-01", "2024-01-01"]}]) == 3
+
+
+def test_universal_filter_recent_cutoff_matches_iso_separator(tmp_path):
+    """Regression: the ``recent`` cutoff must use the same ``T`` separator
+    as stored timestamps. Before the fix the cutoff came from SQLite's
+    ``datetime('now', ?)`` which returns ``YYYY-MM-DD HH:MM:SS`` (space
+    separator); a lexical ``>=`` against ``YYYY-MM-DDTHH:MM:SS`` treated
+    every photo on the cutoff day as recent because ``T`` (0x54) sorts
+    after ``' '`` (0x20). Place the photo on the cutoff day *before* the
+    cutoff clock time so the mismatch flips the answer.
+    """
+    from datetime import UTC, datetime, timedelta
+    db, fid = _filter_db(tmp_path)
+    boundary = db.add_photo(folder_id=fid, filename='boundary.jpg',
+                            extension='.jpg', file_size=100, file_mtime=1.0)
+    # 5-days-ago at 00:05 UTC. The ``recent 5 days`` cutoff lands 5 days
+    # ago at the *current* clock time — so the photo is on the cutoff day
+    # but strictly earlier than the cutoff, and its true age is > 5 days.
+    # Correct answer: excluded. Bug behavior: the T/space mismatch makes
+    # the photo lexically sort after the space-separated cutoff and the
+    # rule wrongly includes it. Skip if the test happens to run in the
+    # first minute of a UTC day (where cutoff clock time is <= 00:05 and
+    # the boundary is legitimately within the window).
+    now = datetime.now(UTC)
+    if now.hour == 0 and now.minute <= 5:
+        pytest.skip("cutoff clock time <= photo time — inconclusive boundary")
+    boundary_ts = (
+        (now - timedelta(days=5))
+        .replace(hour=0, minute=5, second=0, microsecond=0)
+        .isoformat(timespec='seconds')
+    )
+    db.conn.execute("UPDATE photos SET timestamp=? WHERE id=?",
+                    (boundary_ts, boundary))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # A photo whose true age is > 5 days must not match "recent 5 days".
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 5, "unit": "days"}}]) == 0
+    # ``recent_days`` shares the cutoff formatting — guard it too.
+    assert count([{"field": "timestamp", "op": "recent_days",
+                   "value": 5}]) == 0
+    # A wider window still matches, sanity-check.
+    assert count([{"field": "timestamp", "op": "recent",
+                   "value": {"n": 30, "unit": "days"}}]) == 1
+
+
+def test_universal_filter_species_any_match(tmp_path):
+    """A multi-species photo matches when ANY of its species matches."""
+    db, fid = _filter_db(tmp_path)
+    multi = db.add_photo(folder_id=fid, filename='multi.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    single = db.add_photo(folder_id=fid, filename='single.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    heron = db.add_keyword('Great Blue Heron', is_species=True)
+    egret = db.add_keyword('Snowy Egret', is_species=True)
+    plain = db.add_keyword('wetlands')
+    db.tag_photo(multi, heron)
+    db.tag_photo(multi, egret)
+    db.tag_photo(single, heron)
+    db.tag_photo(single, plain)
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "species", "op": "is", "value": "Snowy Egret"}]) == 1
+    assert count([{"field": "species", "op": "is", "value": "Great Blue Heron"}]) == 2
+    assert count([{"field": "species", "op": "contains", "value": "egret"}]) == 1
+    assert count([{"field": "species", "op": "is not", "value": "Snowy Egret"}]) == 1
+    # non-species keywords never match the species field
+    assert count([{"field": "species", "op": "contains", "value": "wetlands"}]) == 0
+
+
+def test_universal_filter_species_contains_escapes_like_metacharacters(tmp_path):
+    """``contains``/``not_contains`` on species must treat ``%``/``_`` in the
+    value as literal characters — otherwise a rule like
+    ``{"field":"species","op":"contains","value":"%"}`` matches every
+    species-tagged photo instead of only species whose name literally
+    contains ``%``. The other text/folder filters already escape LIKE
+    metacharacters; species did not, so a client could bypass the filter
+    by passing a wildcard."""
+    db, fid = _filter_db(tmp_path)
+    only = db.add_photo(folder_id=fid, filename='only.jpg', extension='.jpg',
+                        file_size=100, file_mtime=1.0)
+    heron = db.add_keyword('Great Blue Heron', is_species=True)
+    db.tag_photo(only, heron)
+
+    count = db.count_photos_for_rules
+    # A bare ``%`` used to match every species-tagged photo; after the fix
+    # it matches only species whose name literally contains ``%``.
+    assert count([{"field": "species", "op": "contains", "value": "%"}]) == 0
+    assert count([{"field": "species", "op": "contains", "value": "_"}]) == 0
+    # ``not_contains`` with a wildcard used to exclude every species-tagged
+    # photo; the escaped form leaves them included (nothing literally
+    # contains ``%``).
+    assert count([{"field": "species", "op": "not_contains", "value": "%"}]) == 1
+    # Sanity: normal literal substring still works.
+    assert count([{"field": "species", "op": "contains", "value": "Heron"}]) == 1
+
+
+def test_universal_filter_keyword_contains_escapes_like_metacharacters(tmp_path):
+    """``keyword contains`` must treat ``%``/``_`` in the value as literal
+    characters, matching the species/filename/camera text rules. Otherwise a
+    request like ``{"field":"keyword","op":"contains","value":"%"}`` matches
+    every keyworded photo — the exact wildcard-bypass hole the registry now
+    advertises to clients through ``/api/filters/fields``."""
+    db, fid = _filter_db(tmp_path)
+    tagged = db.add_photo(folder_id=fid, filename='tagged.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    untagged = db.add_photo(folder_id=fid, filename='untagged.jpg', extension='.jpg',
+                            file_size=100, file_mtime=1.0)
+    k = db.add_keyword('Red-tailed hawk')
+    db.tag_photo(tagged, k)
+
+    count = db.count_photos_for_rules
+    # A bare ``%``/``_`` used to match every keyworded photo; after the fix
+    # they only match keywords literally containing the metacharacter.
+    assert count([{"field": "keyword", "op": "contains", "value": "%"}]) == 0
+    assert count([{"field": "keyword", "op": "contains", "value": "_"}]) == 0
+    # ``not_contains`` with a bare wildcard used to exclude every keyworded
+    # photo; escaped, it leaves them included and excludes only the
+    # untagged photo (no keyword row exists to match).
+    assert count([{"field": "keyword", "op": "not_contains", "value": "%"}]) == 2
+    # Sanity: literal substrings still match normally.
+    assert count([{"field": "keyword", "op": "contains", "value": "hawk"}]) == 1
+    assert count([{"field": "keyword", "op": "contains", "value": "sparrow"}]) == 0
+
+
+def test_universal_filter_species_matches_root_via_taxon_of_hierarchy_leaf(tmp_path):
+    """Species rules resolve through taxon identity — a photo tagged only
+    with a hierarchy leaf whose linked taxon has a same-taxon top-level root
+    still matches the root's name. Mirrors how
+    ``get_species_keywords_for_photos`` canonicalizes to the root spelling,
+    so the universal filter agrees with the species names shown in Browse,
+    Compare, and life-list views."""
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    pid = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    other = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    # A photo tagged only with a hierarchy leaf whose taxon links to the
+    # top-level root "Verdin". Leaf spelling ("Auriparus flaviceps") is
+    # distinct from root ("Verdin"), so a raw ``k.name`` predicate cannot
+    # rescue the match — canonicalization through ``taxon_id`` is required.
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Auriparus flaviceps", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.add_keyword("Verdin", is_species=True)  # auto-links taxon_id
+    db.conn.commit()
+    db.tag_photo(pid, leaf)
+
+    # Sanity check: the canonical species surfaced elsewhere is "Verdin".
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+
+    count = db.count_photos_for_rules
+    # `is`/`equals` on the root name matches the taxon-linked leaf.
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 1
+    assert count([{"field": "species", "op": "equals", "value": "Verdin"}]) == 1
+    # `contains` also follows the root-name canonicalization: the leaf name
+    # does not contain "erdi", but the root name does.
+    assert count([{"field": "species", "op": "contains", "value": "erdi"}]) == 1
+    # A non-matching species stays non-matching.
+    assert count([{"field": "species", "op": "is", "value": "Nope"}]) == 0
+    # `is not` / `not_contains` correctly exclude the taxon-matched photo
+    # and include the untagged one (2 photos - 1 match = 1).
+    assert count([{"field": "species", "op": "is not", "value": "Verdin"}]) == 1
+    assert count([{"field": "species", "op": "not_contains", "value": "erdi"}]) == 1
+    _ = other  # keep the second photo alive for the negative assertions.
+
+
+def test_universal_filter_workflow_fields(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    edited = db.add_photo(folder_id=fid, filename='edited.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    indexed = db.add_photo(folder_id=fid, filename='indexed.jpg', extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+    burst = db.add_photo(folder_id=fid, filename='burst.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    db.set_photo_edit_recipe(edited, {"rotation": 90})
+    db.conn.execute(
+        "INSERT INTO photo_embeddings(photo_id, model, variant, embedding) "
+        "VALUES (?,?,?,?)", (indexed, 'clip-vit', '', b'\x01'))
+    db.conn.execute("UPDATE photos SET burst_id='B42' WHERE id=?", (burst,))
+    db.conn.execute("UPDATE photos SET file_hash='abc123' WHERE id=?", (burst,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    assert count([{"field": "has_edits", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "has_edits", "op": "is", "value": 0}]) == 2
+    assert count([{"field": "has_visual_index", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "clip-vit"}]) == 1
+    assert count([{"field": "has_visual_index", "op": "is", "value": 1,
+                   "model": "other-model"}]) == 0
+    # An unsupported op on a boolean field must raise, not silently return
+    # a truthy predicate — the API layer catches ValueError → 400 so
+    # malformed requests surface as validation errors instead of a 200
+    # with unfiltered rows. Every registry-advertised boolean field must
+    # fail-closed the same way, not just ``has_visual_index``.
+    for bad in (
+        {"field": "has_visual_index", "op": "contains", "value": 1},
+        {"field": "has_edits", "op": "contains", "value": 1},
+        {"field": "in_burst", "op": "starts_with", "value": 1},
+        {"field": "has_gps", "op": "between", "value": [0, 1]},
+        {"field": "has_location_keyword", "op": "contains", "value": 1},
+        {"field": "is_duplicate", "op": ">=", "value": 1},
+    ):
+        with pytest.raises(ValueError):
+            count([bad])
+    # A non-boolean value must also fail-closed: without this guard, values
+    # outside ``_truthy``'s whitelist (True/1/"1"/"true") silently fall to
+    # the negative branch, so ``has_gps is "yes"`` would quietly return the
+    # ``is false`` set instead of the reject-as-400 the other malformed
+    # boolean rules get.
+    for bad in (
+        {"field": "has_edits", "op": "is", "value": "yes"},
+        {"field": "has_gps", "op": "is", "value": "maybe"},
+        {"field": "has_visual_index", "op": "is not", "value": "sometimes"},
+        {"field": "in_burst", "op": "equals", "value": 2},
+    ):
+        with pytest.raises(ValueError):
+            count([bad])
+    assert count([{"field": "in_burst", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "burst_id", "op": "is", "value": "B42"}]) == 1
+    assert count([{"field": "duplicate_group", "op": "is", "value": "abc123"}]) == 1
+
+
+def test_is_duplicate_sees_cross_workspace_partners(tmp_path):
+    """``is_duplicate`` must match a photo whose only duplicate lives in
+    another workspace — otherwise Browse hides members that the Duplicates
+    workflow (``find_duplicate_groups``, which is catalog-wide by
+    ``file_hash``) will still act on.
+    """
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    active_ws = db._ws_id()
+    other_ws = db.create_workspace('Other')
+
+    active_folder = db.add_folder('/active', name='active')
+    other_folder = db.add_folder('/other', name='other')
+    db.remove_workspace_folder(active_ws, other_folder)
+    db.add_workspace_folder(other_ws, other_folder)
+
+    here = db.add_photo(folder_id=active_folder, filename='here.jpg',
+                        extension='.jpg', file_size=100, file_mtime=1.0)
+    there = db.add_photo(folder_id=other_folder, filename='there.jpg',
+                         extension='.jpg', file_size=100, file_mtime=2.0)
+    lone = db.add_photo(folder_id=active_folder, filename='lone.jpg',
+                        extension='.jpg', file_size=100, file_mtime=3.0)
+    db.conn.execute("UPDATE photos SET file_hash='shared' WHERE id IN (?, ?)",
+                    (here, there))
+    db.conn.execute("UPDATE photos SET file_hash='unique' WHERE id=?", (lone,))
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # ``here`` is only visible in the active workspace; ``there`` sits in the
+    # other workspace. Under the old workspace-scoped subquery, ``here`` would
+    # count as 0 duplicates. Catalog-wide, it must show as a duplicate member.
+    assert count([{"field": "is_duplicate", "op": "is", "value": 1}]) == 1
+    assert count([{"field": "is_duplicate", "op": "is", "value": 0}]) == 1
+
+    # Rejecting the cross-workspace partner drops the pair, matching
+    # find_duplicate_groups' rejected-flag filter.
+    db.conn.execute("UPDATE photos SET flag='rejected' WHERE id=?", (there,))
+    db.conn.commit()
+    assert count([{"field": "is_duplicate", "op": "is", "value": 1}]) == 0
+    assert count([{"field": "is_duplicate", "op": "is", "value": 0}]) == 2
+
+
+def test_universal_filter_prediction_rules_pin_current_fingerprint(tmp_path):
+    """Universal-filter rules that consult ``predictions`` (prediction_status,
+    prediction_confidence, classifier_model, taxonomy_*) must only match the
+    most recent ``labels_fingerprint`` per (detection, classifier_model) —
+    matching how the dashboard and review UI decide which prediction row is
+    "current". Without pinning, an older accepted row keeps the photo in
+    ``prediction_status is accepted`` after a rerun classifier writes a new
+    fingerprint with a different (still-pending) verdict.
+    """
+    db, fid = _filter_db(tmp_path)
+    ws_id = db._ws_id()
+    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    det = db.save_detections(photo, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    # Stale-fingerprint prediction accepted under an old label set.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-old', 'Robin', 0.9, '2026-01-01')",
+        (det,),
+    )
+    stale_pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=? AND labels_fingerprint='fp-old'",
+        (det,),
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status, reviewed_at) "
+        "VALUES (?, ?, 'accepted', '2026-01-02')",
+        (stale_pred, ws_id),
+    )
+    # Current-fingerprint prediction — still pending.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp-new', 'Finch', 0.55, '2026-04-24')",
+        (det,),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # Accept lives only on the stale fingerprint → filter must exclude it.
+    assert count([{"field": "prediction_status", "op": "is",
+                   "value": "accepted"}]) == 0
+    # Current fingerprint is pending → visible.
+    assert count([{"field": "prediction_status", "op": "is",
+                   "value": "pending"}]) == 1
+    # Confidence + classifier_model + taxonomy filters read pred.* so all
+    # ride the same pin: the stale 0.9 must not satisfy a >=0.8 rule.
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.8}]) == 0
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.5}]) == 1
+
+
+def test_universal_filter_prediction_rules_gate_by_detector_confidence(tmp_path, monkeypatch):
+    """Universal-filter rules that consult ``predictions`` (prediction_status,
+    prediction_confidence, classifier_model, taxonomy_*) must apply the
+    workspace-effective ``detector_confidence`` floor so a prediction on a
+    below-threshold hidden detection can't satisfy a rule that Browse would
+    show no detection context for. Mirrors get_detections_for_photos() and
+    the dashboard prediction counters, which both filter by the threshold.
+    """
+    import config as cfg
+    monkeypatch.setattr(cfg, "CONFIG_PATH", str(tmp_path / "config.json"))
+    cfg.save({"detector_confidence": 0.5})
+
+    db, fid = _filter_db(tmp_path)
+    # Photo A: above-threshold detection carrying a current prediction —
+    # should match every advertised prediction rule.
+    a = db.add_photo(folder_id=fid, filename='a.jpg', extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+    det_a = db.save_detections(a, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Robin', 0.85, '2026-01-01')",
+        (det_a,),
+    )
+    # Photo B: ONLY a below-threshold detection with an otherwise-matching
+    # prediction — Browse hides the detection at threshold=0.5, so the
+    # prediction filters must hide the photo too.
+    b = db.add_photo(folder_id=fid, filename='b.jpg', extension='.jpg',
+                     file_size=100, file_mtime=1.0)
+    det_b = db.save_detections(b, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.05,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Robin', 0.85, '2026-01-01')",
+        (det_b,),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # prediction_confidence, classifier_model, and prediction_status all
+    # route through the shared _prediction_exists helper — one gate covers
+    # them all. Photo A qualifies; Photo B is hidden by the threshold.
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.8}]) == 1
+    assert count([{"field": "classifier_model", "op": "is",
+                   "value": "bioclip-2"}]) == 1
+    assert count([{"field": "prediction_status", "op": "is",
+                   "value": "pending"}]) == 1
+
+
+def test_universal_filter_prediction_rules_ignore_alternative_rows(tmp_path):
+    """Filters that represent the displayed prediction — prediction_confidence,
+    classifier_model, taxonomy_* — must ignore runner-up predictions stored
+    with ``prediction_review.status = 'alternative'``. /api/predictions drops
+    alternatives from top-level results (app.py:12386-12388) and Compare
+    hides them, so a top pick at 0.95 with an alternative at 0.10 must not
+    satisfy ``prediction_confidence <= 0.2``.
+    """
+    db, fid = _filter_db(tmp_path)
+    ws_id = db._ws_id()
+    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    det = db.save_detections(photo, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    # Displayed top prediction — high confidence.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Robin', 0.95, '2026-01-01')",
+        (det,),
+    )
+    # Runner-up alternative — low confidence, marked alternative in review.
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp', 'Sparrow', 0.10, '2026-01-01')",
+        (det,),
+    )
+    alt_pred = db.conn.execute(
+        "SELECT id FROM predictions WHERE detection_id=? AND species='Sparrow'",
+        (det,),
+    ).fetchone()["id"]
+    db.conn.execute(
+        "INSERT INTO prediction_review (prediction_id, workspace_id, status, reviewed_at) "
+        "VALUES (?, ?, 'alternative', '2026-01-02')",
+        (alt_pred, ws_id),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # The alternative sits at 0.10 but must not drag the photo into a
+    # <=0.2 confidence bucket — the displayed 0.95 pick is what matters.
+    assert count([{"field": "prediction_confidence", "op": "<=",
+                   "value": 0.2}]) == 0
+    # The displayed pick still passes a >=0.9 rule.
+    assert count([{"field": "prediction_confidence", "op": ">=",
+                   "value": 0.9}]) == 1
+    # classifier_model still resolves via the top pick (still present, not
+    # excluded — alternative sits under the same model).
+    assert count([{"field": "classifier_model", "op": "is",
+                   "value": "bioclip-2"}]) == 1
+
+
+def test_universal_filter_classifier_model_contains_escapes_like_metacharacters(tmp_path):
+    """``classifier_model contains`` must treat ``%`` / ``_`` in the value as
+    literal characters, matching the other advertised text contains rules.
+    Otherwise ``{"field":"classifier_model","op":"contains","value":"%"}``
+    would match every classified photo — the wildcard-bypass hole the
+    registry now advertises to clients through ``/api/filters/fields``."""
+    db, fid = _filter_db(tmp_path)
+    photo = db.add_photo(folder_id=fid, filename='p.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    det = db.save_detections(photo, [
+        {"box": {"x": 0, "y": 0, "w": 1, "h": 1}, "confidence": 0.9,
+         "category": "animal"},
+    ], detector_model="MDV6")[0]
+    db.conn.execute(
+        "INSERT INTO predictions (detection_id, classifier_model, "
+        "labels_fingerprint, species, confidence, created_at) "
+        "VALUES (?, 'bioclip-2', 'fp1', 'Robin', 0.9, '2026-01-01')",
+        (det,),
+    )
+    db.conn.commit()
+
+    count = db.count_photos_for_rules
+    # A bare ``%`` / ``_`` used to match every classified photo; escaped,
+    # they only match model strings that literally contain the metacharacter.
+    assert count([{"field": "classifier_model", "op": "contains",
+                   "value": "%"}]) == 0
+    assert count([{"field": "classifier_model", "op": "contains",
+                   "value": "_"}]) == 0
+    # Sanity: a literal substring still matches.
+    assert count([{"field": "classifier_model", "op": "contains",
+                   "value": "bioclip"}]) == 1
+
+
+def test_universal_filter_validation_errors(tmp_path):
+    import pytest
+    db, _ = _filter_db(tmp_path)
+    count = db.count_photos_for_rules
+
+    with pytest.raises(ValueError):
+        count([{"field": "flag", "op": "in", "value": "none"}])  # not a list
+    with pytest.raises(ValueError):
+        count([{"field": "iso", "op": "between", "value": [100]}])  # wrong arity
+    with pytest.raises(ValueError):
+        count([{"field": "timestamp", "op": "recent", "value": 30}])  # not a dict
+    with pytest.raises(ValueError):
+        count([{"field": "timestamp", "op": "recent",
+                "value": {"n": 0, "unit": "days"}}])
+    with pytest.raises(ValueError):
+        count([{"field": "timestamp", "op": "recent",
+                "value": {"n": 3, "unit": "fortnights"}}])
+    with pytest.raises(ValueError):
+        count([{"field": "no_such_field", "op": "is", "value": 1}])
+
+
+def test_registry_ops_all_compile(tmp_path):
+    """Every field/op combination the registry advertises must build SQL —
+    the registry and the engine share this test so they cannot drift."""
+    from filter_fields import FILTER_FIELDS
+    db, _ = _filter_db(tmp_path)
+
+    sample_values = {
+        "text": "x", "number": 1, "rating": 3, "date": "2024-01-01",
+        "boolean": 1, "enum": None, "folder": "/photos",
+    }
+    for key, spec in FILTER_FIELDS.items():
+        for op in spec["ops"]:
+            value = sample_values[spec["type"]]
+            if spec["type"] == "enum":
+                value = (spec.get("values") or [".jpg"])[0]
+            if op in ("in", "not_in"):
+                value = [value]
+            elif op == "between":
+                value = ["2024-01-01", "2024-12-31"] if spec["type"] == "date" else [0, 5]
+            elif op == "recent":
+                value = {"n": 7, "unit": "days"}
+            rule = {"field": key, "op": op, "value": value}
+            count = db.count_photos_for_rules([rule])
+            assert isinstance(count, int), f"{key}/{op} failed"
+
+
+def test_exif_backfill_migration_and_idempotence(tmp_path):
+    import json as _json
+
+    from db import Database
+    path = str(tmp_path / "test.db")
+    db, fid = _filter_db(tmp_path)
+    pid = db.add_photo(folder_id=fid, filename='sony.arw', extension='.arw',
+                       file_size=100, file_mtime=1.0)
+    exif = {
+        "EXIF": {"Make": "Sony", "Model": "ILCE-1", "FNumber": 6.3,
+                 "ExposureTime": 0.0004, "ISO": 800},
+        "Composite": {"LensID": "FE 200-600mm F5.6-6.3 G OSS"},
+    }
+    db.conn.execute(
+        "UPDATE photos SET exif_data=?, camera_make=NULL, camera_model=NULL, "
+        "lens=NULL, aperture=NULL, shutter_speed=NULL, iso=NULL WHERE id=?",
+        (_json.dumps(exif), pid))
+    # Simulate a pre-backfill database so reopening runs the migration.
+    db.conn.execute("DELETE FROM db_meta WHERE key='exif_summary_backfill_v1'")
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(path)
+    row = db2.conn.execute(
+        "SELECT camera_make, camera_model, lens, aperture, shutter_speed, iso "
+        "FROM photos WHERE id=?", (pid,)).fetchone()
+    assert row["camera_make"] == "Sony"
+    assert row["camera_model"] == "ILCE-1"
+    assert row["lens"] == "FE 200-600mm F5.6-6.3 G OSS"
+    assert row["aperture"] == 6.3
+    assert row["shutter_speed"] == 0.0004
+    assert row["iso"] == 800
+    # The promoted columns are filterable.
+    ws_id = db2.ensure_default_workspace()
+    db2.set_active_workspace(ws_id)
+    assert db2.count_photos_for_rules(
+        [{"field": "camera_model", "op": "contains", "value": "ilce"}]) == 1
+
+    # Idempotence: with the marker set, reopening must not overwrite.
+    db2.conn.execute("UPDATE photos SET camera_make='UserEdited' WHERE id=?", (pid,))
+    db2.conn.commit()
+    db2.close()
+    db3 = Database(path)
+    row = db3.conn.execute(
+        "SELECT camera_make FROM photos WHERE id=?", (pid,)).fetchone()
+    assert row["camera_make"] == "UserEdited"
+    db3.close()
+
+
+def test_query_photos_sort_and_paging(tmp_path):
+    db, fid = _filter_db(tmp_path)
+    for i, (name, rating) in enumerate([('a.jpg', 1), ('b.jpg', 5), ('c.jpg', 3)]):
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0,
+                           timestamp=f'2024-01-0{i + 1} 10:00:00')
+        db.update_photo_rating(pid, rating)
+
+    rows = db.query_photos([], sort="rating")
+    assert [r["filename"] for r in rows] == ['b.jpg', 'c.jpg', 'a.jpg']
+    rows = db.query_photos([], sort="name", page=2, per_page=2)
+    assert [r["filename"] for r in rows] == ['c.jpg']
+    rows = db.query_photos([{"field": "rating", "op": ">=", "value": 3}], sort="name")
+    assert [r["filename"] for r in rows] == ['b.jpg', 'c.jpg']
+
+
+def test_get_filter_field_values_counts_respect_rules(tmp_path):
+    import pytest
+    db, fid = _filter_db(tmp_path)
+    ids = []
+    for name, model, rating in [
+        ('a.jpg', 'Sony A1', 5), ('b.jpg', 'Sony A1', 1),
+        ('c.jpg', 'Canon R5', 5), ('d.jpg', None, 5),
+    ]:
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        db.update_photo_rating(pid, rating)
+        if model:
+            db.conn.execute("UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
+        ids.append(pid)
+    db.conn.commit()
+
+    # Unfiltered: counts over the whole workspace, NULLs excluded.
+    values = db.get_filter_field_values("camera_model")
+    assert values == [
+        {"value": "Sony A1", "count": 2},
+        {"value": "Canon R5", "count": 1},
     ]
-    assert "apapane" in add_values
-    assert "‘apapane" not in add_values
+    # Sibling rules constrain the counts (facet semantics).
+    values = db.get_filter_field_values(
+        "camera_model", rules=[{"field": "rating", "op": ">=", "value": 4}])
+    assert values == [
+        {"value": "Canon R5", "count": 1},
+        {"value": "Sony A1", "count": 1},
+    ]
+    # Typeahead narrowing.
+    values = db.get_filter_field_values("camera_model", q="son")
+    assert values == [{"value": "Sony A1", "count": 2}]
+    # Keyword and species values come from the keyword tables.
+    heron = db.add_keyword('Great Blue Heron', is_species=True)
+    db.tag_photo(ids[0], heron)
+    assert db.get_filter_field_values("species") == [
+        {"value": "Great Blue Heron", "count": 1}]
+    # Non-suggest fields are rejected.
+    with pytest.raises(ValueError):
+        db.get_filter_field_values("rating")
+
+
+def test_get_filter_field_values_counts_wrap_or_rules(tmp_path):
+    """Facet counts under a top-level ``any`` (OR) rule group must not leak
+    rows that satisfy the first OR branch but fail the facet's own predicate.
+
+    ``_build_query_from_rules`` returns ``WHERE (A) OR (B)`` for
+    ``{mode: any}``; appending ``AND {facet}`` would bind to the last OR
+    branch by SQL precedence (``(A) OR ((B) AND facet)``), letting
+    branch-A rows with a NULL/non-matching facet field still inflate the
+    suggestion count. The facet must wrap the existing rule condition so
+    every matched row also satisfies the ``value IS NOT NULL``/typeahead
+    predicates the suggestion helper appends.
+    """
+    db, fid = _filter_db(tmp_path)
+    # Two-branch tree: rating >= 5  OR  camera_model = "Nikon Z9".
+    # Sony has rating 5 (matches branch A) but a distinct model. Under the
+    # buggy binding, Sony would leak into the Nikon-branch AND camera_model
+    # facet — but only Nikon should count under "Nikon Z9".
+    for name, model, rating in [
+        ('sony_hi.jpg', 'Sony A1', 5),      # matches branch A only
+        ('nikon_lo.jpg', 'Nikon Z9', 1),    # matches branch B only
+        ('nikon_hi.jpg', 'Nikon Z9', 5),    # matches both branches
+        ('nomodel.jpg', None, 5),           # matches branch A, NULL camera
+    ]:
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        db.update_photo_rating(pid, rating)
+        if model:
+            db.conn.execute(
+                "UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
+    db.conn.commit()
+
+    rules = {"mode": "any", "rules": [
+        {"field": "rating", "op": ">=", "value": 5},
+        {"field": "camera_model", "op": "is", "value": "Nikon Z9"},
+    ]}
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values("camera_model", rules=rules)}
+    # Three photos total match the OR tree (sony_hi, nikon_lo, nikon_hi);
+    # the NULL-camera one is excluded by the facet's IS NOT NULL guard.
+    # Counts must match what ``camera_model is <val>`` would return when
+    # combined with the sibling OR tree — one Sony, two Nikon.
+    assert values == {"Sony A1": 1, "Nikon Z9": 2}
+    # Typeahead ``son`` combined with the OR tree must also stay honest —
+    # the ``AND LIKE ?`` clause the helper appends must apply to every
+    # matched row, not just the last OR branch.
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values(
+                  "camera_model", rules=rules, q="son")}
+    assert values == {"Sony A1": 1}
+
+
+def test_get_filter_field_values_folder_counts_over_subtree(tmp_path):
+    """Folder suggestions must aggregate over subtrees so counts match the
+    ``folder under=<path>`` operator the rule engine implements. A parent
+    folder with no direct photos but matching descendants must still be
+    suggested with its subtree count; a folder mixing direct and nested
+    photos must not undercount."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    root = db.add_folder('/photos', name='photos')
+    year = db.add_folder('/photos/2024', name='2024', parent_id=root)
+    month = db.add_folder('/photos/2024/01', name='01', parent_id=year)
+    other = db.add_folder('/vacation', name='vacation')
+    # /photos itself has NO direct photos; only descendants.
+    db.add_photo(folder_id=year, filename='y1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=month, filename='m1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=month, filename='m2.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=other, filename='v1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values("folder")}
+    # Parent with only descendants is still suggestable with subtree count.
+    assert values.get('/photos') == 3
+    # /photos/2024: 1 direct + 2 in /01 subtree.
+    assert values.get('/photos/2024') == 3
+    # /photos/2024/01: 2 direct.
+    assert values.get('/photos/2024/01') == 2
+    # Separate subtree counts independently.
+    assert values.get('/vacation') == 1
+    # Cross-check: each suggestion's count matches what a `folder under`
+    # rule would return.
+    for path, count in values.items():
+        rule_count = db.count_photos_for_rules(
+            [{"field": "folder", "op": "under", "value": path}])
+        assert rule_count == count, f"mismatch for {path!r}: rule={rule_count} suggest={count}"
+
+    # Typeahead narrows to matching folder paths.
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values("folder", q="2024")}
+    assert set(values) == {'/photos/2024', '/photos/2024/01'}
+
+    # Sibling rules constrain the counts (facet semantics preserved).
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values(
+        "folder",
+        rules=[{"field": "filename", "op": "starts_with", "value": "m"}],
+    )}
+    # Only m1.jpg / m2.jpg match; they live under /photos/2024/01.
+    assert values.get('/photos') == 2
+    assert values.get('/photos/2024') == 2
+    assert values.get('/photos/2024/01') == 2
+    assert '/vacation' not in values
+
+
+def test_get_filter_field_values_species_canonicalizes_hierarchy_leaf(tmp_path):
+    """Species typeahead resolves hierarchy leaves through ``taxon_id`` to
+    the same-taxon top-level root's name, so suggestions match the values
+    ``get_species_keywords_for_photos`` shows in Browse, Compare, and
+    life-list views. Otherwise a user editing a Species rule would see the
+    raw leaf spelling (``Desert Verdin``) that never appears elsewhere."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    # Photo p_leaf: tagged only with a hierarchy leaf linked to Verdin taxon.
+    p_leaf = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    # Photo p_root: tagged with the top-level root directly (auto-links).
+    p_root = db.add_photo(folder_id=fid, filename='root.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    root_kid = db.add_keyword("Verdin", is_species=True)
+    db.tag_photo(p_leaf, leaf)
+    db.tag_photo(p_root, root_kid)
+    db.conn.commit()
+
+    # Suggestions canonicalize the leaf to the root spelling; both photos
+    # count under the single canonical name.
+    assert db.get_filter_field_values("species") == [
+        {"value": "Verdin", "count": 2}]
+    # The raw leaf spelling is never suggested — the canonical root wins.
+    assert db.get_filter_field_values("species", q="Desert") == []
+    # Typeahead on the root name returns the canonical suggestion.
+    assert db.get_filter_field_values("species", q="Verd") == [
+        {"value": "Verdin", "count": 2}]
+    # Cross-check: the suggested value works with the `species is` rule
+    # that the UI would fire off — both photos are matched (rule engine
+    # already canonicalizes through taxon).
+    assert db.count_photos_for_rules(
+        [{"field": "species", "op": "is", "value": "Verdin"}]) == 2
+
+
+def test_get_filter_field_values_species_preserves_attached_root_spelling(tmp_path):
+    """When a taxon has multiple top-level species roots and a photo is
+    tagged with the non-MIN(id) root, ``get_species_keywords_for_photos``
+    intentionally keeps the attached root's stored spelling (its
+    ``is_root`` guard). The typeahead must agree — if it always rewrites
+    to the MIN(id) root, the species name Browse shows would disappear
+    from suggestions and a typeahead query for that displayed root would
+    return nothing."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    fid = db.add_folder('/photos', name='photos')
+    taxa = _seed_taxa(db, [(9999, "Corvus brachyrhynchos", "American Crow")])
+    # Two top-level roots for the same taxon: one earlier, one later.
+    root_early = db.add_keyword("American Crow", is_species=True)
+    root_late = db.add_keyword("crow (american)", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET taxon_id=? WHERE id=?",
+        (taxa["American Crow"], root_late),
+    )
+    # Photo tagged with the LATE (non-MIN-id) root only.
+    p_late = db.add_photo(folder_id=fid, filename='late.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.tag_photo(p_late, root_late)
+    # Photo tagged with a hierarchy leaf under the same taxon — still
+    # canonicalizes to the MIN(id) root (existing behavior).
+    p_leaf = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Corvids")
+    leaf = db.add_keyword("Northeastern Crow", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["American Crow"], leaf))
+    db.tag_photo(p_leaf, leaf)
+    db.conn.commit()
+
+    values = {v["value"]: v["count"]
+              for v in db.get_filter_field_values("species")}
+    # The attached late-root spelling must survive as its own suggestion —
+    # matches what ``get_species_keywords_for_photos`` reports for p_late
+    # (Browse shows ``crow (american)``, so the typeahead must offer it).
+    assert values.get("crow (american)") == 1
+    # The hierarchy-leaf photo still canonicalizes to the MIN(id) root
+    # (``American Crow``), matching the leaf-only test above.
+    assert values.get("American Crow") == 1
+    assert "Northeastern Crow" not in values
+    # Typeahead on the attached root spelling finds the photo instead of
+    # returning nothing.
+    late_hits = db.get_filter_field_values("species", q="crow (")
+    assert {v["value"] for v in late_hits} == {"crow (american)"}
+
+
+def test_get_filter_field_values_folder_escapes_like_metacharacters(tmp_path):
+    """Folder suggestion counts must not treat stored folder paths as LIKE
+    patterns. A folder such as ``/photos/my_dir`` uses ``_`` — a single-char
+    LIKE wildcard — so an unescaped subtree join would also match photos in
+    ``/photos/myXdir`` and overcount what selecting the suggestion actually
+    filters to."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    literal = db.add_folder('/photos/my_dir', name='my_dir')
+    look_alike = db.add_folder('/photos/myXdir', name='myXdir')
+    db.add_photo(folder_id=literal, filename='a.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=look_alike, filename='b.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values("folder")}
+    # ``/photos/my_dir`` covers only its own direct photo — the ``_`` in the
+    # stored path must not act as a LIKE wildcard against ``myXdir``. Cross-
+    # check with what the ``folder under`` rule engine returns.
+    assert values.get('/photos/my_dir') == 1
+    assert values.get('/photos/myXdir') == 1
+    for path in ('/photos/my_dir', '/photos/myXdir'):
+        rule_count = db.count_photos_for_rules(
+            [{"field": "folder", "op": "under", "value": path}])
+        assert rule_count == values.get(path), (
+            f"mismatch for {path!r}: rule={rule_count} suggest={values.get(path)}"
+        )
+
+
+def test_get_filter_field_values_folder_root_with_trailing_separator(tmp_path):
+    """A workspace root stored with a trailing separator (Windows drive root
+    ``D:\\`` or POSIX ``/``) must still count its subtree correctly. The
+    rule engine's ``folder under`` op strips trailing separators via
+    ``_path_for_subtree_match``, so the facet must do the same on both
+    sides — otherwise concatenating the LIKE prefix produces ``D://%`` /
+    ``//%`` which matches nothing, and the suggested root counts 0 while
+    ``folder under=<root>`` actually returns every photo on the drive."""
+    from db import Database
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    # POSIX root stored with trailing '/', descendants without.
+    root = db.add_folder('/', name='root')
+    child = db.add_folder('/dcim', name='dcim', parent_id=root)
+    db.add_photo(folder_id=root, filename='at_root.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=child, filename='d1.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+    db.add_photo(folder_id=child, filename='d2.jpg', extension='.jpg',
+                 file_size=100, file_mtime=1.0)
+
+    values = {v["value"]: v["count"] for v in db.get_filter_field_values("folder")}
+    # ``/`` covers the direct photo plus both descendants.
+    assert values.get('/') == 3
+    assert values.get('/dcim') == 2
+    # Cross-check: the suggested count matches what ``folder under`` returns.
+    for path, count in values.items():
+        rule_count = db.count_photos_for_rules(
+            [{"field": "folder", "op": "under", "value": path}])
+        assert rule_count == count, (
+            f"mismatch for {path!r}: rule={rule_count} suggest={count}"
+        )
+
+
+def test_get_filter_field_values_camera_folds_case(tmp_path):
+    """Camera-field suggestions must fold by case: the corresponding rule
+    engine text ops use ``LOWER(column) = LOWER(?)`` for camera_make/
+    camera_model/lens (no ``case_toggle`` on the registry), so raw
+    value-splitting facet counts would show ``Sony A1`` and ``sony a1`` as
+    two 1-count entries while selecting either fires a case-insensitive
+    filter that returns both photos. The suggestion count must equal the
+    rule count for the value it becomes."""
+    db, fid = _filter_db(tmp_path)
+    ids = []
+    for name, model in [
+        ('a.jpg', 'Sony A1'), ('b.jpg', 'sony a1'), ('c.jpg', 'SONY A1'),
+        ('d.jpg', 'Canon R5'),
+    ]:
+        pid = db.add_photo(folder_id=fid, filename=name, extension='.jpg',
+                           file_size=100, file_mtime=1.0)
+        db.conn.execute("UPDATE photos SET camera_model=? WHERE id=?", (model, pid))
+        ids.append(pid)
+    db.conn.commit()
+
+    values = db.get_filter_field_values("camera_model")
+    # One row per case-folded model, count aggregates all case variants.
+    by_lower = {v["value"].lower(): v["count"] for v in values}
+    assert by_lower == {"sony a1": 3, "canon r5": 1}
+    # Cross-check: the suggested count matches what a ``camera_model is <suggested>``
+    # rule would return for the case-insensitive engine.
+    for entry in values:
+        rule_count = db.count_photos_for_rules(
+            [{"field": "camera_model", "op": "is", "value": entry["value"]}])
+        assert rule_count == entry["count"], (
+            f"mismatch for {entry['value']!r}: rule={rule_count} "
+            f"suggest={entry['count']}"
+        )
+    # Typeahead narrowing still works case-insensitively.
+    values = db.get_filter_field_values("camera_model", q="SONY")
+    assert len(values) == 1
+    assert values[0]["value"].lower() == "sony a1"
+    assert values[0]["count"] == 3
+
+
+def test_universal_filter_species_matches_by_displayed_root_name(tmp_path):
+    """Species rules match a photo by the species name shown in the UI —
+    the canonical root spelling from ``get_species_keywords_for_photos``
+    (and ``/api/filters/values``) — never by a same-taxon hierarchy leaf
+    that never surfaces there.
+
+    A photo tagged only with the root ``Verdin`` is displayed as
+    ``Verdin``. A rule ``species is "Auriparus flaviceps"`` (or
+    ``contains "flaviceps"``) targets the leaf spelling and must not
+    pull the root-tagged photo in just because that leaf exists for the
+    same taxon — otherwise the filter contradicts what
+    ``get_species_keywords_for_photos`` and the values typeahead
+    advertise, and the ``is not`` / ``not_contains`` inverses exclude
+    the photo unexpectedly.
+    """
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    pid = db.add_photo(folder_id=fid, filename='v.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    root_kw = db.add_keyword("Verdin", is_species=True)
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Auriparus flaviceps", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.conn.commit()
+    db.tag_photo(pid, root_kw)
+
+    # Sanity check: displayed species is the root spelling ``Verdin``,
+    # not the leaf ``Auriparus flaviceps``.
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Verdin"]}
+
+    count = db.count_photos_for_rules
+    # The displayed name matches.
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 1
+    # A same-taxon hierarchy leaf that never surfaces in the UI does not.
+    assert count([{"field": "species", "op": "is",
+                   "value": "Auriparus flaviceps"}]) == 0
+    assert count([{"field": "species", "op": "contains",
+                   "value": "flaviceps"}]) == 0
+    # The ``is not`` / ``not_contains`` inverses correctly keep the
+    # root-tagged photo included when the query targets a leaf spelling
+    # the photo is not displayed under.
+    assert count([{"field": "species", "op": "is not",
+                   "value": "Auriparus flaviceps"}]) == 1
+    assert count([{"field": "species", "op": "not_contains",
+                   "value": "flaviceps"}]) == 1
+
+
+def test_universal_filter_species_matches_rootless_hierarchy_leaf(tmp_path):
+    """When a hierarchy leaf's taxon has no top-level root row in
+    ``keywords`` (repair detached the ``Verdin`` root and left only the
+    ``Desert Verdin`` leaf), ``get_species_keywords_for_photos`` and the
+    values typeahead both fall back to the leaf's own ``k.name``. The
+    species filter must fall back the same way — otherwise
+    ``species is "Desert Verdin"`` silently excludes the photo (and
+    ``is not`` silently includes it) even though the leaf name is what
+    the rest of the app surfaces.
+    """
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    pid = db.add_photo(folder_id=fid, filename='leaf.jpg', extension='.jpg',
+                       file_size=100, file_mtime=1.0)
+    other = db.add_photo(folder_id=fid, filename='other.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.conn.commit()
+    db.tag_photo(pid, leaf)
+    # No top-level ``Verdin`` root exists — this is the rootless-leaf
+    # shape the repair pass leaves behind.
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords "
+        "WHERE parent_id IS NULL AND taxon_id=?", (taxa["Verdin"],)
+    ).fetchone()[0] == 0
+
+    # The displayed species falls back to the leaf's own spelling.
+    assert db.get_species_keywords_for_photos([pid]) == {pid: ["Desert Verdin"]}
+
+    count = db.count_photos_for_rules
+    # The leaf name matches ``is`` / ``equals`` / ``contains``.
+    assert count([{"field": "species", "op": "is",
+                   "value": "Desert Verdin"}]) == 1
+    assert count([{"field": "species", "op": "equals",
+                   "value": "Desert Verdin"}]) == 1
+    assert count([{"field": "species", "op": "contains",
+                   "value": "Verdin"}]) == 1
+    # And the inverses correctly exclude the leaf-tagged photo.
+    assert count([{"field": "species", "op": "is not",
+                   "value": "Desert Verdin"}]) == 1
+    assert count([{"field": "species", "op": "not_contains",
+                   "value": "Verdin"}]) == 1
+    _ = other
+
+
+def test_universal_filter_species_multi_root_isolates_attached_spelling(tmp_path):
+    """When a taxon has multiple top-level roots (say ``Verdin`` and the
+    sibling alias ``Auriparus flaviceps``), a photo tagged only with one
+    of them must match rules for that spelling only — never for the
+    sibling root's spelling. ``/api/filters/values`` groups attached
+    roots by their own ``kv.name`` (its ``kv.parent_id IS NULL`` branch),
+    so if the filter matched any same-taxon root, selecting one
+    suggestion would return photos the count advertises under the other.
+
+    A hierarchy leaf photo for the same taxon must still match the
+    canonical MIN(id) root spelling — that's what
+    ``get_species_keywords_for_photos`` and the typeahead surface for
+    leaves — but not the sibling root spelling.
+    """
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    # Create ``Verdin`` first so it wins MIN(id) — the sibling root
+    # ``Auriparus flaviceps`` gets a higher id.
+    verdin_root = db.add_keyword("Verdin", is_species=True)
+    sci_root = db.add_keyword("Auriparus flaviceps", is_species=True)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], sci_root))
+    parent = db.add_keyword("Penduline tits")
+    leaf = db.add_keyword("Desert Verdin", parent_id=parent)
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=1, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], leaf))
+    db.conn.commit()
+
+    p_verdin = db.add_photo(folder_id=fid, filename='v.jpg', extension='.jpg',
+                            file_size=100, file_mtime=1.0)
+    p_sci = db.add_photo(folder_id=fid, filename='s.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    p_leaf = db.add_photo(folder_id=fid, filename='l.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    db.tag_photo(p_verdin, verdin_root)
+    db.tag_photo(p_sci, sci_root)
+    db.tag_photo(p_leaf, leaf)
+
+    # Sanity: display keeps each attached root's own spelling and
+    # canonicalizes the hierarchy leaf to MIN(id) root.
+    displayed = db.get_species_keywords_for_photos([p_verdin, p_sci, p_leaf])
+    assert displayed[p_verdin] == ["Verdin"]
+    assert displayed[p_sci] == ["Auriparus flaviceps"]
+    assert displayed[p_leaf] == ["Verdin"]
+
+    count = db.count_photos_for_rules
+    # ``species is "Verdin"`` matches only the photos surfaced as
+    # ``Verdin`` — the attached-``Verdin`` photo and the canonicalized
+    # leaf — never the sibling-root-tagged photo.
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 2
+    # ``species is "Auriparus flaviceps"`` matches only the attached
+    # sibling root, not the ``Verdin``-tagged nor the leaf-tagged photos
+    # (the leaf displays as ``Verdin`` via MIN(id) canonicalization).
+    assert count([{"field": "species", "op": "is",
+                   "value": "Auriparus flaviceps"}]) == 1
+
+
+def test_exif_backfill_migration_clears_empty_marker_for_rescan(tmp_path):
+    """Rows whose ``exif_data`` is the ``'{}'`` marker were scanned with
+    ``extract_full_metadata=False`` before the promoted EXIF columns
+    existed, so there is nothing to backfill from JSON. The scanner's
+    incremental pre-pass treats any non-NULL ``exif_data`` as already
+    extracted, so leaving the marker in place would keep camera/lens/iso
+    NULL until a user manually forces a full non-incremental scan. The
+    migration must clear those rows back to NULL so the next incremental
+    scan re-runs ExifTool and populates the promoted columns.
+    """
+    from db import Database
+    path = str(tmp_path / "test.db")
+    db, fid = _filter_db(tmp_path)
+    empty = db.add_photo(folder_id=fid, filename='empty.jpg', extension='.jpg',
+                         file_size=100, file_mtime=1.0)
+    populated = db.add_photo(folder_id=fid, filename='sony.arw', extension='.arw',
+                             file_size=100, file_mtime=1.0)
+    import json as _json
+    exif = {"EXIF": {"Make": "Sony", "Model": "ILCE-1"}}
+    db.conn.execute(
+        "UPDATE photos SET exif_data='{}', camera_make=NULL, "
+        "camera_model=NULL WHERE id=?", (empty,))
+    db.conn.execute(
+        "UPDATE photos SET exif_data=?, camera_make=NULL, "
+        "camera_model=NULL WHERE id=?", (_json.dumps(exif), populated))
+    # Simulate pre-backfill.
+    db.conn.execute("DELETE FROM db_meta WHERE key='exif_summary_backfill_v1'")
+    db.conn.commit()
+    db.close()
+
+    db2 = Database(path)
+    # Populated row is backfilled from its stored JSON.
+    row = db2.conn.execute(
+        "SELECT exif_data, camera_make, camera_model FROM photos WHERE id=?",
+        (populated,)).fetchone()
+    assert row["camera_make"] == "Sony"
+    assert row["camera_model"] == "ILCE-1"
+    # Empty-marker row is cleared so the next incremental scan re-extracts
+    # ExifTool for it (the pre-pass keys on ``exif_data IS NOT NULL``).
+    row = db2.conn.execute(
+        "SELECT exif_data, camera_make, camera_model FROM photos WHERE id=?",
+        (empty,)).fetchone()
+    assert row["exif_data"] is None
+    assert row["camera_make"] is None
+    assert row["camera_model"] is None
+    db2.close()
+
+    # Second re-open is a no-op (marker set): a fresh '{}' written after
+    # the migration ran must not be cleared on subsequent opens —
+    # otherwise the scanner's own ``COALESCE(exif_data, '{}')`` write
+    # would bounce right back to NULL every time.
+    db3 = Database(path)
+    db3.conn.execute(
+        "UPDATE photos SET exif_data='{}' WHERE id=?", (empty,))
+    db3.conn.commit()
+    db3.close()
+    db4 = Database(path)
+    row = db4.conn.execute(
+        "SELECT exif_data FROM photos WHERE id=?", (empty,)).fetchone()
+    assert row["exif_data"] == '{}'
+    db4.close()
+
+
+def test_universal_filter_has_species_matches_taxonomy_type_keyword(tmp_path):
+    """``has_species`` must accept species stored as
+    ``type='taxonomy'`` with ``is_species=0`` — the shape upgraded/legacy
+    photos carry and that the species filter,
+    ``get_species_keywords_for_photos``, and Browse all treat as species.
+    A plain ``k.is_species = 1`` check disagreed: the same photo would
+    appear under ``species is Verdin`` yet fail ``has_species is true``.
+    Also validates the newer ``is_species=1`` flag path so both storage
+    shapes count toward the "Has species" chip.
+    """
+    db, fid = _filter_db(tmp_path)
+    taxa = _seed_taxa(db, [(2912, "Auriparus flaviceps", "Verdin")])
+    p_legacy = db.add_photo(folder_id=fid, filename='legacy.jpg', extension='.jpg',
+                            file_size=100, file_mtime=1.0)
+    p_flag = db.add_photo(folder_id=fid, filename='flag.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    p_none = db.add_photo(folder_id=fid, filename='none.jpg', extension='.jpg',
+                          file_size=100, file_mtime=1.0)
+    # Legacy shape: type='taxonomy', is_species=0, taxon linked to a species.
+    legacy_kw = db.add_keyword("Verdin")
+    db.conn.execute(
+        "UPDATE keywords SET type='taxonomy', is_species=0, taxon_id=? "
+        "WHERE id=?", (taxa["Verdin"], legacy_kw))
+    db.conn.commit()
+    db.tag_photo(p_legacy, legacy_kw)
+    # Newer shape: is_species=1 flag.
+    flag_kw = db.add_keyword("Great Blue Heron", is_species=True)
+    db.tag_photo(p_flag, flag_kw)
+
+    count = db.count_photos_for_rules
+    # Sanity: the species filter already accepts the legacy shape.
+    assert count([{"field": "species", "op": "is", "value": "Verdin"}]) == 1
+    # Both storage shapes count toward has_species=true; only p_none
+    # (untagged) matches has_species=false.
+    assert count([{"field": "has_species", "op": "is", "value": 1}]) == 2
+    assert count([{"field": "has_species", "op": "is", "value": 0}]) == 1
+    _ = p_none  # keep the untagged photo alive for the negative branch.

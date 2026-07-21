@@ -111,6 +111,7 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 12px; padding: 3px 10px; font-size: 12px; font-weight: 600; }
 .pill-ok { background: color-mix(in srgb, var(--success, #2da44e) 18%, transparent); color: var(--success, #2da44e); }
 .pill-bad { background: color-mix(in srgb, var(--danger, #cf222e) 18%, transparent); color: var(--danger, #cf222e); }
+.pill-warn { background: color-mix(in srgb, var(--warning, #bf8700) 18%, transparent); color: var(--warning, #9a6700); }
 .unsafe-list { margin: 6px 0 0 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }
 .result-links a { color: var(--accent); font-size: 12px; }
 #importError { color: var(--danger); font-size: 12px; margin-top: 6px; display: none; }
@@ -174,6 +175,13 @@ body { display: flex; flex-direction: column; height: 100vh; }
   border: 0; background: transparent; color: var(--text-secondary);
   cursor: pointer; padding: 0; line-height: 1;
 }
+.dependency-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.dependency-status { font-size: 12px; color: var(--text-secondary); }
+.dependency-status.ok { color: var(--success, #2da44e); }
+.dependency-status.bad { color: var(--warning, #bf8700); }
+.advanced-import { margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+.advanced-import summary { cursor: pointer; }
+.metadata-repair { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-primary); }
 </style>
 </head>
 <body>
@@ -188,6 +196,34 @@ body { display: flex; flex-direction: column; height: 100vh; }
         Cleanup is only enabled after every staged file is verified in the archive.
       </div>
       <div class="staging-items" id="orphanedStagingItems"></div>
+    </div>
+
+    <div class="card" id="exiftoolCard">
+      <h3>Photo metadata</h3>
+      <div id="importExiftoolStatus" class="dependency-status">Checking ExifTool…</div>
+      <div class="dependency-actions" id="importExiftoolActions" style="display:none;">
+        <button class="btn btn-primary" type="button" id="btnInstallExiftool"
+                onclick="installImportExiftool()">Repair ExifTool</button>
+      </div>
+      <details class="advanced-import" id="missingExiftoolAdvanced" style="display:none;">
+        <summary>Advanced</summary>
+        <label>
+          <input type="checkbox" id="chkAllowMissingExiftool">
+          Import without metadata
+        </label>
+        <div class="hint">
+          Capture dates, GPS, camera details, and date-based folder placement may be missing.
+          You can repair them later while the originals are available.
+        </div>
+      </details>
+      <div class="metadata-repair" id="metadataRepairSection" style="display:none;">
+        <div id="metadataRepairSummary" class="dependency-status"></div>
+        <div class="dependency-actions">
+          <button class="btn" type="button" id="btnRepairMetadata"
+                  onclick="startMetadataRepair()">Repair photo metadata</button>
+          <span id="metadataRepairStatus" class="hint"></span>
+        </div>
+      </div>
     </div>
 
     <div class="card" id="sourceCard">
@@ -327,7 +363,10 @@ body { display: flex; flex-direction: column; height: 100vh; }
       <div class="section-divider">
         <div class="option-stack">
           <label><input type="checkbox" id="chkSkipDuplicates" checked> Skip duplicates</label>
-          <label><input type="checkbox" id="chkVerifyByHash"> Verify copied files with full content hashes</label>
+          <label><input type="radio" name="duplicateVerification" id="chkTrustLikelyDuplicates" checked> Trust likely duplicates</label>
+          <div class="hint">Fast — matches filename, byte size, and EXIF capture time to the second. Existing files are not read again.</div>
+          <label><input type="radio" name="duplicateVerification" id="chkVerifyByHash"> Verify duplicates byte-for-byte</label>
+          <div class="hint">Slower — reads the complete source and existing archive copy to confirm their contents are identical.</div>
         </div>
       </div>
     </div>
@@ -338,13 +377,16 @@ body { display: flex; flex-direction: column; height: 100vh; }
         <select id="afterImportSelect" style="max-width:280px;">
           <option id="afterImportHiddenDefault" value="__hidden_default__" hidden disabled></option>
           <option value="__none__">None — import only</option>
-          <option value="identify">Identify birds</option>
-          <option value="quick_look">Quick look (thumbnails + previews)</option>
-          <option value="cull_ready" data-advanced-strategy>Cull-ready (+ quality review)</option>
-          <option value="full" data-advanced-strategy>Full pipeline (everything)</option>
+          <!-- Saved processes are appended here by loadAfterImportProcesses(). -->
         </select>
       </div>
       <div class="hint">Processing runs as its own job when the import finishes — a processing failure never touches imported photos.</div>
+      <div class="row" id="afterMoveRow" style="display:none; margin-top:10px;">
+        <label><input type="checkbox" id="chkAfterMove" onchange="updateAfterMoveUI()"> Then move to NAS</label>
+        <select id="afterMoveTarget" style="max-width:220px;" onchange="updateAfterMoveUI()"></select>
+      </div>
+      <div class="hint" id="afterMoveUnavailable" style="display:none;"></div>
+      <div class="remote-preview" id="afterMovePreview" style="display:none;"></div>
     </div>
 
     <div class="card">
@@ -428,6 +470,7 @@ let browserSelectAnchorPath = '';
 let activeImportMode = 'in_place';
 let importRemoteTargets = [];
 let importRsyncAvailable = false;
+let importSshAvailable = false;
 let destStructureSeq = 0;
 // Monotonic sequence for the import preview / duplicate-check flow so a
 // slow older previewImport() response can't overwrite the summary text
@@ -438,6 +481,85 @@ let importPreviewTimer = null;
 let importThumbSchedulerCancel = null;
 let importTags = [];
 let newImagesSnapshotId = null;
+let importExiftoolReady = null;
+let importExiftoolRequired = true;
+
+async function loadImportReadiness() {
+  const status = document.getElementById('importExiftoolStatus');
+  const actions = document.getElementById('importExiftoolActions');
+  const advanced = document.getElementById('missingExiftoolAdvanced');
+  const repairSection = document.getElementById('metadataRepairSection');
+  try {
+    const resp = await fetch('/api/import/readiness');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'readiness check failed');
+    const exiftool = data.exiftool || {};
+    importExiftoolReady = !!exiftool.available;
+    importExiftoolRequired = data.requires_exiftool !== false;
+    status.className = 'dependency-status ' + (importExiftoolReady ? 'ok' : 'bad');
+    status.textContent = importExiftoolReady
+      ? 'ExifTool ' + (exiftool.version || '') + ' is ready. Capture dates, GPS, and camera details will be preserved.'
+      : 'ExifTool is unavailable. Repair it before importing so photo metadata is preserved.';
+    actions.style.display = importExiftoolReady ? 'none' : '';
+    advanced.style.display = importExiftoolReady ? 'none' : '';
+
+    const repairCount = Number(data.metadata_repair_count || 0);
+    repairSection.style.display = repairCount ? '' : 'none';
+    if (repairCount) {
+      document.getElementById('metadataRepairSummary').textContent =
+        repairCount.toLocaleString() + ' existing photo' + (repairCount === 1 ? '' : 's') +
+        ' need metadata repair.';
+      const repairBtn = document.getElementById('btnRepairMetadata');
+      repairBtn.disabled = !data.metadata_repair_available;
+      repairBtn.title = data.metadata_repair_available
+        ? '' : (importExiftoolReady ? 'Connect the original photo folder first.' : 'Repair ExifTool first.');
+    }
+  } catch (e) {
+    importExiftoolReady = null;
+    status.className = 'dependency-status bad';
+    status.textContent = 'Could not check ExifTool. Vireo will verify it when import starts.';
+    actions.style.display = 'none';
+    advanced.style.display = 'none';
+    repairSection.style.display = 'none';
+  }
+}
+
+async function installImportExiftool() {
+  const btn = document.getElementById('btnInstallExiftool');
+  const status = document.getElementById('importExiftoolStatus');
+  btn.disabled = true;
+  btn.textContent = 'Repairing…';
+  try {
+    const resp = await fetch('/api/system/install-exiftool', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok || !data.success) throw new Error(data.error || 'ExifTool repair failed');
+    status.textContent = 'ExifTool repaired. Verifying…';
+    await loadImportReadiness();
+  } catch (e) {
+    status.className = 'dependency-status bad';
+    status.textContent = String(e.message || e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Repair ExifTool';
+  }
+}
+
+async function startMetadataRepair() {
+  const btn = document.getElementById('btnRepairMetadata');
+  const status = document.getElementById('metadataRepairStatus');
+  btn.disabled = true;
+  status.textContent = 'Starting repair…';
+  try {
+    const resp = await fetch('/api/jobs/repair-metadata', { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'repair failed to start');
+    status.innerHTML = 'Repair started for ' + Number(data.photo_count || 0).toLocaleString() +
+      ' photos · <a href="/jobs">Open Jobs</a>';
+  } catch (e) {
+    status.textContent = String(e.message || e);
+    btn.disabled = false;
+  }
+}
 
 function normalizedImportTag(name) {
   return String(name || '').trim().replace(/\s+/g, ' ');
@@ -509,6 +631,7 @@ function updateImportMode() {
   onImportDestModeChange();
   refreshSourceCounts();
   scheduleImportPreview();
+  updateAfterMoveUI();
 }
 
 function selectedFileTypes() {
@@ -585,7 +708,7 @@ function renderRecentDestinations(recents) {
 function wireDestStructureInvalidation() {
   [
     'chkRecursive', 'fileTypePreset', 'destMode', 'remoteSubpath',
-    'chkSkipDuplicates', 'chkVerifyByHash', 'destInput',
+    'chkSkipDuplicates', 'chkTrustLikelyDuplicates', 'chkVerifyByHash', 'destInput',
     'folderTemplatePreset', 'folderTemplate',
   ].forEach((id) => {
     const el = document.getElementById(id);
@@ -593,6 +716,7 @@ function wireDestStructureInvalidation() {
     const onPreviewOptionChange = () => {
       hideDestStructure();
       scheduleImportPreview();
+      updateAfterMoveUI();
     };
     el.addEventListener('change', onPreviewOptionChange);
     el.addEventListener('input', onPreviewOptionChange);
@@ -613,6 +737,9 @@ function updateWorkspaceMode() {
   // which default (workspace-scoped vs global) the server will resolve
   // after_import against, so the After Import display must resync.
   updateAdvancedImportOptions();
+  // ...and the resync can change whether a process chains at all, which
+  // gates the "Then move to NAS" row.
+  updateAfterMoveUI();
 }
 
 function importRemoteTargetId() {
@@ -708,6 +835,7 @@ function onImportDestModeChange() {
   if (localRows) localRows.style.display = remoteId ? 'none' : '';
   if (remoteRows) remoteRows.style.display = remoteId ? '' : 'none';
   updateRemoteDestPreview();
+  updateAfterMoveUI();
 }
 
 async function loadImportRemoteTargets() {
@@ -717,9 +845,11 @@ async function loadImportRemoteTargets() {
     const data = await resp.json();
     importRemoteTargets = (data && data.targets) || [];
     importRsyncAvailable = !!(data && data.rsync_available);
+    importSshAvailable = !!(data && data.ssh_available);
   } catch (e) {
     importRemoteTargets = [];
     importRsyncAvailable = false;
+    importSshAvailable = false;
   }
   const sel = document.getElementById('destMode');
   if (!sel) return;
@@ -731,6 +861,7 @@ async function loadImportRemoteTargets() {
     sel.appendChild(opt);
   });
   onImportDestModeChange();
+  updateAfterMoveUI();
 }
 
 function importEscapeHtml(s) {
@@ -900,9 +1031,12 @@ async function browseForDestination() {
     if (result) {
       const path = Array.isArray(result) ? result[0] : result;
       if (path) {
-        document.getElementById('destInput').value = path;
-        hideDestStructure();
-        scheduleImportPreview();
+        const destination = document.getElementById('destInput');
+        destination.value = path;
+        // Notify destInput listeners (dest-structure invalidation, NAS-move
+        // row) exactly like a manual edit would — matches
+        // selectRecentDestination().
+        destination.dispatchEvent(new Event('input', { bubbles: true }));
       }
       return;
     }
@@ -1185,9 +1319,12 @@ function updateImportBrowserSelection() {
 function selectImportBrowserFolder() {
   if (browserMode === 'destination') {
     if (!browserPath) return;
-    document.getElementById('destInput').value = browserPath;
-    hideDestStructure();
-    scheduleImportPreview();
+    const destination = document.getElementById('destInput');
+    destination.value = browserPath;
+    // Notify destInput listeners (dest-structure invalidation, NAS-move
+    // row) exactly like a manual edit would — matches
+    // selectRecentDestination().
+    destination.dispatchEvent(new Event('input', { bubbles: true }));
   } else {
     const paths = browserSelectedPaths.length
       ? browserSelectedPaths
@@ -1198,12 +1335,186 @@ function selectImportBrowserFolder() {
   closeImportFolderBrowser();
 }
 
+// Populate the After Import dropdown from the saved-process library. Keeps
+// the two static options (hidden default + None) and appends one option per
+// saved process, value = its id.
+async function loadAfterImportProcesses() {
+  const sel = document.getElementById('afterImportSelect');
+  if (!sel) return;
+  try {
+    const resp = await fetch('/api/processes');
+    if (!resp.ok) return;
+    const procs = await resp.json();
+    Array.from(sel.querySelectorAll('option[data-process]')).forEach(
+      (o) => o.remove());
+    (procs || []).forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = String(p.id);
+      opt.textContent = p.name;
+      opt.dataset.process = '1';
+      sel.appendChild(opt);
+    });
+  } catch (e) { /* leave with just "None — import only" */ }
+}
+
 function selectedAfterImport() {
   const v = document.getElementById('afterImportSelect').value;
   // __hidden_default__ is a display-only placeholder — the request path
   // omits after_import in that state, so callers never read this value.
   if (v === '__none__' || v === '__hidden_default__') return null;
-  return v;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? null : n;
+}
+
+// True when a Start Import would chain a processing run — either the user
+// (or the workspace default prefill) has a real process selected, or the
+// "New workspace default" placeholder is masking a real global default the
+// server will apply after creating the workspace. The chained NAS move
+// fires from that processing run, so this gates the "Then move to NAS" row.
+function afterImportChainsProcess() {
+  const sel = document.getElementById('afterImportSelect');
+  if (!sel) return false;
+  if (sel.value === '__hidden_default__') {
+    const placeholder = document.getElementById('afterImportHiddenDefault');
+    return !!(placeholder && placeholder.dataset.maskedValue);
+  }
+  return selectedAfterImport() !== null;
+}
+
+// Normalize a path for display and prefix math: forward slashes, no
+// trailing slash. Case is PRESERVED — this feeds the visible move preview
+// (NAS-side paths are case-sensitive) and the rel-subpath slicing.
+function afterMoveNormPath(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+// Containment gate compares case-INSENSITIVELY, mirroring the server's
+// alias-folding check (_validate_after_process_move via
+// _path_equal_or_descends): on the default case-insensitive macOS/Windows
+// volumes "/volumes/photos/2026" IS inside "/Volumes/Photos", and a
+// case-sensitive gate here would hide the "Then move to NAS" row for a
+// request the server accepts. The server stays authoritative — on a
+// genuinely case-sensitive filesystem the worst case is a clear 400 at
+// Start Import instead of a silently missing option.
+function afterMovePathInsideRoot(destination, root) {
+  const d = afterMoveNormPath(destination).toLowerCase();
+  const r = afterMoveNormPath(root).toLowerCase();
+  return !!r && (d === r || d.indexOf(r + '/') === 0);
+}
+
+// A remote target can host the chained move only when the chosen archive
+// destination sits inside its local_archive_root. This client-side prefix
+// check mirrors the server's realpath/commonpath validation closely enough
+// for UI gating; the server remains the authority.
+function afterMoveEligibleTargets() {
+  const destination = (document.getElementById('destInput').value || '').trim();
+  if (!importIsAbsolutePath(destination)) return [];
+  return importRemoteTargets.filter(
+    (t) => t.local_archive_root
+      && afterMovePathInsideRoot(destination, t.local_archive_root));
+}
+
+function updateAfterMoveUI() {
+  const row = document.getElementById('afterMoveRow');
+  const unavailable = document.getElementById('afterMoveUnavailable');
+  const preview = document.getElementById('afterMovePreview');
+  const sel = document.getElementById('afterMoveTarget');
+  if (!row || !unavailable || !preview || !sel) return;
+  const hideAll = () => {
+    row.style.display = 'none';
+    unavailable.style.display = 'none';
+    preview.style.display = 'none';
+  };
+  // The chained move only exists for local-disk archive copies that chain
+  // a processing run — everything else hides the row entirely, and a
+  // hidden row means startImport() sends after_process_move: null no
+  // matter what the (stale) checkbox says.
+  if (selectedImportMode() !== 'copy' || importRemoteTargetId()
+      || !afterImportChainsProcess()) {
+    hideAll();
+    return;
+  }
+  const eligible = afterMoveEligibleTargets();
+  if (!eligible.length) {
+    hideAll();
+    // Only claim "unavailable" once there is a concrete destination to
+    // judge — an empty or relative destination isn't decidable yet.
+    const destination = (document.getElementById('destInput').value || '').trim();
+    if (importIsAbsolutePath(destination)) {
+      unavailable.textContent =
+        "Move to NAS unavailable: the destination is not inside any remote "
+        + "target's local archive root. Set one under Settings > Remote targets.";
+      unavailable.style.display = '';
+    }
+    return;
+  }
+  unavailable.style.display = 'none';
+  row.style.display = '';
+  // Repopulate with the currently-eligible targets, preserving the user's
+  // pick when it is still eligible; a single eligible target selects
+  // itself (a freshly-populated select shows its first option).
+  const previous = sel.value;
+  while (sel.options.length) sel.remove(0);
+  eligible.forEach((t) => {
+    const opt = document.createElement('option');
+    opt.value = t.id;
+    opt.textContent = t.name;
+    sel.appendChild(opt);
+  });
+  if (eligible.some((t) => t.id === previous)) sel.value = previous;
+  if (!document.getElementById('chkAfterMove').checked) {
+    preview.style.display = 'none';
+    preview.textContent = '';
+    return;
+  }
+  const target = eligible.find((t) => t.id === sel.value) || eligible[0];
+  const destination = afterMoveNormPath(
+    (document.getElementById('destInput').value || '').trim());
+  const root = afterMoveNormPath(target.local_archive_root);
+  const rel = destination === root ? '' : destination.slice(root.length + 1);
+  const remoteBase =
+    afterMoveNormPath(target.remote_path) + (rel ? '/' + rel : '');
+  const mountOk =
+    !!target.mount_path && importIsAbsolutePath(target.mount_path);
+  const mountBase = mountOk
+    ? afterMoveNormPath(target.mount_path) + (rel ? '/' + rel : '') : '';
+  preview.textContent = '';
+  const line = document.createElement('div');
+  line.textContent =
+    'After processing, each imported folder moves to '
+    + remoteBase + '/<imported folder>'
+    + (mountOk
+        ? ' and the catalog repoints to ' + mountBase + '/<imported folder>.'
+        : '.')
+    + " Photos leave this computer's archive.";
+  preview.appendChild(line);
+  if (!importRsyncAvailable) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: no GNU rsync found, so the move to NAS would fail. Install GNU rsync or set its path under Settings > Paths.'));
+  }
+  if (!importSshAvailable) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: no OpenSSH client found, so the move to NAS would fail.'));
+  }
+  if (!target.mount_path) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: the move to NAS would fail: this target has no local mount path — add one under Settings > Remote targets.'));
+  } else if (!importIsAbsolutePath(target.mount_path)) {
+    preview.appendChild(remotePreviewWarn(
+      'Warning: the move to NAS would fail: this target\'s local mount path must be absolute — fix it under Settings > Remote targets.'));
+  }
+  preview.style.display = '';
+}
+
+function afterMoveRequest() {
+  // Reads the row visibility updateAfterMoveUI maintains — keeping the
+  // writer and this reader adjacent so a refactor can't silently split them.
+  const row = document.getElementById('afterMoveRow');
+  const sel = document.getElementById('afterMoveTarget');
+  const chk = document.getElementById('chkAfterMove');
+  return (row && chk && sel && chk.checked &&
+          row.style.display !== 'none' && sel.value)
+    ? {remote_target_id: sel.value} : null;
 }
 
 function retireHiddenDefaultOption(sel) {
@@ -1216,23 +1527,23 @@ function retireHiddenDefaultOption(sel) {
   if (sel && sel.value === '__hidden_default__') sel.value = '__none__';
 }
 
-function afterImportOptionLabel(strategy) {
+function afterImportOptionLabel(processId) {
   const sel = document.getElementById('afterImportSelect');
-  const value = strategy || '__none__';
-  if (!sel) return strategy || 'None — import only';
+  const value = processId == null ? '__none__' : String(processId);
+  const fallback = processId == null ? 'None — import only' : String(processId);
+  if (!sel) return fallback;
   const opt = Array.from(sel.options).find(
     (o) => o.value === value && o.id !== 'afterImportHiddenDefault');
-  return opt ? (opt.textContent || '').trim() : (strategy || 'None — import only');
+  return opt ? (opt.textContent || '').trim() : fallback;
 }
 
+// Keep the After Import display honest about what a Start Import will do.
+// (Named for the advanced-mode listener it's still wired to; saved processes
+// no longer have an "advanced" tier, so there's nothing to hide/show — the
+// only remaining job is the new-workspace default placeholder.)
 function updateAdvancedImportOptions() {
   const sel = document.getElementById('afterImportSelect');
   if (!sel) return;
-  const advanced = !!(window.isAdvancedMode && window.isAdvancedMode());
-  sel.querySelectorAll('[data-advanced-strategy]').forEach((opt) => {
-    opt.hidden = !advanced;
-    opt.disabled = !advanced;
-  });
   const placeholder = document.getElementById('afterImportHiddenDefault');
   if (!placeholder) return;
 
@@ -1251,13 +1562,13 @@ function updateAdvancedImportOptions() {
   // inherits the GLOBAL default, since a brand-new workspace has no
   // overrides yet). The visible dropdown, prefilled from the currently-
   // active workspace's default, would otherwise lie about what the
-  // server is going to do — show a placeholder that names the real
-  // target strategy.
+  // server is going to do — show a placeholder that names the real target.
   if (newMode && _afterImportConfigLoaded) {
-    const label = afterImportOptionLabel(_globalDefaultStrategy);
+    const label = afterImportOptionLabel(_globalDefaultProcessId);
     placeholder.textContent =
       'New workspace default: ' + label + ' (applied to the new workspace)';
-    placeholder.dataset.maskedValue = _globalDefaultStrategy || '';
+    placeholder.dataset.maskedValue =
+      _globalDefaultProcessId == null ? '' : String(_globalDefaultProcessId);
     placeholder.hidden = false;
     placeholder.disabled = false;
     _afterImportHidingDefault = true;
@@ -1265,58 +1576,33 @@ function updateAdvancedImportOptions() {
     return;
   }
 
-  // Not new-workspace mode: the visible selection should track the
-  // workspace's own default (or the HTML fallback if config didn't
-  // load). Re-derive it every call so switching workspaceNew off
-  // restores the workspace default rather than sticking on whatever
-  // placeholder we were showing.
+  // Not new-workspace mode: track the workspace's own default (or the HTML
+  // fallback if config didn't load). Re-derive it every call so switching
+  // workspaceNew off restores the workspace default rather than sticking on
+  // whatever placeholder we were showing.
   const wsDef = _afterImportConfigLoaded
-    ? (_workspaceDefaultStrategy || '__none__')
+    ? (_workspaceDefaultProcessId == null
+        ? '__none__' : String(_workspaceDefaultProcessId))
     : '__none__';
   sel.value = wsDef;
   if (sel.selectedIndex === -1) sel.value = '__none__';
-
-  if (advanced) {
-    retireHiddenDefaultOption(sel);
-    _afterImportHidingDefault = false;
-    return;
-  }
-
-  const current = sel.selectedOptions[0];
-  const currentIsHiddenAdvanced =
-    !!(current && current.disabled && current.hasAttribute('data-advanced-strategy'));
-  if (currentIsHiddenAdvanced) {
-    // The workspace's default is an advanced-only strategy (full,
-    // cull_ready) but advanced mode is off. If we silently fell the
-    // display back to __none__, startImport() would omit after_import so
-    // the server still runs the hidden default while the dropdown reads
-    // "None — import only" — the exact mismatch the reviewer flagged.
-    // Instead, surface an honest placeholder that names the masked
-    // strategy so the visible selection tells the truth about what a
-    // Start Import will do.
-    const maskedLabel = (current.textContent || '').trim();
-    placeholder.textContent =
-      'Workspace default: ' + maskedLabel + ' (enable Advanced mode to change)';
-    placeholder.dataset.maskedValue = current.value;
-    placeholder.hidden = false;
-    placeholder.disabled = false;
-    _afterImportHidingDefault = true;
-    sel.value = '__hidden_default__';
-  } else {
-    retireHiddenDefaultOption(sel);
-    _afterImportHidingDefault = false;
-  }
+  retireHiddenDefaultOption(sel);
+  _afterImportHidingDefault = false;
 }
 
-window.addEventListener('advancedmodechange', updateAdvancedImportOptions);
-window.addEventListener('devmodechange', updateAdvancedImportOptions);
+// Combined into one listener per event (rather than registering
+// updateAdvancedImportOptions then updateAfterMoveUI separately) so the
+// move row always re-evaluates against the already-updated After Import
+// selection, without depending on listener registration order.
+window.addEventListener('advancedmodechange', () => { updateAdvancedImportOptions(); updateAfterMoveUI(); });
+window.addEventListener('devmodechange', () => { updateAdvancedImportOptions(); updateAfterMoveUI(); });
 
 // True once initImportPage() has resolved the workspace's after-import
 // default into the select. Until then, the select still shows its HTML
 // initial value (__none__), which selectedAfterImport() would surface as
 // an explicit null. Posting `after_import: null` tells the import
 // endpoint to run import-only and skip the workspace's
-// pipeline.default_strategy — the exact race the reviewer flagged.
+// pipeline.default_process_id — the exact race the reviewer flagged.
 // Guarding the body key with this flag makes an unresolved default
 // fall back to the endpoint's "key omitted → apply workspace default"
 // branch, which is what the user actually expects.
@@ -1344,22 +1630,22 @@ let _afterImportHidingDefault = false;
 // verbatim.
 let _afterImportUserTouched = false;
 
-// The unscoped global pipeline.default_strategy from /api/config, captured
+// The unscoped global pipeline.default_process_id from /api/config, captured
 // during initImportPage. A brand-new workspace has no config_overrides yet,
 // so this is the strategy the server will apply when the new-workspace
 // import path omits `after_import`. Used to populate the honest "New
 // workspace default: X" placeholder so the visible dropdown selection
 // isn't misled by whatever was prefilled from the currently-active
 // workspace's (possibly-overridden) default.
-let _globalDefaultStrategy = null;
+let _globalDefaultProcessId = null;
 
-// The effective pipeline.default_strategy for the CURRENTLY-active
+// The effective pipeline.default_process_id for the CURRENTLY-active
 // workspace (global config merged with the workspace's overrides). Used
 // so updateAdvancedImportOptions() can re-derive the visible dropdown
 // selection when the user toggles "New workspace" off without touching
 // the dropdown — the underlying target reverts to the current workspace's
 // default rather than sticking on whatever placeholder was showing.
-let _workspaceDefaultStrategy = null;
+let _workspaceDefaultProcessId = null;
 
 function showError(msg) {
   const el = document.getElementById('importError');
@@ -1551,7 +1837,13 @@ function useStagingAsImportSource(result) {
     updateImportMode();
   }
   if (result.inferred_destination) {
-    document.getElementById('destInput').value = result.inferred_destination;
+    const destination = document.getElementById('destInput');
+    destination.value = result.inferred_destination;
+    // Dispatch AFTER the value is set so every destInput listener
+    // (dest-structure invalidation, NAS-move row) re-evaluates against the
+    // inferred destination — updateImportMode() above ran while destInput
+    // still held its previous value.
+    destination.dispatchEvent(new Event('input', { bubbles: true }));
     hideDestStructure();
   }
   scheduleImportPreview();
@@ -1771,6 +2063,7 @@ function destStructureSignature(destination, fileTypes, recursive, excludePaths)
     recursive: recursive,
     skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
     verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
     exclude_paths: (excludePaths || []).slice().sort(),
   });
 }
@@ -1785,6 +2078,7 @@ function importPreviewSignature() {
     recursive: document.getElementById('chkRecursive').checked,
     skip_duplicates: document.getElementById('chkSkipDuplicates').checked,
     verify_by_hash: document.getElementById('chkVerifyByHash').checked,
+    trust_likely_duplicates: document.getElementById('chkTrustLikelyDuplicates').checked,
   });
 }
 
@@ -2072,6 +2366,12 @@ async function startImport() {
     showError('Add at least one source folder.');
     return;
   }
+  const allowMissingExiftool = !!document.getElementById('chkAllowMissingExiftool')?.checked;
+  if (importExiftoolRequired && importExiftoolReady === false && !allowMissingExiftool) {
+    showError('Repair ExifTool before importing, or use Advanced → Import without metadata.');
+    document.getElementById('exiftoolCard')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
   const copyMode = newImagesSnapshotId === null && selectedImportMode() === 'copy';
   const body = newImagesSnapshotId !== null ? {
     source_snapshot_id: newImagesSnapshotId,
@@ -2079,6 +2379,7 @@ async function startImport() {
       sources: sources,
       recursive: document.getElementById('chkRecursive').checked,
     };
+  if (allowMissingExiftool) body.allow_missing_exiftool = true;
   if (importTags.length) body.tags = importTags.slice();
   if (document.getElementById('chkLocationFromGps').checked) {
     body.location_from_gps = true;
@@ -2112,6 +2413,8 @@ async function startImport() {
     body.file_types = fileTypes;
     body.skip_duplicates = document.getElementById('chkSkipDuplicates').checked;
     body.verify_by_hash = document.getElementById('chkVerifyByHash').checked;
+    body.trust_likely_duplicates =
+      document.getElementById('chkTrustLikelyDuplicates').checked;
   }
   // For new-workspace imports where the user hasn't touched the After
   // Import dropdown, the visible selection was prefilled from the
@@ -2128,6 +2431,10 @@ async function startImport() {
   ) {
     body.after_import = selectedAfterImport();
   }
+  // The chained NAS move is only offered while its row is visible (local
+  // archive copy + chained process + eligible target) — a hidden row means
+  // a stale checkbox must not send anything.
+  body.after_process_move = afterMoveRequest();
   document.getElementById('btnStart').disabled = true;
   try {
     const resp = await fetch(copyMode ? '/api/jobs/import-photos' : '/api/jobs/import-in-place', {
@@ -2263,6 +2570,25 @@ function renderResult(res, status) {
     pill.className = 'pill pill-ok';
     pill.textContent = 'Safe to format the card — every file is verified in the archive';
     unsafe.style.display = 'none';
+  } else if (
+    res.unverified_duplicates_only
+    && (!status || status === 'completed')
+  ) {
+    pill.className = 'pill pill-warn';
+    pill.textContent = 'Import complete — keep the card until likely duplicates are verified';
+    const files = res.unsafe_files || [];
+    unsafe.style.display = '';
+    if (!files.length) {
+      const li = document.createElement('li');
+      li.textContent = res.unverified_duplicate +
+        ' likely duplicates matched by filename, byte size, and capture time, but were not compared byte-for-byte.';
+      unsafe.appendChild(li);
+    }
+    files.forEach((u) => {
+      const item = document.createElement('li');
+      item.textContent = u.path + ' — ' + u.reason;
+      unsafe.appendChild(item);
+    });
   } else {
     pill.className = 'pill pill-bad';
     pill.textContent = 'Do NOT format the card yet';
@@ -2324,13 +2650,54 @@ function renderTaggingInfo(res) {
 
 function renderChainInfo(res) {
   const chain = document.getElementById('chainInfo');
+  const parts = [];
   if (res.process_job_id) {
-    chain.textContent = 'Processing started as its own job: ' + res.process_job_id;
+    parts.push('Processing started as its own job: ' + res.process_job_id);
   } else if (res.after_import_skipped) {
-    chain.textContent = 'Processing not started: ' + res.after_import_skipped;
-  } else {
-    chain.textContent = '';
+    parts.push('Processing not started: ' + res.after_import_skipped);
   }
+  // Set only when the chained process job actually enqueued with a move
+  // plan, so this states what WILL happen, not what was merely requested.
+  // `note` carries the honest reason when folders were skipped (photos
+  // cataloged directly on the archive root have no folder to move).
+  if (res.after_process_move_planned) {
+    const plan = res.after_process_move_planned;
+    const n = (plan.folders || []).length;
+    if (n === 0) {
+      parts.push(
+        'Move to NAS (' + plan.target_name + ') will not run: '
+        + (plan.note || 'no folders to move') + '.');
+    } else {
+      parts.push(
+        'Processing will be followed by a move to NAS ('
+        + plan.target_name + '): '
+        + n + ' folder' + (n === 1 ? '' : 's') + '.');
+      if (plan.note) parts.push('Note: ' + plan.note + '.');
+    }
+  }
+  // Pre-block path: processing couldn't start, so the import hook fired
+  // the promised NAS move itself. `_chain_after_move` writes its outcome
+  // (move_job_ids / after_move_skipped / after_move_note /
+  // after_move_errors) onto the import result — surface it here so the
+  // user isn't left thinking "processing paused" also means the requested
+  // NAS move silently didn't happen.
+  const moveIds = res.move_job_ids || [];
+  if (moveIds.length) {
+    parts.push(
+      'Move to NAS: ' + moveIds.length + ' move job'
+      + (moveIds.length === 1 ? '' : 's') + ' started.');
+    if (res.after_move_note) parts.push('Note: ' + res.after_move_note + '.');
+  } else if (res.after_move_skipped) {
+    parts.push('Move to NAS skipped: ' + res.after_move_skipped + '.');
+  }
+  const moveErrors = res.after_move_errors || [];
+  if (moveErrors.length) {
+    parts.push(
+      'Move to NAS: ' + moveErrors.length + ' folder'
+      + (moveErrors.length === 1 ? '' : 's')
+      + ' failed to start — ' + moveErrors.join('; ') + '.');
+  }
+  chain.textContent = parts.join(' ');
 }
 
 function renderModelWarning(res) {
@@ -2446,6 +2813,7 @@ async function initImportPage() {
   // template, or file-type controls without the rendered structure
   // being invalidated.
   wireDestStructureInvalidation();
+  await loadImportReadiness();
   // Native menu deep link: File > Import Folder... routes here as
   // /import?mode=copy&pick=source so it lands in Copy-to-archive with the
   // source picker open, while File > Import Photos... gets the page
@@ -2519,19 +2887,25 @@ async function initImportPage() {
     setFolderTemplate(ingestCfg.folder_template);
   }
 
-  // Preselect the workspace's default strategy (null -> import only).
+  // Populate the dropdown from the saved-process library before resolving
+  // any default id into a selected option.
+  await loadAfterImportProcesses();
+
+  // Preselect the workspace's default process (null -> import only).
   const sel = document.getElementById('afterImportSelect');
-  const def = pipelineCfg.default_strategy;
-  sel.value = def ? def : '__none__';
+  const def = pipelineCfg.default_process_id;
+  sel.value = (def != null) ? String(def) : '__none__';
   if (sel.selectedIndex === -1) sel.value = '__none__';
   // Capture the unscoped global default so the "New workspace default"
-  // placeholder can name the strategy the server will actually apply
+  // placeholder can name the process the server will actually apply
   // to a freshly-created workspace (which starts with no overrides).
-  _globalDefaultStrategy = (cfg && cfg.pipeline && cfg.pipeline.default_strategy) || null;
+  _globalDefaultProcessId =
+    (cfg && cfg.pipeline && cfg.pipeline.default_process_id != null)
+      ? cfg.pipeline.default_process_id : null;
   // Capture the effective (workspace-scoped) default so switching out of
   // "New workspace" mode without touching the dropdown restores this
   // value rather than sticking on the placeholder.
-  _workspaceDefaultStrategy = def || null;
+  _workspaceDefaultProcessId = (def != null) ? def : null;
   // updateAdvancedImportOptions() may flip _afterImportHidingDefault
   // when the resolved default is an advanced-only strategy the current
   // mode hides. Wire the change listener first so a user-driven change
@@ -2544,14 +2918,15 @@ async function initImportPage() {
     // default (hidden)" placeholder is no longer relevant — retire it
     // so it doesn't clutter the dropdown on the next open.
     if (sel.value !== '__hidden_default__') retireHiddenDefaultOption(sel);
+    updateAfterMoveUI();
   });
   _afterImportHidingDefault = false;
   // Only mark the resolved default as trustworthy when BOTH config
   // fetches actually succeeded. Otherwise the select value reflects the
   // HTML placeholder rather than the workspace default, and startImport
-  // should omit the key so the server applies pipeline.default_strategy.
+  // should omit the key so the server applies pipeline.default_process_id.
   // Set this BEFORE the initial updateAdvancedImportOptions() call so
-  // that call can use _workspaceDefaultStrategy to derive the visible
+  // that call can use _workspaceDefaultProcessId to derive the visible
   // dropdown value.
   _afterImportConfigLoaded = cfgOk && overridesOk;
   updateAdvancedImportOptions();

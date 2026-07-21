@@ -25,9 +25,14 @@
   .publish-option { display:flex; gap:8px; align-items:flex-start; margin-top:12px; font-size:13px; color:var(--text-secondary); }
   .publish-status { min-height:16px; margin-top:10px; font-size:12px; color:var(--text-secondary); }
   .export-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .export-columns-wrap { grid-column:1 / -1; }
+  .export-columns { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:7px 16px; padding:10px; border:1px solid var(--border-primary); border-radius:6px; background:var(--bg-tertiary); }
+  .export-column-option { display:flex; align-items:flex-start; gap:7px; font-size:12px; color:var(--text-secondary); cursor:pointer; }
+  .export-column-option input { margin:1px 0 0; }
   @media (max-width: 640px) {
     .lifelist-actions { margin-left:0; width:100%; justify-content:flex-end; }
     .export-grid { grid-template-columns:1fr; }
+    .export-columns { grid-template-columns:1fr; }
   }
 
   .lifelist-meta { padding:8px 24px; font-size:12px; color:var(--text-secondary); }
@@ -44,6 +49,9 @@
   .species-meta { font-size:12px; color:var(--text-secondary); margin-top:6px; }
   .species-locations { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
   .loc-chip { padding:1px 7px; border-radius:999px; background:var(--bg-tertiary); color:var(--text-secondary); font-size:11px; white-space:nowrap; }
+  .lifelist-load-more { margin-top:9px; border:1px solid var(--border-secondary); background:var(--bg-tertiary); color:var(--text-primary); border-radius:4px; padding:5px 9px; font-size:12px; cursor:pointer; }
+  .lifelist-load-more:hover { border-color:var(--accent); }
+  .lifelist-load-more:disabled { opacity:.65; cursor:default; }
 
   .lifelist-empty { text-align:center; padding:80px 24px; color:var(--text-secondary); }
   .lifelist-empty a { color:var(--accent); }
@@ -152,6 +160,18 @@
       <option value="most-photos">Most photos</option>
     </select>
   </div>
+  <div class="control-group">
+    <label for="taxonomicGroupSelect">Taxonomic group</label>
+    <select id="taxonomicGroupSelect">
+      <option value="all">All groups</option>
+    </select>
+  </div>
+  <div class="control-group">
+    <label for="identificationRankSelect">Identification level</label>
+    <select id="identificationRankSelect">
+      <option value="all">All levels</option>
+    </select>
+  </div>
   <div class="control-group" title="When enabled, number the visible cards in their current displayed order. Disable it to keep each species' original chronological lifer number.">
     <label for="renumberView">Life List numbering</label>
     <label class="numbering-toggle" for="renumberView">
@@ -194,7 +214,11 @@
           <option value="all">All listed photos</option>
         </select>
       </div>
-      <label class="publish-option" style="margin-top:22px;">
+      <div id="exportColumnsWrap" class="export-columns-wrap" style="display:none;">
+        <span class="modal-label">Columns</span>
+        <div id="exportColumns" class="export-columns"></div>
+      </div>
+      <label id="exportLocationsWrap" class="publish-option" style="margin-top:22px;">
         <input id="exportLocations" type="checkbox">
         <span>Include location keywords.</span>
       </label>
@@ -258,7 +282,37 @@ var currentData = null;
 var debounceTimer = null;
 var LIFE_LIST_SORT_STORAGE_KEY = 'vireo.lifeList.sort';
 var LIFE_LIST_RENUMBER_STORAGE_KEY = 'vireo.lifeList.renumber';
+var LIFE_LIST_EXPORT_COLUMNS = {
+  species: [
+    ['number', 'Life-list number'],
+    ['species', 'Displayed species name'],
+    ['scientific_name', 'Scientific name'],
+    ['common_name', 'Common name'],
+    ['photo_count', 'Photo count'],
+    ['first_seen', 'First seen date'],
+    ['last_seen', 'Last seen date'],
+    ['locations', 'Locations'],
+    ['best_photo_id', 'Representative photo ID'],
+    ['best_filename', 'Representative filename'],
+  ],
+  photos: [
+    ['number', 'Life-list number'],
+    ['species', 'Displayed species name'],
+    ['scientific_name', 'Scientific name'],
+    ['common_name', 'Common name'],
+    ['photo_id', 'Photo ID'],
+    ['filename', 'Filename'],
+    ['timestamp', 'Date and time'],
+    ['is_life_list_photo', 'Life-list photo'],
+    ['quality_score', 'Quality score'],
+    ['locations', 'Locations'],
+  ],
+};
+var lifeListExportColumnSelections = {species: null, photos: null};
 var LIFE_LIST_SORTS = ['newest', 'life-order', 'alpha', 'most-photos'];
+var LIFE_LIST_PAGE_SIZE = 100;
+var lifeListLightboxSpecies = null;
+var lifeListLoadPromises = {};
 
 function restoreLifeListViewPreferences() {
   try {
@@ -298,7 +352,68 @@ async function loadLifeList() {
     meta.textContent = 'Failed to load life list.';
     return;
   }
+  populateLifeListTaxonomyFilters();
   render();
+}
+
+function replaceSelectOptions(select, options) {
+  var previous = select.value;
+  select.innerHTML = options.map(function(option) {
+    return '<option value="' + escapeAttr(option.value) + '">'
+      + escapeAttr(option.label) + '</option>';
+  }).join('');
+  if (options.some(function(option) { return option.value === previous; })) {
+    select.value = previous;
+  }
+}
+
+function populateLifeListTaxonomyFilters() {
+  var entries = (currentData && currentData.species) || [];
+  var classes = {};
+  var hasUnknownClass = false;
+  var hasUnknownRank = false;
+
+  entries.forEach(function(entry) {
+    var taxonomicClass = entry.taxonomic_class;
+    if (taxonomicClass && taxonomicClass.id != null) {
+      classes[String(taxonomicClass.id)] =
+        taxonomicClass.common_name || taxonomicClass.name;
+    } else {
+      hasUnknownClass = true;
+    }
+    if (!entry.taxon_rank) {
+      hasUnknownRank = true;
+    }
+  });
+
+  var groupOptions = [{ value: 'all', label: 'All groups' }];
+  Object.keys(classes).sort(function(a, b) {
+    return classes[a].localeCompare(classes[b]);
+  }).forEach(function(id) {
+    groupOptions.push({ value: id, label: classes[id] });
+  });
+  if (hasUnknownClass) {
+    groupOptions.push({ value: 'unknown', label: 'Unmatched / unknown' });
+  }
+  replaceSelectOptions(document.getElementById('taxonomicGroupSelect'), groupOptions);
+
+  var rankLabels = {
+    species: 'Species only',
+    genus: 'Genus',
+    family: 'Family',
+    order: 'Order',
+    class: 'Class',
+    phylum: 'Phylum',
+    kingdom: 'Kingdom'
+  };
+  var rankOptions = [{ value: 'all', label: 'All levels' }];
+  Object.keys(rankLabels).forEach(function(rank) {
+    rankOptions.push({ value: rank, label: rankLabels[rank] });
+  });
+  if (hasUnknownRank) {
+    rankOptions.push({ value: 'unknown', label: 'Unmatched / unknown' });
+  }
+  replaceSelectOptions(document.getElementById('identificationRankSelect'), rankOptions);
 }
 
 function sortedSpecies() {
@@ -345,6 +460,16 @@ function renderCard(entry, displayNumber) {
   }).join('');
   var extraLocs = (entry.locations || []).length - 3;
   if (extraLocs > 0) locations += '<span class="loc-chip">+' + extraLocs + ' more</span>';
+  var remaining = Math.max(0, entry.photo_count - (entry.photos || []).length);
+  var loadMore = entry.has_more
+    ? '<button type="button" class="lifelist-load-more" data-load-more-species="'
+      + escapeAttr(entry.species) + '"' + (entry.loading_more ? ' disabled' : '') + '>'
+      + (entry.loading_more
+        ? 'Loading photos…'
+        : 'Load ' + Math.min(LIFE_LIST_PAGE_SIZE, remaining) + ' more photo'
+          + (Math.min(LIFE_LIST_PAGE_SIZE, remaining) === 1 ? '' : 's'))
+      + '</button>'
+    : '';
   return '<div class="species-card" data-species="' + escapeAttr(entry.species) + '" title="'
     + escapeAttr((entry.locations || []).join(', ')) + '">'
     + '<div class="lifer-number">#' + displayNumber + '</div>'
@@ -355,7 +480,51 @@ function renderCard(entry, displayNumber) {
     + sci
     + '<div class="species-meta">' + metaParts.join(' &middot; ') + '</div>'
     + (locations ? '<div class="species-locations">' + locations + '</div>' : '')
+    + loadMore
     + '</div></div>';
+}
+
+function lifeListEntry(species) {
+  return (currentData && currentData.species || []).find(function(entry) {
+    return entry.species === species;
+  });
+}
+
+function loadMoreLifeListPhotos(entry) {
+  if (!entry || !entry.has_more) return Promise.resolve(entry ? entry.photos : []);
+  if (lifeListLoadPromises[entry.species]) {
+    return lifeListLoadPromises[entry.species];
+  }
+  entry.loading_more = true;
+  render();
+  var params = new URLSearchParams({
+    species: entry.species,
+    offset: String((entry.photos || []).length),
+    limit: String(LIFE_LIST_PAGE_SIZE),
+  });
+  var promise = safeFetch('/api/life-list/species?' + params.toString())
+    .then(function(data) {
+      var seen = new Set((entry.photos || []).map(function(photo) { return photo.id; }));
+      (data.photos || []).forEach(function(photo) {
+        if (!seen.has(photo.id)) {
+          entry.photos.push(photo);
+          seen.add(photo.id);
+        }
+      });
+      entry.loaded_count = data.loaded_count;
+      entry.has_more = data.has_more;
+      return entry.photos;
+    })
+    .catch(function() {
+      return entry.photos;
+    })
+    .finally(function() {
+      entry.loading_more = false;
+      delete lifeListLoadPromises[entry.species];
+      render();
+    });
+  lifeListLoadPromises[entry.species] = promise;
+  return promise;
 }
 
 function render() {
@@ -375,6 +544,8 @@ function render() {
   controls.style.display = '';
 
   var search = document.getElementById('speciesSearch').value.trim();
+  var taxonomicGroup = document.getElementById('taxonomicGroupSelect').value;
+  var identificationRank = document.getElementById('identificationRankSelect').value;
   var searchOptions = VireoTextSearch.readOptions('lifeSpecies');
   var list = sortedSpecies();
   if (search) {
@@ -386,30 +557,84 @@ function render() {
       );
     });
   }
+  if (taxonomicGroup !== 'all') {
+    list = list.filter(function(entry) {
+      if (taxonomicGroup === 'unknown') return !entry.taxonomic_class;
+      return entry.taxonomic_class
+        && String(entry.taxonomic_class.id) === taxonomicGroup;
+    });
+  }
+  if (identificationRank !== 'all') {
+    list = list.filter(function(entry) {
+      if (identificationRank === 'unknown') return !entry.taxon_rank;
+      return entry.taxon_rank === identificationRank;
+    });
+  }
 
+  var filtersActive = Boolean(search)
+    || taxonomicGroup !== 'all'
+    || identificationRank !== 'all';
   meta.textContent = currentData.meta.species_count + ' species on your life list · '
     + currentData.meta.photo_count + ' tagged photos'
-    + (search ? ' · ' + list.length + ' matching' : '');
+    + (filtersActive ? ' · ' + list.length + ' shown' : '');
 
   var renumberView = document.getElementById('renumberView').checked;
   content.innerHTML = list.map(function(entry, index) {
     return renderCard(entry, renumberView ? index + 1 : entry.number);
   }).join('')
-    || '<div class="lifelist-empty" style="grid-column:1/-1;"><p>No species match this search.</p></div>';
+    || '<div class="lifelist-empty" style="grid-column:1/-1;"><p>No life-list entries match these filters.</p></div>';
+
+  content.querySelectorAll('[data-load-more-species]').forEach(function(button) {
+    button.addEventListener('click', function(event) {
+      event.stopPropagation();
+      loadMoreLifeListPhotos(lifeListEntry(button.getAttribute('data-load-more-species')));
+    });
+  });
 
   content.querySelectorAll('.species-card').forEach(function(card) {
     card.addEventListener('click', function() {
       var sp = card.getAttribute('data-species');
       var entry = (currentData.species || []).find(function(e) { return e.species === sp; });
       if (entry && entry.best && window.openLightbox) {
-        // The lightbox set is this species' top photos so the user can
-        // flip through their best shots of the lifer. The shared lightbox
-        // panel (see _navbar.html) renders its own representative control.
+        // Keep the same array object as pages are appended so the shared
+        // lightbox immediately sees newly loaded photos.
+        lifeListLightboxSpecies = entry.species;
         openLightbox(entry.best.id, entry.best.filename, entry.photos || [entry.best]);
       }
     });
   });
 }
+
+// Prefetch the next page before the viewer reaches the end of the current
+// lightbox list. If navigation reaches the boundary first, the boundary
+// listener waits for that same request and advances as soon as it arrives.
+document.addEventListener('lightbox:photochanged', function(event) {
+  var entry = lifeListEntry(lifeListLightboxSpecies);
+  if (!entry || !entry.has_more) return;
+  var photoId = event && event.detail && event.detail.photoId;
+  var index = (entry.photos || []).findIndex(function(photo) { return photo.id === photoId; });
+  if (index >= entry.photos.length - 3) loadMoreLifeListPhotos(entry);
+});
+
+document.addEventListener('lightbox:navigationboundary', function(event) {
+  var detail = event && event.detail || {};
+  if (detail.delta !== 1) return;
+  var entry = lifeListEntry(lifeListLightboxSpecies);
+  if (!entry || !entry.has_more) return;
+  var currentId = detail.photoId;
+  loadMoreLifeListPhotos(entry).then(function() {
+    if (window._lightboxCurrentId !== currentId) return;
+    var index = entry.photos.findIndex(function(photo) { return photo.id === currentId; });
+    var next = entry.photos[index + 1];
+    if (next && window.openLightbox) {
+      openLightbox(next.id, next.filename, entry.photos);
+    }
+  });
+});
+
+document.addEventListener('lightbox:closed', function() {
+  lifeListLightboxSpecies = null;
+});
 
 function debounceRender() {
   clearTimeout(debounceTimer);
@@ -417,6 +642,8 @@ function debounceRender() {
 }
 
 document.getElementById('speciesSearch').addEventListener('input', debounceRender);
+document.getElementById('taxonomicGroupSelect').addEventListener('change', render);
+document.getElementById('identificationRankSelect').addEventListener('change', render);
 document.getElementById('sortSelect').addEventListener('change', function() {
   saveLifeListViewPreference(LIFE_LIST_SORT_STORAGE_KEY, this.value);
   if (currentData) render();
@@ -442,15 +669,71 @@ function closeExportModal() {
   document.getElementById('exportModal').classList.remove('open');
 }
 
+function exportColumnSelection(detail) {
+  if (!lifeListExportColumnSelections[detail]) {
+    var selection = {};
+    LIFE_LIST_EXPORT_COLUMNS[detail].forEach(function(column) {
+      selection[column[0]] = true;
+    });
+    lifeListExportColumnSelections[detail] = selection;
+  }
+  return lifeListExportColumnSelections[detail];
+}
+
+function selectedExportColumns(detail) {
+  var selection = exportColumnSelection(detail);
+  return LIFE_LIST_EXPORT_COLUMNS[detail]
+    .map(function(column) { return column[0]; })
+    .filter(function(column) { return selection[column]; });
+}
+
+function updateExportLocationsVisibility() {
+  var format = document.getElementById('exportFormat').value;
+  var detail = document.getElementById('exportDetail').value;
+  var showLocations = format === 'json' || format === 'txt';
+  if (format === 'csv') {
+    showLocations = selectedExportColumns(detail).indexOf('locations') !== -1;
+  }
+  document.getElementById('exportLocationsWrap').style.display = showLocations ? '' : 'none';
+}
+
+function renderExportColumns(detail) {
+  var container = document.getElementById('exportColumns');
+  var selection = exportColumnSelection(detail);
+  container.textContent = '';
+  LIFE_LIST_EXPORT_COLUMNS[detail].forEach(function(column) {
+    var label = document.createElement('label');
+    label.className = 'export-column-option';
+    var checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = column[0];
+    checkbox.checked = selection[column[0]];
+    checkbox.addEventListener('change', function() {
+      selection[column[0]] = checkbox.checked;
+      document.getElementById('exportStatus').textContent = '';
+      updateExportLocationsVisibility();
+    });
+    var text = document.createElement('span');
+    text.textContent = column[1];
+    label.appendChild(checkbox);
+    label.appendChild(text);
+    container.appendChild(label);
+  });
+}
+
 function updateExportControls() {
   var format = document.getElementById('exportFormat').value;
   var detailWrap = document.getElementById('exportDetailWrap');
   var photosWrap = document.getElementById('exportPhotosWrap');
+  var columnsWrap = document.getElementById('exportColumnsWrap');
   var detail = document.getElementById('exportDetail').value;
   detailWrap.style.display = format === 'csv' ? '' : 'none';
   photosWrap.style.display = (
     format === 'files' || (format === 'csv' && detail === 'photos')
   ) ? '' : 'none';
+  columnsWrap.style.display = format === 'csv' ? '' : 'none';
+  if (format === 'csv') renderExportColumns(detail);
+  updateExportLocationsVisibility();
 }
 
 function downloadLifeListExport() {
@@ -458,15 +741,29 @@ function downloadLifeListExport() {
   var detail = document.getElementById('exportDetail').value;
   var photos = document.getElementById('exportPhotos').value;
   var includeLocations = document.getElementById('exportLocations').checked ? '1' : '0';
+  var columns = format === 'csv' ? selectedExportColumns(detail) : [];
+  if (format === 'csv' && !columns.length) {
+    document.getElementById('exportStatus').textContent = 'Select at least one column.';
+    return;
+  }
   var params = new URLSearchParams({
     format: format,
     detail: detail,
     include_locations: includeLocations,
   });
+  if (format === 'csv') params.set('columns', columns.join(','));
   if (format === 'files' || (format === 'csv' && detail === 'photos')) {
     params.set('photos', photos);
   }
-  window.location.href = '/api/life-list/export?' + params.toString();
+  var link = document.createElement('a');
+  link.href = '/api/life-list/export?' + params.toString();
+  // Explicitly mark this as a download. WKWebView otherwise treats showable
+  // formats such as CSV as a normal page navigation even when the response
+  // carries Content-Disposition: attachment.
+  link.download = '';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
   closeExportModal();
 }
 

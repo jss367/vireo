@@ -137,7 +137,7 @@ class PipelineParams:
     # explicitly checks the Eye Keypoints stage box — that box is a
     # per-run opt-in that must override the (default-off) Settings value
     # so preflight and scoring see the enabled state. Left None by
-    # strategy expansion (``process_strategies.resolve_strategy``) so a
+    # strategy expansion (the saved-process flag expansion) so a
     # ``full`` strategy chain from after-import respects the user's
     # Settings default instead of silently forcing eye detection on.
     eye_detect_override: bool | None = None
@@ -223,6 +223,72 @@ def resolve_remote_archive(target, subpath):
 def _should_abort(abort_event):
     """Check if the pipeline should abort."""
     return abort_event.is_set()
+
+
+class _PipelinePauseGate:
+    """Park every active pipeline worker before publishing ``paused``.
+
+    Phase one has four concurrent workers.  Letting the first worker that
+    reaches a checkpoint publish ``paused`` would be misleading because the
+    other three could still be scanning, rendering, or loading a model.  This
+    gate tracks the active participants and only confirms the pause once all
+    of them are at safe checkpoints.  Later pipeline stages use the same gate
+    with one active participant.
+    """
+
+    def __init__(self, runner, job_id):
+        self._runner = runner
+        self._job_id = job_id
+        self._lock = threading.Lock()
+        self._active = set()
+        self._parked = set()
+
+    def _pause_requested(self):
+        probe = getattr(self._runner, "pause_requested", None)
+        return bool(probe and probe(self._job_id))
+
+    def _cancellation_requested(self):
+        probe = getattr(self._runner, "cancellation_requested", None)
+        if probe is not None:
+            return probe(self._job_id)
+        return self._runner.is_cancelled(self._job_id)
+
+    def register_many(self, participant_names):
+        with self._lock:
+            self._active.update(participant_names)
+
+    def register(self, participant_name):
+        self.register_many((participant_name,))
+
+    def unregister(self, participant_name):
+        with self._lock:
+            self._active.discard(participant_name)
+            self._parked.discard(participant_name)
+            all_parked = not self._active or self._active <= self._parked
+        if all_parked and self._pause_requested():
+            self._runner.mark_paused(self._job_id)
+
+    def checkpoint(self, participant_name):
+        """Wait through a requested pause and return cancellation state."""
+        if not self._pause_requested():
+            return self._cancellation_requested()
+
+        with self._lock:
+            if participant_name not in self._active:
+                return self._cancellation_requested()
+            self._parked.add(participant_name)
+            all_parked = self._active <= self._parked
+
+        if all_parked:
+            self._runner.mark_paused(self._job_id)
+
+        try:
+            return self._runner.wait_if_paused(
+                self._job_id, publish_paused=False,
+            )
+        finally:
+            with self._lock:
+                self._parked.discard(participant_name)
 
 
 def _recipe_render_source(photo, recipe, max_size, vireo_dir, folders):
@@ -734,6 +800,53 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
     """
     job["_start_time"] = time.time()
     abort = threading.Event()
+    pause_gate = _PipelinePauseGate(runner, job["id"])
+    pause_context = threading.local()
+
+    def _cancellation_requested():
+        probe = getattr(runner, "cancellation_requested", None)
+        if probe is not None:
+            return probe(job["id"])
+        return runner.is_cancelled(job["id"])
+
+    def _pause_checkpoint():
+        participant = getattr(pause_context, "participant", None)
+        if participant is None:
+            return _cancellation_requested()
+        cancelled = pause_gate.checkpoint(participant)
+        if cancelled:
+            abort.set()
+        return cancelled
+
+    # Shadow the module-level helper inside this run so the existing safe
+    # cancellation boundaries double as pause checkpoints.  Calls made from a
+    # library-owned helper thread have no registered participant and remain a
+    # non-blocking cancellation probe; the owning pipeline worker parks at its
+    # next outer boundary instead.
+    def _should_abort(abort_event):
+        if _pause_checkpoint():
+            abort_event.set()
+        # Resolve through the module namespace so tests and diagnostics that
+        # replace the pipeline's abort policy still observe every checkpoint.
+        return globals()["_should_abort"](abort_event)
+
+    def _should_abort_without_pause(abort_event):
+        """Check cancellation without parking while a shared lock is held."""
+        if _cancellation_requested():
+            abort_event.set()
+        return globals()["_should_abort"](abort_event)
+
+    def _run_pause_participant(participant, work_fn, *, pre_registered=False):
+        if not pre_registered:
+            pause_gate.register(participant)
+        pause_context.participant = participant
+        try:
+            _pause_checkpoint()
+            return work_fn()
+        finally:
+            pause_context.participant = None
+            pause_gate.unregister(participant)
+
     errors = job["errors"]  # shared list, append is thread-safe
     if params.destination or params.local_processing or params.remote_target_id:
         raise RuntimeError(
@@ -853,7 +966,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
         def _cancel_watcher():
             while not cancel_watcher_stop.is_set():
-                if runner.is_cancelled(job["id"]):
+                # This watcher must never park for Pause: it is not pipeline
+                # work and would otherwise publish ``paused`` before the real
+                # stage workers have reached safe checkpoints.
+                if _cancellation_requested():
                     abort.set()
                     return
                 if cancel_watcher_stop.wait(0.25):
@@ -988,6 +1104,20 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         collection_ready = threading.Event()
         models_ready = threading.Event()
         loaded_models = {}  # populated by model_loader thread
+
+        def _put_scan_item(item):
+            """Put into the scan/thumbnail queue without defeating Pause.
+
+            Both ordinary photo items and the end sentinel can otherwise block
+            forever on a full queue after the thumbnail worker has parked.
+            """
+            while not _should_abort(abort):
+                try:
+                    scan_to_thumb.put(item, timeout=0.5)
+                    return True
+                except queue.Full:
+                    continue
+            return False
         # Resolved in collection_stage once the scanner has committed photo rows.
         # When set (i.e. snapshot-scoped runs), the collection is trimmed to this
         # set so every downstream stage (classify, extract_masks, eye_keypoints,
@@ -1040,17 +1170,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                 def photo_cb(photo_id, path):
                     collected_photo_ids.append(photo_id)
-                    # Abort-aware put: a blocking no-timeout put would wedge the
-                    # scanner forever if the thumbnail consumer died with a full
-                    # queue (its setup can fail before its drain loop starts).
-                    # On abort the item is dropped — the consumer is gone and the
-                    # pipeline is tearing down anyway.
-                    while not _should_abort(abort):
-                        try:
-                            scan_to_thumb.put((photo_id, path), timeout=0.5)
-                            break
-                        except queue.Full:
-                            continue
+                    # Abort/pause-aware: a blocking put would wedge the scanner
+                    # if the thumbnail consumer parked or failed on a full queue.
+                    _put_scan_item((photo_id, path))
                     stages["scan"]["count"] = len(collected_photo_ids)
                     runner.update_step(job["id"], "scan",
                                        current_file=os.path.basename(path))
@@ -1070,7 +1192,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     )
 
                 def cancel_check():
-                    return _should_abort(abort) or runner.is_cancelled(job["id"])
+                    return _should_abort(abort) or _cancellation_requested()
 
                 # Accumulator so multi-folder scans (repair loop, scan-in-place
                 # with sources=[...]) don't rewind the overall progress at each
@@ -1126,7 +1248,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             summary="Skipped (using collection)",
                         )
                         _update_stages(runner, job["id"], stages)
-                        scan_to_thumb.put(_SENTINEL)
+                        _put_scan_item(_SENTINEL)
                         return
 
                     total_broken = sum(len(paths) for _, paths in broken)
@@ -1195,7 +1317,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                         except (OSError, RuntimeError) as e:
                             if isinstance(e, ScanCancelled) and (
-                                _should_abort(abort) or runner.is_cancelled(job["id"])
+                                _should_abort(abort) or _cancellation_requested()
                             ):
                                 abort.set()
                                 stages["scan"]["status"] = "skipped"
@@ -1212,14 +1334,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         finally:
                             advance_scan_acc()
 
-                    if _should_abort(abort) or runner.is_cancelled(job["id"]):
+                    if _should_abort(abort) or _cancellation_requested():
                         stages["scan"]["status"] = "skipped"
                         runner.update_step(
                             job["id"], "scan",
                             status="completed",
                             summary="Cancelled",
                         )
-                        scan_to_thumb.put(_SENTINEL)
+                        _put_scan_item(_SENTINEL)
                         return
 
                     from metadata import scan_metadata_warning
@@ -1238,7 +1360,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     runner.update_step(
                         job["id"], "scan", status="completed", summary=summary,
                     )
-                    scan_to_thumb.put(_SENTINEL)
+                    _put_scan_item(_SENTINEL)
                     return
 
                 # Determine source folder(s)
@@ -1304,7 +1426,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     status="completed", summary="Skipped",
                                 )
                             abort.set()
-                            scan_to_thumb.put(_SENTINEL)
+                            _put_scan_item(_SENTINEL)
 
                         try:
                             if remote_archive is not None:
@@ -2137,7 +2259,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                         finally:
                             advance_scan_acc()
-                if _should_abort(abort) or runner.is_cancelled(job["id"]):
+                if _should_abort(abort) or _cancellation_requested():
                     stages["scan"]["status"] = "skipped"
                     runner.update_step(
                         job["id"], "scan", status="completed", summary="Cancelled",
@@ -2158,7 +2280,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                        summary=scan_summary)
             except Exception as e:
                 if isinstance(e, ScanCancelled) and (
-                    _should_abort(abort) or runner.is_cancelled(job["id"])
+                    _should_abort(abort) or _cancellation_requested()
                 ):
                     abort.set()
                     stages["scan"]["status"] = "skipped"
@@ -2204,7 +2326,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     "cache for %s",
                                     scanned_root,
                                 )
-                scan_to_thumb.put(_SENTINEL)
+                _put_scan_item(_SENTINEL)
                 _update_stages(runner, job["id"], stages)
 
         def collection_stage():
@@ -2218,6 +2340,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
             # Wait for scanner to complete (don't check abort -- we want the
             # collection regardless so the user can see scanned photos)
             while True:
+                # Pause is different from abort: this worker can park while it
+                # waits without giving up the collection the scanner produced.
+                _pause_checkpoint()
                 if stages["scan"]["status"] in ("completed", "failed", "skipped"):
                     break
                 time.sleep(0.1)
@@ -2350,6 +2475,9 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         pending_thumb_paths.clear()
 
                 while True:
+                    # Continue draining after cancellation, but park before
+                    # taking another item when the whole pipeline is paused.
+                    _pause_checkpoint()
                     try:
                         item = scan_to_thumb.get(timeout=1.0)
                     except queue.Empty:
@@ -2775,9 +2903,40 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 pass  # photo may have been deleted mid-pipeline
                             continue
                     if not os.path.exists(cache_path):
-                        canonical = _recipe_render_source(
-                            detail_photo, recipe, max_size, base_dir, folders,
-                        )
+                        folder_path = folders.get(detail_photo["folder_id"])
+                        raw_source_path = None
+                        if (
+                            not recipe
+                            and folder_path
+                            and os.path.splitext(detail_photo["filename"])[1].lower()
+                            in _RAW_EXTENSIONS
+                        ):
+                            # Mirror /photos/<id>/preview: an unedited RAW
+                            # must warm from the camera-rendered source,
+                            # not the highlight-preserving working copy.
+                            # Otherwise the pipeline preview stage writes
+                            # flatter/darker bytes into the tracked preview
+                            # cache and _serve_preview returns those cache
+                            # hits before its own RAW-source branch ever
+                            # runs, so the migration's one-time purge is
+                            # undone the first time this stage runs.
+                            candidate = os.path.join(
+                                folder_path, detail_photo["filename"],
+                            )
+                            if os.path.exists(candidate) and not _has_current_working_copy_failure(
+                                detail_photo,
+                                base_dir,
+                                trust_existing_working_copy=False,
+                                live_source_path=candidate,
+                                folder_path=folder_path,
+                            ):
+                                raw_source_path = candidate
+                        if raw_source_path:
+                            canonical = raw_source_path
+                        else:
+                            canonical = _recipe_render_source(
+                                detail_photo, recipe, max_size, base_dir, folders,
+                            )
                         if (
                             os.path.splitext(canonical)[1].lower() in _RAW_EXTENSIONS
                             and _has_current_working_copy_failure(
@@ -3079,7 +3238,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         pass
 
                 def cancel_check():
-                    return _should_abort(abort) or runner.is_cancelled(job["id"])
+                    return _should_abort(abort) or _cancellation_requested()
 
                 if model_type == "timm":
                     if cancel_check():
@@ -3316,7 +3475,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         preload_err.__class__.__name__ == "ClassificationCancelled"
                     )
                     if (
-                        runner.is_cancelled(job["id"])
+                        _cancellation_requested()
                         or is_classification_cancelled
                         or str(preload_err) == "classification cancelled"
                     ):
@@ -3346,7 +3505,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     e.__class__.__name__ == "ClassificationCancelled"
                 )
                 if (
-                    runner.is_cancelled(job["id"])
+                    _cancellation_requested()
                     or is_classification_cancelled
                     or str(e) == "classification cancelled"
                 ):
@@ -3644,6 +3803,14 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 user_cfg = thread_db.get_effective_config(cfg.load())
                 grouping_window = user_cfg.get("grouping_window_seconds", 5)
                 similarity_threshold = user_cfg.get("similarity_threshold", 0.85)
+                detector_confidence = user_cfg.get("detector_confidence", 0.2)
+                pipeline_cfg = user_cfg.get("pipeline", {})
+                weak_rescue_enabled = pipeline_cfg.get(
+                    "weak_detection_rescue_enabled", True,
+                )
+                weak_detection_confidence = pipeline_cfg.get(
+                    "weak_detection_confidence", 0.12,
+                )
 
                 tax = loaded_models["tax"]
                 # Fingerprint for the FIRST model is preloaded by model_loader_stage.
@@ -3658,6 +3825,43 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 folders = detect_state["folders"]
                 cached_detections = detect_state["detections"]
                 total = len(photos)
+
+                # A low-confidence box is not globally promoted. Only select
+                # weak runs bracketed by ordinary detections in one tightly
+                # timed sequence. This gives the classifier a chance to
+                # validate threshold-cliff frames without making every weak
+                # MegaDetector result eligible throughout the library.
+                contextual_weak_ids = set()
+                if (
+                    weak_rescue_enabled
+                    and weak_detection_confidence < detector_confidence
+                    and photos
+                ):
+                    from weak_detections import contextual_weak_runs
+
+                    raw_mdv6_detections = thread_db.get_detections_for_photos(
+                        [p["id"] for p in photos],
+                        min_conf=weak_detection_confidence,
+                        detector_model="megadetector-v6",
+                    )
+                    weak_runs = contextual_weak_runs(
+                        photos,
+                        raw_mdv6_detections,
+                        detector_confidence=detector_confidence,
+                        weak_confidence=weak_detection_confidence,
+                        max_gap=pipeline_cfg.get("burst_time_gap", 3.0),
+                    )
+                    contextual_weak_ids = {
+                        photo_id
+                        for run in weak_runs
+                        for photo_id in run["photo_ids"]
+                    }
+                    if contextual_weak_ids:
+                        log.info(
+                            "Classification: rescuing %d weak-detection "
+                            "photo(s) across %d bracketed sequence(s)",
+                            len(contextual_weak_ids), len(weak_runs),
+                        )
 
                 total_predictions_stored = 0
                 total_full_image_fallbacks = 0
@@ -3735,7 +3939,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                             if (
                                 _should_abort(abort)
-                                or runner.is_cancelled(job["id"])
+                                or _cancellation_requested()
                                 or is_classification_cancelled
                                 or str(model_err) == "classification cancelled"
                             ):
@@ -3830,6 +4034,22 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     full_image_fallbacks = 0
                     stages["classify"].setdefault("cached", 0)
                     stages["classify"].setdefault("seen", 0)
+                    # Photo-scoped bookkeeping for ``count`` (inferred) and
+                    # ``cached``. ``total`` and ``cached_estimate`` count PHOTOS
+                    # (× specs), so multi-subject photos with several qualifying
+                    # detections must not each add multiple ticks to ``count`` /
+                    # ``cached`` — otherwise the UI's ``inferred · cached /
+                    # total`` line can read ``2 inferred / 1`` on a two-subject
+                    # photo, and the cached-preflight would understate remaining
+                    # work when only one of the photo's detections is cached.
+                    # A photo lands in ``photos_cached_in_spec`` on its first
+                    # cache-hit detection and is promoted to
+                    # ``photos_inferred_in_spec`` (decrementing ``cached``,
+                    # incrementing ``count``) the moment any of its detections
+                    # actually runs inference. Reset per spec so a photo can be
+                    # counted once per (photo × spec) — matching ``total``.
+                    photos_cached_in_spec: set = set()
+                    photos_inferred_in_spec: set = set()
                     # Photos that iterated past the inner abort check IN THIS spec.
                     # Used for the per-spec ``runner.update_step`` progress (which
                     # is bounded by ``total``, not the multi-spec stage total) and
@@ -3857,6 +4077,8 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         model_type=model_type,
                         model_name=model_name,
                         spec_fp=spec_fp,
+                        photos_cached_in_spec=photos_cached_in_spec,
+                        photos_inferred_in_spec=photos_inferred_in_spec,
                     ):
                         nonlocal failed, has_flushed_in_spec
                         if not inference_batch:
@@ -3888,10 +4110,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             pre_len,
                         )
 
-                        new_count = len(raw_results) - pre_len
-                        if new_count > 0:
+                        # Photo-scoped ``count`` bookkeeping: each distinct
+                        # photo whose flush yielded at least one successful
+                        # classification counts once. If it was previously
+                        # bucketed as fully-cached (an earlier detection hit
+                        # the cache), migrate it — decrement ``cached`` and
+                        # add it to ``count`` — so ``count + cached`` stays
+                        # bounded by the (photo-scoped) ``total``.
+                        new_photo_ids = {
+                            r["photo"]["id"] for r in raw_results[pre_len:]
+                        }
+                        promoted = new_photo_ids & photos_cached_in_spec
+                        if promoted:
+                            photos_cached_in_spec.difference_update(promoted)
+                            stages["classify"]["cached"] = max(
+                                0,
+                                stages["classify"].get("cached", 0)
+                                - len(promoted),
+                            )
+                        newly_inferred = new_photo_ids - photos_inferred_in_spec
+                        if newly_inferred:
+                            photos_inferred_in_spec.update(newly_inferred)
                             stages["classify"]["count"] = (
-                                stages["classify"].get("count", 0) + new_count
+                                stages["classify"].get("count", 0)
+                                + len(newly_inferred)
                             )
 
                     for batch_start in range(0, total, batch_size):
@@ -3917,7 +4159,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             if models_succeeded == 0:
                                 first_model_photo_ids.add(photo["id"])
 
-                            # Pull the primary detection for this photo from the
+                            # Pull every qualifying detection for this photo from the
                             # detect-stage cache. Fall back to db.get_detections()
                             # only for photos whose per-photo detect iteration
                             # never completed (e.g. mid-batch exception, or the
@@ -3928,15 +4170,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             # classifiers still get one attempt and future reruns
                             # can hit classifier_runs for that attempt.
                             full_image_fallback = False
+                            is_contextual_weak = (
+                                photo["id"] in contextual_weak_ids
+                            )
+                            detection_floor = (
+                                weak_detection_confidence
+                                if is_contextual_weak
+                                else detector_confidence
+                            )
                             if photo["id"] in cached_detections:
                                 # cached_detections from _detect_batch can include
                                 # full-image rows when an earlier pass synthesized
                                 # them (legacy db state); filter to match the
-                                # fallback-query branch below so primary_det only
-                                # lands on a real detector box.
+                                # fallback-query branch below so classifiers only
+                                # see real, qualifying animal boxes. _detect_batch's
+                                # fresh cache contains raw low-confidence boxes too,
+                                # while DB reads normally apply this threshold.
                                 photo_dets = [
                                     d for d in cached_detections[photo["id"]]
                                     if d.get("detector_model") != "full-image"
+                                    and d.get("category", "animal") == "animal"
+                                    and d.get(
+                                        "confidence",
+                                        d.get("detector_confidence", 0),
+                                    ) >= detection_floor
                                 ]
                             else:
                                 photo_dets = [
@@ -3949,11 +4206,41 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         "confidence": d["detector_confidence"],
                                         "category": d["category"],
                                     }
-                                    for d in thread_db.get_detections(photo["id"])
+                                    for d in thread_db.get_detections(
+                                        photo["id"], min_conf=detection_floor,
+                                    )
                                     if d["detector_model"] != "full-image"
+                                    and d["category"] == "animal"
                                 ]
-                            primary_det = photo_dets[0] if photo_dets else None
-                            if primary_det is None:
+                            if is_contextual_weak and not photo_dets:
+                                # detect_state intentionally caches only rows
+                                # passing the ordinary workspace threshold on
+                                # reuse runs. Recover the raw weak row from the
+                                # database for this explicitly selected bridge.
+                                photo_dets = [
+                                    {
+                                        "id": d["id"],
+                                        "box_x": d["box_x"],
+                                        "box_y": d["box_y"],
+                                        "box_w": d["box_w"],
+                                        "box_h": d["box_h"],
+                                        "confidence": d["detector_confidence"],
+                                        "category": d["category"],
+                                    }
+                                    for d in thread_db.get_detections(
+                                        photo["id"],
+                                        min_conf=weak_detection_confidence,
+                                        detector_model="megadetector-v6",
+                                    )
+                                    if d["category"] == "animal"
+                                ]
+                            if is_contextual_weak and photo_dets:
+                                # One best weak crop is enough to validate the
+                                # bridge. Classifying every low-confidence box
+                                # would multiply work and false-positive risk.
+                                photo_dets = photo_dets[:1]
+                            detections_to_classify = photo_dets
+                            if not detections_to_classify:
                                 # Distinguish "no eligible detection at the
                                 # workspace threshold" from "MegaDetector found
                                 # nothing at all." Weak raw detections keep the
@@ -3986,7 +4273,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                         detector_model="full-image",
                                     )
                                     full_det_id = full_det_ids[0]
-                                primary_det = {
+                                detections_to_classify = [{
                                     "id": full_det_id,
                                     "box_x": 0,
                                     "box_y": 0,
@@ -3995,99 +4282,137 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                     "confidence": 0,
                                     "category": "animal",
                                     "detector_model": "full-image",
-                                }
+                                }]
                                 full_image_fallback = True
                                 full_image_fallbacks += 1
                                 fresh_full_image_ids_by_photo.setdefault(
                                     photo["id"], set(),
                                 ).add(full_det_id)
 
-                            # Classifier-run gate: skip work when this exact
-                            # (detection, classifier_model, labels_fingerprint)
-                            # triple was already classified. Reclassify bypasses
-                            # the gate so users can force a fresh pass. When
-                            # gated, surface the cached top-1 prediction into
-                            # raw_results so downstream grouping/storage sees
-                            # it — otherwise the cached detection would silently
-                            # drop out of the grouping pipeline.
-                            if not params.reclassify:
-                                run_keys = thread_db.get_classifier_run_keys(
-                                    primary_det["id"]
-                                )
-                                if (model_name, spec_fp) in run_keys:
-                                    cached = thread_db.get_predictions_for_detection(
-                                        primary_det["id"],
-                                        classifier_model=model_name,
-                                        labels_fingerprint=spec_fp,
-                                        min_classifier_conf=0,
+                            for detection in detections_to_classify:
+                                # Classifier-run gate: skip work when this exact
+                                # (detection, classifier_model, labels_fingerprint)
+                                # triple was already classified. Reclassify bypasses
+                                # the gate so users can force a fresh pass. When
+                                # gated, surface the cached top-1 prediction into
+                                # raw_results so downstream grouping/storage sees
+                                # it — otherwise the cached detection would silently
+                                # drop out of the grouping pipeline.
+                                if not params.reclassify:
+                                    run_keys = thread_db.get_classifier_run_keys(
+                                        detection["id"]
                                     )
-                                    if cached:
-                                        skipped_existing += 1
-                                        stages["classify"]["cached"] += 1
-                                        top = cached[0]
-                                        folder_path = folders.get(photo["folder_id"], "")
-                                        image_path = os.path.join(
-                                            folder_path, photo["filename"],
+                                    if (model_name, spec_fp) in run_keys:
+                                        cached = thread_db.get_predictions_for_detection(
+                                            detection["id"],
+                                            classifier_model=model_name,
+                                            labels_fingerprint=spec_fp,
+                                            min_classifier_conf=0,
                                         )
-                                        timestamp = None
-                                        if photo["timestamp"]:
-                                            with contextlib.suppress(ValueError, TypeError):
-                                                timestamp = dt.fromisoformat(
-                                                    photo["timestamp"]
+                                        if cached:
+                                            skipped_existing += 1
+                                            # Photo-scoped ``cached`` bucket:
+                                            # only the FIRST cached detection
+                                            # per photo (per spec) ticks the
+                                            # counter. A subsequent inferred
+                                            # detection on the same photo will
+                                            # promote it into ``count`` in the
+                                            # flush path above.
+                                            if (
+                                                photo["id"]
+                                                not in photos_inferred_in_spec
+                                                and photo["id"]
+                                                not in photos_cached_in_spec
+                                            ):
+                                                photos_cached_in_spec.add(
+                                                    photo["id"],
                                                 )
-                                        embedding = None
-                                        if model_type != "timm":
-                                            emb_blob = thread_db.get_photo_embedding(
-                                                photo["id"], model_name,
+                                                stages["classify"]["cached"] += 1
+                                            top = cached[0]
+                                            folder_path = folders.get(photo["folder_id"], "")
+                                            image_path = os.path.join(
+                                                folder_path, photo["filename"],
                                             )
-                                            if emb_blob:
-                                                embedding = np.frombuffer(
-                                                    emb_blob, dtype=np.float32,
+                                            timestamp = None
+                                            if photo["timestamp"]:
+                                                with contextlib.suppress(ValueError, TypeError):
+                                                    timestamp = dt.fromisoformat(
+                                                        photo["timestamp"]
+                                                    )
+                                            embedding = None
+                                            if model_type != "timm":
+                                                # Prefer the per-detection
+                                                # embedding so multi-subject
+                                                # cache reruns don't reuse a
+                                                # single last-wins photo-level
+                                                # vector for every detection.
+                                                # Fall back to the photo-level
+                                                # entry only when the photo has
+                                                # a single qualifying detection
+                                                # — there the photo-level row
+                                                # unambiguously belongs to it,
+                                                # so legacy data (classified
+                                                # before per-detection variants
+                                                # were written) still refines
+                                                # correctly.
+                                                emb_blob = thread_db.get_photo_embedding(
+                                                    photo["id"], model_name,
+                                                    variant=f"det:{detection['id']}",
                                                 )
-                                        raw_results.append({
-                                            "photo": photo,
-                                            "detection_id": primary_det["id"],
-                                            "folder_path": folder_path,
-                                            "image_path": image_path,
-                                            "prediction": top["species"],
-                                            "confidence": top["confidence"],
-                                            "timestamp": timestamp,
-                                            "filename": photo["filename"],
-                                            "embedding": embedding,
-                                            "taxonomy": None,
-                                            "_existing": True,
-                                        })
-                                        continue
-                                    # Run key with no cached rows (e.g.
-                                    # prior pass stored `category == 'match'`
-                                    # so the prediction was intentionally not
-                                    # written). Fall through to re-classify
-                                    # instead of stranding the detection.
+                                                if not emb_blob and len(
+                                                    detections_to_classify
+                                                ) == 1:
+                                                    emb_blob = thread_db.get_photo_embedding(
+                                                        photo["id"], model_name,
+                                                    )
+                                                if emb_blob:
+                                                    embedding = np.frombuffer(
+                                                        emb_blob, dtype=np.float32,
+                                                    )
+                                            raw_results.append({
+                                                "photo": photo,
+                                                "detection_id": detection["id"],
+                                                "folder_path": folder_path,
+                                                "image_path": image_path,
+                                                "prediction": top["species"],
+                                                "confidence": top["confidence"],
+                                                "timestamp": timestamp,
+                                                "filename": photo["filename"],
+                                                "embedding": embedding,
+                                                "taxonomy": None,
+                                                "_existing": True,
+                                            })
+                                            continue
+                                        # Run key with no cached rows (e.g.
+                                        # prior pass stored `category == 'match'`
+                                        # so the prediction was intentionally not
+                                        # written). Fall through to re-classify
+                                        # instead of stranding the detection.
 
-                            img, folder_path, image_path = _prepare_image(
-                                photo, folders,
-                                None if full_image_fallback else primary_det,
-                            )
-                            if img is None:
-                                failed += 1
-                                failed_photo_ids.add(photo["id"])
-                                continue
-                            inference_batch.append({
-                                "photo": photo,
-                                "detection_id": primary_det["id"],
-                                "folder_path": folder_path,
-                                "image_path": image_path,
-                                "img": img,
-                            })
-                            # Flush the first real inference immediately. That
-                            # preserves the existing cancel checkpoint after model
-                            # warm-up, then later images batch normally for GPU
-                            # throughput.
-                            if (
-                                not has_flushed_in_spec
-                                or len(inference_batch) >= inference_batch_size
-                            ):
-                                _flush_pending_inference()
+                                img, folder_path, image_path = _prepare_image(
+                                    photo, folders,
+                                    None if full_image_fallback else detection,
+                                )
+                                if img is None:
+                                    failed += 1
+                                    failed_photo_ids.add(photo["id"])
+                                    continue
+                                inference_batch.append({
+                                    "photo": photo,
+                                    "detection_id": detection["id"],
+                                    "folder_path": folder_path,
+                                    "image_path": image_path,
+                                    "img": img,
+                                })
+                                # Flush the first real inference immediately. That
+                                # preserves the existing cancel checkpoint after model
+                                # warm-up, then later images batch normally for GPU
+                                # throughput.
+                                if (
+                                    not has_flushed_in_spec
+                                    or len(inference_batch) >= inference_batch_size
+                                ):
+                                    _flush_pending_inference()
 
                         # Batch boundary: surface the per-photo accumulated
                         # count + cached to the UI. Replaces the old per-batch
@@ -4256,6 +4581,10 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                         parts.append(f"{skipped_existing} cached")
                     if full_image_fallbacks:
                         parts.append(f"{full_image_fallbacks} full-image fallback")
+                    if contextual_weak_ids:
+                        parts.append(
+                            f"{len(contextual_weak_ids)} weak detections rescued"
+                        )
                     if failed:
                         parts.append(f"{failed} failed")
                     runner.update_step(
@@ -4301,6 +4630,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     "failed": total_failed,
                     "already_classified": total_skipped_existing,
                     "full_image_fallbacks": total_full_image_fallbacks,
+                    "weak_detection_rescues": len(contextual_weak_ids),
                     "model_count": len(resolved_specs_local),
                     "models_succeeded": models_succeeded,
                     "models_skipped": len(skipped_model_names),
@@ -4394,6 +4724,65 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # detector_confidence" — the user's remediation differs
                 # (download weights vs lower the threshold).
                 detector_confidence = effective_cfg.get("detector_confidence", 0.2)
+                weak_rescue_enabled = pipeline_cfg.get(
+                    "weak_detection_rescue_enabled", True,
+                )
+                weak_detection_confidence = pipeline_cfg.get(
+                    "weak_detection_confidence", 0.12,
+                )
+
+                # Recompute the same contextual-weak set that classify_stage
+                # and load_photo_features use, so a bracketed weak frame that
+                # got classified above also gets SAM masks + quality features
+                # here. Without this, scoring.hard_reject_reasons drops the
+                # rescued frame with `no_subject_mask` on a first-time pipeline
+                # run (predictions land, but the mask worklist skipped it) —
+                # partially undoing the rescue.
+                contextual_weak_ids: set = set()
+                if (
+                    weak_rescue_enabled
+                    and weak_detection_confidence < detector_confidence
+                    and photos
+                ):
+                    from weak_detections import contextual_weak_runs
+                    raw_mdv6_dets = thread_db.get_detections_for_photos(
+                        [p["id"] for p in photos],
+                        min_conf=weak_detection_confidence,
+                        detector_model="megadetector-v6",
+                    )
+                    weak_runs = contextual_weak_runs(
+                        photos,
+                        raw_mdv6_dets,
+                        detector_confidence=detector_confidence,
+                        weak_confidence=weak_detection_confidence,
+                        max_gap=pipeline_cfg.get("burst_time_gap", 3.0),
+                    )
+                    weak_scope_ids = {
+                        photo_id
+                        for run in weak_runs
+                        for photo_id in (
+                            run["left_photo_id"],
+                            *run["photo_ids"],
+                            run["right_photo_id"],
+                        )
+                    }
+                    if weak_scope_ids:
+                        # Mask only frames that pass the same matching-species
+                        # anchor gate as encounter grouping. Candidate weak
+                        # runs with conflicting or unclassified anchors remain
+                        # ordinary sub-threshold detections throughout.
+                        from pipeline import load_photo_features
+                        weak_features = load_photo_features(
+                            thread_db,
+                            config=effective_cfg,
+                            photo_ids=weak_scope_ids,
+                        )
+                        contextual_weak_ids = {
+                            feature["id"]
+                            for feature in weak_features
+                            if feature.get("subject_uncertain")
+                        }
+
                 photo_det_map = {}
                 photos_with_detections = 0
                 photos_subthreshold_only = 0
@@ -4405,12 +4794,28 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                     # legacy `mask_path IS NULL` prefilter gone, sub-threshold-
                     # only photos would otherwise enter SAM extraction on
                     # variant cache misses.
-                    dets = [
-                        d for d in thread_db.get_detections(
-                            p["id"], min_conf=detector_confidence,
-                        )
-                        if d["detector_model"] != "full-image"
-                    ]
+                    #
+                    # Contextual weak-rescue photos get the lower floor plus
+                    # the same MDv6/animal constraints that classify_stage and
+                    # load_photo_features apply, so mask extraction picks up
+                    # the same bracketed frame those two stages already opted
+                    # in to.
+                    if p["id"] in contextual_weak_ids:
+                        dets = [
+                            d for d in thread_db.get_detections(
+                                p["id"],
+                                min_conf=weak_detection_confidence,
+                                detector_model="megadetector-v6",
+                            )
+                            if d["category"] == "animal"
+                        ]
+                    else:
+                        dets = [
+                            d for d in thread_db.get_detections(
+                                p["id"], min_conf=detector_confidence,
+                            )
+                            if d["detector_model"] != "full-image"
+                        ]
                     if dets:
                         photos_with_detections += 1
                         primary = dets[0]  # already ordered by confidence DESC
@@ -4714,7 +5119,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 skipped += 1
                                 processed = i + 1
                                 continue
-                            if _should_abort(abort):
+                            if _should_abort_without_pause(abort):
                                 break
 
                             # GPU serialisation lives inside masking.generate_mask
@@ -4728,7 +5133,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                                 skipped += 1
                                 processed = i + 1
                                 continue
-                            if _should_abort(abort):
+                            if _should_abort_without_pause(abort):
                                 break
 
                             mask_path = save_mask(
@@ -4736,7 +5141,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                             )
                             completeness = crop_completeness(mask)
                             features = compute_all_quality_features(proxy, mask)
-                            if _should_abort(abort):
+                            if _should_abort_without_pause(abort):
                                 break
 
                             # Per-mask features (move from photos row into
@@ -4915,7 +5320,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
 
                 # Apply the per-run eye-detect override only when the caller
                 # sent an explicit signal. ``skip_eye_keypoints=False`` alone
-                # is not proof of opt-in: ``resolve_strategy('full')`` sets it
+                # is not proof of opt-in: ``the "Full" saved process`` sets it
                 # to False as a base default, so an after-import ``full``
                 # chain would otherwise force ``eye_detect_enabled=True``
                 # against a workspace whose Settings default is False (the
@@ -5271,7 +5676,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
                 # pass, not the culling result the user actually sees.
                 # Gated on ``eye_detect_override`` (an explicit per-run
                 # signal), NOT on ``not skip_eye_keypoints``, because the
-                # latter is False by default in ``resolve_strategy('full')``
+                # latter is False by default in ``the "Full" saved process``
                 # too — using it would force eye scoring on for any chained
                 # ``full`` run regardless of workspace Settings.
                 if params.eye_detect_override is not None:
@@ -5533,10 +5938,23 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         threads = {}
 
         # Phase 1: scan + thumbnails + model loading (concurrent)
-        threads["scanner"] = threading.Thread(target=scanner_stage, daemon=True)
-        threads["collection"] = threading.Thread(target=collection_stage, daemon=True)
-        threads["thumbnail"] = threading.Thread(target=thumbnail_stage, daemon=True)
-        threads["model_loader"] = threading.Thread(target=model_loader_stage, daemon=True)
+        phase_one = {
+            "scanner": scanner_stage,
+            "collection": collection_stage,
+            "thumbnail": thumbnail_stage,
+            "model_loader": model_loader_stage,
+        }
+        # Register the complete phase before starting its first thread.  If the
+        # first worker reaches Pause immediately, it must wait for the other
+        # three rather than declaring the whole pipeline paused on its own.
+        pause_gate.register_many(phase_one)
+        for name, stage_fn in phase_one.items():
+            threads[name] = threading.Thread(
+                target=_run_pause_participant,
+                args=(name, stage_fn),
+                kwargs={"pre_registered": True},
+                daemon=True,
+            )
 
         for t in threads.values():
             t.start()
@@ -5554,7 +5972,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # call on abort would leave the runner.set_steps-created rows
         # persisted as "pending" with no finished_at, forever. Each stage
         # checks abort internally and marks itself "Skipped".
-        previews_stage()
+        _run_pause_participant("previews", previews_stage)
 
         # Phase 2: detect (needs collection; runs MegaDetector once across all
         # photos so each per-model classify step reuses cached detections
@@ -5564,21 +5982,21 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # the `detect` step row reaches a terminal status. Skipping the call
         # would leave the row pending forever on a model-loader failure.
         # detect_stage handles abort internally and marks itself skipped.
-        detect_stage()
+        _run_pause_participant("detect", detect_stage)
 
         # Phase 3: classify per model (reads cached detections from detect_stage).
         # Always invoked for the same reason: every `classify:<model_id>` row
         # must land in a terminal state so the jobs tree finalizes cleanly on
         # a loader-triggered abort.
-        classify_stage()
+        _run_pause_participant("classify", classify_stage)
 
         # Phase 3: extract-masks (needs classify output)
-        extract_masks_stage()
+        _run_pause_participant("extract_masks", extract_masks_stage)
 
         # Phase 3.5: eye keypoints (needs masks + classifier output). No-op when
         # SuperAnimal weights are absent — users opt in on the pipeline models
         # card. Per-photo failures log and continue rather than abort the stage.
-        eye_keypoints_stage()
+        _run_pause_participant("eye_keypoints", eye_keypoints_stage)
 
         # Phases 4 + 5: regroup and miss detection. Held under the
         # per-workspace regroup lock TOGETHER so a concurrent same-workspace
@@ -5592,20 +6010,30 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         # miss_stage's own gate covers the regroup-failed and abort cases, so
         # both stages can be invoked unconditionally and still reach a
         # terminal step status.
-        if abort.is_set():
-            # Both stages early-return as "Skipped" without touching grouping
-            # state, so the lock isn't needed — and skipping the calls would
-            # leave their step rows pending forever. Staying outside the lock
-            # also keeps an aborted/cancelled run from blocking behind a
-            # concurrent pipeline's regroup.
-            regroup_stage()
-            miss_stage()
-        else:
-            with acquire_workspace_regroup(workspace_id):
+        def _run_regroup_and_misses():
+            if abort.is_set():
+                # Both stages early-return as "Skipped" without touching
+                # grouping state, so the lock isn't needed — and skipping the
+                # calls would leave their step rows pending forever. Staying
+                # outside the lock also keeps an aborted/cancelled run from
+                # blocking behind a concurrent pipeline's regroup.
                 regroup_stage()
                 miss_stage()
+            else:
+                # Pause checkpoints deliberately surround this critical
+                # section rather than living inside either stage: their shared
+                # lock must span regroup + misses atomically, but a paused job
+                # must not retain it and block another pipeline indefinitely.
+                with acquire_workspace_regroup(workspace_id):
+                    regroup_stage()
+                    miss_stage()
+            _pause_checkpoint()
 
-        archive_stage()
+        _run_pause_participant(
+            "regroup_and_misses", _run_regroup_and_misses,
+        )
+
+        _run_pause_participant("archive", archive_stage)
 
         cancel_watcher_stop.set()
 
@@ -5620,7 +6048,7 @@ def run_pipeline_job(job, runner, db_path, workspace_id, params,
         failed_stages = [
             name for name, s in stages.items() if s.get("status") == "failed"
         ]
-        if failed_stages and not runner.is_cancelled(job["id"]):
+        if failed_stages and not _cancellation_requested():
             # Stash the structured result on the job BEFORE raising so the
             # completion event and job_history still carry per-stage details
             # (stages dict, errors list). Without this, the pipeline UI loses

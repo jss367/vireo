@@ -2,32 +2,26 @@
 
 Vireo measures interest in downloads without adding analytics or identifiers to the desktop application. Two independent sources answer different questions:
 
-- Plausible Analytics reports aggregate visits to `vireo.photo`, referral sources, campaign parameters, approximate location and device information, and outbound-link clicks, including installer links.
+- Cloudflare Web Analytics reports aggregate visits to `vireo.photo`, referral sources, approximate location and device information, and page-performance metrics. Cloudflare Web Analytics does not record query strings, so campaign parameters like `utm_source` are not available.
 - GitHub reports the cumulative download count for each release asset.
 
-A download-button click is not proof that a download completed. A GitHub asset download is not a unique person or confirmed installation; retries, automated traffic, and maintainer testing may be included.
+A website visit is not proof that someone downloaded Vireo. A GitHub asset download is not a unique person or confirmed installation; retries, automated traffic, and maintainer testing may be included.
 
 ## Enable website measurement
 
-1. Add `vireo.photo` as a site in Plausible Analytics.
-2. In Plausible's site installation settings, enable **Outbound links** and leave other optional measurements disabled unless the privacy policy is updated first.
-3. Copy the unique script URL from the Plausible installation snippet. It has the form `https://plausible.io/js/pa-….js`.
-4. In the GitHub repository, open **Settings → Secrets and variables → Actions → Variables** and create `PLAUSIBLE_SCRIPT_URL` with that URL as its value.
+1. In the Cloudflare dashboard, open **Web Analytics**.
+2. Select **Add a site** and add `vireo.photo`.
+3. Open **Manage site** and copy the token from the JavaScript beacon snippet. The snippet loads `https://static.cloudflareinsights.com/beacon.min.js` as a module script and includes a `data-cf-beacon` value like `{"token":"..."}`.
+4. In the GitHub repository, open **Settings → Secrets and variables → Actions → Variables** and create `CLOUDFLARE_WEB_ANALYTICS_TOKEN` with that token as its value.
 5. Run the **Deploy Website** workflow or merge a website change to `main`.
 
-The website includes the tracker only when `PUBLIC_PLAUSIBLE_SCRIPT_URL` is present at build time. Local builds do not send analytics by default.
+The website includes the tracker only when `PUBLIC_CLOUDFLARE_WEB_ANALYTICS_TOKEN` is present at build time. Local builds do not send analytics by default.
 
-To verify the deployed integration, view the page source and confirm that the Plausible script URL and `plausible.init()` are present. Then click an installer link from a separate browser session and confirm that an `Outbound Link: Click` event appears in Plausible.
+To verify the deployed integration, view the page source and confirm that `https://static.cloudflareinsights.com/beacon.min.js` and `data-cf-beacon` are present. Then load the site from a separate browser session and confirm that traffic appears in Cloudflare Web Analytics. Cloudflare says data can take a few minutes to appear.
 
-## Measure campaigns
+## Attribute announcements
 
-Point announcements at the Vireo download page with descriptive campaign parameters, for example:
-
-```text
-https://vireo.photo/download/?utm_source=reddit&utm_campaign=windows_public_beta
-```
-
-Use only broad source and campaign names. Do not place names, email addresses, usernames, or other person-specific information in campaign parameters.
+Cloudflare Web Analytics reports the referring site for each visit but does not record URL query strings or fragments, so `utm_source`, similar campaign parameters, and `#fragment` suffixes are dropped. To distinguish traffic from a specific announcement, either rely on the referrer that Cloudflare records for the source (for example, `reddit.com`) or point the announcement at a distinct URL path (for example, `/download/reddit/`) that renders its own page using the shared `Base` layout so the Cloudflare beacon executes on that path. A server-side redirect to `/download/` would not work: the beacon only runs on the final page after redirects, so the visit would be logged under `/download/` rather than the announcement path.
 
 ## Report GitHub downloads
 
@@ -45,6 +39,6 @@ The report groups the public installer formats linked from the website:
 - Windows: `-setup.exe`
 - Linux: `.deb`
 
-macOS automatic updates use a separate `.app.tar.gz` asset, and Linux automatic updates use a separate `.AppImage` asset. Windows automatic updates reuse the `-setup.exe` installer, so the Windows GitHub count includes both manual downloads and automatic updates. Use Plausible installer-link clicks to estimate manual Windows download intent.
+macOS automatic updates use a separate `.app.tar.gz` asset, and Linux automatic updates use a separate `.AppImage` asset. Windows automatic updates reuse the `-setup.exe` installer, so the Windows GitHub count includes both manual downloads and automatic updates.
 
 GitHub counts are cumulative. Save periodic JSON output if historical snapshots are needed.

@@ -1,12 +1,21 @@
 import base64
+import io
+import re
 import time
 
+from PIL import Image
 from playwright.sync_api import expect
 
 _PNG_1X1 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
     "/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 )
+
+
+def _png_bytes(size, color):
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, "PNG")
+    return buf.getvalue()
 
 
 def test_browse_lightbox_arrows_navigate(live_server, page):
@@ -16,6 +25,12 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     argument, so _lightboxPhotoList stayed empty and lightboxNav() silently no-op'd.
     """
     url = live_server["url"]
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
     page.goto(f"{url}/browse")
 
     first_card = page.locator(".grid-card").first
@@ -45,6 +60,377 @@ def test_browse_lightbox_arrows_navigate(live_server, page):
     expect(filename_display).to_have_text(first_filename)
     expect(counter).to_contain_text("1 /")
     expect(counter).to_contain_text(first_filename)
+
+
+def test_browse_lightbox_same_photo_reopen_does_not_lock_controls(live_server, page):
+    """Reopening the visible photo must not wait for a same-src load event."""
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
+    page.goto(f"{live_server['url']}/browse")
+
+    page.locator(".grid-card").first.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth > 0;
+        }"""
+    )
+
+    state = page.evaluate(
+        """() => {
+            const current = window._lightboxPhotoList.find(
+                photo => photo.id === window._lightboxCurrentId
+            );
+            window.openLightbox(
+                current.id,
+                current.filename,
+                window._lightboxPhotoList
+            );
+            return {
+                pending: window._lbVisualTransitionPending,
+                actionsInert: document.getElementById('lightboxActions').inert,
+                adjustInert: document.getElementById('lightboxAdjustPanel').inert,
+            };
+        }"""
+    )
+
+    assert state == {
+        "pending": False,
+        "actionsInert": False,
+        "adjustInert": False,
+    }
+
+
+def test_paired_source_switch_commits_after_load_and_uses_jpeg_dimensions(
+    live_server, page, tmp_path,
+):
+    """Pair labels follow displayed pixels and failed switches preserve state."""
+    db = live_server["db"]
+    folder_path = tmp_path / "paired"
+    folder_path.mkdir()
+    folder_id = db.add_folder(str(folder_path), name="paired")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="developed.nef",
+        extension=".nef",
+        file_size=1000,
+        file_mtime=1.0,
+        width=4000,
+        height=3000,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='developed.jpg' WHERE id=?",
+        (photo_id,),
+    )
+    db.save_detections(photo_id, [{
+        "box": {"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4},
+        "confidence": 0.95,
+        "category": "animal",
+    }], detector_model="test-detector")
+    db.conn.commit()
+
+    jpeg = _png_bytes((200, 100), "green")
+    raw = _png_bytes((100, 200), "red")
+    fail_raw = {"enabled": False, "attempts": 0}
+    hold_raw = {"enabled": False, "routes": []}
+
+    def serve_pair(route):
+        wants_raw = "source=raw" in route.request.url
+        if wants_raw and hold_raw["enabled"]:
+            hold_raw["routes"].append(route)
+            return
+        if wants_raw and fail_raw["enabled"]:
+            fail_raw["attempts"] += 1
+            route.abort()
+            return
+        body = raw if wants_raw else jpeg
+        route.fulfill(body=body, content_type="image/png")
+
+    pair_url = re.compile(
+        rf"/(thumbnails/{photo_id}\.jpg|photos/{photo_id}/(full|original|preview))"
+    )
+    page.route(pair_url, serve_pair)
+    page.goto(f"{live_server['url']}/browse?photo_id={photo_id}")
+
+    card = page.locator(f'.grid-card[data-id="{photo_id}"]')
+    expect(card).to_be_visible()
+    jpeg_card_html = page.evaluate(
+        """photoId => {
+            const photo = Object.assign({}, window.photos.find(p => p.id === photoId), {
+                detections: [{x: 0.1, y: 0.2, w: 0.3, h: 0.4, confidence: 0.95}]
+            });
+            const previous = window.showDetectionBoxes;
+            window.showDetectionBoxes = true;
+            const html = window.renderPhotoCard(photo, 0);
+            window.showDetectionBoxes = previous;
+            return html;
+        }""",
+        photo_id,
+    )
+    assert 'style="display:none;left:' in jpeg_card_html
+    card.dblclick()
+
+    control = page.locator("#lightboxSourceControl")
+    image = page.locator("#lightboxImg")
+    expect(control).to_be_visible()
+    expect(control).to_have_text("Viewing JPEG · Show RAW")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.naturalWidth === 200 && img.naturalHeight === 100;
+        }"""
+    )
+    assert image.evaluate("img => [img.naturalWidth, img.naturalHeight]") == [200, 100]
+    assert page.evaluate(
+        """() => [
+            document.getElementById('lightboxTransform').style.width,
+            document.getElementById('lightboxTransform').style.height
+        ]"""
+    ) == ["200px", "100px"]
+
+    control.click()
+    expect(control).to_have_text("Viewing RAW · Show JPEG")
+    assert image.evaluate("img => [img.naturalWidth, img.naturalHeight]") == [100, 200]
+    expect(page.locator("#lightboxDetections .lb-detection-box")).to_have_count(1)
+    expect(card.locator(".pair-source-badge")).to_have_text("RAW · JPEG pair")
+    rebuilt = page.evaluate(
+        """photoId => {
+            const photo = Object.assign({}, window.photos.find(p => p.id === photoId), {
+                detections: [{x: 0.1, y: 0.2, w: 0.3, h: 0.4, confidence: 0.95}]
+            });
+            const previous = window.showDetectionBoxes;
+            window.showDetectionBoxes = true;
+            const html = window.renderPhotoCard(photo, 0);
+            window.showDetectionBoxes = previous;
+            return html;
+        }""",
+        photo_id,
+    )
+    assert "RAW · JPEG pair" in rebuilt
+    assert 'class="det-box"' in rebuilt
+    assert 'style="display:none;left:' not in rebuilt
+
+    control.click()
+    expect(control).to_have_text("Viewing JPEG · Show RAW")
+    fail_raw["enabled"] = True
+    attempts_before = fail_raw["attempts"]
+    control.click()
+    for _ in range(50):
+        if fail_raw["attempts"] > attempts_before:
+            break
+        page.wait_for_timeout(100)
+    assert fail_raw["attempts"] > attempts_before, (
+        "Expected the RAW source request to be attempted so the abort "
+        "path is exercised before asserting the state is unchanged."
+    )
+    expect(control).to_have_text("Viewing JPEG · Show RAW")
+    assert image.evaluate("img => [img.naturalWidth, img.naturalHeight]") == [200, 100]
+
+    fail_raw["enabled"] = False
+    hold_raw["enabled"] = True
+    control.click()
+    expect(control).to_contain_text("Loading RAW")
+    for _ in range(50):
+        if hold_raw["routes"]:
+            break
+        page.wait_for_timeout(20)
+    assert hold_raw["routes"], "expected the RAW probe request to be held"
+    page.evaluate(
+        """dataUrl => {
+            window._lightboxCurrentId = -1;
+            document.getElementById('lightboxImg').src = dataUrl;
+        }""",
+        "data:image/png;base64," + _PNG_1X1,
+    )
+    page.wait_for_function(
+        """() => document.getElementById('lightboxImg').naturalWidth === 1"""
+    )
+    hold_raw["routes"].pop(0).fulfill(body=raw, content_type="image/png")
+    page.wait_for_timeout(100)
+    assert image.get_attribute("src").startswith("data:image/png;base64,")
+    assert page.evaluate(
+        """photoId => (
+            window._vireoPairSource(photoId) === 'jpeg' &&
+            !window._vireoPairPendingSourceByPhoto[String(photoId)]
+        )""",
+        photo_id,
+    )
+
+
+def test_non_raw_jpeg_companions_do_not_enable_pair_controls(
+    live_server, page, tmp_path,
+):
+    """Sidecars and reverse pair records must not become RAW/JPEG switches."""
+    db = live_server["db"]
+    folder_path = tmp_path / "non-pair"
+    folder_path.mkdir()
+    folder_id = db.add_folder(str(folder_path), name="non-pair")
+    photo_id = db.add_photo(
+        folder_id=folder_id,
+        filename="developed.jpg",
+        extension=".jpg",
+        file_size=1000,
+        file_mtime=1.0,
+        width=200,
+        height=100,
+    )
+    db.conn.execute(
+        "UPDATE photos SET companion_path='developed.nef' WHERE id=?",
+        (photo_id,),
+    )
+    db.conn.commit()
+
+    image_requests = []
+
+    def serve_image(route):
+        image_requests.append(route.request.url)
+        route.fulfill(body=_png_bytes((200, 100), "green"), content_type="image/png")
+
+    page.route(
+        re.compile(
+            rf"/(thumbnails/{photo_id}\.jpg|photos/{photo_id}/(full|original|preview))"
+        ),
+        serve_image,
+    )
+    page.goto(f"{live_server['url']}/browse?photo_id={photo_id}")
+
+    card = page.locator(f'.grid-card[data-id="{photo_id}"]')
+    expect(card).to_be_visible()
+    expect(card.locator(".pair-source-badge")).to_have_count(0)
+    assert page.evaluate(
+        """() => [
+            window.vireoPhotoIsRawJpegPair({
+                filename: 'developed.jpg', extension: '.jpg',
+                companion_path: 'developed.nef'
+            }),
+            window.vireoPhotoIsRawJpegPair({
+                filename: 'capture.nef', extension: '.nef',
+                companion_path: 'capture.xmp'
+            }),
+            window.vireoPhotoIsRawJpegPair({
+                filename: 'capture.NEF', companion_path: 'capture.JPEG'
+            })
+        ]"""
+    ) == [False, False, True]
+
+    card.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    expect(page.locator("#lightboxSourceControl")).to_be_hidden()
+    assert page.evaluate("photoId => window._vireoPairSource(photoId)", photo_id) is None
+    assert image_requests
+    assert all("source=" not in request_url for request_url in image_requests)
+
+
+def test_browse_lightbox_filename_can_be_selected_without_resetting_zoom(
+    live_server, page
+):
+    """Selecting the filename must not bubble into the lightbox zoom/close handlers."""
+    page.goto(f"{live_server['url']}/browse")
+
+    first_card = page.locator(".grid-card").first
+    first_card.wait_for(state="visible")
+    first_filename = first_card.get_attribute("data-filename")
+    first_card.dblclick()
+
+    overlay = page.locator("#lightboxOverlay")
+    filename_display = page.locator("#lightboxFilename")
+    expect(overlay).to_have_class("lightbox-overlay active")
+    expect(filename_display).to_have_text(first_filename)
+
+    page.evaluate(
+        """() => {
+            window._lbNativeZoom = 2;
+            window._lbSetZoom(2, null, null);
+        }"""
+    )
+
+    # A click is part of both double-click and drag-to-select interactions. It
+    # previously reached closeLightbox(), which reset _lbZoom to fit.
+    filename_display.click()
+
+    expect(overlay).to_have_class("lightbox-overlay active")
+    assert page.evaluate("window._lbZoom") == 2
+    assert filename_display.evaluate(
+        "el => getComputedStyle(el).userSelect"
+    ) == "text"
+    assert filename_display.evaluate(
+        "el => getComputedStyle(el).cursor"
+    ) == "text"
+    assert page.evaluate(
+        """() => (
+            Number(getComputedStyle(document.getElementById('lightboxFlagStatus')).zIndex) >
+            Number(getComputedStyle(document.querySelector('.lightbox-bottom-bar')).zIndex)
+        )"""
+    ) is True
+
+
+def test_browse_lightbox_reserves_space_for_bottom_controls(live_server, page):
+    """The fitted image stays above the toolbar and expands when it is hidden."""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200" '
+        'viewBox="0 0 1600 1200"><rect width="1600" height="1200" fill="#274"/></svg>'
+    )
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+    page.set_viewport_size({"width": 1000, "height": 800})
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth === 1600;
+        }"""
+    )
+    page.wait_for_function(
+        """() => {
+            const wrapRect = document.getElementById('lightboxWrap').getBoundingClientRect();
+            const imageRect = document.getElementById('lightboxTransform').getBoundingClientRect();
+            return imageRect.top >= wrapRect.top - 1
+                && imageRect.bottom <= wrapRect.bottom + 1;
+        }"""
+    )
+
+    visible = page.evaluate(
+        """() => {
+            const wrap = document.getElementById('lightboxWrap');
+            const bar = document.querySelector('.lightbox-bottom-bar');
+            const image = document.getElementById('lightboxTransform');
+            const wrapRect = wrap.getBoundingClientRect();
+            const barRect = bar.getBoundingClientRect();
+            const imageRect = image.getBoundingClientRect();
+            return {
+                wrapHeight: wrapRect.height,
+                wrapBottom: wrapRect.bottom,
+                barTop: barRect.top,
+                imageBottom: imageRect.bottom,
+                fitScale: window._lbFitScale,
+            };
+        }"""
+    )
+    assert visible["wrapBottom"] < visible["barTop"]
+    assert visible["imageBottom"] <= visible["wrapBottom"] + 1
+
+    page.locator("#lightboxToggleChrome").click()
+    expect(page.locator("#lightboxOverlay")).to_have_class(
+        "lightbox-overlay active lb-hide-chrome"
+    )
+    page.wait_for_function(
+        """before => {
+            const wrap = document.getElementById('lightboxWrap');
+            return wrap.clientHeight > before.wrapHeight + 20
+                && window._lbFitScale > before.fitScale;
+        }""",
+        arg=visible,
+    )
 
 
 def test_browse_photo_id_deep_link_loads_target_folder_first_page(live_server, page):
@@ -96,6 +482,26 @@ def test_browse_photo_id_deep_link_loads_target_after_first_folder_page(live_ser
 def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
     """Navigating from a 1:1 lightbox view keeps the next photo at 1:1."""
     url = live_server["url"]
+
+    # The pending-1:1 state set on navigation is cleared the instant the next
+    # photo's native zoom is learned — which happens via TWO async paths: the
+    # /api/photos/<id> metadata fetch and the /original image's onload. If
+    # either resolves before the synchronous assertion below, _lbPending1To1
+    # has already flipped to False and the test flakes (it did on the v0.23.0
+    # release build). Hold both for the target photo so the pending state is
+    # deterministic during the assertion window; the second phase then learns
+    # native zoom explicitly and verifies the deferred snap applies.
+    hold = {"active": False, "held": []}
+
+    def _hold_when_active(route):
+        if hold["active"]:
+            hold["held"].append(route)  # park it; never resolves during asserts
+        else:
+            route.continue_()
+
+    page.route(re.compile(r"/api/photos/\d+$"), _hold_when_active)
+    page.route("**/photos/*/original", _hold_when_active)
+
     page.goto(f"{url}/browse")
 
     first_card = page.locator(".grid-card").first
@@ -105,16 +511,32 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
 
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
 
+    # Put photo 1 into a 1:1 view. Crucially set _lbPending1To1 = true rather
+    # than relying on _lbZoom == _lbNativeZoom: lightboxNav() carries the 1:1
+    # intent forward via _lbIsOneToOneZoom(), which returns true immediately when
+    # _lbPending1To1 is set but otherwise depends on _lbNativeZoom. The fixture
+    # photos are seeded without width/height, so photo 1's async /api/photos/1
+    # metadata (width=null) recomputes _lbNativeZoom to null; if that lands after
+    # this force (as it does under CI CPU contention), _lbIsOneToOneZoom() would
+    # be false at Next and the next photo would not inherit the pending 1:1 —
+    # exactly the failure that blocked the v0.24.0 release build. Keying off
+    # pending makes the carry-forward immune to that clobber.
     page.evaluate(
         """() => {
             window._lbNativeZoom = 2;
             window._lbZoom = 2;
-            window._lbPending1To1 = false;
+            window._lbPending1To1 = true;
         }"""
     )
 
+    # From here on, stall the next photo's native-zoom sources so the deferred
+    # 1:1 snap cannot resolve before we observe it.
+    hold["active"] = True
     page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
+    # Guard that the hold worked: native zoom must still be unknown, so the
+    # pending assertion below is genuinely exercising the deferred path.
+    assert page.evaluate("window._lbNativeZoom") is None
     assert page.evaluate("window._lbZoom > 1.001") is True
     assert page.evaluate("window._lbPending1To1") is True
     assert page.evaluate(
@@ -133,6 +555,11 @@ def test_browse_lightbox_arrows_preserve_one_to_one_zoom(live_server, page):
     )
     assert restored
     assert page.evaluate("window._lbZoom") > 1.001
+
+    # Release the parked requests so context teardown doesn't wait on them.
+    hold["active"] = False
+    for route in hold["held"]:
+        route.abort()
 
 
 def test_browse_lightbox_predecodes_adjacent_photo_for_current_source_tier(
@@ -169,8 +596,235 @@ def test_browse_lightbox_predecodes_adjacent_photo_for_current_source_tier(
     assert page.evaluate("window._lightboxCurrentId") != next_id
 
 
-def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page):
-    """Arrow navigation preserves pan/zoom per photo and carries it to unseen photos."""
+def test_browse_lightbox_preloads_current_original_after_preview_settles(
+    live_server, page
+):
+    """The current photo's 100% source is decoded after a short dwell at Fit."""
+    current_id = live_server["data"]["photos"][0]
+    live_server["db"].conn.execute(
+        "UPDATE photos SET width=4000, height=2000 WHERE id=?",
+        (current_id,),
+    )
+    live_server["db"].conn.commit()
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+
+    assert page.evaluate("window._lightboxCurrentId") == current_id
+    page.wait_for_function(
+        """photoId => window._lbOriginalPreload && (
+            window._lbOriginalPreload.photoId === photoId &&
+            window._lbOriginalPreload.status === 'decoded'
+        )""",
+        arg=current_id,
+    )
+
+    assert any(f"/photos/{current_id}/original" in url for url in original_requests)
+    assert page.evaluate("window._lbCurrentSrcKey") == "full"
+
+
+def test_browse_lightbox_waits_for_fit_image_before_preloading_original(
+    live_server, page
+):
+    """A slow Fit render is not made slower by a competing original request."""
+    current_id = live_server["data"]["photos"][0]
+    db = live_server["db"]
+    db.conn.execute(
+        "UPDATE photos SET width=4000, height=2000 WHERE id=?",
+        (current_id,),
+    )
+    db.conn.commit()
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    original_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
+    )
+    held_full = {}
+    original_requests = []
+
+    def hold_full(route):
+        held_full["route"] = route
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=original_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/full", hold_full)
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function("window._lbFullUsesOriginal === false")
+    page.wait_for_timeout(800)
+
+    assert "route" in held_full
+    assert original_requests == []
+
+    held_full.pop("route").fulfill(body=full_svg, content_type="image/svg+xml")
+    page.wait_for_function(
+        """photoId => window._lbOriginalPreload && (
+            window._lbOriginalPreload.photoId === photoId &&
+            window._lbOriginalPreload.status === 'decoded'
+        )""",
+        arg=current_id,
+    )
+
+
+def test_browse_lightbox_skips_original_when_full_covers_one_to_one(
+    live_server, page
+):
+    """Small photos stay on /full at 100%, so warming /original is wasteful."""
+    current_id = live_server["data"]["photos"][0]
+    db = live_server["db"]
+    db.conn.execute(
+        "UPDATE photos SET width=1600, height=800 WHERE id=?",
+        (current_id,),
+    )
+    db.conn.commit()
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="800" '
+        'viewBox="0 0 1600 800"><rect width="1600" height="800" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function("window._lbNativeZoom !== null")
+    page.wait_for_timeout(800)
+
+    assert page.evaluate("window._lbPickSourceKey(window._lbNativeZoom)") == "full"
+    assert original_requests == []
+    assert page.evaluate("window._lbOriginalPreload") is None
+
+
+def test_browse_lightbox_cancels_original_warmup_when_zoom_leaves_fit(
+    live_server, page
+):
+    """A visible intermediate-tier upgrade takes priority over background warming."""
+    current_id = live_server["data"]["photos"][0]
+    db = live_server["db"]
+    db.conn.execute(
+        "UPDATE photos SET width=4000, height=2000 WHERE id=?",
+        (current_id,),
+    )
+    db.conn.commit()
+    full_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="960" '
+        'viewBox="0 0 1920 960"><rect width="1920" height="960" fill="#274"/></svg>'
+    )
+    preview_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2560" height="1280" '
+        'viewBox="0 0 2560 1280"><rect width="2560" height="1280" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
+    )
+    page.route(
+        "**/photos/*/preview?size=2560*",
+        lambda route: route.fulfill(body=preview_svg, content_type="image/svg+xml"),
+    )
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=preview_svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    page.wait_for_function("window._lbOriginalPreloadTimer !== null")
+
+    selected_key = page.evaluate(
+        """() => {
+            let zoom = 1.01;
+            while (zoom < window._lbNativeZoom && window._lbPickSourceKey(zoom) === 'full') {
+                zoom += 0.05;
+            }
+            const key = window._lbPickSourceKey(zoom);
+            window._lbSetZoom(zoom);
+            return key;
+        }"""
+    )
+    assert selected_key == "2560"
+    page.wait_for_timeout(800)
+
+    assert original_requests == []
+    assert page.evaluate("window._lbOriginalPreloadTimer") is None
+    assert page.evaluate("window._lbOriginalPreload") is None
+
+
+def test_browse_lightbox_does_not_preload_when_full_already_uses_original(
+    live_server, page
+):
+    """Full-resolution preview mode must not request the original twice."""
+    db = live_server["db"]
+    db.update_workspace(
+        db._active_workspace_id,
+        config_overrides={"preview_max_size": 0},
+    )
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
+        'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/></svg>'
+    )
+    original_requests = []
+
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(body=svg, content_type="image/svg+xml"),
+    )
+
+    def serve_original(route):
+        original_requests.append(route.request.url)
+        route.fulfill(body=svg, content_type="image/svg+xml")
+
+    page.route("**/photos/*/original", serve_original)
+    page.goto(f"{live_server['url']}/browse")
+    page.locator(".grid-card").first.dblclick()
+    expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
+    page.wait_for_function("window._lbFullUsesOriginal === true")
+    page.wait_for_timeout(800)
+
+    assert original_requests == []
+    assert page.evaluate("window._lbOriginalPreload") is None
+
+
+def test_browse_lightbox_carries_current_viewport_to_previously_seen_photo(
+    live_server, page
+):
+    """Arrow navigation uses the current viewport, not a target photo's old one."""
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
         'viewBox="0 0 4000 2000"><rect width="4000" height="2000" fill="#274"/>'
@@ -205,11 +859,17 @@ def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page)
             window._lbPhotoW = 4000;
             window._lbPhotoH = 2000;
             window._lbRecomputeNativeZoom();
-            window._lbApplyViewportState({zoom: 2.2, centerX: 0.24, centerY: 0.70});
+            window._lbApplyViewportState({
+                zoom: window._lbNativeZoom,
+                centerX: 0.24,
+                centerY: 0.70,
+                oneToOne: true,
+            });
             window._lbSaveViewportState(window._lightboxCurrentId);
             return window._lbViewportStateFromCurrent();
         }"""
     )
+    assert first_view["oneToOne"] is True
 
     page.locator("[title='Next (→)']").click()
     expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
@@ -227,29 +887,40 @@ def test_browse_lightbox_restores_and_carries_zoomed_viewport(live_server, page)
     assert abs(carried_view["centerX"] - first_view["centerX"]) < 0.03
     assert abs(carried_view["centerY"] - first_view["centerY"]) < 0.03
 
-    page.evaluate(
+    second_view = page.evaluate(
         """() => {
-            window._lbApplyViewportState({zoom: 2.2, centerX: 0.78, centerY: 0.30});
+            window._lbApplyViewportState({zoom: 1, centerX: 0.5, centerY: 0.5});
             window._lbSaveViewportState(window._lightboxCurrentId);
+            return window._lbViewportStateFromCurrent();
         }"""
     )
     page.locator("[title='Previous (←)']").click()
     expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
+    page.evaluate(
+        """() => {
+            window._lbPhotoW = 4000;
+            window._lbPhotoH = 2000;
+            window._lbRecomputeNativeZoom();
+            window._lbTryApplyPendingViewportState();
+        }"""
+    )
     page.wait_for_function("window._lbPendingViewportState === null")
-    restored_view = page.evaluate("window._lbViewportStateFromCurrent()")
-    assert abs(restored_view["zoom"] - first_view["zoom"]) < 0.05
-    assert abs(restored_view["centerX"] - first_view["centerX"]) < 0.03
-    assert abs(restored_view["centerY"] - first_view["centerY"]) < 0.03
+    returned_view = page.evaluate("window._lbViewportStateFromCurrent()")
+    assert abs(returned_view["zoom"] - second_view["zoom"]) < 0.05
+    assert abs(returned_view["centerX"] - second_view["centerX"]) < 0.03
+    assert abs(returned_view["centerY"] - second_view["centerY"]) < 0.03
+    assert abs(returned_view["zoom"] - first_view["zoom"]) > 0.5
 
 
 def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     live_server, page
 ):
-    """100% navigation must not recenter the outgoing photo while loading.
+    """100% navigation must keep the outgoing photo intact while loading.
 
     The incoming photo's metadata often resolves before its image. Previously
     navigation reset pan immediately, visibly jerking the outgoing bitmap to
     center, then restored the carried viewport when the new bitmap decoded.
+    Its filename and counter also advanced while that old bitmap was visible.
     """
     first_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
@@ -313,9 +984,20 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
             };
         }"""
     )
+    page.evaluate(
+        """() => {
+            window.__photoChangedDuringNavigation = [];
+            document.addEventListener('lightbox:photochanged', event => {
+                window.__photoChangedDuringNavigation.push(event.detail.photoId);
+            });
+            document.getElementById('lightboxAdjustPanel').classList.add('open');
+            const externalPanel = document.createElement('div');
+            externalPanel.id = 'syncLightboxPanel';
+            document.getElementById('lightboxOverlay').appendChild(externalPanel);
+        }"""
+    )
 
-    page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    page.keyboard.press("ArrowRight")
     page.wait_for_function("() => window._lbVisualTransitionPending === true")
     page.wait_for_function("() => window._lightboxCurrentId === window.photos[1].id")
     page.wait_for_timeout(100)
@@ -324,6 +1006,51 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
     while "route" not in held_original and time.time() < deadline:
         page.wait_for_timeout(10)
     assert "route" in held_original
+
+    # The outgoing bitmap remains visible while the incoming original is
+    # loading, so its filename and position must remain visible too.
+    expect(page.locator("#lightboxFilename")).to_have_text(
+        first_card.get_attribute("data-filename")
+    )
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
+    expect(page.locator("#lightboxActions")).to_have_attribute("inert", "")
+    expect(page.locator("#lightboxAdjustPanel")).to_have_attribute("inert", "")
+    expect(page.locator("#syncLightboxPanel")).to_have_attribute("inert", "")
+    assert page.evaluate("window.__photoChangedDuringNavigation") == []
+
+    # Photo-targeted keyboard actions are suppressed along with the buttons;
+    # they must not mutate the incoming photo while the outgoing one is shown.
+    page.keyboard.press("p")
+    assert page.evaluate("window._lbFlagPendingWrites") == 0
+
+    interaction_state = page.evaluate(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            const beforeZoom = window._lbZoom;
+            img.dispatchEvent(new WheelEvent('wheel', {
+                bubbles: true, cancelable: true, deltaY: -120,
+                clientX: 400, clientY: 300,
+            }));
+            img.dispatchEvent(new MouseEvent('contextmenu', {
+                bubbles: true, cancelable: true, button: 2,
+                clientX: 400, clientY: 300,
+            }));
+            img.dispatchEvent(new MouseEvent('click', {
+                bubbles: true, cancelable: true, button: 0,
+                clientX: 400, clientY: 300,
+            }));
+            return {
+                beforeZoom: beforeZoom,
+                afterZoom: window._lbZoom,
+                nativePhotoIds: window.nativeMenuActivePhotoIds(),
+            };
+        }"""
+    )
+    assert interaction_state["afterZoom"] == interaction_state["beforeZoom"]
+    assert interaction_state["nativePhotoIds"] == []
+    expect(page.locator(".vireo-ctx-menu")).to_have_count(0)
+    page.evaluate("window.lightboxDelete()")
+    expect(page.locator("#deleteModal")).not_to_have_class("modal-overlay open")
 
     while_loading = page.evaluate(
         """() => {
@@ -352,23 +1079,35 @@ def test_browse_lightbox_holds_off_center_transform_until_next_photo_is_ready(
                 && img && img.complete && img.naturalWidth === 3000;
         }"""
     )
+    expect(page.locator("#lightboxFilename")).to_have_text(
+        page.locator(".grid-card").nth(1).get_attribute("data-filename")
+    )
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    assert page.evaluate("window.__photoChangedDuringNavigation") == [next_id]
+    assert page.evaluate(
+        "!document.getElementById('lightboxActions').inert"
+    )
+    assert page.evaluate(
+        "!document.getElementById('lightboxAdjustPanel').inert"
+    )
+    assert page.evaluate(
+        "!document.getElementById('syncLightboxPanel') || "
+        "!document.getElementById('syncLightboxPanel').inert"
+    )
     carried = page.evaluate("window._lbViewportStateFromCurrent()")
     assert abs(carried["centerX"] - before["viewport"]["centerX"]) < 0.03
     assert abs(carried["centerY"] - before["viewport"]["centerY"]) < 0.03
 
 
-def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
+def test_browse_lightbox_mid_transition_save_keeps_navigation_handoff(
     live_server, page
 ):
-    """A save while the outgoing bitmap is still frozen must not stomp the
-    incoming photo's intended inspection point.
+    """A save while the outgoing bitmap is frozen keeps the handed-off viewport.
 
     Regression: while _lbVisualTransitionPending is true, _lightboxCurrentId
     already points at the incoming photo but the DOM transform still belongs
-    to the outgoing bitmap. A save triggered by another arrow press or
-    closeLightbox in that window used to read the DOM and record the outgoing
-    transform under the incoming photo's id, replacing the state the next
-    open of that photo would otherwise restore.
+    to the outgoing bitmap. The save must use the pending navigation handoff,
+    rather than re-reading that transitional DOM state.
     """
     first_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
@@ -427,8 +1166,8 @@ def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
         }"""
     )
 
-    # Prime a distinctive saved viewport for the incoming photo so we can
-    # tell "our intended state survives" from "outgoing DOM state leaked in".
+    # Prime a distinctive old viewport for the incoming photo. Navigation
+    # must ignore it in favor of the current outgoing viewport.
     incoming_id = page.evaluate("window.photos[1].id")
     intended = {"zoom": 2.5, "centerX": 0.80, "centerY": 0.15}
     page.evaluate(
@@ -445,7 +1184,7 @@ def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
     )
 
     page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
     page.wait_for_function("() => window._lbVisualTransitionPending === true")
     page.wait_for_function("() => window._lightboxCurrentId === window.photos[1].id")
     page.wait_for_timeout(50)
@@ -469,21 +1208,14 @@ def test_browse_lightbox_mid_transition_save_does_not_leak_outgoing_transform(
         incoming_id,
     )
 
-    # The stored state for the incoming photo must not be the outgoing
-    # bitmap's transform. It should be either the pending restore state that
-    # openLightbox armed for the incoming photo, or the pre-existing saved
-    # state we primed above — never the outgoing photo's centerX/centerY.
+    # The stored state for the incoming photo should be the pending handoff,
+    # not the stale per-photo viewport primed above.
     stored = saved_during_transition["stored"]
     assert stored is not None
-    # Guard against the specific regression: the outgoing photo's off-center
-    # inspection point (0.20, 0.75) must not be recorded under the incoming
-    # photo's id.
-    assert not (
-        abs(stored["centerX"] - outgoing["centerX"]) < 0.05
-        and abs(stored["centerY"] - outgoing["centerY"]) < 0.05
-    ), (
-        "outgoing DOM transform leaked into incoming photo's saved viewport"
-    )
+    assert abs(stored["zoom"] - outgoing["zoom"]) < 0.05
+    assert abs(stored["centerX"] - outgoing["centerX"]) < 0.05
+    assert abs(stored["centerY"] - outgoing["centerY"]) < 0.05
+    assert abs(stored["centerX"] - intended["centerX"]) > 0.1
 
     held_original.pop("route").fulfill(
         body=next_svg, content_type="image/svg+xml"
@@ -506,9 +1238,8 @@ def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
     failing tier isn't the /original fallback candidate) previously left
     _lbVisualTransitionPending true indefinitely. That kept the metadata
     callback skipping layout updates and made _lbSaveViewportState treat the
-    incoming photo as still mid-transition even though the UI/counter had
-    already advanced to it, freezing the outgoing transform on screen until
-    the lightbox was closed or another navigation succeeded.
+    incoming photo as still mid-transition, freezing the outgoing transform on
+    screen until the lightbox was closed or another navigation succeeded.
     """
     first_svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="4000" height="2000" '
@@ -547,7 +1278,6 @@ def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
     # with _lbVisualTransitionPending=true. The /full request then 404s, so
     # handleInitialImageError takes the non-'original' early-return path.
     page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
     page.wait_for_function(
         "() => window._lightboxCurrentId === window.photos[1].id"
     )
@@ -555,6 +1285,13 @@ def test_browse_lightbox_clears_transition_state_when_incoming_image_errors(
     page.wait_for_function(
         "() => window._lbVisualTransitionPending === false",
         timeout=3000,
+    )
+    expect(page.locator("#lightboxFilename")).to_have_text(
+        page.locator(".grid-card").nth(1).get_attribute("data-filename")
+    )
+    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    assert page.evaluate(
+        "!document.getElementById('lightboxActions').inert"
     )
 
     # With the pending flag cleared, saving the current photo's viewport must
@@ -671,7 +1408,7 @@ def test_browse_lightbox_defers_overlays_while_visual_transition_pending(
     )
 
     page.locator("[title='Next (→)']").click()
-    expect(page.locator("#lightboxCounter")).to_contain_text("2 /")
+    expect(page.locator("#lightboxCounter")).to_contain_text("1 /")
     page.wait_for_function("() => window._lbVisualTransitionPending === true")
     page.wait_for_function("() => window._lightboxCurrentId === window.photos[1].id")
 
@@ -1399,6 +2136,23 @@ def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, 
 
     page.route("**/photos/*/original", hold_first_original)
 
+    # The fixture photos are seeded without width/height, so /api/photos/<id>
+    # returns width=null. When that async metadata fetch resolves it overwrites
+    # the _lbPhotoW=4000 injected below with null (app: `_lbPhotoW = data.width
+    # || null`), which nulls _lbNativeZoom. Depending on whether that lands
+    # before or after the native-zoom reads below, the test either crashed
+    # ("None is not defined") or hung waiting for native zoom to settle. Force
+    # real dimensions into the metadata response so _lbPhotoW stays 4000 and
+    # native zoom is stable for the duration of the test.
+    def force_photo_dims(route):
+        resp = route.fetch()
+        data = resp.json()
+        data["width"] = 4000
+        data["height"] = 2000
+        route.fulfill(response=resp, json=data)
+
+    page.route(re.compile(r"/api/photos/\d+$"), force_photo_dims)
+
     url = live_server["url"]
     page.set_viewport_size({"width": 1000, "height": 800})
     page.goto(f"{url}/browse")
@@ -1429,7 +2183,10 @@ def test_browse_lightbox_waits_for_original_before_one_to_one_snap(live_server, 
     )
     assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
     assert page.evaluate("window._lbCurrentSrcKey") == "full"
-    deadline = time.time() + 2
+    # The deferred swap is scheduled on a debounced timer; under CI CPU
+    # contention that timer plus the preloader round-trip can take well over 2s,
+    # so allow generous headroom before asserting the /original request was held.
+    deadline = time.time() + 8
     while "route" not in held_original and time.time() < deadline:
         page.wait_for_timeout(25)
     assert "route" in held_original
@@ -1479,6 +2236,23 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
 
     page.route("**/photos/*/original", hold_first_original)
 
+    # The fixture photos are seeded without width/height, so /api/photos/<id>
+    # returns width=null. When that async metadata fetch resolves it overwrites
+    # the _lbPhotoW=4000 injected below with null (app: `_lbPhotoW = data.width
+    # || null`), which nulls _lbNativeZoom. Depending on whether that lands
+    # before or after the native-zoom reads below, the test either crashed
+    # ("None is not defined") or hung waiting for native zoom to settle. Force
+    # real dimensions into the metadata response so _lbPhotoW stays 4000 and
+    # native zoom is stable for the duration of the test.
+    def force_photo_dims(route):
+        resp = route.fetch()
+        data = resp.json()
+        data["width"] = 4000
+        data["height"] = 2000
+        route.fulfill(response=resp, json=data)
+
+    page.route(re.compile(r"/api/photos/\d+$"), force_photo_dims)
+
     url = live_server["url"]
     page.set_viewport_size({"width": 1000, "height": 800})
     page.goto(f"{url}/browse")
@@ -1521,7 +2295,15 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
         page.wait_for_timeout(25)
     assert "route" in held_original
 
-    native_zoom_before = page.evaluate("window._lbNativeZoom")
+    # Stash the pre-resize native zoom in a page variable rather than reading it
+    # into Python and interpolating it back. During the deferred /original swap
+    # _lbNativeZoom can be transiently unset; a Python None then formats into the
+    # wait expression as the literal `None`, which throws "None is not defined"
+    # in JS. Guard that it is a finite number first, then compare in-page.
+    page.wait_for_function(
+        "typeof window._lbNativeZoom === 'number' && isFinite(window._lbNativeZoom)"
+    )
+    page.evaluate("window._lbNativeZoomBaseline = window._lbNativeZoom")
 
     # Resize while the high-res source is still loading. The image is 4000px
     # wide so _lbFitScale (hence _lbNativeZoom) is width-constrained; shrinking
@@ -1531,7 +2313,7 @@ def test_browse_lightbox_resize_preserves_deferred_one_to_one(live_server, page)
     # signal that the debounced handler has actually executed — no fixed sleep.
     page.set_viewport_size({"width": 640, "height": 800})
     page.wait_for_function(
-        "Math.abs(window._lbNativeZoom - %r) > 0.1" % native_zoom_before
+        "Math.abs(window._lbNativeZoom - window._lbNativeZoomBaseline) > 0.1"
     )
 
     # The resize handler has now run while /original is still held. Pre-fix it
@@ -1773,6 +2555,11 @@ def test_browse_lightbox_ignores_stale_original_failure_after_nav(live_server, p
 
     first_card = page.locator(".grid-card").first
     first_card.wait_for(state="visible")
+    # This test needs to own the one /original request it later aborts. The
+    # normal fit-view warmup can otherwise win the route race under a slow CI
+    # runner, leaving the actual source-swap request to fail immediately and
+    # turning the final abort into an unrelated preload failure.
+    page.evaluate("window._lbScheduleOriginalPreload = function() {}")
     first_card.dblclick()
 
     expect(page.locator("#lightboxOverlay")).to_have_class("lightbox-overlay active")
@@ -1808,14 +2595,23 @@ def test_browse_lightbox_ignores_stale_original_failure_after_nav(live_server, p
         }"""
     )
     page.wait_for_function("window._lightboxCurrentId === window._lightboxPhotoList[1].id")
-    held_original.pop("route").abort()
-    page.wait_for_timeout(100)
+    with page.expect_event(
+        "requestfailed",
+        predicate=lambda request: "/original" in request.url,
+    ):
+        held_original.pop("route").abort()
 
     assert page.evaluate("window._lbOriginalUnavailable") is False
 
 
 def test_browse_e_f_g_keyboard_modes(live_server, page):
     """Browse grid shortcuts open the image, request fullscreen, and return to grid."""
+    page.route(
+        "**/photos/*/full",
+        lambda route: route.fulfill(
+            body=base64.b64decode(_PNG_1X1), content_type="image/png"
+        ),
+    )
     url = live_server["url"]
     page.goto(f"{url}/browse")
 
@@ -1829,6 +2625,12 @@ def test_browse_e_f_g_keyboard_modes(live_server, page):
     page.keyboard.press("e")
     expect(overlay).to_have_class("lightbox-overlay active")
     expect(filename_display).to_have_text(first_filename)
+    page.wait_for_function(
+        """() => {
+            const img = document.getElementById('lightboxImg');
+            return img && img.complete && img.naturalWidth > 0;
+        }"""
+    )
 
     page.keyboard.press("g")
     expect(overlay).to_have_class("lightbox-overlay")
@@ -1952,13 +2754,23 @@ def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallba
         lambda route: route.fulfill(body=full_svg, content_type="image/svg+xml"),
     )
     page.route("**/photos/*/original", lambda route: route.abort())
+    held_fallback = {}
+
+    def hold_fallback(route):
+        if held_fallback.get("released"):
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+        elif "route" not in held_fallback:
+            held_fallback["route"] = route
+        else:
+            route.fulfill(body=fallback_svg, content_type="image/svg+xml")
+
     page.route(
         "**/photos/*/preview?size=2560",
-        lambda route: route.fulfill(body=fallback_svg, content_type="image/svg+xml"),
+        hold_fallback,
     )
     page.route(
         "**/photos/*/preview?size=3840",
-        lambda route: route.fulfill(body=fallback_svg, content_type="image/svg+xml"),
+        hold_fallback,
     )
 
     url = live_server["url"]
@@ -2012,6 +2824,17 @@ def test_browse_lightbox_deferred_one_to_one_survives_original_failure_to_fallba
         timeout=6000,
     )
     assert abs(page.evaluate("window._lbZoom") - 1) < 0.001
+
+    # The queued state above is intentionally transient in production. Keep
+    # the fallback decode parked until after it has been observed so a fast
+    # runner cannot complete the swap and clear _lbPending1To1 first.
+    deadline = time.time() + 8
+    while "route" not in held_fallback and time.time() < deadline:
+        page.wait_for_timeout(25)
+    assert "route" in held_fallback
+    fallback_route = held_fallback.pop("route")
+    held_fallback["released"] = True
+    fallback_route.fulfill(body=fallback_svg, content_type="image/svg+xml")
 
     # Once the fallback tier becomes the current source the deferred snap
     # completes at true 1:1 on that tier — never stranded on the upscaled /full.
@@ -2117,7 +2940,15 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
     assert waiting["currentSource"] == "full"
     assert waiting["desiredSource"] in ("2560", "3840")
 
-    native_zoom_before = page.evaluate("window._lbNativeZoom")
+    # Stash the pre-resize native zoom in a page variable rather than reading it
+    # into Python and interpolating it back. While the fallback tier is loading
+    # _lbNativeZoom can be transiently unset; a Python None then formats into the
+    # wait expression as the literal `None`, which throws "None is not defined"
+    # in JS. Guard that it is a finite number first, then compare in-page.
+    page.wait_for_function(
+        "typeof window._lbNativeZoom === 'number' && isFinite(window._lbNativeZoom)"
+    )
+    page.evaluate("window._lbNativeZoomBaseline = window._lbNativeZoom")
 
     # Resize while the fallback tier is still held. _lbRecomputeNativeZoom runs
     # unconditionally at the top of the resize handler (before any pending-state
@@ -2125,7 +2956,7 @@ def test_browse_lightbox_resize_preserves_post_original_failure_fallback(
     # signal that the debounced handler actually executed — no fixed sleep.
     page.set_viewport_size({"width": 640, "height": 800})
     page.wait_for_function(
-        "Math.abs(window._lbNativeZoom - %r) > 0.1" % native_zoom_before
+        "Math.abs(window._lbNativeZoom - window._lbNativeZoomBaseline) > 0.1"
     )
 
     # The resize handler has now run while the fallback tier is still loading.

@@ -903,6 +903,15 @@ async function loadCollectionFilter() {
       var opt = document.createElement('option');
       opt.value = c.id;
       opt.textContent = c.name;
+      // count_error means /api/collections couldn't resolve this collection's
+      // rules — selecting it would 400 the downstream /photos endpoint and
+      // (previously) silently widen the review scope back to every prediction.
+      // Show it disabled with a hint so the state is visible.
+      if (c.count_error) {
+        opt.disabled = true;
+        opt.textContent = c.name + ' (unavailable — edit rules to fix)';
+        opt.title = "This collection's rules could not be resolved. Edit it in Browse to make it usable.";
+      }
       sel.appendChild(opt);
     });
   } catch(e) {}
@@ -920,7 +929,17 @@ async function switchCollection(val) {
       collectionPhotoIds = new Set(data.photos.map(function(p) { return p.id; }));
       predictions = allPredictions.filter(function(p) { return collectionPhotoIds.has(p.photo_id); });
     } catch(e) {
-      predictions = allPredictions.slice();
+      // The old catch fell back to allPredictions.slice(), which silently
+      // widened the review scope to every prediction — the opposite of what
+      // the user asked for. Keep the scope empty and surface the failure
+      // instead so a broken rule can't quietly turn "just this collection"
+      // into "everything".
+      console.error('Failed to load photos for collection ' + val + ':', e);
+      collectionPhotoIds = new Set();
+      predictions = [];
+      if (typeof showToast === 'function') {
+        showToast('Could not load photos for this collection — check its rules', 'error');
+      }
     }
   }
   renderAll();

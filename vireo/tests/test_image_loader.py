@@ -143,6 +143,54 @@ def test_raw_uses_embedded_jpeg_when_large_enough(tmp_path, monkeypatch):
     assert fake.postprocess_calls == 0, "postprocess should be skipped"
 
 
+def test_raw_camera_rendered_mode_uses_near_full_embedded_jpeg(
+    tmp_path, monkeypatch,
+):
+    """Full-size lightbox display keeps the camera rendition used by previews."""
+    from image_loader import RAW_DECODE_CAMERA_RENDERED, load_image
+
+    nef = tmp_path / "test.nef"
+    nef.write_bytes(b"fake NEF content")
+
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((8256, 5504), color="green"),
+        sensor_size=(8288, 5520),
+        postprocess_size=(8288, 5520),
+    ))
+
+    result = load_image(
+        str(nef), max_size=None, raw_decode=RAW_DECODE_CAMERA_RENDERED,
+    )
+
+    assert result is not None
+    assert result.size == (8256, 5504)
+    assert fake.postprocess_calls == 0
+
+
+def test_raw_camera_rendered_mode_rejects_cropped_embedded_jpeg(
+    tmp_path, monkeypatch,
+):
+    """A matching long edge cannot hide a substantially cropped short edge."""
+    from image_loader import RAW_DECODE_CAMERA_RENDERED, load_image
+
+    nef = tmp_path / "test.nef"
+    nef.write_bytes(b"fake NEF content")
+
+    fake = _install_fake_raw(monkeypatch, _FakeRaw(
+        embedded_jpeg=_jpeg_bytes((6000, 3376)),
+        sensor_size=(6000, 4000),
+        postprocess_size=(6000, 4000),
+    ))
+
+    result = load_image(
+        str(nef), max_size=None, raw_decode=RAW_DECODE_CAMERA_RENDERED,
+    )
+
+    assert result is not None
+    assert result.size == (6000, 4000)
+    assert fake.postprocess_calls == 1
+
+
 def test_raw_preserve_highlights_mode_bypasses_embedded_jpeg(tmp_path, monkeypatch):
     """Edit-quality RAW loads demosaic instead of using camera-rendered JPEGs."""
     import rawpy

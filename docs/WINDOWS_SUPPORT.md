@@ -27,6 +27,7 @@ explicit executable path under Settings → Paths.
 - Darktable and `darktable-cli` are required only for Darktable development.
 - Adobe DNG Converter is required only for Nikon High Efficiency NEF
   conversion.
+- Lightroom Classic is required only for Lightroom catalog workflows.
 - Remote import, archive, and move require both the Windows OpenSSH Client
   optional feature and a user-installed GNU rsync. Vireo tests both programs
   before enabling a transfer and preserves originals after any failed or
@@ -58,7 +59,7 @@ network storage.
 
 The manual journey covers fresh install, JPEG and supported RAW imports, model
 download, CPU classification, process/review/cull/browse/edit/export,
-duplicates, map, iNaturalist, Darktable, DNG conversion,
+duplicates, map, iNaturalist, Lightroom import, Darktable, DNG conversion,
 local and remote moves, publishing, update from the previous beta, and
 uninstall. Do not publish with a confirmed Windows startup, updater, data-loss,
 or core-workflow blocker.

@@ -99,6 +99,2766 @@ def test_move_photos_updates_db(move_env):
     assert photo["folder_id"] == env["fid_dst"]
 
 
+def test_move_folder_by_date_splits_photos_and_moves_sidecars(tmp_path):
+    """A date template can fan one source folder into multiple destinations."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "first.jpg").write_bytes(b"first")
+    (src / "first.xmp").write_text("<xmp/>")
+    (src / "second.jpg").write_bytes(b"second")
+    p1 = db.add_photo(
+        folder_id=fid, filename="first.jpg", extension=".jpg",
+        file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    p2 = db.add_photo(
+        folder_id=fid, filename="second.jpg", extension=".jpg",
+        file_size=6, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    result = move_folder_by_date(
+        db, fid, str(archive), "%Y-%m-%d",
+    )
+
+    assert result["moved"] == 2
+    assert result["errors"] == []
+    assert result["destination_count"] == 2
+    assert (archive / "2026-07-12" / "first.jpg").read_bytes() == b"first"
+    assert (archive / "2026-07-12" / "first.xmp").exists()
+    assert (archive / "2026-07-13" / "second.jpg").read_bytes() == b"second"
+    assert not (src / "first.jpg").exists()
+    assert not (src / "second.jpg").exists()
+    rows = db.conn.execute(
+        """SELECT p.id, f.path FROM photos p
+           JOIN folders f ON f.id = p.folder_id
+           WHERE p.id IN (?, ?)""",
+        (p1, p2),
+    ).fetchall()
+    assert {row["path"] for row in rows} == {
+        str(archive / "2026-07-12"),
+        str(archive / "2026-07-13"),
+    }
+
+
+def test_move_folder_by_date_copies_shared_xmp_to_each_date(tmp_path):
+    """Same-stem photos split by date each retain their shared XMP."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "IMG.CR3").write_bytes(b"raw")
+    (src / "IMG.JPG").write_bytes(b"jpeg")
+    (src / "IMG.xmp").write_bytes(b"shared-xmp")
+    db.add_photo(
+        folder_id=fid, filename="IMG.CR3", extension=".cr3",
+        file_size=3, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid, filename="IMG.JPG", extension=".jpg",
+        file_size=4, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    result = move_folder_by_date(db, fid, str(archive), "%Y-%m-%d")
+
+    assert result["moved"] == 2
+    assert result["errors"] == []
+    assert (
+        archive / "2026-07-12" / "IMG.xmp"
+    ).read_bytes() == b"shared-xmp"
+    assert (
+        archive / "2026-07-13" / "IMG.xmp"
+    ).read_bytes() == b"shared-xmp"
+    assert not (src / "IMG.xmp").exists()
+
+
+def test_move_photos_reuses_shared_xmp_within_one_destination(tmp_path):
+    """Same-batch siblings reuse the first verified XMP copy."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    destination = tmp_path / "archive"
+    fid = db.add_folder(str(src), name="card")
+    (src / "IMG.CR3").write_bytes(b"raw")
+    (src / "IMG.JPG").write_bytes(b"jpeg")
+    (src / "IMG.xmp").write_bytes(b"shared-xmp")
+    raw_pid = db.add_photo(
+        folder_id=fid, filename="IMG.CR3", extension=".cr3",
+        file_size=3, file_mtime=1.0,
+    )
+    jpeg_pid = db.add_photo(
+        folder_id=fid, filename="IMG.JPG", extension=".jpg",
+        file_size=4, file_mtime=2.0,
+    )
+
+    result = move_photos(db, [raw_pid, jpeg_pid], str(destination))
+
+    assert result["moved"] == 2
+    assert result["errors"] == []
+    assert (destination / "IMG.xmp").read_bytes() == b"shared-xmp"
+    assert not (src / "IMG.xmp").exists()
+
+
+def test_move_folder_by_date_rebases_developed_outputs(tmp_path):
+    """Regression: when photos in one folder fan out to per-date destinations,
+    each photo's developed-output file must move from the OLD folder-key
+    subdir to the NEW folder-key subdir. Without this rebase, previously
+    developed renders stay under the old key while the catalog points each
+    photo at its date folder — export/full-resolution lookups then miss the
+    render and fall back to RAW.
+    """
+    from export import developed_folder_key
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "first.jpg").write_bytes(b"first")
+    (src / "second.jpg").write_bytes(b"second")
+    db.add_photo(
+        folder_id=fid, filename="first.jpg", extension=".jpg",
+        file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid, filename="second.jpg", extension=".jpg",
+        file_size=6, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    developed = tmp_path / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(src))
+    (developed / old_key).mkdir()
+    (developed / old_key / "first.jpg").write_bytes(b"first-dev")
+    (developed / old_key / "second.tiff").write_bytes(b"second-dev")
+
+    result = move_folder_by_date(
+        db, fid, str(archive), "%Y-%m-%d",
+        developed_dir=str(developed),
+    )
+    assert result["errors"] == []
+    assert result["moved"] == 2
+
+    # Each photo's developed render moved to its new date-folder key.
+    new_first_key = developed_folder_key(str(archive / "2026-07-12"))
+    new_second_key = developed_folder_key(str(archive / "2026-07-13"))
+    assert (developed / new_first_key / "first.jpg").read_bytes() == b"first-dev"
+    assert (developed / new_second_key / "second.tiff").read_bytes() == b"second-dev"
+    # Old key's subdir is emptied and cleaned up.
+    assert not (developed / old_key).exists()
+
+
+def test_move_folder_by_date_without_developed_dir_leaves_disk_alone(tmp_path):
+    """When ``darktable_output_dir`` is unset (or the caller doesn't pass
+    ``developed_dir``), the date move must not touch any external dir —
+    same as before the rebase was added.
+    """
+    from export import developed_folder_key
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+    (src / "first.jpg").write_bytes(b"first")
+    db.add_photo(
+        folder_id=fid, filename="first.jpg", extension=".jpg",
+        file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+
+    developed = tmp_path / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(src))
+    (developed / old_key).mkdir()
+    (developed / old_key / "first.jpg").write_bytes(b"first-dev")
+
+    move_folder_by_date(db, fid, str(archive), "%Y-%m-%d")
+
+    # No developed_dir passed → the old key's subdir stays untouched.
+    assert (developed / old_key / "first.jpg").read_bytes() == b"first-dev"
+
+
+def test_move_photos_relocates_developed_output_per_photo(move_env):
+    """``move_photos`` relocates each moved photo's developed render to the
+    destination folder's key when ``developed_dir`` is supplied — the same
+    helper that ``move_folder_by_date`` relies on for date-fanned moves.
+    """
+    from export import developed_folder_key
+    from move import move_photos
+
+    env = move_env
+    developed = env["tmp_path"] / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(env["src"]))
+    (developed / old_key).mkdir()
+    (developed / old_key / "bird1.jpg").write_bytes(b"bird1-dev")
+    # A sibling render stays behind because its photo isn't in this move.
+    (developed / old_key / "bird2.jpg").write_bytes(b"bird2-dev")
+
+    result = move_photos(
+        db=env["db"],
+        photo_ids=[env["p1"]],
+        destination=str(env["dst"]),
+        developed_dir=str(developed),
+    )
+    assert result["errors"] == []
+
+    new_key = developed_folder_key(str(env["dst"]))
+    assert (developed / new_key / "bird1.jpg").read_bytes() == b"bird1-dev"
+    # bird2's render is left alone under the old key — its photo didn't move.
+    assert (developed / old_key / "bird2.jpg").read_bytes() == b"bird2-dev"
+
+
+def test_move_photos_rejects_stale_developed_render_at_destination(move_env):
+    """A pre-existing render at the destination key blocks the move.
+
+    ``_iter_developed_outputs`` resolves developed renders by destination
+    folder + stem alone. An untracked ``<new_key>/bird1.jpg`` left behind
+    from a previously deleted photo, a manually placed file, or a partial
+    copy from an aborted earlier move would silently be served as the
+    moved photo's render if we repointed the row against it. Treat that
+    as a move collision instead so the source photo and its render stay
+    intact for manual reconciliation.
+    """
+    from export import developed_folder_key
+    from move import move_photos
+
+    env = move_env
+    developed = env["tmp_path"] / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(env["src"]))
+    new_key = developed_folder_key(str(env["dst"]))
+    (developed / old_key).mkdir()
+    (developed / new_key).mkdir()
+    (developed / old_key / "bird1.jpg").write_bytes(b"src-dev")
+    (developed / new_key / "bird1.jpg").write_bytes(b"dst-dev")
+
+    result = move_photos(
+        db=env["db"],
+        photo_ids=[env["p1"]],
+        destination=str(env["dst"]),
+        developed_dir=str(developed),
+    )
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render" in result["errors"][0]
+    # Both developed files remain exactly where they were.
+    assert (developed / new_key / "bird1.jpg").read_bytes() == b"dst-dev"
+    assert (developed / old_key / "bird1.jpg").read_bytes() == b"src-dev"
+    # Source photo file and catalog row untouched.
+    assert (env["src"] / "bird1.jpg").exists()
+    assert not (env["dst"] / "bird1.jpg").exists()
+    assert env["db"].get_photo(env["p1"])["folder_id"] == env["fid_src"]
+
+
+def test_move_photos_rejects_stale_default_developed_render_at_destination(
+    tmp_path,
+):
+    """When ``darktable_output_dir`` is unset the develop job writes to
+    ``<folder>/developed/``. A leftover file there for the same stem
+    would be silently picked up as the moved photo's render after the
+    row is repointed, so the pre-move guard must cover this layout too.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    fid_src = db.add_folder(str(src), name="src")
+    db.add_folder(str(dst), name="dst")
+
+    (src / "bird.cr3").write_bytes(b"raw")
+    pid = db.add_photo(
+        folder_id=fid_src, filename="bird.cr3", extension=".cr3",
+        file_size=3, file_mtime=1.0,
+    )
+
+    stale_dev_dir = dst / "developed"
+    stale_dev_dir.mkdir()
+    (stale_dev_dir / "bird.jpg").write_bytes(b"stale-dev")
+
+    result = move_photos(
+        db=db,
+        photo_ids=[pid],
+        destination=str(dst),
+    )
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render" in result["errors"][0]
+    assert (src / "bird.cr3").exists()
+    assert not (dst / "bird.cr3").exists()
+    assert (stale_dev_dir / "bird.jpg").read_bytes() == b"stale-dev"
+    assert db.get_photo(pid)["folder_id"] == fid_src
+
+
+def test_move_photos_rejects_blocked_default_developed_path(tmp_path):
+    """A file at the target render directory must fail before catalog update."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    fid_src = db.add_folder(str(src), name="src")
+    db.add_folder(str(dst), name="dst")
+
+    source_file = src / "bird.cr3"
+    source_file.write_bytes(b"raw")
+    pid = db.add_photo(
+        folder_id=fid_src, filename=source_file.name, extension=".cr3",
+        file_size=3, file_mtime=1.0,
+    )
+    blocked = dst / "developed"
+    blocked.write_bytes(b"not-a-directory")
+
+    result = move_photos(db, [pid], str(dst))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed output path is not a directory" in result["errors"][0]
+    assert source_file.exists()
+    assert not (dst / source_file.name).exists()
+    assert blocked.read_bytes() == b"not-a-directory"
+    assert db.get_photo(pid)["folder_id"] == fid_src
+
+
+def test_move_photos_rejects_case_folded_stale_developed_render(
+    tmp_path, monkeypatch,
+):
+    """A case-only stale render blocks moves on case-folding volumes."""
+    import move as move_module
+    from move import move_photos
+
+    monkeypatch.setattr(
+        move_module, "_is_case_insensitive_path", lambda _: True,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    fid_src = db.add_folder(str(src), name="src")
+    db.add_folder(str(dst), name="dst")
+
+    incoming = src / "img.cr3"
+    incoming.write_bytes(b"raw")
+    pid = db.add_photo(
+        folder_id=fid_src, filename=incoming.name, extension=".cr3",
+        file_size=3, file_mtime=1.0,
+    )
+    stale_dev_dir = dst / "developed"
+    stale_dev_dir.mkdir()
+    (stale_dev_dir / "IMG.jpg").write_bytes(b"stale-dev")
+
+    result = move_photos(db, [pid], str(dst))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render" in result["errors"][0]
+    assert incoming.exists()
+    assert not (dst / incoming.name).exists()
+    assert db.get_photo(pid)["folder_id"] == fid_src
+
+
+def test_move_photos_out_of_developed_folder_ignores_source_original(
+    tmp_path,
+):
+    """A source folder named developed is not a stale-render directory."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    destination = tmp_path / "archive"
+    source = destination / "developed"
+    source.mkdir(parents=True)
+    destination_id = db.add_folder(str(destination), name="archive")
+    source_id = db.add_folder(
+        str(source), name="developed", parent_id=destination_id,
+    )
+    source_file = source / "bird.jpg"
+    source_file.write_bytes(b"original")
+    pid = db.add_photo(
+        folder_id=source_id, filename=source_file.name, extension=".jpg",
+        file_size=source_file.stat().st_size, file_mtime=1.0,
+    )
+
+    result = move_photos(db, [pid], str(destination))
+
+    assert result["moved"] == 1
+    assert result["errors"] == []
+    assert (destination / "bird.jpg").read_bytes() == b"original"
+    assert not source_file.exists()
+    assert db.get_photo(pid)["folder_id"] == destination_id
+
+
+def test_move_photos_stale_check_allows_same_source_shared_stem(tmp_path):
+    """A same-source RAW+JPEG pair legitimately shares its render. When
+    the earlier sibling has already relocated the render, the later
+    sibling must not be tripped up by the stale-render guard -- the
+    catalog origin proves the file belongs to their shared stem, not a
+    stray leftover.
+    """
+    from export import developed_folder_key
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    fid_src = db.add_folder(str(src), name="src")
+    db.add_folder(str(dst), name="dst")
+
+    (src / "IMG.raw").write_bytes(b"raw")
+    (src / "IMG.jpg").write_bytes(b"jpeg")
+    pid_raw = db.add_photo(
+        folder_id=fid_src, filename="IMG.raw", extension=".raw",
+        file_size=3, file_mtime=1.0,
+    )
+    pid_jpg = db.add_photo(
+        folder_id=fid_src, filename="IMG.jpg", extension=".jpg",
+        file_size=4, file_mtime=2.0,
+    )
+
+    developed = tmp_path / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(src))
+    (developed / old_key).mkdir()
+    (developed / old_key / "IMG.jpg").write_bytes(b"shared-dev")
+
+    result = move_photos(
+        db=db,
+        photo_ids=[pid_raw, pid_jpg],
+        destination=str(dst),
+        developed_dir=str(developed),
+    )
+
+    assert result["errors"] == []
+    assert result["moved"] == 2
+    new_key = developed_folder_key(str(dst))
+    assert (developed / new_key / "IMG.jpg").read_bytes() == b"shared-dev"
+
+
+def test_move_photos_keeps_render_for_unselected_same_stem_photo(tmp_path):
+    """A same-stem photo left in the source must retain its shared render."""
+    from export import developed_folder_key
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_folder(str(dst), name="dst")
+
+    (src / "IMG.raw").write_bytes(b"raw")
+    (src / "IMG.jpg").write_bytes(b"jpeg")
+    moved_pid = db.add_photo(
+        folder_id=fid, filename="IMG.raw", extension=".raw",
+        file_size=3, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=fid, filename="IMG.jpg", extension=".jpg",
+        file_size=4, file_mtime=2.0,
+    )
+    source_developed = src / "developed"
+    source_developed.mkdir()
+    (source_developed / "IMG.tiff").write_bytes(b"shared-render")
+    configured = tmp_path / "configured-developed"
+    configured.mkdir()
+    old_key = developed_folder_key(str(src))
+    (configured / old_key).mkdir()
+    (configured / old_key / "IMG.jpg").write_bytes(b"configured-render")
+
+    result = move_photos(
+        db, [moved_pid], str(dst), developed_dir=str(configured),
+    )
+
+    assert result["errors"] == []
+    assert (source_developed / "IMG.tiff").read_bytes() == b"shared-render"
+    assert (dst / "developed" / "IMG.tiff").read_bytes() == b"shared-render"
+    new_key = developed_folder_key(str(dst))
+    assert (configured / old_key / "IMG.jpg").read_bytes() \
+        == b"configured-render"
+    assert (configured / new_key / "IMG.jpg").read_bytes() \
+        == b"configured-render"
+
+
+def test_move_folder_by_date_rebases_default_developed_renders(tmp_path):
+    """Regression: when ``darktable_output_dir`` is unset, the develop job
+    writes to ``<folder>/developed/<stem>.<ext>`` — the export/full-
+    resolution lookup's default probe location. Per-photo date-organized
+    moves must rebase those renders too, or the catalog silently points
+    at a destination folder whose ``developed/`` subdir is empty and the
+    app falls back to the RAW/original.
+    """
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "first.jpg").write_bytes(b"first")
+    (src / "second.jpg").write_bytes(b"second")
+    db.add_photo(
+        folder_id=fid, filename="first.jpg", extension=".jpg",
+        file_size=5, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid, filename="second.jpg", extension=".jpg",
+        file_size=6, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    default_developed = src / "developed"
+    default_developed.mkdir()
+    (default_developed / "first.jpg").write_bytes(b"first-dev")
+    (default_developed / "second.tiff").write_bytes(b"second-dev")
+
+    result = move_folder_by_date(db, fid, str(archive), "%Y-%m-%d")
+    assert result["errors"] == []
+    assert result["moved"] == 2
+
+    # Each photo's default-location developed render moved alongside its
+    # photo to the destination date folder's ``developed/`` subdir.
+    assert (archive / "2026-07-12" / "developed" / "first.jpg").read_bytes() \
+        == b"first-dev"
+    assert (archive / "2026-07-13" / "developed" / "second.tiff").read_bytes() \
+        == b"second-dev"
+    # Source ``developed/`` is cleaned up once emptied.
+    assert not default_developed.exists()
+
+
+def test_move_folder_by_date_preserves_tracked_developed_child(tmp_path):
+    """A tracked child named ``developed`` contains originals, not renders."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    tracked_child = src / "developed"
+    tracked_child.mkdir(parents=True)
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+    child_fid = db.add_folder(
+        str(tracked_child), name="developed", parent_id=fid,
+    )
+
+    # Matching stems reproduce the bug: moving the parent's bird first used
+    # to mistake the child's tracked original for a generated render.
+    (src / "bird.jpg").write_bytes(b"parent")
+    (tracked_child / "bird.jpg").write_bytes(b"child")
+    db.add_photo(
+        folder_id=fid, filename="bird.jpg", extension=".jpg",
+        file_size=6, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    child_pid = db.add_photo(
+        folder_id=child_fid, filename="bird.jpg", extension=".jpg",
+        file_size=5, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    result = move_folder_by_date(db, fid, str(archive), "%Y-%m-%d")
+
+    assert result["errors"] == []
+    assert result["moved"] == 2
+    assert (archive / "2026-07-12" / "bird.jpg").read_bytes() == b"parent"
+    assert (archive / "2026-07-13" / "bird.jpg").read_bytes() == b"child"
+    child_row = db.conn.execute(
+        """SELECT f.path FROM photos p
+           JOIN folders f ON f.id = p.folder_id
+           WHERE p.id = ?""",
+        (child_pid,),
+    ).fetchone()
+    assert child_row["path"] == str(archive / "2026-07-13")
+
+
+def test_move_folder_by_date_copies_shared_stem_render_to_each_date(tmp_path):
+    """Same-stem photo rows fanned to different dates share one render."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "IMG.raw").write_bytes(b"raw")
+    (src / "IMG.jpg").write_bytes(b"jpeg")
+    db.add_photo(
+        folder_id=fid, filename="IMG.raw", extension=".raw",
+        file_size=3, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid, filename="IMG.jpg", extension=".jpg",
+        file_size=4, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+    default_developed = src / "developed"
+    default_developed.mkdir()
+    (default_developed / "IMG.tiff").write_bytes(b"shared-render")
+
+    result = move_folder_by_date(db, fid, str(archive), "%Y-%m-%d")
+
+    assert result["errors"] == []
+    assert result["moved"] == 2
+    for date in ("2026-07-12", "2026-07-13"):
+        assert (
+            archive / date / "developed" / "IMG.tiff"
+        ).read_bytes() == b"shared-render"
+    assert not default_developed.exists()
+
+
+def test_move_folder_by_date_copies_shared_stem_render_configured_dir(
+    tmp_path,
+):
+    """Same shared-stem fan-out regression, configured-``darktable_output_dir``
+    variant. Sibling of
+    ``test_move_folder_by_date_copies_shared_stem_render_to_each_date`` —
+    that one only exercises the default ``<folder>/developed/`` layout via
+    ``relocate_default_developed_file``. This one exercises the flat-key
+    layout via ``relocate_developed_file``, which routes through the same
+    ``_relocate_stem_files`` helper but from a different call site with
+    different old/new subdirs. Without the shared-move record in the
+    listing cache, the second destination's folder key would be empty
+    even though the render existed under the source key.
+    """
+    from export import developed_folder_key
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    (src / "IMG.CR3").write_bytes(b"raw")
+    (src / "IMG.JPG").write_bytes(b"jpg")
+    db.add_photo(
+        folder_id=fid, filename="IMG.CR3", extension=".cr3",
+        file_size=3, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid, filename="IMG.JPG", extension=".jpg",
+        file_size=3, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    developed = tmp_path / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(src))
+    (developed / old_key).mkdir()
+    (developed / old_key / "IMG.jpg").write_bytes(b"shared-dev")
+
+    result = move_folder_by_date(
+        db, fid, str(archive), "%Y-%m-%d",
+        developed_dir=str(developed),
+    )
+    assert result["errors"] == []
+    assert result["moved"] == 2
+
+    first_key = developed_folder_key(str(archive / "2026-07-12"))
+    second_key = developed_folder_key(str(archive / "2026-07-13"))
+    # Both new folder keys carry the render — one arrived via
+    # ``shutil.move`` and the other via ``shutil.copy2`` from the first
+    # destination — so neither photo silently loses its edit under the
+    # flat-key layout.
+    assert (developed / first_key / "IMG.jpg").read_bytes() == b"shared-dev"
+    assert (developed / second_key / "IMG.jpg").read_bytes() == b"shared-dev"
+
+
+def test_move_folder_by_date_rejects_distinct_same_stem_renders(tmp_path):
+    """Distinct source-folder renders cannot share one destination stem."""
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    parent = tmp_path / "card"
+    first_src = parent / "a"
+    second_src = parent / "b"
+    first_src.mkdir(parents=True)
+    second_src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    parent_fid = db.add_folder(str(parent), name="card")
+    first_fid = db.add_folder(str(first_src), name="a", parent_id=parent_fid)
+    second_fid = db.add_folder(str(second_src), name="b", parent_id=parent_fid)
+
+    (first_src / "IMG.CR3").write_bytes(b"first-raw")
+    (second_src / "IMG.NEF").write_bytes(b"second-raw")
+    first_pid = db.add_photo(
+        folder_id=first_fid, filename="IMG.CR3", extension=".cr3",
+        file_size=9, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    second_pid = db.add_photo(
+        folder_id=second_fid, filename="IMG.NEF", extension=".nef",
+        file_size=10, file_mtime=2.0, timestamp="2026-07-12T10:15:00",
+    )
+    (first_src / "developed").mkdir()
+    (second_src / "developed").mkdir()
+    (first_src / "developed" / "IMG.jpg").write_bytes(b"first-render")
+    (second_src / "developed" / "IMG.jpg").write_bytes(b"second-render")
+
+    result = move_folder_by_date(
+        db, parent_fid, str(archive), "%Y-%m-%d",
+    )
+
+    assert result["moved"] == 1
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    destination = archive / "2026-07-12"
+    assert (destination / "IMG.CR3").read_bytes() == b"first-raw"
+    assert (destination / "developed" / "IMG.jpg").read_bytes() \
+        == b"first-render"
+    assert (second_src / "IMG.NEF").read_bytes() == b"second-raw"
+    assert (second_src / "developed" / "IMG.jpg").read_bytes() \
+        == b"second-render"
+    assert db.get_photo(first_pid)["folder_id"] != first_fid
+    assert db.get_photo(second_pid)["folder_id"] == second_fid
+
+
+def test_move_folder_by_date_lists_developed_dir_once_per_source(
+    tmp_path, monkeypatch,
+):
+    """Regression: fanning N developed photos through per-date destinations
+    must not rescan the source developed subdir once per photo. Prior to
+    the shared listing cache, ``move_folder_by_date`` would call the
+    per-photo relocate helper N times and each call would re-list the
+    same directory — quadratic on large libraries.
+    """
+    import export as export_mod
+    from export import developed_folder_key
+    from move import move_folder_by_date
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "card"
+    src.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    fid = db.add_folder(str(src), name="card")
+
+    # Three distinct capture-date destinations so the group loop runs
+    # three times, each of which used to list the source developed subdir
+    # independently.
+    photos = [
+        ("first.jpg", "2026-07-12T09:30:00"),
+        ("second.jpg", "2026-07-13T10:15:00"),
+        ("third.jpg", "2026-07-14T08:00:00"),
+    ]
+    for name, ts in photos:
+        (src / name).write_bytes(b"x")
+        db.add_photo(
+            folder_id=fid, filename=name, extension=".jpg",
+            file_size=1, file_mtime=1.0, timestamp=ts,
+        )
+
+    developed = tmp_path / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(src))
+    (developed / old_key).mkdir()
+    for name, _ in photos:
+        (developed / old_key / name).write_bytes(b"dev")
+
+    target = str(developed / old_key)
+    listdir_calls = []
+    real_listdir = os.listdir
+
+    def counting_listdir(path):
+        if str(path) == target:
+            listdir_calls.append(str(path))
+        return real_listdir(path)
+
+    monkeypatch.setattr(export_mod.os, "listdir", counting_listdir)
+
+    result = move_folder_by_date(
+        db, fid, str(archive), "%Y-%m-%d",
+        developed_dir=str(developed),
+    )
+    assert result["errors"] == []
+    assert result["moved"] == 3
+    # With the shared listing cache the initial scan of the old-key subdir
+    # runs once for the whole run instead of once per photo — so we allow
+    # at most 1 initial listdir + one post-rename cleanup listdir per
+    # relocated photo (3 here). Without the cache we would see 3 initial
+    # scans + 3 cleanup scans = 6.
+    assert len(listdir_calls) <= 4, (
+        f"expected at most 4 listdirs of the source developed subdir, "
+        f"got {len(listdir_calls)}"
+    )
+
+
+def test_plan_folder_date_moves_uses_unsorted_without_a_usable_time(tmp_path):
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    (src / "unknown.jpg").write_bytes(b"x")
+    db.add_photo(
+        folder_id=fid, filename="unknown.jpg", extension=".jpg",
+        file_size=1, file_mtime=None,
+    )
+
+    plan = plan_folder_date_moves(db, fid, str(tmp_path / "archive"), "%Y-%m-%d")
+
+    assert len(plan) == 1
+    assert plan[0]["relative_path"] == "unsorted"
+
+
+def test_plan_folder_date_moves_normalizes_dot_components(tmp_path):
+    """Rendered dot components never leak into catalog destination paths."""
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive = tmp_path / "archive"
+
+    plan = plan_folder_date_moves(
+        db, fid, str(archive), "./%Y-%m-%d",
+    )
+
+    assert plan[0]["relative_path"] == "2026-07-12"
+    assert plan[0]["destination"] == str(archive / "2026-07-12")
+
+
+def test_plan_folder_date_moves_rejects_dot_only_template(tmp_path):
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+
+    with pytest.raises(ValueError, match="empty path"):
+        plan_folder_date_moves(db, fid, str(tmp_path / "archive"), ".")
+
+
+def test_plan_folder_date_moves_rejects_template_that_escapes_destination(tmp_path):
+    """Defense-in-depth: even when a caller reaches the underlying planner
+    without the API-layer template validator, a rendered path that
+    resolves outside ``destination`` must be rejected rather than
+    silently placing a group above the chosen root.
+
+    ``build_destination_path`` already rejects a template with a literal
+    ``..`` segment (``ingest._is_unsafe_path``); this test locks in the
+    belt-and-suspenders resolved-path check that catches anything that
+    slips past the string-level guard.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    (src / "photo.jpg").write_bytes(b"x")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+
+    with pytest.raises(ValueError):
+        plan_folder_date_moves(
+            db, fid, str(tmp_path / "archive"), "%Y/../%m",
+        )
+
+
+def test_plan_folder_date_moves_rejects_destination_occupied_by_file(tmp_path):
+    """A rendered date path must be a directory or available to create."""
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-07-12").write_bytes(b"occupied")
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(archive), "%Y-%m-%d")
+
+
+def test_plan_folder_date_moves_rejects_destination_root_regular_file(tmp_path):
+    """The destination root itself must be validated as a directory.
+
+    The ancestor walk only checks paths *inside* ``destination`` (``depth``
+    starts at 1), so a destination path that is itself a regular file (or
+    dangling symlink) would slip past preflight — none of ``destination/2026``,
+    ``destination/2026/07`` lexist yet — and ``os.makedirs`` in the worker
+    would then raise ``NotADirectoryError``/``FileExistsError`` inside the
+    background job. Preflight must reject the destination root itself.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    # ``archive`` is a regular file, not a directory. Any nested template
+    # rendered under it would end up trying to ``makedirs`` a child of a
+    # regular file.
+    archive = tmp_path / "archive"
+    archive.write_bytes(b"blocked")
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(archive), "%Y/%m")
+
+
+def test_plan_folder_date_moves_rejects_parent_of_missing_destination_root(tmp_path):
+    """When the requested destination root does not exist yet and one of its
+    parents is already a regular file, preflight must reject the plan.
+
+    The destination check at the top of ``plan_folder_date_moves`` only fires
+    when ``destination`` itself lexists, and the intermediate-ancestor walk
+    only visits paths *inside* ``destination``. Without walking
+    ``destination``'s own parents, a request like
+    ``destination='/archive/root'`` where ``/archive`` is a plain file would
+    pass preflight, and ``move_photos`` would then call
+    ``os.makedirs('/archive/root/2026/07', exist_ok=True)`` and raise
+    ``NotADirectoryError`` inside the background job — losing the structured
+    date-destination error this guard is meant to provide.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    # ``archive`` is a regular file — a nested destination root under it
+    # ('/archive/root') doesn't lexist, but the parent is blocking.
+    archive = tmp_path / "archive"
+    archive.write_bytes(b"blocked")
+    blocked_destination = archive / "root"
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(blocked_destination), "%Y/%m")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Broken symlinks are unusual on Windows and require admin.",
+)
+def test_plan_folder_date_moves_rejects_dangling_symlink_parent_of_root(tmp_path):
+    """A dangling-symlink parent of a not-yet-existing destination root must
+    fail preflight for the same reason a plain-file parent does.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive_parent = tmp_path / "archive"
+    os.symlink(str(tmp_path / "disconnected-volume"), str(archive_parent))
+    blocked_destination = archive_parent / "root"
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(blocked_destination), "%Y/%m")
+
+
+def test_plan_folder_date_moves_rejects_ancestor_occupied_by_file(tmp_path):
+    """A nested template must reject a plan whose intermediate ancestor is a
+    regular file.
+
+    For template ``%Y/%m`` rendering ``2026/07``, the leaf-only check misses
+    a case where ``<destination>/2026`` is already a regular file — the leaf
+    ``<destination>/2026/07`` does not lexist yet. ``move_photos`` would then
+    call ``os.makedirs(<destination>/2026/07, exist_ok=True)`` and raise
+    ``NotADirectoryError`` inside the background job. Preflight must walk
+    each ancestor and surface a structured error instead.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    # ``<archive>/2026`` is a regular file, blocking any ``2026/*`` child.
+    (archive / "2026").write_bytes(b"blocked")
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(archive), "%Y/%m")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Broken symlinks are unusual on Windows and require admin.",
+)
+def test_plan_folder_date_moves_rejects_dangling_symlink_ancestor(tmp_path):
+    """A dangling-symlink intermediate ancestor must fail preflight.
+
+    For template ``%Y/%m`` rendering ``2026/07`` where ``<destination>/2026``
+    is a dangling symlink, the leaf check accepts the plan because
+    ``<destination>/2026/07`` does not lexist. ``os.makedirs(..., exist_ok=True)``
+    would then raise ``FileExistsError``/``NotADirectoryError`` inside the
+    worker — this is especially plausible for mounted-drive symlinks whose
+    target is disconnected.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    # Point the symlink at a sibling *inside* the destination root so the
+    # traversal safety check doesn't fire first — the intermediate ancestor
+    # is the scenario we're guarding against.
+    os.symlink(str(archive / "target"), str(archive / "2026"))
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(archive), "%Y/%m")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Broken symlinks are unusual on Windows and require admin.",
+)
+def test_plan_folder_date_moves_rejects_dangling_symlink_destination(tmp_path):
+    """A rendered date destination that is a dangling symlink must be
+    rejected in preflight.
+
+    ``os.path.exists`` follows the link and reports False for a dangling
+    symlink, so the older check accepted it and the background job later
+    crashed with ``FileExistsError`` inside ``move_photos``' ``makedirs``.
+    Use ``os.path.lexists`` so preflight fails cleanly instead.
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    # Point the symlink at a would-be sibling *inside* the destination
+    # root so the traversal safety check doesn't fire first — the
+    # scenario we're guarding against is a preflight-accepted dangling
+    # link that then trips makedirs's FileExistsError in the worker.
+    os.symlink(str(archive / "target"), str(archive / "2026-07-12"))
+
+    with pytest.raises(ValueError, match="not a directory"):
+        plan_folder_date_moves(db, fid, str(archive), "%Y-%m-%d")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows doesn't allow '\\' in folder names, so folding '\\' to '/' "
+    "in the descendants query is the correct Windows behavior; the leak only "
+    "affects POSIX where a literal backslash IS a legal filename character.",
+)
+def test_plan_folder_date_moves_does_not_leak_slash_siblings_on_posix(tmp_path):
+    """Regression: a POSIX folder whose name contains '\\' must not swallow
+    a sibling '/'-separated subtree.
+
+    ``/photos/a\\b`` and ``/photos/a/b/nested`` are distinct directories on
+    POSIX. If the descendants query folds '\\' to '/' before comparing
+    prefixes, the ``/photos/a\\b`` prefix becomes ``/photos/a/b/`` and matches
+    every row under ``/photos/a/b/…`` — pulling photos that don't belong to
+    the selected folder into the plan (and, worse, into the move that
+    executes it).
+    """
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    photos_root = tmp_path / "photos"
+    photos_root.mkdir()
+
+    backslash_dir = photos_root / "a\\b"
+    backslash_dir.mkdir()
+    (backslash_dir / "target.jpg").write_bytes(b"target")
+
+    slash_parent = photos_root / "a"
+    slash_parent.mkdir()
+    (slash_parent / "b").mkdir()
+    slash_nested = slash_parent / "b" / "nested"
+    slash_nested.mkdir()
+    (slash_nested / "sibling.jpg").write_bytes(b"sibling")
+
+    fid_target = db.add_folder(str(backslash_dir), name="a\\b")
+    fid_nested = db.add_folder(str(slash_nested), name="nested")
+    db.add_photo(
+        folder_id=fid_target, filename="target.jpg", extension=".jpg",
+        file_size=6, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=fid_nested, filename="sibling.jpg", extension=".jpg",
+        file_size=7, file_mtime=2.0, timestamp="2026-07-13T10:15:00",
+    )
+
+    plan = plan_folder_date_moves(
+        db, fid_target, str(tmp_path / "archive"), "%Y-%m-%d",
+    )
+
+    # Only the photo actually under /photos/a\b appears in the plan.
+    planned_ids = {pid for group in plan for pid in group["photo_ids"]}
+    assert len(planned_ids) == 1
+    only_id = next(iter(planned_ids))
+    only_photo = db.get_photo(only_id)
+    assert only_photo["filename"] == "target.jpg"
+
+
+def test_plan_folder_date_moves_matches_descendant_by_case_on_windows(
+    tmp_path, monkeypatch,
+):
+    """Regression: on Windows, tracked descendants whose stored path differs
+    from the selected folder only by case must still be picked up by the
+    descendants prefix query. Before the fix the query only normalized
+    separators (``REPLACE(f.path, '\\', '/')``), so a folder stored as
+    ``C:\\Photos`` with a descendant row ``c:\\photos\\2026`` would drop
+    the descendant and leave those photos behind.
+
+    Executes on non-Windows hosts by swapping ``move``'s ``sys`` for a
+    shim that reports ``platform == "win32"`` — patching the real
+    ``sys.platform`` would leak into stdlib modules that gate
+    Windows-only imports (multiprocessing, etc.).
+    """
+    import types
+
+    import move as move_mod
+    from move import plan_folder_date_moves
+
+    shim = types.SimpleNamespace(platform="win32")
+    monkeypatch.setattr(move_mod, "sys", shim)
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    # Rows are stored with mixed case; the actual on-disk paths are used
+    # only to satisfy add_folder's isdir check.
+    parent_disk = tmp_path / "photos"
+    parent_disk.mkdir()
+    child_disk = parent_disk / "2026"
+    child_disk.mkdir()
+    alias_disk = tmp_path / "alias"
+    alias_disk.mkdir()
+    (parent_disk / "root.jpg").write_bytes(b"root")
+    (child_disk / "child.jpg").write_bytes(b"child")
+    (alias_disk / "alias.jpg").write_bytes(b"alias")
+
+    # Insert the folder rows directly so we can control the exact case that
+    # gets stored — add_folder normalizes through the filesystem.
+    parent_fid = db.add_folder(str(parent_disk), name="photos")
+    child_fid = db.add_folder(str(child_disk), name="2026")
+    alias_fid = db.add_folder(str(alias_disk), name="alias")
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        ("C:\\Photos", parent_fid),
+    )
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        ("c:\\photos\\2026", child_fid),
+    )
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        ("c:\\PHOTOS", alias_fid),
+    )
+    db.conn.commit()
+
+    db.add_photo(
+        folder_id=parent_fid, filename="root.jpg", extension=".jpg",
+        file_size=4, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    db.add_photo(
+        folder_id=child_fid, filename="child.jpg", extension=".jpg",
+        file_size=5, file_mtime=2.0, timestamp="2026-07-13T09:30:00",
+    )
+    db.add_photo(
+        folder_id=alias_fid, filename="alias.jpg", extension=".jpg",
+        file_size=5, file_mtime=3.0, timestamp="2026-07-14T09:30:00",
+    )
+
+    # The destination itself is host-OS absolute so os.path.isabs and the
+    # traversal check pass under the test runner; only the descendants
+    # query needs the Windows-style stored rows to trigger the case-fold
+    # branch.
+    plan = plan_folder_date_moves(
+        db, parent_fid, str(tmp_path / "archive"), "%Y-%m-%d",
+    )
+
+    planned_ids = {pid for group in plan for pid in group["photo_ids"]}
+    assert len(planned_ids) == 3, (
+        "differently-cased descendant and exact alias should be included"
+    )
+
+
+def test_plan_folder_date_moves_matches_case_alias_on_casefolding_posix(
+    tmp_path, monkeypatch,
+):
+    """Case-only aliases on a case-insensitive POSIX volume are descendants."""
+    import move as move_mod
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    parent_disk = tmp_path / "Photos"
+    child_disk = parent_disk / "2026"
+    child_disk.mkdir(parents=True)
+    parent_fid = db.add_folder(str(parent_disk), name="Photos")
+    child_fid = db.add_folder(str(child_disk), name="2026")
+    parent_path = str(parent_disk)
+    child_alias = str(tmp_path / "photos" / "2026")
+    db.conn.execute(
+        "UPDATE folders SET path = ? WHERE id = ?",
+        (child_alias, child_fid),
+    )
+    db.conn.commit()
+    child_pid = db.add_photo(
+        folder_id=child_fid, filename="child.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+    # Simulate a case-insensitive POSIX filesystem while retaining the
+    # host's POSIX path implementation. Root-scoped fallback in
+    # _path_equal_or_descends then folds the case-only alias safely.
+    monkeypatch.setattr(move_mod, "_case_insensitive_root", lambda path: "/")
+
+    plan = move_mod.plan_folder_date_moves(
+        db, parent_fid, str(tmp_path / "archive"), "%Y-%m-%d",
+    )
+
+    assert parent_path != child_alias
+    assert [pid for item in plan for pid in item["photo_ids"]] == [child_pid]
+
+
+def test_plan_folder_date_moves_matches_symlink_alias_descendants_on_posix(
+    tmp_path,
+):
+    """A tracked child stored through a symlink target must still be planned
+    as a descendant of the selected folder.
+
+    Regression: on case-sensitive POSIX the descendants query used a raw
+    ``substr(f.path, ...)`` prefix, which is false when the selected folder is
+    stored as ``/photos/card`` (a symlink to ``/mnt/card``) but the child row
+    is stored as ``/mnt/card/day``. Those photos were silently dropped from
+    the date-move plan and left behind on disk.
+    """
+    if sys.platform == "win32":
+        pytest.skip("POSIX-only symlink semantics")
+
+    from move import plan_folder_date_moves
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    target_root = tmp_path / "mnt" / "card"
+    target_root.mkdir(parents=True)
+    (target_root / "day").mkdir()
+
+    alias_root = tmp_path / "photos" / "card"
+    alias_root.parent.mkdir(parents=True)
+    try:
+        os.symlink(target_root, alias_root, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("filesystem does not support symlinks")
+
+    parent_fid = db.add_folder(str(alias_root), name="card")
+    child_fid = db.add_folder(str(target_root / "day"), name="day")
+    child_pid = db.add_photo(
+        folder_id=child_fid, filename="child.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0, timestamp="2026-07-12T09:30:00",
+    )
+
+    plan = plan_folder_date_moves(
+        db, parent_fid, str(tmp_path / "archive"), "%Y-%m-%d",
+    )
+
+    assert [pid for item in plan for pid in item["photo_ids"]] == [child_pid]
+
+
+def test_move_photos_allows_incremental_same_stem_siblings(tmp_path):
+    """A RAW/JPEG pair may be moved to one destination in separate calls."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    destination = tmp_path / "destination"
+    raw = src / "IMG.CR3"
+    jpeg = src / "IMG.JPG"
+    raw.write_bytes(b"raw")
+    jpeg.write_bytes(b"jpeg")
+    raw_pid = db.add_photo(
+        folder_id=db.add_folder(str(src), name="src"),
+        filename=raw.name, extension=".cr3", file_size=3, file_mtime=1.0,
+    )
+    source_fid = db.get_photo(raw_pid)["folder_id"]
+    jpeg_pid = db.add_photo(
+        folder_id=source_fid, filename=jpeg.name, extension=".jpg",
+        file_size=4, file_mtime=2.0,
+    )
+    developed = src / "developed"
+    developed.mkdir()
+    (developed / "IMG.jpg").write_bytes(b"render")
+
+    first = move_photos(db, [raw_pid], str(destination))
+    second = move_photos(db, [jpeg_pid], str(destination))
+
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    assert second["moved"] == 1
+    assert second["errors"] == []
+    assert (destination / raw.name).read_bytes() == b"raw"
+    assert (destination / jpeg.name).read_bytes() == b"jpeg"
+    assert not raw.exists()
+    assert not jpeg.exists()
+
+
+def test_move_photos_rejects_unknown_destination_same_stem_origin(tmp_path):
+    """A pre-existing same-stem photo is not assumed to be a moved sibling."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    source_fid = db.add_folder(str(source), name="source")
+    destination_fid = db.add_folder(str(destination), name="destination")
+    incoming = source / "IMG.CR3"
+    existing = destination / "IMG.JPG"
+    incoming.write_bytes(b"unrelated-raw")
+    existing.write_bytes(b"existing-jpeg")
+    incoming_pid = db.add_photo(
+        folder_id=source_fid, filename=incoming.name, extension=".cr3",
+        file_size=incoming.stat().st_size, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=destination_fid, filename=existing.name, extension=".jpg",
+        file_size=existing.stat().st_size, file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming.read_bytes() == b"unrelated-raw"
+    assert existing.read_bytes() == b"existing-jpeg"
+    assert db.get_photo(incoming_pid)["folder_id"] == source_fid
+
+
+def test_move_photos_provenance_survives_folder_id_reuse(tmp_path):
+    """SQLite ``INTEGER PRIMARY KEY`` without AUTOINCREMENT reuses freed
+    rowids after ``delete_folder``. Storing the source folder's *id* on
+    ``last_move_source_folder_*`` would let a brand-new unrelated folder
+    that lands on the same rowid compare equal to a stale reference and
+    bypass the same-stem developed-render collision guard. The check must
+    use a non-reusable identifier (the source folder's path).
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    original_source = tmp_path / "original"
+    destination = tmp_path / "destination"
+    original_source.mkdir()
+    original_fid = db.add_folder(str(original_source), name="original")
+    original_file = original_source / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    dest_fid = db.get_photo(original_pid)["folder_id"]
+    assert dest_fid != original_fid
+
+    # Drop the original source folder. SQLite is now free to reuse its
+    # rowid on the next folders INSERT.
+    db.delete_folder(original_fid)
+
+    # Force a rowid collision by inserting a synthetic folder row at the
+    # freed id. This mirrors what SQLite would do on the next real
+    # add_folder if that id happens to be at max(id)+1.
+    replacement_source = tmp_path / "replacement"
+    replacement_source.mkdir()
+    db.conn.execute(
+        "INSERT INTO folders (id, path, name) VALUES (?, ?, ?)",
+        (original_fid, str(replacement_source), "replacement"),
+    )
+    db.conn.commit()
+    db.add_workspace_folder(ws_id, original_fid)
+
+    incoming_file = replacement_source / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=original_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The replacement folder shares its rowid with the deleted original,
+    # but its path is different, so the collision guard must reject the
+    # move rather than treat it as a same-source sibling.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == original_fid
+
+
+def test_move_photos_provenance_cleared_when_source_folder_deleted(tmp_path):
+    """When a source folder is deleted after some of its photos were moved
+    out, any destination-photo rows that still reference the deleted path
+    via ``last_move_source_folder_path`` must have that provenance cleared.
+    Otherwise a new unrelated folder later appearing at the same path — for
+    example a removable card re-mounted at ``/Volumes/CARD`` after the old
+    scan was dropped — would compare equal to the stale reference and slip
+    a same-stem developed-render collision past the guard in
+    ``move_photos``.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    reusable_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    reusable_path.mkdir()
+    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_file = reusable_path / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    # Add a same-stem sibling that stays behind so the source stem is not
+    # drained by the move below — otherwise ``move_photos`` correctly
+    # expires the moved row's provenance immediately (covered by
+    # ``test_move_photos_provenance_cleared_when_source_stem_drained``)
+    # and there is nothing left for ``delete_folder``'s cascade to clear.
+    sibling_file = reusable_path / "IMG.NEF"
+    sibling_file.write_bytes(b"sibling-raw")
+    db.add_photo(
+        folder_id=original_fid, filename=sibling_file.name,
+        extension=".nef", file_size=sibling_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    # The destination row records the source path as provenance while a
+    # same-stem sibling remains behind.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(reusable_path)
+    )
+
+    # Drop the original source folder — the on-disk path is still there
+    # (imagine the card being re-inserted with different content later),
+    # but the earlier scan is gone from the catalog.
+    db.delete_folder(original_fid)
+
+    # Provenance must be cleared so a new folder at the reused path can't
+    # inherit the earlier claim.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] is None
+    )
+
+    # A brand-new folder appears at the same path with an unrelated photo
+    # that happens to share the stem.
+    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
+    db.add_workspace_folder(ws_id, replacement_fid)
+    incoming_file = reusable_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=replacement_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The new folder shares the deleted folder's path, but that stale
+    # provenance was invalidated on delete, so the collision guard sees an
+    # unknown origin for the existing stem and rejects rather than merging
+    # unrelated content into one destination folder+stem.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+
+
+def test_move_photos_provenance_cleared_when_missing_folder_merges_into_existing(tmp_path):
+    """When a missing source folder is relocated onto a path already tracked
+    by another folder, ``_merge_into_existing`` deletes the source folder
+    row and frees its old path. Any destination photo still carrying that
+    old path in ``last_move_source_folder_path`` must have that provenance
+    cleared. Otherwise, a new unrelated folder scanned at that freed path
+    later would compare equal to the stale reference in ``move_photos`` and
+    slip a same-stem developed-render collision past the guard — the same
+    class of bug fixed for ``delete_folder``, applied to the merge path.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    reusable_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    reusable_path.mkdir()
+    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_file = reusable_path / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    # Same-stem sibling that stays behind so the source stem is not drained
+    # by the move — otherwise ``move_photos`` would clear provenance
+    # immediately (covered by the drain test) and the merge cleanup under
+    # test would have nothing to clear.
+    sibling_file = reusable_path / "IMG.NEF"
+    sibling_file.write_bytes(b"sibling-raw")
+    db.add_photo(
+        folder_id=original_fid, filename=sibling_file.name,
+        extension=".nef", file_size=sibling_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(reusable_path)
+    )
+
+    # Simulate the missing-folder-merge flow: the original card folder goes
+    # missing, then the user relocates that missing entry onto a path that
+    # another folder already tracks (e.g. a replacement archive folder).
+    target_path = tmp_path / "REPLACEMENT"
+    target_path.mkdir()
+    target_fid = db.add_folder(str(target_path), name="REPLACEMENT")
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?",
+        (original_fid,),
+    )
+    db.conn.commit()
+    # Delete the on-disk source directory so relocate_folder's
+    # revalidation doesn't refresh the source instead of merging.
+    sibling_file.unlink()
+    reusable_path.rmdir()
+
+    db.relocate_folder(original_fid, str(target_path))
+
+    # The original source folder row must be gone (merged into target).
+    assert db.conn.execute(
+        "SELECT id FROM folders WHERE id = ?", (original_fid,)
+    ).fetchone() is None
+    # Provenance must be cleared so a new folder at the freed path can't
+    # inherit the stale claim.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] is None
+    )
+
+    # A brand-new unrelated folder now appears at the freed path with a
+    # same-stem photo but a different extension.
+    reusable_path.mkdir()
+    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
+    db.add_workspace_folder(ws_id, replacement_fid)
+    incoming_file = reusable_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=replacement_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The collision guard now sees an unknown origin for the existing stem
+    # (provenance was cleared by the merge) and rejects rather than
+    # merging unrelated content into one destination folder+stem.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+
+
+def test_move_provenance_rebased_for_child_cascaded_by_missing_merge(tmp_path):
+    """Missing-root merges rebase provenance for surviving child folders."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    old_root = tmp_path / "OLD"
+    old_child = old_root / "child"
+    old_child.mkdir(parents=True)
+    new_root = tmp_path / "NEW"
+    new_child = new_root / "child"
+    new_child.mkdir(parents=True)
+    destination = tmp_path / "archive"
+
+    old_root_id = db.add_folder(str(old_root), name="OLD")
+    child_id = db.add_folder(
+        str(old_child), name="child", parent_id=old_root_id,
+    )
+    new_root_id = db.add_folder(str(new_root), name="NEW")
+
+    moved_file = old_child / "IMG.JPG"
+    sibling_file = old_child / "IMG.CR3"
+    moved_file.write_bytes(b"jpeg")
+    sibling_file.write_bytes(b"raw")
+    moved_pid = db.add_photo(
+        folder_id=child_id, filename=moved_file.name, extension=".jpg",
+        file_size=4, file_mtime=1.0,
+    )
+    db.add_photo(
+        folder_id=child_id, filename=sibling_file.name, extension=".cr3",
+        file_size=3, file_mtime=2.0,
+    )
+
+    first = move_photos(db, [moved_pid], str(destination))
+    assert first["moved"] == 1
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (moved_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(old_child)
+    )
+
+    # The old root is now missing. Relocating it onto an already-tracked
+    # root merges the root row while cascading the surviving child row onto
+    # the real child directory beneath the target.
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id IN (?, ?)",
+        (old_root_id, child_id),
+    )
+    db.conn.commit()
+    sibling_file.unlink()
+    old_child.rmdir()
+    old_root.rmdir()
+
+    cascaded = db.relocate_folder(old_root_id, str(new_root))
+
+    assert cascaded == [{
+        "id": child_id,
+        "old_path": str(old_child),
+        "new_path": str(new_child),
+    }]
+    assert db.conn.execute(
+        "SELECT path, parent_id FROM folders WHERE id = ?", (child_id,),
+    ).fetchone()["parent_id"] == new_root_id
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (moved_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(new_child)
+    )
+
+    # Reuse the freed old child path with unrelated same-stem content. The
+    # rebased provenance must make the destination collision guard reject it.
+    old_child.mkdir(parents=True)
+    replacement_id = db.add_folder(str(old_child), name="child")
+    incoming = old_child / "IMG.NEF"
+    incoming.write_bytes(b"replacement")
+    incoming_pid = db.add_photo(
+        folder_id=replacement_id, filename=incoming.name, extension=".nef",
+        file_size=incoming.stat().st_size, file_mtime=3.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming.exists()
+    assert db.get_photo(incoming_pid)["folder_id"] == replacement_id
+
+
+def test_move_photos_provenance_rebased_when_source_folder_moved(tmp_path):
+    """Renaming/moving a source folder via ``move_folder_path`` (e.g. the
+    whole-folder move flow) frees the old path for reuse. Without cascading
+    the rename into ``photos.last_move_source_folder_path``, a new unrelated
+    folder later scanned at the freed path would compare equal to the stale
+    stored origin and slip past the same-stem developed-render collision
+    guard in ``move_photos``, letting two unrelated destination rows share
+    the developed-output lookup by folder+stem. The cascade must rebase the
+    stored provenance so it still points at the renamed folder — preserving
+    the shared-render relationship with siblings that stay behind — and
+    stops matching against any future occupant of the freed path.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    reusable_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    reusable_path.mkdir()
+    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_file = reusable_path / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    # Same-stem sibling that stays behind — see analogous note in the
+    # source-folder-deleted test above; without it, ``move_photos``
+    # correctly expires provenance immediately and the cascade under test
+    # has nothing to rebase.
+    sibling_file = reusable_path / "IMG.NEF"
+    sibling_file.write_bytes(b"sibling-raw")
+    db.add_photo(
+        folder_id=original_fid, filename=sibling_file.name,
+        extension=".nef", file_size=sibling_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(reusable_path)
+    )
+
+    # Rename the original source folder in the catalog (mirrors what the
+    # whole-folder move flow does before the on-disk directory is moved
+    # out). The old path is now free for reuse.
+    renamed_path = tmp_path / "CARD.bak"
+    reusable_path.rename(renamed_path)
+    db.move_folder_path(original_fid, str(renamed_path), new_name="CARD.bak")
+
+    # The provenance must have been rebased to the new path, not left
+    # pointing at the freed one.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(renamed_path)
+    )
+
+    # A brand-new folder appears at the freed path with an unrelated photo
+    # that happens to share the stem.
+    reusable_path.mkdir()
+    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
+    db.add_workspace_folder(ws_id, replacement_fid)
+    incoming_file = reusable_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=replacement_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The new folder shares the freed path, but the provenance was rebased
+    # onto the renamed folder, so the collision guard rejects rather than
+    # merging two unrelated content trees onto one destination folder+stem.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+
+
+def test_move_photos_provenance_cleared_when_source_stem_drained(tmp_path):
+    """When the last same-stem sibling is moved out of a source folder, any
+    destination rows still carrying that source path in
+    ``last_move_source_folder_path`` must have the provenance expired.
+    Otherwise a later rescan/import of an unrelated ``IMG.*`` into the same
+    source path could match ``existing_origin == src_dir`` in the collision
+    guard and slip into the destination, where developed-output lookup is
+    keyed by destination folder + stem only and the incoming photo would
+    display/export the old row's developed render.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    source_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    source_path.mkdir()
+    src_fid = db.add_folder(str(source_path), name="CARD")
+    src_file = source_path / "IMG.JPG"
+    src_file.write_bytes(b"original-jpeg")
+    src_pid = db.add_photo(
+        folder_id=src_fid, filename=src_file.name,
+        extension=".jpg", file_size=src_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, src_fid)
+
+    first = move_photos(db, [src_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+
+    # The source folder is now drained of same-stem photos, so the
+    # destination row must not still claim that source as its provenance
+    # (otherwise a rescan into the same path could inherit its render).
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (src_pid,),
+        ).fetchone()["last_move_source_folder_path"] is None
+    )
+
+    # A brand-new unrelated photo lands in the same source folder path
+    # (imagine a card wiped and re-populated). Its stem happens to match
+    # the earlier row, but they don't share a developed render.
+    incoming_file = source_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=src_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The collision guard now sees an unknown origin for the existing stem
+    # (provenance was expired when the source drained) and rejects rather
+    # than merging unrelated rows into one destination folder+stem.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == src_fid
+
+
+def test_delete_photos_expires_provenance_when_source_stem_drains(tmp_path):
+    """Deleting the final source sibling expires moved-row provenance."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    source_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    source_path.mkdir()
+    src_fid = db.add_folder(str(source_path), name="CARD")
+    db.add_workspace_folder(ws_id, src_fid)
+
+    raw = source_path / "IMG.CR3"
+    jpeg = source_path / "IMG.JPG"
+    raw.write_bytes(b"raw")
+    jpeg.write_bytes(b"jpeg")
+    raw_pid = db.add_photo(
+        folder_id=src_fid, filename=raw.name, extension=".cr3",
+        file_size=3, file_mtime=1.0,
+    )
+    jpeg_pid = db.add_photo(
+        folder_id=src_fid, filename=jpeg.name, extension=".jpg",
+        file_size=4, file_mtime=2.0,
+    )
+
+    first = move_photos(db, [raw_pid], str(destination))
+    assert first["moved"] == 1
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (raw_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(source_path)
+    )
+
+    deleted = db.delete_photos([jpeg_pid])
+    assert deleted["deleted"] == 1
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (raw_pid,),
+        ).fetchone()["last_move_source_folder_path"] is None
+    )
+
+    jpeg.unlink()
+    incoming = source_path / "IMG.NEF"
+    incoming.write_bytes(b"replacement")
+    incoming_pid = db.add_photo(
+        folder_id=src_fid, filename=incoming.name, extension=".nef",
+        file_size=incoming.stat().st_size, file_mtime=3.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming.exists()
+    assert db.get_photo(incoming_pid)["folder_id"] == src_fid
+
+
+def test_move_photos_provenance_cleared_across_date_fanout(tmp_path):
+    """A single source folder can fan same-stem siblings out to multiple
+    date-organized destinations. When the last sibling drains the source,
+    the provenance on the earlier siblings (moved to a different date
+    destination) must also be expired — otherwise a later unrelated
+    ``IMG.*`` reappearing at the source path could slip into whichever
+    destination still carries the stale claim.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    source_path = tmp_path / "CARD"
+    dest_a = tmp_path / "archive" / "2026-07-19"
+    dest_b = tmp_path / "archive" / "2026-07-20"
+    source_path.mkdir()
+    src_fid = db.add_folder(str(source_path), name="CARD")
+    file_a = source_path / "IMG.JPG"
+    file_a.write_bytes(b"jpeg-bytes")
+    file_b = source_path / "IMG.CR3"
+    file_b.write_bytes(b"raw-bytes")
+    pid_a = db.add_photo(
+        folder_id=src_fid, filename=file_a.name, extension=".jpg",
+        file_size=file_a.stat().st_size, file_mtime=1.0,
+    )
+    pid_b = db.add_photo(
+        folder_id=src_fid, filename=file_b.name, extension=".cr3",
+        file_size=file_b.stat().st_size, file_mtime=2.0,
+    )
+    db.add_workspace_folder(ws_id, src_fid)
+
+    # First sibling moves to date A (source still has the other sibling —
+    # provenance should be preserved on this call).
+    first = move_photos(db, [pid_a], str(dest_a))
+    assert first["moved"] == 1
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (pid_a,),
+        ).fetchone()["last_move_source_folder_path"] == str(source_path)
+    )
+
+    # Second sibling moves to date B and drains the source folder. Both
+    # destination rows now need their provenance expired.
+    second = move_photos(db, [pid_b], str(dest_b))
+    assert second["moved"] == 1
+    for pid in (pid_a, pid_b):
+        assert (
+            db.conn.execute(
+                "SELECT last_move_source_folder_path "
+                "FROM photos WHERE id = ?",
+                (pid,),
+            ).fetchone()["last_move_source_folder_path"] is None
+        )
+
+
+def test_move_photos_provenance_rebased_when_missing_folder_relocated(tmp_path):
+    """Renaming a missing source folder via ``Database.relocate_folder`` (the
+    "remap missing folder to a new location" flow) frees the old path for
+    reuse. Without cascading the rebase into
+    ``photos.last_move_source_folder_path``, a later unrelated folder scanned
+    at the freed path would compare equal to the stale stored origin and
+    slip past the same-stem developed-render collision guard in
+    ``move_photos``, letting two unrelated destination rows share the
+    developed-output lookup by folder+stem. The cascade must rebase the
+    stored provenance onto the new path — preserving the shared-render
+    relationship with any sibling that stays behind — and stop matching
+    against any future occupant of the freed path.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    reusable_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    reusable_path.mkdir()
+    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_file = reusable_path / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    # Same-stem sibling that stays behind so the destination row keeps its
+    # provenance after the move — otherwise ``move_photos`` correctly
+    # expires it immediately and the ``relocate_folder`` cascade has
+    # nothing to rebase.
+    sibling_file = reusable_path / "IMG.NEF"
+    sibling_file.write_bytes(b"sibling-raw")
+    db.add_photo(
+        folder_id=original_fid, filename=sibling_file.name,
+        extension=".nef", file_size=sibling_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(reusable_path)
+    )
+
+    # Mark the folder as missing (its on-disk path is gone) and remap it
+    # via ``relocate_folder`` to a fresh location. This is the flow used
+    # when a user tells the app "this folder now lives here". The old
+    # path is now free for reuse.
+    relocated_path = tmp_path / "CARD_RELOCATED"
+    reusable_path.rename(relocated_path)
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?",
+        (original_fid,),
+    )
+    db.conn.commit()
+    db.relocate_folder(original_fid, str(relocated_path))
+
+    # The provenance must have been rebased onto the new path, not left
+    # pointing at the freed one.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(relocated_path)
+    )
+
+    # A brand-new unrelated folder appears at the freed path with an
+    # unrelated photo whose stem matches.
+    reusable_path.mkdir()
+    replacement_fid = db.add_folder(str(reusable_path), name="CARD")
+    db.add_workspace_folder(ws_id, replacement_fid)
+    incoming_file = reusable_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=replacement_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # The collision guard rejects the incoming photo because its source
+    # path does not match the rebased provenance on the existing
+    # destination row.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == replacement_fid
+
+
+def test_move_photos_provenance_cleared_when_source_folder_marked_missing(tmp_path):
+    """When ``check_folder_health`` flips a folder to ``'missing'`` because
+    its on-disk path is gone, the folder row is preserved so a later rescan
+    can bring it back — but its stored path is now free for reuse by an
+    unrelated mount. ``add_folder``'s ``INSERT OR IGNORE`` maps a fresh scan
+    of the same path back onto the surviving folder row, so photos from a
+    different card land under the same ``folder_id`` and ``src_dir``. Any
+    destination photo still carrying that path in
+    ``last_move_source_folder_path`` would then compare equal to the new
+    card's ``src_dir`` in ``move_photos`` and slip past the same-stem
+    developed-render collision guard, letting two unrelated destination rows
+    share the developed-output lookup by folder+stem. The health check must
+    invalidate that provenance on the ``ok`` → ``missing`` transition.
+    """
+    import shutil
+
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    reusable_path = tmp_path / "CARD"
+    destination = tmp_path / "archive"
+    reusable_path.mkdir()
+    original_fid = db.add_folder(str(reusable_path), name="CARD")
+    original_file = reusable_path / "IMG.JPG"
+    original_file.write_bytes(b"original-jpeg")
+    original_pid = db.add_photo(
+        folder_id=original_fid, filename=original_file.name,
+        extension=".jpg", file_size=original_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    # A same-stem sibling stays behind so ``move_photos`` does not expire
+    # provenance immediately on drain — the sibling-drain path is covered
+    # by its own test. This one exercises the health-check cascade.
+    sibling_file = reusable_path / "IMG.NEF"
+    sibling_file.write_bytes(b"sibling-raw")
+    db.add_photo(
+        folder_id=original_fid, filename=sibling_file.name,
+        extension=".nef", file_size=sibling_file.stat().st_size,
+        file_mtime=1.0,
+    )
+    db.add_workspace_folder(ws_id, original_fid)
+
+    first = move_photos(db, [original_pid], str(destination))
+    assert first["moved"] == 1
+    assert first["errors"] == []
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] == str(reusable_path)
+    )
+
+    # The card is ejected — the on-disk directory disappears. The next
+    # health-check cycle notices and flips the folder to ``'missing'``.
+    # The folder row and its remaining photo rows survive in case the
+    # same card returns.
+    shutil.rmtree(reusable_path)
+    changed = db.check_folder_health()
+    assert changed >= 1
+    assert db.conn.execute(
+        "SELECT status FROM folders WHERE id = ?", (original_fid,),
+    ).fetchone()["status"] == "missing"
+
+    # Provenance pointing at the freed path must have been cleared by the
+    # health check — otherwise a different card mounted at the same path
+    # later would inherit the earlier scan's claim on the destination
+    # developed render.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (original_pid,),
+        ).fetchone()["last_move_source_folder_path"] is None
+    )
+
+    # A different card is mounted at the same path and rescanned. INSERT
+    # OR IGNORE in ``add_folder`` reuses the surviving folder row for that
+    # path, so the new card's photos land under the same ``folder_id`` as
+    # the old scan. Without the provenance clear above, ``move_photos``
+    # would see the destination stem's stored origin (``/CARD``) equal to
+    # this incoming photo's ``src_dir`` (also ``/CARD``) and merge two
+    # unrelated developed renders under one destination folder+stem.
+    reusable_path.mkdir()
+    incoming_file = reusable_path / "IMG.CR3"
+    incoming_file.write_bytes(b"replacement-raw")
+    incoming_pid = db.add_photo(
+        folder_id=original_fid, filename=incoming_file.name,
+        extension=".cr3", file_size=incoming_file.stat().st_size,
+        file_mtime=2.0,
+    )
+
+    result = move_photos(db, [incoming_pid], str(destination))
+
+    # With provenance cleared, the destination stem is now unknown-origin,
+    # so the collision guard rejects the incoming photo instead of
+    # silently letting it share the earlier scan's render.
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert incoming_file.read_bytes() == b"replacement-raw"
+    assert db.get_photo(incoming_pid)["folder_id"] == original_fid
+
+
+def test_move_photos_rejects_case_folded_stem_collision(tmp_path, monkeypatch):
+    """On case-insensitive destinations (Windows, default macOS APFS), two
+    unrelated source folders can contain ``IMG.CR3`` and ``img.NEF`` and
+    both originals land in the same date folder. Their ``*.jpg`` developed
+    renders both want a case-only variant of the same filename, so exactly
+    one wins; the second photo's row would then serve the first's render.
+    The same-stem destination collision guard in ``move_photos`` must fold
+    the stem to the destination filesystem's case sensitivity before
+    consulting the origin map, so this collision is refused up front.
+    """
+    import move as move_module
+    from move import move_photos
+
+    monkeypatch.setattr(
+        move_module, "_is_case_insensitive_path", lambda _: True,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    source_a = tmp_path / "cardA"
+    source_b = tmp_path / "cardB"
+    destination = tmp_path / "archive"
+    source_a.mkdir()
+    source_b.mkdir()
+
+    fid_a = db.add_folder(str(source_a), name="cardA")
+    fid_b = db.add_folder(str(source_b), name="cardB")
+    db.add_workspace_folder(ws_id, fid_a)
+    db.add_workspace_folder(ws_id, fid_b)
+
+    file_a = source_a / "IMG.CR3"
+    file_a.write_bytes(b"raw-a")
+    pid_a = db.add_photo(
+        folder_id=fid_a, filename=file_a.name, extension=".cr3",
+        file_size=file_a.stat().st_size, file_mtime=1.0,
+    )
+    file_b = source_b / "img.NEF"
+    file_b.write_bytes(b"raw-b")
+    pid_b = db.add_photo(
+        folder_id=fid_b, filename=file_b.name, extension=".nef",
+        file_size=file_b.stat().st_size, file_mtime=2.0,
+    )
+
+    result = move_photos(db, [pid_a, pid_b], str(destination))
+
+    # First photo moves, second is rejected because its case-folded stem
+    # collides with the existing destination stem from a different source.
+    assert result["moved"] == 1
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    # The winning photo is the one processed first.
+    assert db.get_photo(pid_a)["folder_id"] != fid_a
+    assert db.get_photo(pid_b)["folder_id"] == fid_b
+    assert file_b.read_bytes() == b"raw-b"
+
+
+def test_move_photos_folds_stems_for_configured_developed_volume(
+    tmp_path, monkeypatch,
+):
+    """A case-folding developed volume governs render stem collisions."""
+    import move as move_module
+    from move import move_photos
+
+    destination = tmp_path / "case-sensitive-archive"
+    developed_dir = tmp_path / "case-folding-developed"
+    developed_dir.mkdir()
+
+    def fake_case_probe(path):
+        return os.path.normpath(path) == os.path.normpath(developed_dir)
+
+    monkeypatch.setattr(
+        move_module, "_is_case_insensitive_path", fake_case_probe,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    source_a = tmp_path / "cardA"
+    source_b = tmp_path / "cardB"
+    source_a.mkdir()
+    source_b.mkdir()
+    fid_a = db.add_folder(str(source_a), name="cardA")
+    fid_b = db.add_folder(str(source_b), name="cardB")
+    db.add_workspace_folder(ws_id, fid_a)
+    db.add_workspace_folder(ws_id, fid_b)
+
+    file_a = source_a / "IMG.CR3"
+    file_b = source_b / "img.NEF"
+    file_a.write_bytes(b"raw-a")
+    file_b.write_bytes(b"raw-b")
+    pid_a = db.add_photo(
+        folder_id=fid_a, filename=file_a.name, extension=".cr3",
+        file_size=file_a.stat().st_size, file_mtime=1.0,
+    )
+    pid_b = db.add_photo(
+        folder_id=fid_b, filename=file_b.name, extension=".nef",
+        file_size=file_b.stat().st_size, file_mtime=2.0,
+    )
+
+    result = move_photos(
+        db, [pid_a, pid_b], str(destination),
+        developed_dir=str(developed_dir),
+    )
+
+    assert result["moved"] == 1
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert db.get_photo(pid_a)["folder_id"] != fid_a
+    assert db.get_photo(pid_b)["folder_id"] == fid_b
+    assert file_b.exists()
+
+
+def test_move_photos_rejects_same_source_case_only_stem_collision(
+    tmp_path, monkeypatch,
+):
+    """Same-source provenance only permits an exact shared render stem."""
+    import move as move_module
+    from move import move_photos
+
+    monkeypatch.setattr(
+        move_module, "_is_case_insensitive_path", lambda _: True,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    source = tmp_path / "case-sensitive-source"
+    destination = tmp_path / "case-folding-destination"
+    source.mkdir()
+    fid = db.add_folder(str(source), name="source")
+    files = {
+        "IMG.CR3": b"raw-upper",
+        "IMG.JPG": b"jpeg-upper",
+        "img.NEF": b"raw-lower",
+    }
+    pids = {}
+    for index, (filename, content) in enumerate(files.items(), start=1):
+        path = source / filename
+        path.write_bytes(content)
+        pids[filename] = db.add_photo(
+            folder_id=fid, filename=filename,
+            extension=os.path.splitext(filename)[1].lower(),
+            file_size=len(content), file_mtime=float(index),
+        )
+
+    first = move_photos(db, [pids["IMG.CR3"]], str(destination))
+    assert first["moved"] == 1
+    # The exact-stem IMG.JPG sibling keeps the source provenance alive.
+    assert (
+        db.conn.execute(
+            "SELECT last_move_source_folder_path FROM photos WHERE id = ?",
+            (pids["IMG.CR3"],),
+        ).fetchone()["last_move_source_folder_path"] == str(source)
+    )
+
+    result = move_photos(db, [pids["img.NEF"]], str(destination))
+
+    assert result["moved"] == 0
+    assert len(result["errors"]) == 1
+    assert "developed render stem" in result["errors"][0]
+    assert (source / "img.NEF").exists()
+    assert db.get_photo(pids["img.NEF"])["folder_id"] == fid
+
+
+def test_move_photos_allows_case_folded_stem_on_case_sensitive_destination(
+    tmp_path, monkeypatch,
+):
+    """The case-folded guard must NOT punish case-sensitive destinations,
+    where ``IMG.CR3`` and ``img.NEF`` legitimately coexist as distinct
+    files with distinct renders. Both photos should move successfully.
+    """
+    import move as move_module
+    from move import move_photos
+
+    monkeypatch.setattr(
+        move_module, "_is_case_insensitive_path", lambda _: False,
+    )
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    source_a = tmp_path / "cardA"
+    source_b = tmp_path / "cardB"
+    destination = tmp_path / "archive"
+    source_a.mkdir()
+    source_b.mkdir()
+
+    fid_a = db.add_folder(str(source_a), name="cardA")
+    fid_b = db.add_folder(str(source_b), name="cardB")
+    db.add_workspace_folder(ws_id, fid_a)
+    db.add_workspace_folder(ws_id, fid_b)
+
+    file_a = source_a / "IMG.CR3"
+    file_a.write_bytes(b"raw-a")
+    pid_a = db.add_photo(
+        folder_id=fid_a, filename=file_a.name, extension=".cr3",
+        file_size=file_a.stat().st_size, file_mtime=1.0,
+    )
+    file_b = source_b / "img.NEF"
+    file_b.write_bytes(b"raw-b")
+    pid_b = db.add_photo(
+        folder_id=fid_b, filename=file_b.name, extension=".nef",
+        file_size=file_b.stat().st_size, file_mtime=2.0,
+    )
+
+    result = move_photos(db, [pid_a, pid_b], str(destination))
+
+    assert result["moved"] == 2
+    assert result["errors"] == []
+
+
+def test_move_photos_refuses_destination_that_is_a_file(tmp_path):
+    """Regression: ``os.makedirs(destination, exist_ok=True)`` raises
+    ``FileExistsError`` when the path exists as a regular file, so a
+    date-organized move that lands on such a path would crash the batch
+    with an opaque error. ``move_photos`` must detect that up front and
+    return a structured error instead.
+    """
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    (src / "photo.jpg").write_bytes(b"x")
+    pid = db.add_photo(
+        folder_id=fid, filename="photo.jpg", extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+
+    blocked = tmp_path / "blocked"
+    blocked.write_bytes(b"not a directory")
+
+    result = move_photos(
+        db=db, photo_ids=[pid], destination=str(blocked),
+    )
+
+    assert result["moved"] == 0
+    assert result["errors"]
+    assert any("not a directory" in err for err in result["errors"])
+    # The photo row stays at the original folder and the on-disk source
+    # file is untouched.
+    assert db.get_photo(pid)["folder_id"] == fid
+    assert (src / "photo.jpg").exists()
+    assert blocked.read_bytes() == b"not a directory"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink setup is POSIX-only")
+def test_move_photos_refuses_broken_symlink_destination(tmp_path):
+    """The worker returns structured errors for a dangling destination."""
+    from move import move_photos
+
+    db = Database(str(tmp_path / "test.db"))
+    src = tmp_path / "src"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="src")
+    photo = src / "photo.jpg"
+    photo.write_bytes(b"x")
+    pid = db.add_photo(
+        folder_id=fid, filename=photo.name, extension=".jpg",
+        file_size=1, file_mtime=1.0,
+    )
+    blocked = tmp_path / "blocked"
+    blocked.symlink_to(tmp_path / "disconnected-volume", target_is_directory=True)
+
+    result = move_photos(db, [pid], str(blocked))
+
+    assert result["moved"] == 0
+    assert any("not a directory" in error for error in result["errors"])
+    assert photo.read_bytes() == b"x"
+    assert os.path.lexists(blocked)
+
+
+def test_relocate_stem_files_cleans_up_partial_copy_on_failure(
+    tmp_path, monkeypatch,
+):
+    """Regression: if ``shutil.copy2`` creates the destination file and
+    then fails (full disk, flaky mount), the partial file must be
+    removed. Otherwise ``_iter_developed_outputs`` picks up the
+    truncated render at the new key and serves it to exports/full-res
+    instead of falling back to the intact source or the RAW.
+    """
+    from export import _relocate_stem_files
+
+    old_dir = tmp_path / "old"
+    old_dir.mkdir()
+    (old_dir / "img.jpg").write_bytes(b"payload-full-content")
+    new_dir = tmp_path / "new"
+
+    def failing_copy2(src, dst, *a, **kw):
+        # Simulate a real full-disk / flaky-mount failure: only part of
+        # the source bytes make it to the destination before the error.
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "wb") as fh:
+            fh.write(b"partial")
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr("export.shutil.copy2", failing_copy2)
+
+    relocated = _relocate_stem_files(
+        str(old_dir), str(new_dir), "img", listing_cache={},
+        preserve_source=True,
+    )
+    assert relocated == 0
+    # The partial destination file must be gone so the fallback path in
+    # _iter_developed_outputs doesn't pick it up.
+    assert not (new_dir / "img.jpg").exists()
+    # The source render stayed in place.
+    assert (old_dir / "img.jpg").read_bytes() == b"payload-full-content"
+
+
+def test_relocate_stem_files_keeps_complete_copy_when_unlink_fails(
+    tmp_path, monkeypatch,
+):
+    """Regression: on cross-filesystem moves, ``shutil.move`` copies the
+    file and then unlinks the source. If only the unlink fails (locked
+    source, read-only source dir), the destination is already complete
+    and must be preserved — otherwise exports miss the render even
+    though we did write it successfully.
+    """
+    from export import _relocate_stem_files
+
+    old_dir = tmp_path / "old"
+    old_dir.mkdir()
+    source = old_dir / "img.jpg"
+    source.write_bytes(b"payload")
+    new_dir = tmp_path / "new"
+
+    real_rename = os.rename
+    real_unlink = os.unlink
+
+    def cross_device_rename(src, dst):
+        if os.fspath(src) == str(source):
+            raise OSError("cross-device rename")
+        return real_rename(src, dst)
+
+    def locked_source_unlink(path):
+        if os.fspath(path) == str(source):
+            raise PermissionError("permission denied removing source")
+        return real_unlink(path)
+
+    monkeypatch.setattr(os, "rename", cross_device_rename)
+    monkeypatch.setattr(os, "unlink", locked_source_unlink)
+
+    listing_cache = {}
+    relocated = _relocate_stem_files(
+        str(old_dir), str(new_dir), "img", listing_cache=listing_cache,
+        preserve_source=False,
+    )
+    assert relocated == 1
+    # The complete destination copy stays in place so
+    # _iter_developed_outputs still finds the render at the new key.
+    assert (new_dir / "img.jpg").read_bytes() == b"payload"
+    assert source.read_bytes() == b"payload"
+    # The listing cache records the successful destination so later
+    # same-stem calls can reuse it.
+    assert any(v == str(new_dir / "img.jpg")
+               for v in listing_cache.values())
+
+
+def test_move_photos_reports_cleanup_error_after_commit(move_env, monkeypatch):
+    """A post-commit os.remove failure must not roll back the catalog and
+    must not abort remaining photos in the batch.
+
+    Before the fix, os.remove on a locked or read-only source file raised
+    out of the loop after the ``UPDATE photos`` commit — the catalog for
+    the current photo already pointed at the destination, its developed
+    render was still under the old folder key, and every subsequent photo
+    in the batch was skipped.
+    """
+    import move as move_mod
+
+    env = move_env
+
+    original_remove = move_mod.os.remove
+    target_src = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.jpg")))
+
+    def failing_remove(path):
+        if os.path.normcase(os.path.normpath(path)) == target_src:
+            raise OSError("permission denied")
+        return original_remove(path)
+
+    monkeypatch.setattr(move_mod.os, "remove", failing_remove)
+
+    result = move_mod.move_photos(
+        db=env["db"],
+        photo_ids=[env["p1"], env["p2"]],
+        destination=str(env["dst"]),
+    )
+
+    # The batch completes: bird1 counts as moved (destination has the file
+    # and the catalog is repointed) and bird2 is unaffected. bird1's
+    # leftover original is reported as a per-photo error.
+    assert result["moved"] == 2
+    assert any("bird1.jpg" in err for err in result["errors"])
+    assert (env["dst"] / "bird1.jpg").exists()
+    assert (env["dst"] / "bird2.jpg").exists()
+    # Catalog points at the new folder for both.
+    p1_row = env["db"].get_photo(env["p1"])
+    p2_row = env["db"].get_photo(env["p2"])
+    assert p1_row["folder_id"] == env["fid_dst"]
+    assert p2_row["folder_id"] == env["fid_dst"]
+
+
+def test_move_photos_rebases_developed_before_source_cleanup(
+    move_env, monkeypatch,
+):
+    """Regression: even when os.remove of the source fails, the developed
+    render must already be relocated to the new folder key so full-res /
+    export lookups don't silently fall back to RAW.
+    """
+    import move as move_mod
+    from export import developed_folder_key
+
+    env = move_env
+
+    developed = env["tmp_path"] / "developed"
+    developed.mkdir()
+    old_key = developed_folder_key(str(env["src"]))
+    new_key = developed_folder_key(str(env["dst"]))
+    (developed / old_key).mkdir()
+    (developed / old_key / "bird1.jpg").write_bytes(b"bird1-dev")
+
+    original_remove = move_mod.os.remove
+    target_src = os.path.normcase(os.path.normpath(str(env["src"] / "bird1.jpg")))
+
+    def failing_remove(path):
+        if os.path.normcase(os.path.normpath(path)) == target_src:
+            raise OSError("permission denied")
+        return original_remove(path)
+
+    monkeypatch.setattr(move_mod.os, "remove", failing_remove)
+
+    move_mod.move_photos(
+        db=env["db"],
+        photo_ids=[env["p1"]],
+        destination=str(env["dst"]),
+        developed_dir=str(developed),
+    )
+
+    # Developed render followed the catalog even though source cleanup
+    # blew up mid-loop.
+    assert (developed / new_key / "bird1.jpg").read_bytes() == b"bird1-dev"
+
+
 def test_move_photos_collision_skips(move_env):
     """move_photos reports collision and skips conflicting files."""
     from move import move_photos
@@ -180,6 +2940,182 @@ def test_move_folder_copies_tree(move_env):
     # DB paths updated
     folder = env["db"].conn.execute("SELECT path FROM folders WHERE id = ?", (env["fid_src"],)).fetchone()
     assert folder["path"] == str(env["dst"] / "src")
+
+
+def test_move_folder_can_rename_during_move(move_env):
+    """An explicit destination name moves and renames in one safe operation."""
+    from move import move_folder
+
+    env = move_env
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        destination_name="2026-07-12",
+    )
+
+    landing = env["dst"] / "2026-07-12"
+    assert result["errors"] == []
+    assert (landing / "bird1.jpg").exists()
+    assert not env["src"].exists()
+    folder = env["db"].conn.execute(
+        "SELECT path, name FROM folders WHERE id = ?", (env["fid_src"],)
+    ).fetchone()
+    assert folder["path"] == str(landing)
+    assert folder["name"] == "2026-07-12"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows strips trailing spaces from path components, so a ' shoot ' "
+    "directory can't exist on disk — the untrimmed-name invariant is a POSIX concern.",
+)
+def test_move_folder_no_op_rename_preserves_untrimmed_source_name(tmp_path):
+    """A no-op rename lands at the source's raw name — spaces and all.
+
+    When the user leaves the Folder name field unchanged, the UI sends
+    ``destination_name=""`` so the backend keeps the source folder name
+    verbatim. If move_folder trims that fallback, the copy lands at
+    ``/archive/shoot`` while preflight showed ``/archive/ shoot `` — the
+    catalog then points at a folder that doesn't match what the user
+    approved and could silently merge with a different existing folder.
+    """
+    from move import move_folder
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    src = tmp_path / " shoot "
+    src.mkdir()
+    (src / "bird.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 100)
+    dst = tmp_path / "archive"
+    dst.mkdir()
+
+    fid = db.add_folder(str(src), name=" shoot ")
+    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                 file_size=102, file_mtime=1.0)
+
+    result = move_folder(
+        db=db,
+        folder_id=fid,
+        destination=str(dst),
+        destination_name="",
+    )
+
+    landing = dst / " shoot "
+    assert result["errors"] == []
+    assert landing.is_dir()
+    assert (landing / "bird.jpg").exists()
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()
+    assert folder["path"] == str(landing)
+
+
+def test_move_folder_no_op_rename_uses_source_leaf_when_name_missing(tmp_path):
+    """A nameless folder row whose path ends in '/' must still land at its leaf.
+
+    Legacy/relocated rows can carry an empty ``name`` alongside a ``path``
+    stored with a trailing separator. ``os.path.basename("/photos/shoot/")``
+    is ``""``, so without stripping the separator the no-op rename fallback
+    collapses to ``""`` and the copy lands directly in the selected parent
+    (potentially merging with a different folder). Preflight and
+    ``resolve_folder_dest`` already ``rstrip("/\\")`` before basename();
+    ``move_folder`` must too.
+    """
+    from move import move_folder
+
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db.ensure_default_workspace()
+    db.set_active_workspace(ws_id)
+
+    src = tmp_path / "shoot"
+    src.mkdir()
+    (src / "bird.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 100)
+    dst = tmp_path / "archive"
+    dst.mkdir()
+
+    fid = db.add_folder(str(src), name="shoot")
+    # Simulate a legacy row: blank name, trailing separator on path.
+    db.conn.execute(
+        "UPDATE folders SET name = '', path = ? WHERE id = ?",
+        (str(src) + "/", fid),
+    )
+    db.conn.commit()
+
+    db.add_photo(folder_id=fid, filename="bird.jpg", extension=".jpg",
+                 file_size=102, file_mtime=1.0)
+
+    result = move_folder(
+        db=db,
+        folder_id=fid,
+        destination=str(dst),
+        destination_name="",
+    )
+
+    landing = dst / "shoot"
+    assert result["errors"] == []
+    assert landing.is_dir()
+    assert (landing / "bird.jpg").exists()
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (fid,)
+    ).fetchone()
+    assert folder["path"] == str(landing)
+
+
+def test_move_folder_rejects_destination_name_with_path_segments(move_env):
+    """The rename field cannot escape the separately selected parent."""
+    from move import move_folder
+
+    env = move_env
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        destination_name="../somewhere-else",
+    )
+
+    assert result["moved"] == 0
+    assert "without slashes" in result["errors"][0]
+    assert env["src"].exists()
+
+
+def test_move_folder_rejects_drive_qualified_destination_name(move_env):
+    """A Windows drive-qualified leaf like C:shoot must not escape the parent.
+
+    os.path.join(r"D:\\archive", "C:shoot") returns the drive-relative path
+    "C:shoot" on Windows, so accepting a colon-bearing leaf would drop the
+    copy — and repoint catalog_path — outside the selected destination.
+    """
+    from move import move_folder
+
+    env = move_env
+    result = move_folder(
+        db=env["db"],
+        folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+        destination_name="C:shoot",
+    )
+
+    assert result["moved"] == 0
+    assert "colons" in result["errors"][0]
+    assert env["src"].exists()
+
+
+def test_normalize_destination_name_rejects_colon():
+    """Drive-qualified and colon-containing leaves are rejected everywhere."""
+    import pytest
+    from move import normalize_destination_name
+
+    for bad in ("C:shoot", "D:\\archive", "foo:bar", ":", "bird:cage/nest"):
+        with pytest.raises(ValueError):
+            normalize_destination_name(bad)
+
+    # Valid single-component names still pass through.
+    assert normalize_destination_name("2026-07-12") == "2026-07-12"
+    assert normalize_destination_name("") == ""
+    assert normalize_destination_name(None) == ""
 
 
 def test_move_folder_reports_cleanup_error_after_commit(move_env, monkeypatch):
@@ -2132,6 +5068,10 @@ def test_resolve_folder_dest():
     # Falls back to basename when name is empty
     assert resolve_folder_dest("/a/birds/", "", "/nas/photos") == \
         os.path.join("/nas/photos", "birds")
+    # An explicit final name supports rename-while-moving.
+    assert resolve_folder_dest(
+        "/a/12", "12", "/nas/photos/2026", "2026-07-12"
+    ) == os.path.join("/nas/photos/2026", "2026-07-12")
 
 
 def test_move_folder_updates_counts(move_env):
@@ -2225,6 +5165,86 @@ def test_move_folder_progress_shutil_fallback(move_env, monkeypatch):
     copy_calls = [c for c in calls if c[3] == "Copying files" and c[0] > 0]
     assert copy_calls, "shutil fallback reported no per-file progress"
     assert copy_calls[-1][1] == 3  # same 3-file denominator
+
+
+def test_move_folder_prefers_discovered_gnu_rsync(move_env, monkeypatch):
+    """Local NAS moves use discovered GNU rsync instead of a Finder app's
+    bare ``rsync`` resolving to macOS openrsync."""
+    import move as move_mod
+
+    env = move_env
+    captured = {}
+    monkeypatch.setattr(move_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        move_mod, "resolve_rsync_bin", lambda configured="": "/gnu/rsync",
+    )
+
+    def fake_run(*args, **kwargs):
+        captured["rsync_bin"] = kwargs.get("rsync_bin")
+        return 1, "simulated failure", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_run)
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+    )
+
+    assert captured["rsync_bin"] == "/gnu/rsync"
+    assert result["moved"] == 0
+
+
+def test_move_folder_windows_skips_discovered_rsync(move_env, monkeypatch):
+    """Native Windows paths must not be passed to auto-discovered POSIX rsync."""
+    import move as move_mod
+
+    env = move_env
+    captured = {}
+    monkeypatch.setattr(move_mod.sys, "platform", "win32")
+
+    def unexpected_resolve(configured=""):
+        raise AssertionError("Windows local moves must not discover rsync")
+
+    monkeypatch.setattr(move_mod, "resolve_rsync_bin", unexpected_resolve)
+
+    def fake_run(*args, **kwargs):
+        captured["rsync_bin"] = kwargs.get("rsync_bin")
+        return 1, "simulated failure", False
+
+    monkeypatch.setattr(move_mod, "_run_rsync_streamed", fake_run)
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+    )
+
+    assert captured["rsync_bin"] == "rsync"
+    assert result["moved"] == 0
+
+
+def test_move_folder_stall_preserves_rsync_diagnostic(move_env, monkeypatch):
+    """A watchdog timeout includes stderr's filename/root cause instead of
+    replacing it with a generic 30-minute stall message."""
+    import move as move_mod
+
+    env = move_env
+    monkeypatch.setattr(
+        move_mod,
+        "_run_rsync_streamed",
+        lambda *args, **kwargs: (
+            -9,
+            "rsync: DSC_2042.NEF: file truncated while hashing\n",
+            True,
+        ),
+    )
+
+    result = move_mod.move_folder(
+        db=env["db"], folder_id=env["fid_src"],
+        destination=str(env["dst"]),
+    )
+
+    assert result["moved"] == 0
+    assert "stalled" in result["errors"][0]
+    assert "DSC_2042.NEF" in result["errors"][0]
+    assert "file truncated while hashing" in result["errors"][0]
 
 
 def test_move_folder_shutil_fallback_preserves_dir_symlink(move_env, monkeypatch):

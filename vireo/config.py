@@ -46,8 +46,10 @@ DEFAULTS = {
     # `remote_path` is the NAS-side filesystem path used for the rsync-over-SSH
     # transfer; `mount_path` is the local path (e.g. an SMB mount) where Vireo
     # can read those same files afterward, and is what the catalog points at
-    # once a move completes. Custom settings UI (like external_editors), so
-    # it's excluded from SCHEMA.
+    # once a move completes. `local_archive_root` (optional) is the local
+    # directory that mirrors `remote_path` for chained import→process→move
+    # runs — see `_coerce_remote_target`. Custom settings UI (like
+    # external_editors), so it's excluded from SCHEMA.
     "remote_targets": [],
     "darktable_bin": "",
     # Legacy single-editor field. Kept for one-cycle migration: if
@@ -74,7 +76,9 @@ DEFAULTS = {
     # out of "Needs Identification" and are skipped by the classifier.
     "subject_types": ["taxonomy", "individual", "genre"],
     # --- Display ---
-    "browse_card_fields": ["filename", "rating", "flag", "sharpness"],
+    "browse_card_fields": [
+        "filename", "location_status", "rating", "flag", "sharpness"
+    ],
     "photos_per_page": 50,
     "thumbnail_size": 400,
     "thumbnail_quality": 85,
@@ -93,10 +97,11 @@ DEFAULTS = {
     "cull_phash_threshold": 19,
     # --- Pipeline (nested — flows through effective_cfg.get("pipeline")) ---
     "pipeline": {
-        # Process strategy to run after an import. None = no automatic
-        # processing (the "import only" choice); otherwise a name from
-        # process_strategies.STRATEGIES. Per-workspace via config_overrides.
-        "default_strategy": None,
+        # Saved process to run after an import. None = no automatic
+        # processing (the "import only" choice); otherwise a saved_processes
+        # id. Per-workspace via config_overrides. Global default stays None
+        # so a fresh workspace is import-only until the user picks a process.
+        "default_process_id": None,
         "w_focus": 0.45,
         "w_exposure": 0.20,
         "w_composition": 0.15,
@@ -122,6 +127,11 @@ DEFAULTS = {
         # below the workspace `detector_confidence` cutoff. Set to 1.01 to
         # disable the override.
         "miss_classifier_override_conf": 0.8,
+        # Contextual weak-detection rescue. The normal detector threshold
+        # remains authoritative everywhere else; boxes in this lower band are
+        # considered only when a short run is bracketed by strong detections.
+        "weak_detection_rescue_enabled": True,
+        "weak_detection_confidence": 0.12,
         # Eye-focus detection
         "eye_detect_enabled": False,
         "eye_classifier_conf_gate": 0.50,
@@ -137,12 +147,17 @@ DEFAULTS = {
         "w_time": 0.35,
         "w_subj": 0.35,
         "w_global": 0.15,
-        "w_species": 0.10,
+        # Kept in sync with encounters.DEFAULTS["w_species"]; raised from 0.10
+        # so a species mismatch resists merging distinct species into one
+        # encounter. See the note in encounters.py for the rationale.
+        "w_species": 0.40,
         "w_meta": 0.05,
         "tau_enc": 40.0,
         "hard_cut_time": 180.0,
         "hard_cut_score": 0.42,
         "soft_cut_score": 0.52,
+        "species_hard_cut_confidence": 0.80,
+        "species_hard_cut_margin": 0.60,
         "merge_score": 0.62,
         "merge_max_gap": 60.0,
         "merge_tau": 20.0,
@@ -173,6 +188,7 @@ DEFAULTS = {
             "shortcuts": "",
             "settings": "",
             "keywords": "",
+            "lightroom": "",
         },
         "review": {
             "accept": "a",
@@ -298,11 +314,17 @@ def set(key, value):
 MIGRATION_MISS_THRESHOLDS = "miss_thresholds_2026_05"
 MIGRATION_TOGGLE_UI_H_CONFLICT = "toggle_ui_h_conflict_2026_07"
 MIGRATION_EYE_DETECT_DEFAULT_OFF = "eye_detect_default_off_2026_07"
+MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID = "default_strategy_to_process_id_2026_07"
+MIGRATION_BROWSE_LOCATION_STATUS = "browse_location_status_2026_07"
+MIGRATION_W_SPECIES_DEFAULT = "w_species_default_2026_07"
 
 _LEGACY_MISS_DET_CONFIDENCE = 0.25
 _LEGACY_MISS_DET_CONFIDENCE_BURST = 0.15
 _NEW_MISS_DET_CONFIDENCE = 0.20
 _NEW_MISS_DET_CONFIDENCE_BURST = 0.12
+
+_LEGACY_W_SPECIES = 0.10
+_NEW_W_SPECIES = 0.40
 
 
 def _read_raw():
@@ -409,6 +431,31 @@ def migrate_toggle_ui_h_conflict():
         return rewrote
 
 
+def migrate_browse_location_status_field():
+    """Add coordinate source to the exact legacy default Browse card fields.
+
+    Customized card-field lists stay untouched. This makes the newly explicit
+    GPS/assigned/none state visible after upgrade for users who were still on
+    the previous default rather than only for fresh installs.
+    """
+    legacy_default = ["filename", "rating", "flag", "sharpness"]
+    new_default = [
+        "filename", "location_status", "rating", "flag", "sharpness"
+    ]
+    with _lock:
+        raw = _read_raw()
+        applied = _migrations_applied(raw)
+        if MIGRATION_BROWSE_LOCATION_STATUS in applied:
+            return False
+        rewrote = raw.get("browse_card_fields") == legacy_default
+        if rewrote:
+            raw["browse_card_fields"] = new_default
+        applied.append(MIGRATION_BROWSE_LOCATION_STATUS)
+        raw["_migrations_applied"] = applied
+        save(raw)
+        return rewrote
+
+
 def migrate_eye_detect_default_off(db=None):
     """One-time rewrite of the previous eye-detection default.
 
@@ -467,6 +514,122 @@ def migrate_eye_detect_default_off(db=None):
             if not global_was_explicit_false:
                 db.invalidate_group_fingerprints_without_explicit_eye_false()
         applied.append(MIGRATION_EYE_DETECT_DEFAULT_OFF)
+        raw["_migrations_applied"] = applied
+        save(raw)
+        return rewrote
+
+
+def migrate_default_strategy_to_process_id(db):
+    """One-time rewrite of the legacy global ``pipeline.default_strategy``
+    (a hardcoded strategy name) to ``pipeline.default_process_id`` (a
+    ``saved_processes.id``).
+
+    The workspace-side rewrite runs inside :class:`db.Database` at handle
+    creation (guarded by ``db_meta``). This function does the corresponding
+    rewrite for the *global* ``~/.vireo/config.json``: without it, an
+    upgraded install that had a global after-import default set via the old
+    ``pipeline.default_strategy`` silently falls back to import-only,
+    because the import endpoints and ``get_effective_config`` now read only
+    ``pipeline.default_process_id``. Workspaces that inherit the global
+    setting (i.e. have no per-workspace override) would stop auto-processing
+    on import until the user re-picks a default in Settings.
+
+    Unknown/removed legacy names map to null (import only). Gated by
+    ``_migrations_applied`` so it runs at most once per install; a user who
+    later manually adds ``default_strategy`` back is not silently rewritten.
+    """
+    import sqlite3
+
+    import process_strategies as ps
+    with _lock:
+        raw = _read_raw()
+        applied = _migrations_applied(raw)
+        if MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID in applied:
+            return False
+        pipeline = raw.get("pipeline")
+        if not (isinstance(pipeline, dict) and "default_strategy" in pipeline):
+            # Nothing legacy to migrate — stamp so we don't re-check every
+            # boot. No saved_processes access needed on this (possibly
+            # schema-uninitialized) connection.
+            applied.append(MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID)
+            raw["_migrations_applied"] = applied
+            save(raw)
+            return False
+        # A legacy key is present and must be resolved against the seeded
+        # saved_processes table. create_app opens its startup ``init_db`` with
+        # ``initialize_schema=False``, so on the first boot after an upgrade
+        # this can run before any schema-initializing handle created/seeded
+        # the table. Defer WITHOUT stamping (and without dropping the legacy
+        # key) so a later boot completes the migration once a request-path
+        # Database has seeded the table — instead of crashing startup with
+        # "no such table: saved_processes".
+        try:
+            seeded = db.conn.execute(
+                "SELECT id FROM saved_processes WHERE name = ?",
+                (ps.DEFAULT_SEED_NAME,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return False
+        if seeded is None:
+            return False
+        old = pipeline.pop("default_strategy")
+        seed_name = (
+            ps.LEGACY_STRATEGY_NAMES.get(old)
+            if isinstance(old, str) else None
+        )
+        pid = None
+        if seed_name is not None:
+            rows = db.conn.execute(
+                "SELECT id FROM saved_processes WHERE name = ?",
+                (seed_name,),
+            ).fetchall()
+            if rows:
+                pid = rows[0]["id"]
+        if pid is not None:
+            pipeline["default_process_id"] = pid
+        applied.append(MIGRATION_DEFAULT_STRATEGY_TO_PROCESS_ID)
+        raw["_migrations_applied"] = applied
+        save(raw)
+        return True
+
+
+def migrate_legacy_w_species_default(db=None):
+    """One-time rewrite of the previous ``pipeline.w_species`` default (0.10)
+    to the new default (0.40) in both the global config file and every
+    workspace's ``config_overrides``.
+
+    Without this migration, an upgraded install that had the pipeline block
+    persisted verbatim keeps ``w_species: 0.10`` and its encounter grouping
+    stays on the old species weight — the intended split-mismatched-species
+    behavior only reaches fresh configs. Only the *exact* legacy value is
+    rewritten; a user who has explicitly tuned ``w_species`` (e.g. 0.15,
+    0.25) is left alone. Gated by a marker so it runs at most once per
+    install; a user who later re-saves 0.10 via the algorithm slider keeps
+    that setting on future loads.
+
+    The effective ``compute_group_fingerprint`` includes ``w_species``, so
+    any workspace whose value actually changes here will naturally show as
+    outdated on the Process page — no explicit fingerprint invalidation
+    needed.
+    """
+    with _lock:
+        raw = _read_raw()
+        applied = _migrations_applied(raw)
+        if MIGRATION_W_SPECIES_DEFAULT in applied:
+            return False
+        rewrote = False
+        pipeline = raw.get("pipeline")
+        if isinstance(pipeline, dict) and pipeline.get("w_species") == _LEGACY_W_SPECIES:
+            pipeline["w_species"] = _NEW_W_SPECIES
+            rewrote = True
+        if db is not None:
+            ws_rewrites = db.rewrite_legacy_w_species_default_in_workspaces(
+                _LEGACY_W_SPECIES,
+                _NEW_W_SPECIES,
+            )
+            if ws_rewrites:
+                rewrote = True
+        applied.append(MIGRATION_W_SPECIES_DEFAULT)
         raw["_migrations_applied"] = applied
         save(raw)
         return rewrote
@@ -546,6 +709,44 @@ def _coerce_remote_target(entry):
         # Stable-ish id derived from the connection tuple so the UI can key
         # rows even for legacy entries saved before ids existed.
         tid = f"{user}@{host}:{remote_path}"
+    mount_path = (entry.get("mount_path") or "").strip()
+    # Local directory that mirrors remote_path for chained import→process→
+    # move runs. Empty = target never offers the chained move. Must be an
+    # absolute local path and must not live inside mount_path (the mount is
+    # the *destination* view of the NAS; the archive root is the local
+    # staging side — pointing it at the mount would "move" files onto
+    # themselves). Invalid values are blanked rather than dropping the
+    # whole target.
+    local_archive_root = (entry.get("local_archive_root") or "").strip()
+    if local_archive_root:
+        if not os.path.isabs(local_archive_root):
+            local_archive_root = ""
+        elif mount_path and os.path.isabs(mount_path):
+            # A relative mount_path would realpath against the server's
+            # CWD here, making this containment check depend on where the
+            # server happened to be launched — it could blank a perfectly
+            # valid archive root. Relative mounts are unusable for
+            # transfers anyway, so skip the check instead of resolving.
+            #
+            # Containment goes through move._path_equal_or_descends so
+            # case-only aliases on case-insensitive volumes (default macOS
+            # APFS, Windows NTFS: "/Volumes/Photos" vs "/volumes/photos")
+            # are recognized as the same directory. A byte-wise
+            # commonpath would miss this and leave a target eligible for
+            # chained moves whose archive root is really the mount, and
+            # the accepted chain would later fail as a source/destination
+            # overlap. The same helper the move guards use is authoritative.
+            try:
+                from move import _path_equal_or_descends
+                if _path_equal_or_descends(local_archive_root, mount_path):
+                    local_archive_root = ""
+            except (OSError, ValueError):
+                # Different drives on Windows / unreadable realpath: cannot
+                # be inside. Blanking the archive root here would drop a
+                # perfectly valid config on a transient FS hiccup, so leave
+                # it as saved and let the runtime move guards catch a real
+                # overlap.
+                pass
     return {
         "id": tid,
         "name": name,
@@ -554,8 +755,9 @@ def _coerce_remote_target(entry):
         "port": port,
         "ssh_key": (entry.get("ssh_key") or "").strip(),
         "remote_path": remote_path,
-        "mount_path": (entry.get("mount_path") or "").strip(),
+        "mount_path": mount_path,
         "bwlimit_kbps": max(0, bwlimit),
+        "local_archive_root": local_archive_root,
     }
 
 

@@ -12,7 +12,7 @@ No black boxes. If it's scanning, you see the file count ticking up. If the mode
 
 ## Work with the ecosystem, don't replace it
 
-XMP stores metadata. The NAS holds files. iNaturalist provides taxonomy. BioCLIP classifies species. Vireo orchestrates and organizes — it doesn't try to own the whole pipeline. Sync to XMP, submit to iNaturalist, browse on any device.
+XMP stores metadata. The NAS holds files. iNaturalist provides taxonomy. BioCLIP classifies species. Vireo orchestrates and organizes — it doesn't try to own the whole pipeline. Import from Lightroom, sync to XMP, browse on any device.
 
 ## Design for scale
 

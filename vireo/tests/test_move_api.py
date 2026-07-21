@@ -22,6 +22,18 @@ def test_move_page_returns_200(app_and_db):
     assert resp.status_code == 200
 
 
+def test_move_page_offers_capture_date_folder_formats(app_and_db):
+    app, _ = app_and_db
+    html = app.test_client().get("/move").data.decode()
+
+    assert 'id="quickFolderMode"' in html
+    assert "Organize photos by capture date" in html
+    assert 'id="quickFolderTemplatePreset"' in html
+    assert "%Y-%m-%d — 2026-07-12" in html
+    assert 'id="quickFolderTemplate"' in html
+    assert "folder_template: templateResult.value" in html
+
+
 def test_move_page_folder_browser_exposes_volumes_shortcut(app_and_db):
     """Move destinations should be able to jump directly to mounted volumes.
     Mac uses /Volumes (a real directory). Windows + Linux use /api/volumes
@@ -55,6 +67,20 @@ def test_move_page_browser_stamps_requests(app_and_db):
     assert "var browseSeq = 0;" in html
     assert "var seq = ++browseSeq;" in html
     assert "if (seq !== browseSeq) return;" in html
+
+
+def test_move_page_loads_every_photo_page_for_selection(app_and_db):
+    """Photo Move must not stop at the API's 500-photo per-request cap."""
+    app, _ = app_and_db
+    client = app.test_client()
+    resp = client.get("/move")
+    html = resp.data.decode()
+
+    assert "var photoLoadSeq = 0;" in html
+    assert "while (total === null || loadedPhotos.length < total)" in html
+    assert "&per_page=500&page=' + page" in html
+    assert "loadedPhotos = loadedPhotos.concat(pagePhotos);" in html
+    assert "if (seq !== photoLoadSeq) return;" in html
 
 
 def test_move_page_pictures_shortcut_resolves_home_on_demand(app_and_db):
@@ -124,9 +150,12 @@ def test_move_photos_job_invalidates_missing_originals_cache(
     pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
     key = _seed_missing_originals_cache(app, db)
 
-    def fake_move_photos(db, photo_ids, destination, progress_cb=None):
+    def fake_move_photos(
+        db, photo_ids, destination, progress_cb=None, developed_dir="",
+    ):
         assert photo_ids == [pid]
         assert destination == str(dst)
+        assert developed_dir == ""
         return {"moved": 1, "errors": [], "destination_folder_id": 123}
 
     monkeypatch.setattr(move_module, "move_photos", fake_move_photos)
@@ -141,6 +170,46 @@ def test_move_photos_job_invalidates_missing_originals_cache(
     assert job["status"] == "completed", job
     with app._missing_originals_lock:
         assert key not in app._missing_originals_cache
+
+
+def test_move_photos_job_passes_configured_developed_dir(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """Selected-photo jobs preserve renders from the configured output dir."""
+    import config as cfg
+    import move as move_module
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    destination = tmp_path / "move-destination"
+    destination.mkdir()
+    developed_dir = tmp_path / "configured-developed"
+    developed_dir.mkdir()
+    pid = db.conn.execute("SELECT id FROM photos LIMIT 1").fetchone()["id"]
+    monkeypatch.setattr(
+        cfg, "load", lambda: {"darktable_output_dir": str(developed_dir)},
+    )
+
+    def fake_move_photos(
+        db, photo_ids, destination, progress_cb=None, developed_dir="",
+    ):
+        assert photo_ids == [pid]
+        assert destination == str(tmp_path / "move-destination")
+        assert developed_dir == str(tmp_path / "configured-developed")
+        return {"moved": 1, "errors": [], "destination_folder_id": 123}
+
+    monkeypatch.setattr(move_module, "move_photos", fake_move_photos)
+
+    response = app.test_client().post("/api/jobs/move-photos", json={
+        "photo_ids": [pid],
+        "destination": str(destination),
+    })
+
+    assert response.status_code == 200, response.get_json()
+    job = wait_for_job_via_client(
+        app.test_client(), response.get_json()["job_id"],
+    )
+    assert job["status"] == "completed", job
 
 
 def test_move_photos_requires_params(app_and_db):
@@ -171,6 +240,82 @@ def test_move_folder_job_starts(app_and_db, tmp_path):
     assert data["job_id"].startswith("move-folder-")
 
 
+def test_move_folder_job_passes_explicit_destination_name(
+    app_and_db, tmp_path, monkeypatch,
+):
+    """The rename shown by preflight is also used by the asynchronous move."""
+    import move as move_module
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    parent = tmp_path / "move_folder_dst"
+    parent.mkdir()
+    fid = db.get_folder_tree()[0]["id"]
+    captured = {}
+
+    def fake_move_folder(
+        db,
+        folder_id,
+        destination,
+        progress_cb=None,
+        developed_dir=None,
+        merge=False,
+        remote=None,
+        destination_name="",
+        allow_tracked_merge=False,
+    ):
+        captured["destination_name"] = destination_name
+        return {"moved": 1, "errors": []}
+
+    monkeypatch.setattr(move_module, "move_folder", fake_move_folder)
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "destination": str(parent),
+        "destination_name": "2026-07-12",
+    })
+
+    assert resp.status_code == 200
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed"
+    assert captured["destination_name"] == "2026-07-12"
+
+
+def test_move_folder_job_organizes_photos_into_capture_date_folders(
+    app_and_db, tmp_path,
+):
+    from wait import wait_for_job_via_client
+
+    app, db = app_and_db
+    src = tmp_path / "date-job-source"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="date-job-source")
+    for index, day in enumerate(("12", "13"), start=1):
+        filename = f"dated-{index}.jpg"
+        (src / filename).write_bytes(b"photo")
+        db.add_photo(
+            folder_id=fid, filename=filename, extension=".jpg",
+            file_size=5, file_mtime=float(index),
+            timestamp=f"2026-07-{day}T10:00:00",
+        )
+    archive = tmp_path / "archive"
+
+    client = app.test_client()
+    resp = client.post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "destination": str(archive),
+        "folder_template": "%Y-%m-%d",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+    assert job["status"] == "completed", job
+    assert job["result"]["moved"] == 2
+    assert job["result"]["destination_count"] == 2
+    assert (archive / "2026-07-12" / "dated-1.jpg").exists()
+    assert (archive / "2026-07-13" / "dated-2.jpg").exists()
+
+
 def test_move_folder_job_invalidates_missing_originals_cache(
     app_and_db, tmp_path, monkeypatch,
 ):
@@ -192,9 +337,12 @@ def test_move_folder_job_invalidates_missing_originals_cache(
         developed_dir=None,
         merge=False,
         remote=None,
+        destination_name="",
+        allow_tracked_merge=False,
     ):
         assert folder_id == fid
         assert destination == str(dst)
+        assert destination_name == ""
         return {"moved": 1, "errors": []}
 
     monkeypatch.setattr(move_module, "move_folder", fake_move_folder)
@@ -364,6 +512,158 @@ def test_move_folder_preflight_dest_exists(app_and_db, tmp_path):
     assert data["file_count"] == 1
     assert data["file_count_truncated"] is False
     assert data["resolved_dest"] == str(landing)
+
+
+def test_move_folder_preflight_uses_explicit_destination_name(
+    app_and_db, tmp_path,
+):
+    """Preflight resolves the editable folder name as the final path leaf."""
+    app, db = app_and_db
+    parent = tmp_path / "dest"
+    parent.mkdir()
+    folder = db.get_folder_tree()[0]
+
+    client = app.test_client()
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(parent),
+        "destination_name": "2026-07-12",
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["resolved_dest"] == str(parent / "2026-07-12")
+    assert data["exists"] is False
+
+
+def test_move_folder_preflight_plans_multiple_capture_date_folders(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    src = tmp_path / "dated-source"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="dated-source")
+    for index, day in enumerate(("12", "13"), start=1):
+        filename = f"bird-{index}.jpg"
+        (src / filename).write_bytes(b"bird")
+        db.add_photo(
+            folder_id=fid, filename=filename, extension=".jpg",
+            file_size=4, file_mtime=float(index),
+            timestamp=f"2026-07-{day}T10:00:00",
+        )
+    archive = tmp_path / "archive"
+
+    resp = app.test_client().post("/api/move-folder/preflight", json={
+        "folder_id": fid,
+        "destination": str(archive),
+        "folder_template": "%Y-%m-%d",
+    })
+
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["date_organized"] is True
+    assert data["photo_count"] == 2
+    assert data["destination_count"] == 2
+    assert [item["relative_path"] for item in data["destinations"]] == [
+        "2026-07-12", "2026-07-13",
+    ]
+
+
+def test_move_folder_preflight_rejects_date_destination_occupied_by_file(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    src = tmp_path / "dated-source"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="dated-source")
+    db.add_photo(
+        folder_id=fid, filename="bird.jpg", extension=".jpg",
+        file_size=4, file_mtime=1.0, timestamp="2026-07-12T10:00:00",
+    )
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-07-12").write_bytes(b"occupied")
+
+    resp = app.test_client().post("/api/move-folder/preflight", json={
+        "folder_id": fid,
+        "destination": str(archive),
+        "folder_template": "%Y-%m-%d",
+    })
+
+    assert resp.status_code == 400
+    assert "not a directory" in resp.get_json()["error"]
+
+
+def test_move_folder_job_rejects_file_at_date_destination(
+    app_and_db, tmp_path,
+):
+    """Companion to the preflight regression above: the job endpoint must
+    also reject the request when any planned date destination is occupied
+    by a regular file rather than dispatching a job that will crash in the
+    worker on ``os.makedirs``. ``plan_folder_date_moves`` raises for the
+    file-at-destination case, so both endpoints refuse.
+    """
+    app, db = app_and_db
+    src = tmp_path / "conflict-job-source"
+    src.mkdir()
+    fid = db.add_folder(str(src), name="conflict-job-source")
+    (src / "bird.jpg").write_bytes(b"bird")
+    db.add_photo(
+        folder_id=fid, filename="bird.jpg", extension=".jpg",
+        file_size=4, file_mtime=1.0, timestamp="2026-07-12T10:00:00",
+    )
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    (archive / "2026-07-12").write_bytes(b"not-a-directory")
+
+    resp = app.test_client().post("/api/jobs/move-folder", json={
+        "folder_id": fid,
+        "destination": str(archive),
+        "folder_template": "%Y-%m-%d",
+    })
+    assert resp.status_code == 400
+    assert "not a directory" in resp.get_json()["error"]
+
+
+def test_move_folder_preflight_rejects_invalid_destination_name(
+    app_and_db, tmp_path,
+):
+    """The final folder name is one component, never a hidden path override."""
+    app, db = app_and_db
+    folder = db.get_folder_tree()[0]
+    client = app.test_client()
+
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(tmp_path),
+        "destination_name": "2026/07/12",
+    })
+
+    assert resp.status_code == 400
+    assert "without slashes" in resp.get_json()["error"]
+
+
+def test_move_folder_preflight_rejects_drive_qualified_destination_name(
+    app_and_db, tmp_path,
+):
+    """A Windows drive-qualified leaf (colon) is rejected at the API boundary.
+
+    Left through, os.path.join(destination, "C:shoot") on a Windows client
+    would collapse to "C:shoot" and land the copy — plus the repointed
+    catalog_path — outside the selected destination.
+    """
+    app, db = app_and_db
+    folder = db.get_folder_tree()[0]
+    client = app.test_client()
+
+    resp = client.post("/api/move-folder/preflight", json={
+        "folder_id": folder["id"],
+        "destination": str(tmp_path),
+        "destination_name": "C:shoot",
+    })
+
+    assert resp.status_code == 400
+    assert "colons" in resp.get_json()["error"]
 
 
 def test_move_folder_preflight_caps_existing_destination_count(app_and_db, tmp_path):

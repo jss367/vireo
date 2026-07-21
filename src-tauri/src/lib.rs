@@ -5,7 +5,7 @@ mod sidecar;
 mod tray;
 mod updater;
 use sidecar::{SidecarStartError, SidecarState};
-use tauri::webview::NewWindowResponse;
+use tauri::webview::{DownloadEvent, NewWindowResponse};
 use tauri::window::{ProgressBarState, ProgressBarStatus};
 use tauri::{Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -57,6 +57,32 @@ fn reload_main_window(app: &tauri::AppHandle) {
             log::error!("Failed to reload main window: {}", e);
         }
     }
+}
+
+fn handle_download<R: tauri::Runtime>(app: &tauri::AppHandle<R>, event: DownloadEvent<'_>) -> bool {
+    match event {
+        DownloadEvent::Requested { url, destination } => {
+            if !navigation::allow_download(app, &url) {
+                return false;
+            }
+            log::info!(
+                "Native download requested from {} to {}",
+                url,
+                destination.display()
+            );
+        }
+        DownloadEvent::Finished { url, path, success } => {
+            if success {
+                // WKWebView does not report the completed path on macOS, so
+                // retain the URL in the log even when `path` is unavailable.
+                log::info!("Native download finished from {} at {:?}", url, path);
+            } else {
+                log::error!("Native download failed from {}", url);
+            }
+        }
+        _ => {}
+    }
+    true
 }
 
 #[tauri::command]
@@ -133,6 +159,7 @@ pub fn run() {
         .plugin(build_log_plugin())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -151,6 +178,7 @@ pub fn run() {
                 .clone();
             let navigation_app = app.handle().clone();
             let popup_app = app.handle().clone();
+            let download_app = app.handle().clone();
             tauri::WebviewWindowBuilder::from_config(app.handle(), &main_config)?
                 .on_navigation(move |url| {
                     navigation::handle_navigation(&navigation_app, url)
@@ -159,6 +187,7 @@ pub fn run() {
                     navigation::handle_new_window(&popup_app, &url);
                     NewWindowResponse::Deny
                 })
+                .on_download(move |_webview, event| handle_download(&download_app, event))
                 .build()?;
 
             // Read the user's launch-time config (~/.vireo/config.json).

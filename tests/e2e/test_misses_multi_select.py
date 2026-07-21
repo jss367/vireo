@@ -4,6 +4,7 @@ Covers plain-click selection, ctrl-click toggle, shift-click range, shift+J/K
 keyboard extension, Esc-to-clear, toolbar actions, and bulk P/X/U acting on the
 selection. Double-click opens the shared lightbox.
 """
+import json
 import time
 
 from playwright.sync_api import expect
@@ -41,6 +42,237 @@ def _ctrl_click(page, locator):
     # Cmd on macOS, Ctrl elsewhere — both map to e.metaKey/e.ctrlKey in our
     # handler. Use Playwright's "Meta" because the test host is macOS.
     locator.click(modifiers=["Meta"])
+
+
+def test_collection_and_rating_filters_limit_visible_misses(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+    collection_id = db.add_collection(
+        "Hawk review",
+        json.dumps([{"field": "photo_ids", "value": pids[:3]}]),
+    )
+
+    page.goto(f"{url}/misses")
+    page.locator("[data-testid^='miss-card-no_subject-']").first.wait_for(
+        state="visible", timeout=3000,
+    )
+    page.locator("#missCollectionFilter").select_option(str(collection_id))
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(3)
+    assert f"collection_id={collection_id}" in page.url
+
+    # The shared E2E fixture gives the first hawk four stars; the other two
+    # have no rating, so composing filters should leave exactly that miss.
+    page.locator("#missRatingFilter").select_option("4")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    expect(
+        page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']")
+    ).to_be_visible()
+
+
+def test_filter_change_ignores_older_threshold_preview(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(5)
+    page.evaluate("""() => {
+      const realFetch = window.fetch.bind(window);
+      let held = false;
+      window.fetch = (url, options) => {
+        if (!held && String(url).includes('/api/misses/preview')) {
+          held = true;
+          return new Promise(resolve => {
+            window.releaseHeldPreview = () => realFetch(url, options).then(resolve);
+          });
+        }
+        return realFetch(url, options);
+      };
+    }""")
+    page.locator("#missCfgNoSubject").evaluate("""el => {
+      el.value = String(Number(el.value) + 1);
+      el.dispatchEvent(new Event('input', {bubbles: true}));
+    }""")
+    page.wait_for_function("window.releaseHeldPreview != null")
+
+    page.locator("#missRatingFilter").select_option("4")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    page.evaluate("window.releaseHeldPreview()")
+    page.wait_for_timeout(400)
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+
+
+def test_filter_change_ignores_older_recompute_response(live_server, page):
+    """A recompute POST that returns after the user has changed filters must
+    not replace the newer filtered view with the previous filter's payload,
+    and — since the server-side recompute has still persisted miss flags for
+    the previous scope — must trigger a fresh loadMisses() for the current
+    filters so any overlapping photos reflect the new flags."""
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(5)
+    page.evaluate("""() => {
+      window.missesFetchCalls = [];
+      const realFetch = window.fetch.bind(window);
+      let held = false;
+      window.fetch = (url, options) => {
+        window.missesFetchCalls.push(String(url));
+        if (!held && String(url).includes('/api/misses/recompute')) {
+          held = true;
+          return new Promise(resolve => {
+            window.releaseHeldRecompute = () => realFetch(url, options).then(resolve);
+          });
+        }
+        return realFetch(url, options);
+      };
+    }""")
+    saved_threshold = page.locator("#missCfgNoSubject").evaluate("""el => {
+      el.value = String(Number(el.value) + 1);
+      return Number(el.value) / 100;
+    }""")
+    page.locator("#missRecomputeBtn").click()
+    page.wait_for_function("window.releaseHeldRecompute != null")
+
+    page.locator("#missRatingFilter").select_option("4")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    calls_before_release = page.evaluate(
+        "window.missesFetchCalls.filter(u => u.startsWith('/api/misses') && !u.includes('/recompute') && !u.includes('/preview')).length"
+    )
+    page.evaluate("window.releaseHeldRecompute()")
+    expect(page.locator("#missTuningStatus")).to_have_text(
+        "Recomputed previous filters; refreshing current view"
+    )
+    # The stale recompute must have scheduled a fresh /api/misses for the
+    # current filters so any overlapping photos pick up the newly persisted
+    # miss flags rather than continuing to render the pre-recompute payload.
+    page.wait_for_function(
+        f"window.missesFetchCalls.filter(u => u.startsWith('/api/misses') && !u.includes('/recompute') && !u.includes('/preview')).length > {calls_before_release}",
+        timeout=3000,
+    )
+    assert page.evaluate("originalMissConfig.miss_det_confidence") == saved_threshold
+
+
+def test_bulk_reject_uses_filters_that_rendered_visible_cards(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?rating_min=4")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    page.evaluate("""() => {
+      const realFetch = window.fetch.bind(window);
+      let held = false;
+      window.fetch = (url, options) => {
+        if (!held && String(url) === '/api/misses') {
+          held = true;
+          return new Promise(resolve => {
+            window.releaseHeldFilterLoad = () => realFetch(url, options).then(resolve);
+          });
+        }
+        return realFetch(url, options);
+      };
+    }""")
+    page.locator("#missRatingFilter").select_option("")
+    page.wait_for_function("window.releaseHeldFilterLoad != null")
+
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.locator("[data-testid='miss-reject-no_subject']").click()
+    assert _wait_for_flag(db, pids[0], "rejected") == "rejected"
+    assert all(db.get_photo(pid)["flag"] != "rejected" for pid in pids[1:])
+    page.evaluate("window.releaseHeldFilterLoad()")
+
+
+def test_recompute_uses_filters_that_rendered_visible_cards(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?rating_min=4")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(1)
+    page.evaluate("""() => {
+      const realFetch = window.fetch.bind(window);
+      let held = false;
+      window.fetch = (url, options) => {
+        if (!held && String(url) === '/api/misses') {
+          held = true;
+          return new Promise(resolve => {
+            window.releaseHeldFilterLoad = () => realFetch(url, options).then(resolve);
+          });
+        }
+        return realFetch(url, options);
+      };
+    }""")
+    page.locator("#missRatingFilter").select_option("")
+    page.wait_for_function("window.releaseHeldFilterLoad != null")
+
+    page.locator("#missRecomputeBtn").click()
+    expect(page.locator("#missTuningStatus")).to_have_text(
+        "Recomputed visible photos; refreshing filters"
+    )
+    timestamps = {
+        row["id"]: row["miss_computed_at"]
+        for row in db.conn.execute(
+            "SELECT id, miss_computed_at FROM photos ORDER BY id"
+        )
+    }
+    assert timestamps[pids[0]] != "2026-04-22"
+    assert all(timestamps[pid] == "2026-04-22" for pid in pids[1:])
+    page.evaluate("window.releaseHeldFilterLoad()")
+
+
+def test_initial_recompute_uses_url_filters_before_grid_loads(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+    page.add_init_script("""(() => {
+      const realFetch = window.fetch.bind(window);
+      let held = false;
+      window.fetch = (url, options) => {
+        if (!held && String(url).includes('/api/misses?rating_min=4')) {
+          held = true;
+          return new Promise(resolve => {
+            window.releaseInitialMissesLoad = () => realFetch(url, options).then(resolve);
+          });
+        }
+        if (String(url).includes('/api/misses/recompute')) {
+          window.initialRecomputeBody = JSON.parse(options.body);
+        }
+        return realFetch(url, options);
+      };
+    })()""")
+
+    page.goto(f"{url}/misses?rating_min=4")
+    page.wait_for_function("window.releaseInitialMissesLoad != null")
+    expect(page.locator("#missRecomputeBtn")).to_be_enabled()
+    page.locator("#missRecomputeBtn").click()
+    page.wait_for_function("window.initialRecomputeBody != null")
+    assert page.evaluate("window.initialRecomputeBody.rating_min") == "4"
+    page.evaluate("window.releaseInitialMissesLoad()")
+
+
+def test_pick_refreshes_unflagged_miss_filter(live_server, page):
+    url = live_server["url"]
+    db = live_server["db"]
+    pids = live_server["data"]["photos"]
+    _seed_misses(db, pids, "no_subject")
+
+    page.goto(f"{url}/misses?flag=none")
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(5)
+    page.locator(f"[data-testid='miss-card-no_subject-{pids[0]}']").click()
+    page.keyboard.press("p")
+
+    assert _wait_for_flag(db, pids[0], "flagged") == "flagged"
+    expect(page.locator("[data-testid^='miss-card-no_subject-']")).to_have_count(4)
 
 
 def test_ctrl_click_toggles_selection(live_server, page):

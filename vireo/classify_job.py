@@ -892,9 +892,23 @@ def _flush_batch(batch, clf, model_type, model_name, db, raw_results, top_k=1):
             all_preds, embedding = result
 
             if embedding is not None:
+                emb_bytes = embedding.tobytes()
                 db.upsert_photo_embedding(
-                    entry["photo"]["id"], model_name, embedding.tobytes()
+                    entry["photo"]["id"], model_name, emb_bytes,
                 )
+                # Also key by detection so multi-subject reruns from
+                # cache pick each detection's own vector instead of the
+                # last-detection-wins photo-level row. Without this, two
+                # subjects on the same photo would share one cached
+                # embedding and refine_groups_by_similarity would merge
+                # them (or misgroup them across a burst) on non-reclassify
+                # reruns even though no fresh inference ran.
+                det_id = entry.get("detection_id")
+                if det_id is not None:
+                    db.upsert_photo_embedding(
+                        entry["photo"]["id"], model_name, emb_bytes,
+                        variant=f"det:{det_id}",
+                    )
 
             if not all_preds:
                 continue
@@ -1108,9 +1122,24 @@ def _classify_photos(
                             top = cached[0]  # ordered by confidence DESC
                             embedding = None
                             if model_type != "timm":
+                                # Prefer per-detection variant so
+                                # multi-subject photos don't reuse the
+                                # last-detection-wins photo-level vector
+                                # (see _flush_batch). Fall back to the
+                                # photo-level entry only when this photo
+                                # has a single qualifying detection so
+                                # legacy data still refines correctly.
                                 emb_blob = db.get_photo_embedding(
                                     photo["id"], model_name,
+                                    variant=f"det:{detection['id']}",
                                 )
+                                if (
+                                    not emb_blob
+                                    and len(photo_detections) == 1
+                                ):
+                                    emb_blob = db.get_photo_embedding(
+                                        photo["id"], model_name,
+                                    )
                                 if emb_blob:
                                     import numpy as np
                                     embedding = np.frombuffer(
@@ -1201,9 +1230,19 @@ def _classify_photos(
                                 pass
                         embedding = None
                         if model_type != "timm":
+                            # Full-image detections are always single per
+                            # (photo, model), so the photo-level row is
+                            # unambiguously theirs. Prefer the per-detection
+                            # variant for parity with new writes; fall back
+                            # to the photo-level entry.
                             emb_blob = db.get_photo_embedding(
                                 photo["id"], model_name,
+                                variant=f"det:{full_det_id}",
                             )
+                            if not emb_blob:
+                                emb_blob = db.get_photo_embedding(
+                                    photo["id"], model_name,
+                                )
                             if emb_blob:
                                 import numpy as np
                                 embedding = np.frombuffer(

@@ -838,12 +838,12 @@
   <div class="section">
     <div class="section-title">Google Maps</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Used for location autocomplete on photo keywords. Get a key from the Google Cloud console (Maps JavaScript API + Places API + Geocoding API enabled). Add an HTTP referrer restriction in the console (e.g. <code>localhost:8080/*</code>) so the key can only be used from your machine.
+      Used for location autocomplete and for map-based photo location review, including nearby park and landmark suggestions. Get a key from the Google Cloud console (Maps JavaScript API + Places API + Geocoding API enabled). Add an HTTP referrer restriction in the console (e.g. <code>localhost:8080/*</code>) so the key can only be used from your machine.
     </p>
     <div class="setting-row">
       <div class="setting-label">
         API Key
-        <small>Stored in <code>~/.vireo/config.json</code>. The key is embedded in the browse page when set so the Google Maps JS library can call autocomplete client-side.</small>
+        <small>Stored in <code>~/.vireo/config.json</code>. The key is sent to the browser when needed so Google Maps can provide maps, autocomplete, and nearby-place suggestions.</small>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <input type="password" id="cfgGoogleMapsApiKey" placeholder="AIza..."
@@ -868,7 +868,7 @@
   <div class="section">
     <div class="section-title">Remote targets (NAS / SSH)</div>
     <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
-      Destinations for moving folders to a NAS over SSH — far more reliable than an SMB mount over a slow/remote link, with resume and integrity verification. The <b>Remote path</b> is the NAS-side filesystem path rsync writes to (e.g. <code>/volume1/Photography</code>); the <b>Local mount path</b> is where you can read those same files afterward (e.g. <code>/Volumes/Photography</code>) — moved photos are repointed there so they stay in your library. Remote moves need GNU rsync (set its path under “GNU rsync path” in the Paths settings if auto-detect fails).
+      Destinations for moving folders to a NAS over SSH — far more reliable than an SMB mount over a slow/remote link, with resume and integrity verification. The <b>Remote path</b> is the NAS-side filesystem path rsync writes to (e.g. <code>/volume1/Photography</code>); the <b>Local mount path</b> is where you can read those same files afterward (e.g. <code>/Volumes/Photography</code>) — moved photos are repointed there so they stay in your library. Remote moves need GNU rsync (set its path under “GNU rsync path” in the Paths settings if auto-detect fails). <b>Local archive root</b> is the local folder that mirrors the remote path. Imports under this folder can chain an automatic move to this target after processing. It must be an absolute path outside the local mount path — other values are cleared on save.
     </p>
     <div id="cfgRemoteTargetsList" style="display:flex;flex-direction:column;gap:10px;margin-bottom:8px;"></div>
     <button type="button" onclick="addRemoteTarget()" style="background:var(--bg-tertiary);color:var(--text-secondary);border:1px solid var(--border-secondary);border-radius:4px;padding:6px 12px;font-size:12px;cursor:pointer;">+ Add remote target</button>
@@ -1624,6 +1624,8 @@ function renderRemoteTargets() {
     r2.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap;';
     r2.appendChild(_rtField('Remote path (NAS side)', t.remote_path, '/volume1/Photography', save('remote_path'), {flex: '1', mono: true}));
     r2.appendChild(_rtField('Local mount path', t.mount_path, '/Volumes/Photography', save('mount_path'), {flex: '1', mono: true}));
+    r2.appendChild(_rtField('Local archive root (chained moves)', t.local_archive_root,
+      '/Users/you/Photos', save('local_archive_root'), {flex: '1', mono: true}));
     card.appendChild(r2);
 
     var r3 = document.createElement('div');
@@ -1664,6 +1666,7 @@ function addRemoteTarget() {
   _remoteTargetsState.push({
     id: _genTargetId(), name: '', host: '', user: '', port: 22,
     ssh_key: '', remote_path: '', mount_path: '', bwlimit_kbps: 0,
+    local_archive_root: '',
   });
   renderRemoteTargets();
   // Defer save until fields are filled — _coerce_remote_target drops empty
@@ -1682,6 +1685,7 @@ function collectRemoteTargets() {
         name: asStr(t.name), host: asStr(t.host), user: asStr(t.user),
         port: asInt(t.port, 22), ssh_key: asStr(t.ssh_key),
         remote_path: asStr(t.remote_path), mount_path: asStr(t.mount_path),
+        local_archive_root: asStr(t.local_archive_root),
         bwlimit_kbps: Math.max(0, asInt(t.bwlimit_kbps, 0)),
       };
     })
@@ -1754,6 +1758,9 @@ async function loadConfig() {
     _remoteTargetsState = [];
     rawTargets.forEach(function(t) {
       if (!t || typeof t !== 'object') return;
+      // Adding a target field? Also update the row builder, addRemoteTarget,
+      // and collectRemoteTargets — a miss HERE silently erases the field on
+      // the next save after a page reload.
       _remoteTargetsState.push({
         id: typeof t.id === 'string' && t.id ? t.id : _genTargetId(),
         name: typeof t.name === 'string' ? t.name : '',
@@ -1763,6 +1770,7 @@ async function loadConfig() {
         ssh_key: typeof t.ssh_key === 'string' ? t.ssh_key : '',
         remote_path: typeof t.remote_path === 'string' ? t.remote_path : '',
         mount_path: typeof t.mount_path === 'string' ? t.mount_path : '',
+        local_archive_root: typeof t.local_archive_root === 'string' ? t.local_archive_root : '',
         bwlimit_kbps: t.bwlimit_kbps == null ? 0 : t.bwlimit_kbps,
       });
     });
@@ -1781,7 +1789,7 @@ async function loadConfig() {
     document.getElementById('cfgBrowseThumbVal').textContent = bt + 'px';
     document.getElementById('cfgOpenInBrowser').checked = cfg.open_in_browser === true;
     // Load browse card fields
-    loadCardFieldCheckboxes(cfg.browse_card_fields || ["filename", "rating", "flag", "sharpness"]);
+    loadCardFieldCheckboxes(cfg.browse_card_fields || ["filename", "location_status", "rating", "flag", "sharpness"]);
     // Load detection settings
     var dc = Math.round((cfg.detector_confidence != null ? cfg.detector_confidence : 0.20) * 100);
     document.getElementById('cfgDetectorConf').value = dc;
@@ -1897,6 +1905,7 @@ async function loadConfig() {
 
 var CARD_FIELD_OPTIONS = [
   { id: 'filename', label: 'Filename', desc: 'Photo filename' },
+  { id: 'location_status', label: 'Coordinate source', desc: 'EXIF GPS, assigned map location, or no coordinates' },
   { id: 'rating', label: 'Rating', desc: 'Star rating' },
   { id: 'flag', label: 'Flag', desc: 'Flagged / rejected indicator' },
   { id: 'sharpness', label: 'Sharpness', desc: 'Sharpness score' },
@@ -2232,7 +2241,7 @@ function renderPlatformReadiness(support) {
   var deps = support.dependencies || {};
   var names = {
     exiftool: 'ExifTool', darktable: 'Darktable', dng_converter: 'Adobe DNG Converter',
-    openssh: 'OpenSSH Client', rsync: 'GNU rsync',
+    lightroom: 'Lightroom Classic', openssh: 'OpenSSH Client', rsync: 'GNU rsync',
     remote_transfer: 'Remote transfers'
   };
   var keys = Object.keys(names).filter(function(key) { return deps[key]; });
