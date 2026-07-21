@@ -572,8 +572,26 @@ body {
   function openPhotoPreview(photo) {
     var group = currentGroup();
     if (!photo || !group || typeof openLightbox !== 'function') return;
-    openLightbox(photo.id, photo.filename || '', group.photos);
+    openLightbox(photo.id, photo.filename || '', group.photos.slice());
   }
+
+  document.addEventListener('lightbox:photodeleted', function(event) {
+    var photoId = Number(event.detail && event.detail.photoId);
+    var group = currentGroup();
+    if (!Number.isFinite(photoId) || !group || group.photo_ids.indexOf(photoId) === -1) return;
+    group.photos = group.photos.filter(function(photo) { return photo.id !== photoId; });
+    group.photo_ids = group.photo_ids.filter(function(id) { return id !== photoId; });
+    group.count = group.photos.length;
+    if (!group.count) {
+      state.groups.splice(state.currentIndex, 1);
+      if (state.currentIndex >= state.groups.length) state.currentIndex = Math.max(0, state.groups.length - 1);
+      renderCurrentGroup();
+      return;
+    }
+    renderGroupFacts(group);
+    renderPhotoMarkers(group);
+    updateProgress();
+  });
 
   function renderPhotoMarkers(group) {
     clearMapObjects();

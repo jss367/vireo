@@ -7906,6 +7906,12 @@ function lightboxDelete() {
         refreshBrowseSidebarCounts();
       }
     }
+
+    try {
+      document.dispatchEvent(new CustomEvent('lightbox:photodeleted', {
+        detail: { photoId: currentId, result: data || null }
+      }));
+    } catch (_) {}
   });
 }
 /* ---------- iNat Submission ---------- */

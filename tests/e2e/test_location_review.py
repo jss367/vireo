@@ -185,6 +185,26 @@ def test_location_review_photo_marker_opens_the_photo_preview(live_server, page)
         "Also delete 1 companion file"
     )
 
+    page.evaluate(
+        """() => {
+          var callback = _deleteCallback;
+          hideDeleteModal();
+          callback({deleted: 1});
+          closeLightbox();
+        }"""
+    )
+    expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
+    expect(page.locator(".location-review-thumb")).to_have_count(1)
+
+    page.locator("#locationReviewSearch").fill("Remaining photo location")
+    page.locator("#locationReviewCustom").click()
+    with page.expect_request("**/api/batch/location/text") as request_info:
+        page.locator("#locationReviewAssign").click()
+    assert request_info.value.post_data_json["photo_ids"] == [photo_ids[1]]
+    expect(page.locator("#locationReviewEmptyTitle")).to_have_text(
+        "All locations reviewed"
+    )
+
 
 def test_location_review_thumbnail_opens_the_photo_preview(live_server, page):
     """The thumbnail strip offers the same preview affordance as map dots."""
