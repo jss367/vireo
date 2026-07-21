@@ -1598,10 +1598,10 @@ def test_repair_misclassified_location_ancestors_restores_legacy_homonym(
     assert db.repair_misclassified_location_ancestors() == 0
 
 
-def test_place_upsert_repairs_misclassified_location_ancestor_on_demand(
+def test_repair_misclassified_location_ancestors_restores_adjacent_nodes(
     tmp_path,
 ):
-    """A stale California taxonomy node must not block map assignment."""
+    """Repair adjacent taxonomy rows within an existing location hierarchy."""
     from db import Database
 
     db = Database(str(tmp_path / "test.db"))
@@ -1610,7 +1610,42 @@ def test_place_upsert_repairs_misclassified_location_ancestor_on_demand(
         "California", parent_id=country_id, kw_type="taxonomy",
     )
     county_id = db.add_keyword(
-        "San Diego County", parent_id=state_id, kw_type="location",
+        "San Diego County", parent_id=state_id, kw_type="taxonomy",
+    )
+    db.add_keyword(
+        "San Diego", parent_id=county_id, kw_type="location",
+    )
+
+    repaired = db.repair_misclassified_location_ancestors()
+
+    assert repaired == 2
+    rows = db.conn.execute(
+        "SELECT name, type FROM keywords WHERE id IN (?, ?) ORDER BY name",
+        (state_id, county_id),
+    ).fetchall()
+    assert [dict(row) for row in rows] == [
+        {"name": "California", "type": "location"},
+        {"name": "San Diego County", "type": "location"},
+    ]
+    assert db.repair_misclassified_location_ancestors() == 0
+
+
+def test_place_upsert_repairs_adjacent_location_ancestors_on_demand(
+    tmp_path,
+):
+    """Adjacent stale taxonomy nodes must not block map assignment."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="taxonomy",
+    )
+    county_id = db.add_keyword(
+        "San Diego County", parent_id=state_id, kw_type="taxonomy",
+    )
+    db.add_keyword(
+        "San Diego", parent_id=county_id, kw_type="location",
     )
 
     leaf_id = db.upsert_place_chain({
@@ -1632,18 +1667,28 @@ def test_place_upsert_repairs_misclassified_location_ancestor_on_demand(
         ],
     })
 
-    state = db.conn.execute(
-        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
-        (state_id,),
-    ).fetchone()
+    ancestors = db.conn.execute(
+        "SELECT name, type, is_species, taxon_id FROM keywords "
+        "WHERE id IN (?, ?) ORDER BY name",
+        (state_id, county_id),
+    ).fetchall()
     leaf = db.conn.execute(
         "SELECT type, parent_id FROM keywords WHERE id = ?", (leaf_id,),
     ).fetchone()
-    assert dict(state) == {
-        "type": "location",
-        "is_species": 0,
-        "taxon_id": None,
-    }
+    assert [dict(row) for row in ancestors] == [
+        {
+            "name": "California",
+            "type": "location",
+            "is_species": 0,
+            "taxon_id": None,
+        },
+        {
+            "name": "San Diego County",
+            "type": "location",
+            "is_species": 0,
+            "taxon_id": None,
+        },
+    ]
     assert dict(leaf) == {"type": "location", "parent_id": county_id}
 
 
