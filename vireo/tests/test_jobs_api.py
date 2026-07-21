@@ -493,30 +493,23 @@ def test_pipeline_job_requires_source_or_collection(app_and_db):
         assert resp.status_code == 400
 
 
-def test_pipeline_job_rejects_macos_other_app_bundle(app_and_db, tmp_path):
-    """POST /api/jobs/pipeline must reject a ``.photoslibrary`` source
-    (single or in ``sources``) before calling ``os.path.isdir``.
-
-    Like /api/jobs/scan and /api/jobs/ingest, the pipeline route stat's
-    the source up front to return a clean 400 for missing dirs. On
-    macOS that pre-stat against an Apple Photos bundle trips the
-    kTCCServiceSystemPolicyAppData prompt this guard exists to prevent,
-    so the rejection must happen before any stat.
-    """
+def test_pipeline_rejects_filesystem_sources_before_stat(app_and_db, tmp_path):
+    """Process owns catalog IDs, so even a valid directory is rejected
+    before any filesystem access; Import owns all path admission."""
     app, _ = app_and_db
     bundle = tmp_path / "Photos Library.photoslibrary"
     bundle.mkdir()
     with app.test_client() as client:
         resp = client.post("/api/jobs/pipeline", json={"source": str(bundle)})
         assert resp.status_code == 400
-        assert "macos" in resp.get_json()["error"].lower()
+        assert "use import" in resp.get_json()["error"].lower()
 
         # Same shape via the ``sources`` list path.
         resp = client.post(
             "/api/jobs/pipeline", json={"sources": [str(bundle)]},
         )
         assert resp.status_code == 400
-        assert "macos" in resp.get_json()["error"].lower()
+        assert "use import" in resp.get_json()["error"].lower()
 
         # Nested paths inside the bundle must be rejected too.
         nested = bundle / "originals"
@@ -525,7 +518,7 @@ def test_pipeline_job_rejects_macos_other_app_bundle(app_and_db, tmp_path):
             "/api/jobs/pipeline", json={"source": str(nested)},
         )
         assert resp.status_code == 400
-        assert "macos" in resp.get_json()["error"].lower()
+        assert "use import" in resp.get_json()["error"].lower()
 
 
 @pytest.mark.skip(reason="retired pipeline import/archive destination path")
@@ -908,15 +901,24 @@ def test_scan_step_has_progress(app_and_db, tmp_path):
 
 def test_pipeline_thumbnail_step_has_progress(app_and_db, tmp_path):
     """Thumbnail step in pipeline reports step-level progress."""
-    app, _ = app_and_db
+    app, db = app_and_db
     client = app.test_client()
 
     scan_dir = str(tmp_path / "scanme")
     os.makedirs(scan_dir)
     Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'a.jpg'))
 
+    scan_resp = client.post('/api/jobs/scan', json={'root': scan_dir})
+    wait_for_job_via_client(client, scan_resp.get_json()['job_id'])
+    photo_ids = [r['id'] for r in db.conn.execute(
+        "SELECT id FROM photos WHERE filename = 'a.jpg'"
+    )]
+    collection_id = db.add_collection(
+        'Thumbnail progress',
+        json.dumps([{'field': 'photo_ids', 'value': photo_ids}]),
+    )
     resp = client.post('/api/jobs/pipeline', json={
-        'source': scan_dir,
+        'collection_id': collection_id,
         'skip_classify': True,
         'skip_extract_masks': True,
         'skip_regroup': True,
@@ -933,15 +935,24 @@ def test_pipeline_thumbnail_step_has_progress(app_and_db, tmp_path):
 
 def test_pipeline_preview_step_has_progress(app_and_db, tmp_path):
     """Preview step in pipeline reports step-level progress."""
-    app, _ = app_and_db
+    app, db = app_and_db
     client = app.test_client()
 
     scan_dir = str(tmp_path / "scanme")
     os.makedirs(scan_dir)
     Image.new('RGB', (100, 100)).save(os.path.join(scan_dir, 'a.jpg'))
 
+    scan_resp = client.post('/api/jobs/scan', json={'root': scan_dir})
+    wait_for_job_via_client(client, scan_resp.get_json()['job_id'])
+    photo_ids = [r['id'] for r in db.conn.execute(
+        "SELECT id FROM photos WHERE filename = 'a.jpg'"
+    )]
+    collection_id = db.add_collection(
+        'Preview progress',
+        json.dumps([{'field': 'photo_ids', 'value': photo_ids}]),
+    )
     resp = client.post('/api/jobs/pipeline', json={
-        'source': scan_dir,
+        'collection_id': collection_id,
         'skip_classify': True,
         'skip_extract_masks': True,
         'skip_regroup': True,
@@ -3077,7 +3088,7 @@ def test_pipeline_folder_ids_with_other_scope_400(app_and_db, extra):
             json={"folder_ids": [root_id], **extra},
         )
         assert resp.status_code == 400
-        assert "folder_ids cannot be combined with" in resp.get_json()["error"]
+        assert "Process only accepts photos" in resp.get_json()["error"]
     assert len(db.get_collections()) == before
 
 
@@ -5676,6 +5687,321 @@ def test_import_in_place_no_destination_required(app_and_db, tmp_path):
         result["collection_id"], per_page=999999,
     )
     assert [p["id"] for p in photos] == result["photo_ids"]
+
+
+def test_import_in_place_snapshot_admits_only_frozen_files(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    root = tmp_path / "registered"
+    nested = root / "trip"
+    nested.mkdir(parents=True)
+    captured = nested / "captured.jpg"
+    late = nested / "late.jpg"
+    Image.new("RGB", (16, 16), "red").save(captured)
+    root_id = db.add_folder(str(root), name="registered")
+    roots_before = {
+        row["folder_id"] for row in db.conn.execute(
+            "SELECT folder_id FROM workspace_folders "
+            "WHERE workspace_id = ? AND is_root = 1",
+            (db._active_workspace_id,),
+        )
+    }
+    snap_id = db.create_new_images_snapshot([str(captured)])
+    # Arrived after discovery: it belongs to the next snapshot, not this one.
+    Image.new("RGB", (16, 16), "blue").save(late)
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": None,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    result = job["result"]
+    assert result["ok"] is True
+    assert result["requested"] == 1
+    assert result["imported"] == 1
+    assert result["already_cataloged"] == 0
+    assert result["missing"] == 0
+    assert result["unreadable"] == 0
+    assert result["unindexed"] == 0
+    assert result["after_import_skipped"] == "import-only"
+    filenames = {
+        row["filename"] for row in db.conn.execute("SELECT filename FROM photos")
+    }
+    assert "captured.jpg" in filenames
+    assert "late.jpg" not in filenames
+
+    roots = db.conn.execute(
+        "SELECT folder_id FROM workspace_folders "
+        "WHERE workspace_id = ? AND is_root = 1",
+        (db._active_workspace_id,),
+    ).fetchall()
+    assert {row["folder_id"] for row in roots} == roots_before
+    assert root_id in roots_before
+
+    # Replaying the same frozen snapshot is idempotent and reports the
+    # already-admitted cohort honestly without creating another collection
+    # or enqueueing Process for photos this import did not admit.
+    quick_look_id = _process_id(db, "Quick look")
+    with app.test_client() as client:
+        replay = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": quick_look_id,
+        })
+        replay_job = wait_for_job_via_client(
+            client, replay.get_json()["job_id"],
+        )
+    assert replay_job["result"]["imported"] == 0
+    assert replay_job["result"]["already_cataloged"] == 1
+    assert replay_job["result"]["after_import_skipped"] == "no new photos"
+    assert "collection_id" not in replay_job["result"]
+    assert "process_job_id" not in replay_job["result"]
+
+
+def test_import_in_place_snapshot_reports_missing_without_processing(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    root = tmp_path / "registered"
+    root.mkdir()
+    root_id = db.add_folder(str(root), name="registered")
+    vanished = root / "vanished.jpg"
+    Image.new("RGB", (16, 16), "red").save(vanished)
+    snap_id = db.create_new_images_snapshot([str(vanished)])
+    quick_look_id = _process_id(db, "Quick look")
+    vanished.unlink()
+    db.conn.execute(
+        "UPDATE folders SET status = 'missing' WHERE id = ?", (root_id,),
+    )
+    db.conn.commit()
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": quick_look_id,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    result = job["result"]
+    assert result["ok"] is False
+    assert result["requested"] == 1
+    assert result["missing"] == 1
+    assert result["missing_paths"] == [str(vanished)]
+    assert result["photo_ids"] == []
+    assert result["after_import_skipped"] == "import failed"
+    assert "process_job_id" not in result
+
+
+def test_import_in_place_snapshot_normalizes_raw_companion_and_replay(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    root = tmp_path / "registered"
+    root.mkdir()
+    raw = root / "IMG_0001.nef"
+    companion = root / "IMG_0001.jpg"
+    Image.new("RGB", (16, 16), "red").save(raw, "JPEG")
+    Image.new("RGB", (16, 16), "blue").save(companion, "JPEG")
+    root_id = db.add_folder(str(root), name="registered")
+    raw_id = db.add_photo(
+        root_id, raw.name, ".nef", raw.stat().st_size, raw.stat().st_mtime,
+    )
+    snap_id = db.create_new_images_snapshot([str(companion)])
+
+    with app.test_client() as client:
+        first = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": None,
+        })
+        assert first.status_code == 200, first.get_json()
+        first_job = wait_for_job_via_client(
+            client, first.get_json()["job_id"],
+        )
+
+        quick_look_id = _process_id(db, "Quick look")
+        replay = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": quick_look_id,
+        })
+        assert replay.status_code == 200, replay.get_json()
+        replay_job = wait_for_job_via_client(
+            client, replay.get_json()["job_id"],
+        )
+
+    assert first_job["result"]["imported"] == 1
+    assert first_job["result"]["photo_ids"] == [raw_id]
+    first_collection = db.get_collection_photos(
+        first_job["result"]["collection_id"], per_page=999999,
+    )
+    assert [photo["id"] for photo in first_collection] == [raw_id]
+    raw_row = db.conn.execute(
+        "SELECT companion_path FROM photos WHERE id = ?", (raw_id,),
+    ).fetchone()
+    assert raw_row["companion_path"] == companion.name
+
+    replay_result = replay_job["result"]
+    assert replay_result["imported"] == 0
+    assert replay_result["already_cataloged"] == 1
+    assert replay_result["after_import_skipped"] == "no new photos"
+    assert "collection_id" not in replay_result
+    assert "process_job_id" not in replay_result
+
+
+def test_import_in_place_snapshot_rejects_path_outside_registered_roots(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    root = tmp_path / "registered"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    db.add_folder(str(root), name="registered")
+    path = outside / "bird.jpg"
+    Image.new("RGB", (16, 16), "red").save(path)
+    snap_id = db.create_new_images_snapshot([str(path)])
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": None,
+        })
+
+    assert resp.status_code == 400
+    assert "outside" in resp.get_json()["error"]
+
+
+def test_import_in_place_snapshot_preserves_registered_root_spelling(
+    app_and_db, tmp_path,
+):
+    app, db = app_and_db
+    physical_root = tmp_path / "registered"
+    physical_root.mkdir()
+    lexical_root = os.path.join(
+        str(tmp_path), "registered", "..", "registered",
+    )
+    captured = os.path.join(lexical_root, "captured.jpg")
+    Image.new("RGB", (16, 16), "red").save(captured)
+    root_id = db.add_folder(lexical_root, name="registered")
+    root_parent_before = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (root_id,),
+    ).fetchone()["parent_id"]
+    snap_id = db.create_new_images_snapshot([captured])
+
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": None,
+        })
+        assert resp.status_code == 200, resp.get_json()
+        job = wait_for_job_via_client(client, resp.get_json()["job_id"])
+
+    assert job["status"] == "completed", job
+    assert job["result"]["imported"] == 1
+    assert job["result"]["missing"] == 0
+    assert job["result"]["unindexed"] == 0
+
+    # The workspace-root folder row's parent_id must not have been
+    # rewritten to point at a phantom ".../registered/.." folder that
+    # _ensure_folder would invent if the scan source were the collapsed
+    # spelling.
+    root_parent_after = db.conn.execute(
+        "SELECT parent_id FROM folders WHERE id = ?", (root_id,),
+    ).fetchone()["parent_id"]
+    assert root_parent_after == root_parent_before
+
+    # No phantom ".." folder rows should have been inserted alongside the
+    # legitimate registered/captured.jpg parent chain.
+    dotdot_rows = db.conn.execute(
+        "SELECT path FROM folders WHERE name = '..'",
+    ).fetchall()
+    assert dotdot_rows == []
+
+
+def test_concurrent_snapshot_imports_serialize_and_report_one_replay(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import scanner
+
+    app, db = app_and_db
+    root = tmp_path / "registered"
+    root.mkdir()
+    captured = root / "captured.jpg"
+    Image.new("RGB", (16, 16), "red").save(captured)
+    db.add_folder(str(root), name="registered")
+    snap_id = db.create_new_images_snapshot([str(captured)])
+    quick_look_id = _process_id(db, "Quick look")
+
+    original_scan = scanner.scan
+    first_scan_entered = threading.Event()
+    second_scan_entered = threading.Event()
+    release_first_scan = threading.Event()
+    calls_lock = threading.Lock()
+    call_count = 0
+
+    def controlled_scan(*args, **kwargs):
+        nonlocal call_count
+        with calls_lock:
+            call_count += 1
+            call_number = call_count
+        if call_number == 1:
+            first_scan_entered.set()
+            # Without per-snapshot serialization, the second worker enters
+            # and releases this wait while both captured pre-scan membership.
+            release_first_scan.wait(timeout=1.0)
+        else:
+            second_scan_entered.set()
+            release_first_scan.set()
+        return original_scan(*args, **kwargs)
+
+    monkeypatch.setattr(scanner, "scan", controlled_scan)
+
+    with app.test_client() as client:
+        first = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": None,
+        })
+        assert first.status_code == 200, first.get_json()
+        assert first_scan_entered.wait(timeout=2.0)
+
+        second = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": quick_look_id,
+        })
+        assert second.status_code == 200, second.get_json()
+
+        first_job = wait_for_job_via_client(
+            client, first.get_json()["job_id"], timeout=5.0,
+        )
+        second_job = wait_for_job_via_client(
+            client, second.get_json()["job_id"], timeout=5.0,
+        )
+
+    assert second_scan_entered.is_set()
+    assert first_job["result"]["imported"] == 1
+    assert second_job["result"]["imported"] == 0
+    assert second_job["result"]["already_cataloged"] == 1
+    assert second_job["result"]["after_import_skipped"] == "no new photos"
+    assert "collection_id" not in second_job["result"]
+    assert "process_job_id" not in second_job["result"]
+
+
+@pytest.mark.parametrize("body", [
+    {"source_snapshot_id": "1"},
+    {"source_snapshot_id": True},
+    {"source_snapshot_id": 999999},
+    {"source_snapshot_id": 1, "sources": ["/tmp/source"]},
+    {"source_snapshot_id": 1, "new_workspace_name": "Other"},
+])
+def test_import_in_place_snapshot_validation(app_and_db, body):
+    app, _ = app_and_db
+    with app.test_client() as client:
+        resp = client.post("/api/jobs/import-in-place", json=body)
+    assert resp.status_code in (400, 404)
 
 
 def test_import_in_place_can_target_new_workspace(app_and_db, tmp_path):

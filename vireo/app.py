@@ -3474,6 +3474,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # over large network volumes. Values are per-spawn dicts; a new walk
     # replaces the key wholesale, so readers never see torn state.
     app._new_images_walk_progress = {}
+    # Import workers run on separate threads. Serialize execution of the same
+    # frozen snapshot so the second worker observes the first worker's catalog
+    # admissions and reports an idempotent replay instead of claiming them too.
+    app._new_images_snapshot_import_locks = {}
+    app._new_images_snapshot_import_locks_guard = threading.Lock()
     app._missing_originals_lock = threading.Lock()
     app._missing_originals_cache = {}
     app._missing_originals_inflight = {}
@@ -16225,12 +16230,18 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if snap is None:
             abort(404)
 
-        # Use only top-level mapped roots (not every auto-registered
-        # subfolder the scanner created) so grouping matches the user's
-        # source folders — otherwise longest-prefix match picks the
-        # deepest descendant and hides which source a file came from.
+        # Use user-facing roots (not every auto-linked descendant) so
+        # grouping matches the source folders. Include roots currently marked
+        # missing: a snapshot preview must retain the folder and unavailable
+        # file the banner promised instead of silently losing its provenance.
         from new_images import mapped_roots as _ni_mapped_roots
-        root_paths = [r["path"] for r in _ni_mapped_roots(db, db._active_workspace_id)]
+
+        root_paths = [
+            r["path"]
+            for r in _ni_mapped_roots(
+                db, db._active_workspace_id, include_missing=True,
+            )
+        ]
 
         # Build unique display names across roots by taking the shortest
         # trailing path segments that are unique — so /mnt/cardA/DCIM and
@@ -16271,10 +16282,24 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         files = []
         type_breakdown = {}
         total_size = 0
+        unavailable_count = 0
         for path in snap["file_paths"]:
             try:
                 stat = os.stat(path)
             except OSError:
+                unavailable_count += 1
+                ext = os.path.splitext(path)[1].lower()
+                files.append({
+                    "path": path,
+                    "filename": os.path.basename(path),
+                    "subfolder": _subfolder_for(path),
+                    "size": 0,
+                    "extension": ext,
+                    "mtime": None,
+                    "available": False,
+                    "error": "File is no longer available",
+                })
+                type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
                 continue
             ext = os.path.splitext(path)[1].lower()
             files.append({
@@ -16284,13 +16309,16 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "size": stat.st_size,
                 "extension": ext,
                 "mtime": stat.st_mtime,
+                "available": True,
                 "thumb_url": "/api/import/folder-preview/thumbnail?path=" + quote(path),
             })
             type_breakdown[ext] = type_breakdown.get(ext, 0) + 1
             total_size += stat.st_size
 
         return jsonify({
-            "total_count": len(files),
+            "total_count": snap["file_count"],
+            "available_count": len(files) - unavailable_count,
+            "unavailable_count": unavailable_count,
             "total_size": total_size,
             "type_breakdown": type_breakdown,
             "duplicate_count": 0,
@@ -21622,16 +21650,20 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/jobs/import-in-place", methods=["POST"])
     def api_job_import_in_place():
-        """Import existing folders without copying files.
+        """Import existing folders or a new-images snapshot without copying.
 
         This is the in-place companion to ``/api/jobs/import-photos``: scan
         selected source folders into the active workspace, leave originals at
         their current paths, and optionally enqueue the same after-import
-        processing strategy used by archive-copy imports.
+        processing strategy used by archive-copy imports. Snapshot mode is the
+        catalog-admission boundary for files discovered below registered roots:
+        it scans only the frozen paths and never promotes their leaf folders to
+        additional workspace roots.
         """
         from image_loader import is_excluded_scan_path
 
         body = request.get_json(silent=True) or {}
+        source_snapshot_id = body.get("source_snapshot_id")
         if body.get("after_process_move") is not None:
             return json_error(
                 "after_process_move is not supported for import-in-place — "
@@ -21643,18 +21675,36 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         sources = body.get("sources")
         if isinstance(sources, str):
             sources = [sources]
-        if not sources or not isinstance(sources, list) or not all(
-            isinstance(s, str) and s for s in sources
-        ):
-            return json_error("sources must be a non-empty list of paths")
-        for s in sources:
-            if is_excluded_scan_path(s):
+        snapshot_paths = None
+
+        if source_snapshot_id is not None:
+            if sources:
                 return json_error(
-                    f"source is inside a macOS app-managed library and "
-                    f"cannot be imported: {s}"
+                    "source_snapshot_id cannot be combined with sources"
                 )
-            if not os.path.isdir(s):
-                return json_error(f"source directory not found: {s}")
+            if "new_workspace_name" in body:
+                return json_error(
+                    "a new-images snapshot belongs to the active workspace "
+                    "and cannot be imported into a new workspace"
+                )
+            if (
+                isinstance(source_snapshot_id, bool)
+                or not isinstance(source_snapshot_id, int)
+            ):
+                return json_error("source_snapshot_id must be an integer")
+        else:
+            if not sources or not isinstance(sources, list) or not all(
+                isinstance(s, str) and s for s in sources
+            ):
+                return json_error("sources must be a non-empty list of paths")
+            for s in sources:
+                if is_excluded_scan_path(s):
+                    return json_error(
+                        f"source is inside a macOS app-managed library and "
+                        f"cannot be imported: {s}"
+                    )
+                if not os.path.isdir(s):
+                    return json_error(f"source directory not found: {s}")
 
         recursive = bool(body.get("recursive", True))
         import_tags, location_from_gps, tag_options_err = (
@@ -21663,6 +21713,63 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         if tag_options_err is not None:
             return tag_options_err
         db = _get_db()
+        if source_snapshot_id is not None:
+            snap = db.get_new_images_snapshot(source_snapshot_id)
+            if snap is None:
+                return json_error(
+                    f"source_snapshot_id {source_snapshot_id} not found",
+                    status=404,
+                )
+            snapshot_paths = list(snap["file_paths"])
+
+            # Resolve each frozen path to one of the workspace's registered
+            # roots. The snapshot was created from these roots, but validate
+            # again at enqueue time so a stale/crafted snapshot can never use
+            # Import as a path-admission escape hatch after workspace roots
+            # change.
+            from new_images import mapped_roots as _mapped_new_image_roots
+
+            registered_roots = sorted(
+                (
+                    (os.path.normpath(r["path"]), r["path"])
+                    for r in _mapped_new_image_roots(
+                        db, db._active_workspace_id, include_missing=True,
+                    )
+                ),
+                key=lambda item: len(item[0]),
+                reverse=True,
+            )
+
+            def _registered_root_for(path):
+                candidate = os.path.normpath(path)
+                for normalized_root, stored_root in registered_roots:
+                    try:
+                        if (
+                            os.path.commonpath([candidate, normalized_root])
+                            == normalized_root
+                        ):
+                            # Containment uses normalized paths, but scanner's
+                            # parent walk is lexical. Preserve the spelling
+                            # that produced the frozen snapshot paths so a
+                            # registered root containing ".." still meets its
+                            # restricted descendants exactly.
+                            return stored_root
+                    except ValueError:
+                        continue
+                return None
+
+            snapshot_paths_by_root = {}
+            for path in snapshot_paths:
+                root = _registered_root_for(path)
+                if root is None:
+                    return json_error(
+                        "new-images snapshot contains a path outside the "
+                        f"active workspace's registered folders: {path}"
+                    )
+                snapshot_paths_by_root.setdefault(root, []).append(path)
+            sources = sorted(snapshot_paths_by_root)
+        else:
+            snapshot_paths_by_root = None
         # Preflight an explicit after_import before creating a workspace so
         # a bad value doesn't leave an orphan Card Import behind. The
         # omitted branch has to wait until AFTER the workspace switch — see
@@ -21710,9 +21817,34 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_cache_dir)
+        snapshot_import_lock = None
+        if source_snapshot_id is not None:
+            snapshot_lock_key = (active_ws, source_snapshot_id)
+            with app._new_images_snapshot_import_locks_guard:
+                snapshot_import_lock = (
+                    app._new_images_snapshot_import_locks.setdefault(
+                        snapshot_lock_key, threading.Lock(),
+                    )
+                )
 
         def _chain_after_import(job, result):
             photo_ids = result.get("photo_ids") or []
+
+            # A frozen snapshot can still yield existing IDs through the
+            # scanner callback when it is replayed. Those IDs make tagging
+            # idempotent, but they must not create another import collection
+            # or enqueue an expensive Process run: this Import admitted
+            # nothing new.
+            if (
+                result.get("ok")
+                and result.get("source_snapshot_id") is not None
+                and result.get("imported") == 0
+            ):
+                result["after_import_skipped"] = (
+                    "import-only" if after_import is None else "no new photos"
+                )
+                return
+
             thread_db, col_id = _record_import_collection(result, active_ws)
 
             if after_import is None:
@@ -21752,7 +21884,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     f"failed to enqueue processing: {e}"
                 )
 
-        def work(job):
+        def _run_import_in_place(job):
             import config as cfg
             from scanner import ScanCancelled
             from scanner import scan as do_scan
@@ -21772,13 +21904,72 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
             photo_ids = []
             seen_photo_ids = set()
+            indexed_paths = set()
             root_errors = []
             scan_acc = {"prior": 0, "last_current": 0, "last_total": 0}
+
+            snapshot_requested = len(snapshot_paths or [])
+            snapshot_missing = []
+            snapshot_unreadable = []
+            snapshot_eligible = set(snapshot_paths or [])
+            snapshot_known_before = {}
+
+            def active_photo_ids_by_path():
+                """Map primary and companion paths to active photo records."""
+                rows = thread_db.conn.execute(
+                    """SELECT p.id, p.filename, p.companion_path,
+                              f.path AS folder_path
+                       FROM photos p
+                       JOIN folders f ON f.id = p.folder_id
+                       JOIN workspace_folders wf ON wf.folder_id = f.id
+                       WHERE wf.workspace_id = ?""",
+                    (active_ws,),
+                ).fetchall()
+                result = {}
+                for row in rows:
+                    result[
+                        os.path.join(row["folder_path"], row["filename"])
+                    ] = row["id"]
+                    if row["companion_path"]:
+                        companion_path = row["companion_path"]
+                        if not os.path.isabs(companion_path):
+                            companion_path = os.path.join(
+                                row["folder_path"], companion_path,
+                            )
+                        result[companion_path] = row["id"]
+                return result
+
+            if snapshot_paths is not None:
+                # Freeze execution outcomes before scanning. Missing and
+                # unreadable files stay visible in the result instead of
+                # silently shrinking the banner's promised count.
+                snapshot_eligible.clear()
+                for path in snapshot_paths:
+                    if not os.path.isfile(path):
+                        snapshot_missing.append(path)
+                        continue
+                    try:
+                        with open(path, "rb") as fh:
+                            fh.read(1)
+                    except OSError:
+                        snapshot_unreadable.append(path)
+                        continue
+                    snapshot_eligible.add(path)
+
+                # Record active-workspace membership before the scan so a
+                # concurrent/repeated import is reported as idempotent rather
+                # than as a newly admitted photo.
+                snapshot_known_before = {
+                    path: photo_id
+                    for path, photo_id in active_photo_ids_by_path().items()
+                    if path in snapshot_eligible
+                }
 
             def photo_cb(photo_id, path):
                 if photo_id not in seen_photo_ids:
                     seen_photo_ids.add(photo_id)
                     photo_ids.append(photo_id)
+                indexed_paths.add(path)
                 runner.update_step(
                     job["id"], "scan", current_file=os.path.basename(path),
                 )
@@ -21827,6 +22018,28 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 if cancel_check():
                     cancelled = True
                     break
+                restricted_files = None
+                restricted_dirs = None
+                if snapshot_paths_by_root is not None:
+                    restricted_files = {
+                        path for path in snapshot_paths_by_root[source]
+                        if path in snapshot_eligible
+                    }
+                    if not restricted_files:
+                        # The snapshot may consist entirely of files that
+                        # vanished after discovery. No scanner call will run,
+                        # but the cached banner count is still stale.
+                        try:
+                            _invalidate_new_images_after_scan(thread_db, source)
+                        except Exception:
+                            log.exception(
+                                "Failed to invalidate new-image cache for %s",
+                                source,
+                            )
+                        continue
+                    restricted_dirs = sorted(
+                        {os.path.dirname(path) for path in restricted_files}
+                    )
                 phase = (
                     f"Importing source {idx} of {len(sources)}: {source}"
                     if len(sources) > 1 else "Importing in place"
@@ -21847,9 +22060,14 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         photo_callback=photo_cb,
                         status_callback=status_cb,
                         recursive=recursive,
+                        restrict_dirs=restricted_dirs,
+                        restrict_files=restricted_files,
                         vireo_dir=vireo_dir,
                         thumb_cache_dir=thumb_cache_dir,
                         cancel_check=cancel_check,
+                        register_restrict_dirs_as_roots=(
+                            snapshot_paths_by_root is None
+                        ),
                     )
                 except Exception as exc:
                     if isinstance(exc, ScanCancelled) and cancel_check():
@@ -21890,7 +22108,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                         )
                     advance_scan_acc()
 
+            if snapshot_paths is not None:
+                # Pairing can fold a newly scanned JPEG into an existing RAW
+                # row and delete the temporary JPEG row after photo_cb saw it.
+                # Resolve the frozen paths again so collections, tags, and a
+                # chained Process job receive durable catalog IDs rather than
+                # a deleted transient ID.
+                catalog_ids_after = active_photo_ids_by_path()
+                photo_ids = list(dict.fromkeys(
+                    catalog_ids_after[path]
+                    for path in snapshot_paths
+                    if path in indexed_paths and path in catalog_ids_after
+                ))
             indexed = len(photo_ids)
+            snapshot_unindexed = sorted(
+                snapshot_eligible - indexed_paths
+            ) if snapshot_paths is not None else []
             if cancelled or cancel_check():
                 runner.update_step(
                     job["id"], "scan", status="cancelled",
@@ -21906,6 +22139,23 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     "errors": root_errors,
                     "photo_ids": photo_ids,
                 }
+                if snapshot_paths is not None:
+                    result.update({
+                        "source_snapshot_id": source_snapshot_id,
+                        "requested": snapshot_requested,
+                        "imported": len(
+                            indexed_paths - set(snapshot_known_before)
+                        ),
+                        "already_cataloged": len(
+                            indexed_paths & set(snapshot_known_before)
+                        ),
+                        "missing": len(snapshot_missing),
+                        "missing_paths": snapshot_missing[:100],
+                        "unreadable": len(snapshot_unreadable),
+                        "unreadable_paths": snapshot_unreadable[:100],
+                        "unindexed": len(snapshot_unindexed),
+                        "unindexed_paths": snapshot_unindexed[:100],
+                    })
                 _apply_import_tags(
                     active_ws, photo_ids, import_tags, location_from_gps,
                     result, job=job, runner=runner,
@@ -21916,22 +22166,64 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             summary = f"{indexed} photos"
             if metadata_warning:
                 summary += f" — {metadata_warning}"
+            snapshot_failures = (
+                len(snapshot_missing)
+                + len(snapshot_unreadable)
+                + len(snapshot_unindexed)
+            )
+            all_errors = list(root_errors)
+            if snapshot_missing:
+                all_errors.append(
+                    f"{len(snapshot_missing)} snapshot file"
+                    f"{'s were' if len(snapshot_missing) != 1 else ' was'} "
+                    "missing at import time"
+                )
+            if snapshot_unreadable:
+                all_errors.append(
+                    f"{len(snapshot_unreadable)} snapshot file"
+                    f"{'s were' if len(snapshot_unreadable) != 1 else ' was'} "
+                    "unreadable at import time"
+                )
+            if snapshot_unindexed:
+                all_errors.append(
+                    f"{len(snapshot_unindexed)} available snapshot file"
+                    f"{'s were' if len(snapshot_unindexed) != 1 else ' was'} "
+                    "not indexed"
+                )
             runner.update_step(
                 job["id"], "scan",
-                status="failed" if root_errors else "completed",
+                status="failed" if all_errors else "completed",
                 summary=summary,
-                error=root_errors[0] if root_errors else None,
-                error_count=len(root_errors) if root_errors else None,
+                error=all_errors[0] if all_errors else None,
+                error_count=len(all_errors) if all_errors else None,
             )
             result = {
                 "mode": "in_place",
-                "ok": not root_errors,
+                "ok": not all_errors,
                 "discovered": indexed,
                 "indexed": indexed,
-                "failed": len(root_errors),
-                "errors": root_errors,
+                "failed": (
+                    snapshot_failures
+                    if snapshot_paths is not None else len(root_errors)
+                ),
+                "errors": all_errors,
                 "photo_ids": photo_ids,
             }
+            if snapshot_paths is not None:
+                result.update({
+                    "source_snapshot_id": source_snapshot_id,
+                    "requested": snapshot_requested,
+                    "imported": len(indexed_paths - set(snapshot_known_before)),
+                    "already_cataloged": len(
+                        indexed_paths & set(snapshot_known_before)
+                    ),
+                    "missing": len(snapshot_missing),
+                    "missing_paths": snapshot_missing[:100],
+                    "unreadable": len(snapshot_unreadable),
+                    "unreadable_paths": snapshot_unreadable[:100],
+                    "unindexed": len(snapshot_unindexed),
+                    "unindexed_paths": snapshot_unindexed[:100],
+                })
             _apply_import_tags(
                 active_ws, photo_ids, import_tags, location_from_gps, result,
                 job=job, runner=runner,
@@ -21939,8 +22231,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             _chain_after_import(job, result)
             return result
 
+        def work(job):
+            if snapshot_import_lock is None:
+                return _run_import_in_place(job)
+            with snapshot_import_lock:
+                return _run_import_in_place(job)
+
         job_config = {
             "sources": sources,
+            "source_snapshot_id": source_snapshot_id,
             "destination": None,
             "recursive": recursive,
             "after_import": after_import,
@@ -24815,11 +25114,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/jobs/pipeline", methods=["POST"])
     def api_job_pipeline():
-        """Streaming pipeline: scan -> thumbnails -> classify -> extract-masks -> regroup.
+        """Process cataloged photos through thumbnails and analysis stages.
 
         Overlaps I/O stages and interleaves detection with classification.
-        Imports are handled by /api/jobs/import-photos. This route processes
-        existing workspace photos by folder/snapshot/collection scope.
+        Import is the sole catalog-admission boundary; this route accepts only
+        existing workspace photos through folder or collection scope.
         """
         from pipeline_job import PipelineParams, run_pipeline_job
 
@@ -24880,6 +25179,19 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         sources = body.get("sources")
         collection_id = body.get("collection_id")
         source_snapshot_id = body.get("source_snapshot_id")
+
+        filesystem_scopes = []
+        if source:
+            filesystem_scopes.append("source")
+        if sources:
+            filesystem_scopes.append("sources")
+        if source_snapshot_id is not None:
+            filesystem_scopes.append("source_snapshot_id")
+        if filesystem_scopes:
+            return json_error(
+                "Process only accepts photos already in the workspace; "
+                "use Import for " + ", ".join(filesystem_scopes)
+            )
 
         # Folder scope: resolve folder_ids to their active-workspace subtrees
         # and materialize an ad-hoc collection, then proceed as a collection
@@ -25110,8 +25422,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             and not source_snapshot_id and pending_folder_collection is None
         ):
             return json_error(
-                "source, sources, collection_id, source_snapshot_id, "
-                "or folder_ids required"
+                "collection_id or folder_ids required"
             )
 
         # Validate type before touching SQLite. Non-integer bodies (objects,

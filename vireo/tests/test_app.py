@@ -13882,12 +13882,8 @@ def test_import_page_offers_common_and_custom_folder_templates(app_and_db):
 
 
 def test_process_page_has_no_import_source(app_and_db):
-    """The wizard is the Process page now: the Import Photos radio flow is
-    gone (it lives at /import); Folders / Collection / New images scopes
-    and the strategy menu are present. A compatibility source-folder
-    browse/type control was restored so users can point Process at
-    raw folders directly — it is present but does not re-add the full
-    Import radio or /api/jobs/import-full entry point."""
+    """Process scopes existing catalog photos only; every filesystem
+    admission control, including newly detected images, lives at Import."""
     app, _ = app_and_db
     client = app.test_client()
     html = client.get("/pipeline").data.decode()
@@ -13895,7 +13891,9 @@ def test_process_page_has_no_import_source(app_and_db):
     assert "/api/jobs/import-full" not in html
     assert 'id="radioFolders"' in html
     assert 'id="radioCollection"' in html
-    assert 'id="radioNewImages"' in html
+    assert 'id="radioNewImages"' not in html
+    assert 'id="sourceOptionNewImages"' not in html
+    assert 'data-testid="source-browse-btn"' not in html
     assert 'id="strategySelect"' in html
     assert "folder_ids" in html
     assert "Open Import to add photos" in html

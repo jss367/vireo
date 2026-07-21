@@ -212,7 +212,7 @@ def test_process_pipeline_rejects_retired_import_fields(client, tmp_path):
     )
 
     assert resp.status_code == 400
-    assert "import/archive fields" in resp.get_json()["error"]
+    assert "use Import" in resp.get_json()["error"]
 
 
 def test_process_plan_rejects_retired_import_fields(client):
