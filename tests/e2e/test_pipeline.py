@@ -48,13 +48,15 @@ def test_pipeline_source_points_imports_to_import_page(live_server, page):
 def test_pipeline_has_no_source_browse_controls(live_server, page):
     """Arbitrary-path sources left with the import/process split: the
     Source card offers only workspace folders and collections, so the
-    Browse button, the type-a-path input, and the folder-browser modal
-    must all be gone."""
+    Browse button, type-a-path input, folder-browser modal, and new-images
+    snapshot source must all be gone."""
     url = live_server["url"]
     page.goto(f"{url}/pipeline")
     expect(page.locator("[data-testid='source-browse-btn']")).to_have_count(0)
     expect(page.locator("#cfgSourceInput")).to_have_count(0)
     expect(page.locator("#folderBrowserOverlay")).to_have_count(0)
+    expect(page.locator("#sourceOptionNewImages")).to_have_count(0)
+    expect(page.locator("[data-testid='source-new-images']")).to_have_count(0)
 
 
 def test_pipeline_collection_source_dims_folders(live_server, page):
@@ -165,7 +167,7 @@ def test_pipeline_section_headers_visible(live_server, page):
     headers = page.locator(".stage-section-header")
     expect(headers).to_have_count(3)
     expect(headers.nth(0)).to_contain_text("Setup")
-    expect(headers.nth(1)).to_contain_text("Indexing")
+    expect(headers.nth(1)).to_contain_text("Preparation")
     expect(headers.nth(2)).to_contain_text("AI processing")
 
 
@@ -176,7 +178,7 @@ def test_pipeline_status_pills_visible_for_processing_stages(live_server, page):
     for suffix in ["Scan", "Previews", "Classify", "Extract", "EyeKeypoints", "Group"]:
         pill = page.locator(f"#pill{suffix}")
         expect(pill).to_be_visible()
-    # Indexing stages always start at "Will run".
+    # Preparation stages always start at "Will run".
     expect(page.locator("#pillScan")).to_contain_text("Will run")
     # Seeded fixture has detections → Classify shows "Already done".
     expect(page.locator("#pillClassify")).to_contain_text("Already done")
@@ -212,7 +214,7 @@ def test_pipeline_toggling_classify_off_marks_downstream_will_skip(live_server, 
     for suffix in ["Classify", "Extract", "Group"]:
         pill = page.locator(f"#pill{suffix}")
         expect(pill).to_contain_text("Will skip")
-    # Indexing stages are unaffected.
+    # Preparation stages are unaffected.
     expect(page.locator("#pillScan")).to_contain_text("Will run")
 
 

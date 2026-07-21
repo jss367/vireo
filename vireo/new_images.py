@@ -51,11 +51,13 @@ def _known_raw_stems_for_workspace(db, workspace_id):
     return {(r["folder_path"], Path(r["filename"]).stem) for r in rows}
 
 
-def mapped_roots(db, workspace_id):
+def mapped_roots(db, workspace_id, *, include_missing=False):
     """Return the workspace's user-facing roots — folders linked to the
     workspace with ``is_root = 1`` and no ``is_root = 1`` ancestor also linked
-    here. Skips folders marked 'missing'. Folders flagged ``'partial'`` from an
-    interrupted scan are kept so a rescan can pick up where it stopped.
+    here. Skips folders marked 'missing' unless ``include_missing=True``;
+    folders flagged ``'partial'`` from an interrupted scan are kept so a
+    rescan can pick up where it stopped. Snapshot consumers opt into missing
+    roots so files that vanish after discovery retain their provenance.
 
     Scoping by ``is_root`` (the canonical "user-facing root" flag, same as
     ``get_workspace_folder_roots``) rather than by mere linkage is what keeps
@@ -73,11 +75,14 @@ def mapped_roots(db, workspace_id):
     one chain are both marked roots (e.g. /A and /A/B/C with /A/B unlinked):
     os.walk'ing both would count files under /A/B/C twice.
     """
+    status_clause = "" if include_missing else (
+        " AND f.status IN ('ok', 'partial')"
+    )
     rows = db.conn.execute(
         """SELECT f.id, f.path, f.parent_id, wf.is_root
            FROM folders f
            JOIN workspace_folders wf ON wf.folder_id = f.id
-           WHERE wf.workspace_id = ? AND f.status IN ('ok', 'partial')""",
+           WHERE wf.workspace_id = ?""" + status_clause,
         (workspace_id,),
     ).fetchall()
     root_ids = {r["id"] for r in rows if r["is_root"]}

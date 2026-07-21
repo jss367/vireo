@@ -2167,7 +2167,7 @@ function sendReport() {
 <!-- New Images Banner -->
 <div class="new-images-banner" id="newImagesBanner" style="display:none;">
   <span id="newImagesMsg"></span>
-  <button type="button" class="banner-cta" onclick="createPipelineFromNewImages(this)">Create a pipeline</button>
+  <button type="button" class="banner-cta" onclick="reviewNewImagesImport(this)">Review import</button>
   <button class="banner-dismiss" onclick="dismissNewImagesBanner()">&times;</button>
 </div>
 
@@ -10622,7 +10622,7 @@ function dismissNewImagesBanner() {
   }
 }
 
-async function createPipelineFromNewImages(btn) {
+async function reviewNewImagesImport(btn) {
   if (btn && btn.disabled) return;
   if (btn) {
     btn.disabled = true;
@@ -10631,7 +10631,7 @@ async function createPipelineFromNewImages(btn) {
   // One POST, then navigate. When the walk that produced the banner count is
   // still cached (the common case), this returns the snapshot instantly and
   // we deep-link to it. If the server is still walking (202) — or anything
-  // goes wrong — land on the pipeline page in its "preparing" state, which
+  // goes wrong — land on the Import page in its "preparing" state, which
   // owns the polling and shows live walk progress. Never poll here holding
   // the user on a frozen button, and never dump them on a blank wizard with
   // no explanation.
@@ -10640,12 +10640,12 @@ async function createPipelineFromNewImages(btn) {
     if (r.ok && r.status !== 202) {
       const data = await r.json();
       if (data && data.snapshot_id != null) {
-        window.location.href = `/pipeline?new_images=${data.snapshot_id}`;
+        window.location.href = `/import?new_images=${data.snapshot_id}`;
         return;
       }
     }
   } catch (e) { /* fall through to the preparing page */ }
-  window.location.href = '/pipeline?new_images=preparing';
+  window.location.href = '/import?new_images=preparing';
 }
 
 // Run on page load and every 60s. Banner dismissal is per-workspace via

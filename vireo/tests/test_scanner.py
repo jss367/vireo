@@ -2295,6 +2295,33 @@ def test_scan_restrict_files_ignores_files_not_in_list(tmp_path, monkeypatch):
     assert "existing.jpg" in filenames
 
 
+def test_update_only_scan_cannot_admit_restricted_file(tmp_path, monkeypatch):
+    import scanner
+    from db import Database
+
+    root = str(tmp_path / "photos")
+    os.makedirs(root)
+    path = os.path.join(root, "uncataloged.jpg")
+    Image.new("RGB", (64, 64), color="blue").save(path, "JPEG")
+    db = Database(str(tmp_path / "test.db"))
+
+    monkeypatch.setattr(
+        scanner,
+        "extract_metadata",
+        lambda paths, restricted_tags=None, progress_callback=None: {},
+    )
+    scanner.scan(
+        root,
+        db,
+        restrict_dirs=[root],
+        restrict_files={path},
+        allow_photo_inserts=False,
+        register_restrict_dirs_as_roots=False,
+    )
+
+    assert db.conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0] == 0
+
+
 def test_incremental_rescan_respects_exif_extracted_guard(tmp_path, monkeypatch):
     """Incremental scan does NOT re-process a row when exif_data is
     populated, even if the row otherwise looks broken. The guard prevents
@@ -3597,6 +3624,31 @@ def test_restricted_scan_roots_subfolders_not_destination_base(tmp_path):
     }
     assert os.path.join(imported, "a.jpg") in photo_paths
     assert os.path.join(base, "2026-01-01", "old.jpg") not in photo_paths
+
+
+def test_restricted_scan_below_registered_root_does_not_promote_leaf(tmp_path):
+    from db import Database
+    from scanner import scan
+
+    root = str(tmp_path / "registered")
+    leaf = os.path.join(root, "trip")
+    _create_test_images(root, {"trip": ["bird.jpg"]})
+    db = Database(str(tmp_path / "test.db"))
+    ws_id = db._active_workspace_id
+    db.add_folder(root, name="registered")
+
+    scan(
+        root,
+        db,
+        restrict_dirs=[leaf],
+        restrict_files={os.path.join(leaf, "bird.jpg")},
+        register_restrict_dirs_as_roots=False,
+    )
+
+    root_paths = [f["path"] for f in db.get_workspace_folder_roots(ws_id)]
+    linked_paths = {f["path"] for f in db.get_workspace_folders(ws_id)}
+    assert root_paths == [root]
+    assert leaf in linked_paths
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions required")

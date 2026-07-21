@@ -1257,7 +1257,7 @@ def backfill_working_copies(db, vireo_dir, progress_callback=None,
     }
 
 
-def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, skip_working_copies=False):
+def scan(root, db, progress_callback=None, incremental=False, extract_full_metadata=True, photo_callback=None, skip_paths=None, status_callback=None, recursive=True, restrict_dirs=None, restrict_files=None, vireo_dir=None, thumb_cache_dir=None, permission_error_callback=None, cancel_check=None, skip_working_copies=False, register_restrict_dirs_as_roots=True, allow_photo_inserts=True):
     """Walk a folder tree, discover photos, read metadata, populate database.
 
     Args:
@@ -1279,8 +1279,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         restrict_files: optional iterable of absolute file paths. When
             provided alongside ``restrict_dirs``, only files whose path
             is in this set are discovered — untracked files in the same
-            directory are ignored. Used by the pipeline's repair path to
-            touch only photos already in the DB.
+            directory are ignored.
         vireo_dir: optional path to the vireo data directory (e.g. ``~/.vireo``).
             When provided, working copies are extracted for RAW photos after
             companion pairing, and derived-cache invalidation fires on
@@ -1314,6 +1313,16 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             has an edit recipe. Passing ``vireo_dir=None`` to suppress
             extraction would also silently drop those masks. See PR
             #1107 review.
+        register_restrict_dirs_as_roots: restricted scans traditionally treat
+            each explicit directory as a newly adopted workspace root. Set
+            False when the restricted files already live below registered
+            roots (for example a new-images snapshot or metadata repair):
+            discovered descendants are linked to the workspace but are not
+            promoted to additional roots.
+        allow_photo_inserts: when False, update existing photo rows only.
+            Files without an existing ``photos`` row are skipped. This gives
+            Process metadata repair a mechanically enforced no-admission
+            contract while retaining the shared metadata refresh code.
     """
     root_path = Path(root)
     # Don't open the root at all if the root is, or sits inside, an
@@ -1567,9 +1576,10 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
     # is the set actually enumerated, so root marking matches what was scanned.
     _restrict_root_paths = None
     if restrict_dirs is not None:
-        _restrict_root_paths = {
-            os.path.normpath(str(d)) for d in effective_restrict_dirs
-        }
+        _restrict_root_paths = (
+            {os.path.normpath(str(d)) for d in effective_restrict_dirs}
+            if register_restrict_dirs_as_roots else set()
+        )
 
     def _ensure_folder(folder_path):
         """Ensure a folder and all its parents exist in the DB. Returns folder_id."""
@@ -1598,6 +1608,7 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
         # link. See PR #1107 review (line 1186).
         link_to_ws = (
             _restrict_root_paths is None
+            or not register_restrict_dirs_as_roots
             or os.path.normpath(folder_str) in _restrict_root_paths
         )
 
@@ -1959,6 +1970,19 @@ def scan(root, db, progress_callback=None, incremental=False, extract_full_metad
             ).fetchone()
             row_already_existed = existing_row is not None
             prev_file_hash = existing_row["file_hash"] if existing_row else None
+
+            # Process may refresh metadata for cataloged photos, but it must
+            # never admit a filesystem path as a side effect. A row can
+            # disappear between repair-scope resolution and this point; skip
+            # that race rather than recreating it through add_photo().
+            if not allow_photo_inserts and not row_already_existed:
+                log.info(
+                    "Update-only scan skipped uncataloged file: %s", image_path,
+                )
+                processed_count += 1
+                if progress_callback:
+                    progress_callback(processed_count, total)
+                continue
 
             photo_id = db.add_photo(
                 folder_id=folder_id,

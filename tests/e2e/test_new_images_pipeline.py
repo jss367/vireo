@@ -1,10 +1,9 @@
-"""E2E test for the new-images banner -> pipeline flow.
+"""E2E test for the new-images banner -> Import flow.
 
 Covers Task 11 of docs/plans/2026-04-22-new-images-pipeline-plan.md:
-drop a JPEG into a registered folder, see the banner, click "Create a
-pipeline", end up on /pipeline?new_images=<id> with the "New images" source
-card pre-selected, start the pipeline, and confirm the photo is visible on
-/browse.
+drop a JPEG into a registered folder, see the banner, click "Review import",
+end up on /import?new_images=<id> with the frozen files loaded, import in
+place, and confirm the photo is visible on /browse.
 
 Does not reuse the shared `live_server` fixture from conftest.py because that
 one seeds phantom photos under /photos/park and /photos/yard that don't exist
@@ -87,8 +86,8 @@ def _clear_new_images_cache():
     get_shared_cache().clear()
 
 
-def test_new_images_banner_drives_pipeline(fresh_server, page):
-    """Full user flow: drop file -> banner -> pipeline -> photo visible."""
+def test_new_images_banner_drives_import(fresh_server, page):
+    """Full user flow: drop file -> banner -> import -> photo visible."""
     url = fresh_server["url"]
     photo_dir = fresh_server["photo_dir"]
     db = fresh_server["db"]
@@ -105,47 +104,34 @@ def test_new_images_banner_drives_pipeline(fresh_server, page):
     msg = page.locator("#newImagesMsg")
     expect(msg).to_contain_text("1 new image")
 
-    # --- Step 3: click "Create a pipeline" and land on /pipeline?new_images=<id>. ---
+    # --- Step 3: review the import and land on its frozen snapshot. ---
     page.locator("#newImagesBanner .banner-cta").click()
-    page.wait_for_url("**/pipeline?new_images=*", timeout=5000)
+    page.wait_for_url("**/import?new_images=*", timeout=5000)
     assert "new_images=" in page.url
 
-    # --- Step 4: the "New images" source card is visible AND selected. ---
-    card = page.locator("#sourceOptionNewImages")
-    expect(card).to_be_visible()
-    radio = page.locator("[data-testid='source-new-images']")
-    expect(radio).to_be_checked()
+    # --- Step 4: snapshot mode is visible, exact, and fixed to Add in place. ---
+    source_note = page.locator("#newImagesImportSource")
+    expect(source_note).to_contain_text("1 newly detected image")
+    expect(page.locator("#modeInPlace")).to_be_checked()
+    expect(page.locator("#modeCopy")).to_be_disabled()
+    expect(page.locator("#previewSummary")).to_contain_text("1 captured file")
 
-    # Subtitle shows the snapshot's count. The JS renders " \u2014 1 new image in 1 folder".
-    subtitle = page.locator("#newImagesCardSubtitle")
-    expect(subtitle).to_contain_text("1 new image")
-
-    # --- Step 5: submit the pipeline with classify/extract/group disabled to
-    # keep it fast (no model in this test environment anyway).
-    # Un-check classify/extract/group to skip the heavy stages.
-    for cb_id in ("enableClassify", "enableExtract", "enableGroup"):
-        checkbox = page.locator(f"#{cb_id}")
-        if checkbox.is_checked():
-            checkbox.uncheck()
-
-    start_btn = page.locator("[data-testid='start-pipeline-btn']")
+    # --- Step 5: choose import-only and admit the captured photo. ---
+    page.locator("#afterImportSelect").select_option("__none__")
+    start_btn = page.locator("#btnStart")
     expect(start_btn).to_be_enabled(timeout=5000)
     start_btn.click()
 
-    # --- Step 6: wait for the pipeline to finish. On success the SSE
-    # 'completed' handler in pipeline.html does
-    # `window.location.href = '/pipeline/review'`, so wait for that
-    # redirect rather than polling the DB. Polling and then immediately
-    # calling page.goto('/browse') races against the JS redirect and
-    # produces net::ERR_ABORTED in Chromium.
-    page.wait_for_url("**/pipeline/review", timeout=30000)
+    # --- Step 6: Import reports a durable catalog result. ---
+    expect(page.locator("#resultCard")).to_be_visible(timeout=30000)
+    expect(page.locator("#resultSummary")).to_contain_text("1 imported")
 
     # Sanity-check that the scan actually ingested the photo.
     photo_row = db.conn.execute(
         "SELECT id, filename FROM photos WHERE filename = ?",
         ("IMG_0001.JPG",),
     ).fetchone()
-    assert photo_row is not None, "Pipeline did not ingest IMG_0001.JPG"
+    assert photo_row is not None, "Import did not index IMG_0001.JPG"
 
     # --- Step 7: navigate to /browse and confirm the photo is visible. ---
     page.goto(f"{url}/browse")
@@ -154,11 +140,11 @@ def test_new_images_banner_drives_pipeline(fresh_server, page):
 
 
 def test_banner_click_during_walk_shows_preparing_state(fresh_server, page, monkeypatch):
-    """Regression test for the reported banner-click bug: clicking "Create a
-    pipeline" while the server-side new-images walk is still running used to
+    """Regression test for the reported banner-click bug: reviewing an import
+    while the server-side new-images walk is still running used to
     freeze the banner button for ~60s and then silently dump the user on a
-    blank pipeline wizard. Now the click navigates immediately to the
-    pipeline page in a visible "preparing" state that shows live walk
+    blank wizard. Now the click navigates immediately to the Import page in
+    a visible "preparing" state that shows live walk
     progress and converges onto the snapshot once the walk finishes."""
     import threading
 
@@ -195,16 +181,12 @@ def test_banner_click_during_walk_shows_preparing_state(fresh_server, page, monk
     get_shared_cache().clear()
 
     try:
-        # Click lands on the pipeline page immediately — no frozen button.
+        # Click lands on the Import page immediately — no frozen button.
         page.locator("#newImagesBanner .banner-cta").click()
-        page.wait_for_url("**/pipeline?new_images=preparing", timeout=5000)
-
-        # The new-images card is visible and selected while preparing.
-        expect(page.locator("#sourceOptionNewImages")).to_be_visible()
-        expect(page.locator("[data-testid='source-new-images']")).to_be_checked()
+        page.wait_for_url("**/import?new_images=preparing", timeout=5000)
 
         # Live walk progress is shown, not an opaque spinner.
-        status = page.locator("#pipelineActionStatus")
+        status = page.locator("#newImagesImportSource")
         expect(status).to_contain_text("1,500 files checked", timeout=10000)
     finally:
         release.set()
@@ -214,6 +196,6 @@ def test_banner_click_during_walk_shows_preparing_state(fresh_server, page, monk
     page.wait_for_url(
         lambda u: "new_images=" in u and "preparing" not in u, timeout=15000,
     )
-    expect(page.locator("#newImagesCardSubtitle")).to_contain_text(
-        "1 new image", timeout=5000,
+    expect(page.locator("#newImagesImportSource")).to_contain_text(
+        "1 newly detected image", timeout=5000,
     )
