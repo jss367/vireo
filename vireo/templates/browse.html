@@ -3998,10 +3998,17 @@ async function saveCollection() {
 
   try {
     var url = collectionEditingId ? '/api/collections/' + collectionEditingId : '/api/collections';
+    // This modal only edits rules — the preview and controls never surface
+    // the stored visual clause. When editing an existing visual collection,
+    // leaving visual_json in place would silently apply a hidden visual
+    // prompt on reopen that the user just previewed without (Codex review
+    // r3623087112). Clear it so the saved collection matches the preview.
+    var body = {name: name, rules: rules};
+    if (collectionEditingId) body.visual = null;
     await safeFetch(url, {
       method: collectionEditingId ? 'PUT' : 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name: name, rules: rules}),
+      body: JSON.stringify(body),
     });
     hideCollectionModal();
     loadCollections();

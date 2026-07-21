@@ -806,6 +806,36 @@ def test_create_collection_pins_active_model_on_has_visual_index(
     assert stored[0]["model"] == "current-model"
 
 
+def test_update_collection_clears_visual_json_when_visual_null(app_and_db):
+    """PUT /api/collections/<id> with ``visual: null`` clears the stored
+    visual_json. Browse's rules-only Edit Rules modal sends this so an
+    existing visual collection can't silently reopen with a hidden
+    visual prompt the user just previewed without (Codex review
+    r3623087112)."""
+    app, db = app_and_db
+    _clear_default_collections(app, db)
+    client = app.test_client()
+
+    cid = _make_visual_collection(db, name="Visual", prompt="a bird")
+    row = db.conn.execute(
+        "SELECT visual_json FROM collections WHERE id = ?", (cid,),
+    ).fetchone()
+    assert row["visual_json"] is not None
+
+    resp = client.put(
+        f"/api/collections/{cid}",
+        json={"name": "Visual",
+              "rules": [{"field": "rating", "op": ">=", "value": 3}],
+              "visual": None},
+    )
+    assert resp.status_code == 200, resp.get_json()
+
+    row = db.conn.execute(
+        "SELECT visual_json FROM collections WHERE id = ?", (cid,),
+    ).fetchone()
+    assert row["visual_json"] is None
+
+
 def test_update_collection_pins_active_model_on_has_visual_index(
     app_and_db, monkeypatch,
 ):

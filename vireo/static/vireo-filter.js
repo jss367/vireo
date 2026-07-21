@@ -315,7 +315,15 @@
     // the root of a whole class of prototype-review bugs.
     if (options.lightRender) renderLight();
     else render();
-    schedulePersist();
+    // Persistence writes the expanded rule tree into ui_state. Opening a
+    // saved collection would then snapshot its whole photo_ids list into
+    // every workspace-state fetch, and a later reload would restore that
+    // stale expansion instead of re-resolving the live collection —
+    // membership edits/deletes wouldn't show through (Codex r3623087117).
+    // Callers opening a saved expression pass ``noPersist: true`` so the
+    // load itself isn't persisted; subsequent user edits go through
+    // mutate() again without the flag and persist normally.
+    if (!options.noPersist) schedulePersist();
     // `reason` (optional string) is forwarded to onChange so pages can
     // pick per-cause reload behavior — e.g. Browse preserving the
     // selected-photo anchor when a quick search is cleared but not for
@@ -1423,7 +1431,11 @@
                 ? visual.strength : 'balanced' }
           : null;
         state.visualInfo = null;
-      }, { reason });
+        // See mutate()'s noPersist note (Codex r3623087117): opening a
+        // saved collection should not snapshot its expanded rule list
+        // (e.g. a huge photo_ids array from a manual collection) into
+        // workspaces.ui_state.
+      }, { reason, noPersist: true });
     },
     getUserRules() { return userRules(); },
     addRule(field, op, value) {
