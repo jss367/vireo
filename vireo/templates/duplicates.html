@@ -539,7 +539,12 @@
     if (window.VireoFilter && VireoFilter.setVisualInfo) {
       VireoFilter.setVisualInfo(visualInfo);
     }
-    if (_lastScanResult) renderResults(_lastScanResult);
+    // Never re-render a cached snapshot while a new scan is in flight.
+    // ``renderResults`` hides the progress UI and re-enables the Scan
+    // button, so filter edits (or pause/resume) mid-scan would otherwise
+    // resurrect stale duplicate cards + actions and even let the user
+    // kick off a second overlapping scan.
+    if (_lastScanResult && !_scanInProgress) renderResults(_lastScanResult);
   }
 
   function groupMatchesFilter(group) {
