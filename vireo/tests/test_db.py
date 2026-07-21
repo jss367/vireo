@@ -1951,6 +1951,43 @@ def test_place_upsert_does_not_reuse_leaf_as_parent(tmp_path):
     assert state["parent_id"] != state_id
 
 
+def test_place_upsert_repairs_taxonomy_root_while_building_parents(tmp_path):
+    """A child-place assignment heals its taxonomy-typed root component."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="taxonomy")
+    state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="location",
+    )
+
+    park_id = db.upsert_place_chain({
+        "place_id": "nearby-park",
+        "name": "Nearby Park",
+        "types": ["park"],
+        "lat": 32.75,
+        "lng": -117.0,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+            {
+                "name": "California",
+                "types": ["administrative_area_level_1"],
+            },
+        ],
+    })
+
+    assert db.conn.execute(
+        "SELECT type FROM keywords WHERE id = ?", (country_id,),
+    ).fetchone()["type"] == "location"
+    assert db.conn.execute(
+        "SELECT parent_id FROM keywords WHERE id = ?", (park_id,),
+    ).fetchone()["parent_id"] == state_id
+    assert db.conn.execute(
+        "SELECT COUNT(*) FROM keywords WHERE name = ? AND parent_id IS NULL",
+        ("United States",),
+    ).fetchone()[0] == 1
+
+
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
     """mark_species_keywords links keywords.taxon_id when taxa table has a match."""
     from db import Database

@@ -10320,23 +10320,35 @@ class Database:
                     ) from inner_err
 
         if parent_id is None:
-            existing = self.conn.execute(
-                "SELECT id FROM keywords "
-                "WHERE name = ? AND parent_id IS NULL "
-                "  AND type = 'location' "
-                + ("" if reuse_location_component else "AND place_id IS NULL"),
-                (name,),
-            ).fetchone()
+            if reuse_location_component:
+                existing = self.conn.execute(
+                    "SELECT id, type FROM keywords "
+                    "WHERE name = ? AND parent_id IS NULL "
+                    "  AND type IN ('location', 'taxonomy') "
+                    "ORDER BY CASE WHEN type = 'location' THEN 0 ELSE 1 END, id "
+                    "LIMIT 1",
+                    (name,),
+                ).fetchone()
+            else:
+                existing = self.conn.execute(
+                    "SELECT id, type FROM keywords "
+                    "WHERE name = ? AND parent_id IS NULL "
+                    "  AND type = 'location' AND place_id IS NULL",
+                    (name,),
+                ).fetchone()
         else:
             existing = self.conn.execute(
-                "SELECT id FROM keywords "
+                "SELECT id, type FROM keywords "
                 "WHERE name = ? AND parent_id = ? "
                 "  AND type = 'location' "
                 + ("" if reuse_location_component else "AND place_id IS NULL"),
                 (name, parent_id),
             ).fetchone()
         if existing:
-            return existing["id"]
+            if existing["type"] == "location":
+                return existing["id"]
+            if self._restore_misclassified_location_ancestor(existing["id"]):
+                return existing["id"]
 
         try:
             cur = self.conn.execute(
