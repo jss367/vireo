@@ -416,6 +416,15 @@
     document.getElementById('results').innerHTML = '';
     document.getElementById('summary').style.display = 'none';
     document.getElementById('applyBar').style.display = 'none';
+    // Invalidate any prior scan snapshot (from a restored scan or a
+    // previous run). If the new scan is cancelled, fails, or the
+    // EventSource errors, ``_scanInProgress`` flips back to false while
+    // the DOM has already been cleared — leaving the stale snapshot in
+    // ``_lastScanResult`` would let the next filter edit / pause / resume
+    // re-render those old duplicate cards and re-enable their actions.
+    // Successful completion repopulates ``_lastScanResult`` via
+    // ``renderResults``.
+    _lastScanResult = null;
     showProgress('Starting scan...');
 
     try {
