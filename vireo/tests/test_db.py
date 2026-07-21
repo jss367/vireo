@@ -1914,6 +1914,43 @@ def test_place_upsert_repairs_root_administrative_location(tmp_path):
     ).fetchone()[0] == 1
 
 
+def test_place_upsert_does_not_reuse_leaf_as_parent(tmp_path):
+    """An alternate place display name must not create a self-parent cycle."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    state_id = db._upsert_one_keyword(
+        "California",
+        country_id,
+        place_id="california-region",
+        latitude=36.7783,
+        longitude=-119.4179,
+    )
+
+    selected_id = db.upsert_place_chain({
+        "place_id": "california-region",
+        "name": "CA",
+        "types": ["administrative_area_level_1"],
+        "lat": 36.7783,
+        "lng": -119.4179,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+            {
+                "name": "California",
+                "types": ["administrative_area_level_1"],
+            },
+        ],
+    })
+
+    assert selected_id == state_id
+    state = db.conn.execute(
+        "SELECT name, parent_id FROM keywords WHERE id = ?", (state_id,),
+    ).fetchone()
+    assert dict(state) == {"name": "CA", "parent_id": country_id}
+    assert state["parent_id"] != state_id
+
+
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
     """mark_species_keywords links keywords.taxon_id when taxa table has a match."""
     from db import Database

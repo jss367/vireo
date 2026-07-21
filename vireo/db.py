@@ -10526,21 +10526,29 @@ class Database:
         normalized.sort(key=lambda item: (item[0], item[1]))
         return [item[2] for item in normalized]
 
-    def _upsert_location_parent_chain(self, components, leaf_name="", leaf_types=None):
+    def _upsert_location_parent_chain(
+        self,
+        components,
+        leaf_name="",
+        leaf_types=None,
+        exclude_keyword_id=None,
+    ):
         """Upsert a chain of parent location keywords from ``address_components``.
 
         Walks broadest → narrowest, returning the list of visited keyword ids
         in broadest → narrowest order. Returns an empty list if ``components``
         is empty / all entries lack a name. The deepest (narrowest) parent is
-        ``chain[-1]`` if non-empty. Caller is responsible for the surrounding
-        transaction.
+        ``chain[-1]`` if non-empty. ``exclude_keyword_id`` prevents an
+        existing selected place from being reused as its own parent when its
+        display name differs from the matching address component. Caller is
+        responsible for the surrounding transaction.
         """
         chain: list[int] = []
         parent_id = None
         for comp in self._location_parent_components(components, leaf_name, leaf_types):
             if not comp.get("name"):
                 continue
-            parent_id = self._upsert_one_keyword(
+            component_id = self._upsert_one_keyword(
                 name=comp["name"],
                 parent_id=parent_id,
                 place_id=None,
@@ -10548,7 +10556,10 @@ class Database:
                 longitude=None,
                 reuse_location_component=True,
             )
-            chain.append(parent_id)
+            if component_id == exclude_keyword_id:
+                continue
+            parent_id = component_id
+            chain.append(component_id)
         return chain
 
     def upsert_place_chain(self, details):
@@ -10577,10 +10588,17 @@ class Database:
         components = details.get("address_components") or []
 
         with self.conn:
+            existing_leaf = self.conn.execute(
+                "SELECT id FROM keywords WHERE place_id = ?",
+                (details["place_id"],),
+            ).fetchone()
             chain = self._upsert_location_parent_chain(
                 components,
                 leaf_name=name,
                 leaf_types=details.get("types"),
+                exclude_keyword_id=(
+                    existing_leaf["id"] if existing_leaf is not None else None
+                ),
             )
             parent_id = chain[-1] if chain else None
             leaf_id = self._upsert_one_keyword(
