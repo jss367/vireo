@@ -1,3 +1,6 @@
+import os
+
+
 def test_set_color_label(app_and_db):
     """POST /api/photos/<id>/color_label sets the color label."""
     app, db = app_and_db
@@ -393,6 +396,86 @@ def test_sync_status(app_and_db):
     resp = client.get('/api/sync/status')
     data = resp.get_json()
     assert data['pending_count'] == 1
+
+
+def test_sync_preview_describes_location_keyword_as_xmp_delta(
+    client_with_photo,
+):
+    """The internal ``effective`` token never stands in for a location value."""
+    import config as cfg
+    from xmp import write_gps_location
+
+    app, db, photo_id = client_with_photo
+    config = cfg.load()
+    config["write_assigned_location_to_xmp"] = True
+    cfg.save(config)
+
+    florida_id = db.conn.execute(
+        "INSERT INTO keywords (name, type) VALUES ('Florida', 'location')"
+    ).lastrowid
+    tallahassee_id = db.conn.execute(
+        "INSERT INTO keywords "
+        "(name, parent_id, type, latitude, longitude) "
+        "VALUES ('Tallahassee', ?, 'location', 30.4383, -84.2807)",
+        (florida_id,),
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, tallahassee_id)
+    db.queue_change(photo_id, "location", "effective")
+
+    photo = db.get_photo(photo_id)
+    folder = db.conn.execute(
+        "SELECT path FROM folders WHERE id = ?", (photo["folder_id"],)
+    ).fetchone()["path"]
+    write_gps_location(
+        os.path.join(folder, "test.xmp"),
+        48.8566,
+        2.3522,
+        source="keyword",
+    )
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    change = response.get_json()["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "Location",
+        "action": "updated",
+        "before": "48.85660, 2.35220",
+        "after": "Tallahassee, Florida",
+        "after_detail": "30.43830, -84.28070 · from a location keyword",
+    }
+
+
+def test_sync_preview_explains_when_location_xmp_writes_are_disabled(
+    client_with_photo,
+):
+    """A queued cleanup check must not imply that a location will be written."""
+    app, db, photo_id = client_with_photo
+    location_id = db.conn.execute(
+        "INSERT INTO keywords "
+        "(name, type, latitude, longitude) "
+        "VALUES ('Tallahassee', 'location', 30.4383, -84.2807)"
+    ).lastrowid
+    db.conn.commit()
+    db.set_photo_location(photo_id, location_id)
+    db.queue_change(photo_id, "location", "effective")
+
+    response = app.test_client().get("/api/sync/preview")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["location_sync_enabled"] is False
+    change = payload["photos"][0]["changes"][0]
+    assert change["presentation"] == {
+        "field": "XMP location",
+        "action": "unchanged",
+        "before": "No XMP sidecar",
+        "after": "No XMP sidecar",
+        "after_detail": (
+            "Tallahassee stays in Vireo; writing its GPS to XMP is turned off"
+        ),
+    }
 
 
 def test_edit_history_recorded_on_rating(app_and_db):

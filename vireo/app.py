@@ -114,6 +114,7 @@ from web.photo_review import create_photo_review_blueprint
 from web.system import system_blueprint
 from web.workspaces import create_workspace_blueprint
 from werkzeug.exceptions import BadRequest
+from xmp import read_sync_preview_metadata
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -202,6 +203,203 @@ class _QuietRequestFilter(logging.Filter):
 
 
 logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
+
+
+def _sync_preview_coordinate_text(location):
+    """Return a compact, truthful coordinate label for sync review."""
+    if not location:
+        return None
+    latitude = location.get("latitude")
+    longitude = location.get("longitude")
+    if latitude is not None and longitude is not None:
+        return f"{latitude:.5f}, {longitude:.5f}"
+    raw_latitude = location.get("raw_latitude")
+    raw_longitude = location.get("raw_longitude")
+    if raw_latitude is None and raw_longitude is None:
+        return None
+    return ", ".join(
+        str(value) for value in (raw_latitude, raw_longitude)
+        if value is not None
+    )
+
+
+def _sync_preview_location_name(location):
+    """Format a location keyword leaf and its parents from specific to broad."""
+    if not location:
+        return None
+    names = [location.get("name")]
+    names.extend(
+        parent.get("name")
+        for parent in reversed(location.get("parent_chain") or [])
+    )
+    result = []
+    seen = set()
+    for name in names:
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(name)
+    return ", ".join(result) or None
+
+
+def _sync_preview_absent_xmp_value(metadata, empty_value):
+    if metadata.get("status") == "missing":
+        return "No XMP sidecar"
+    if metadata.get("status") == "unreadable":
+        return "Unreadable XMP sidecar"
+    return empty_value
+
+
+def _sync_preview_rating_label(value):
+    if value in (None, "", "0", 0):
+        return "Unrated"
+    try:
+        rating = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{rating} star" if rating == 1 else f"{rating} stars"
+
+
+def _sync_preview_flag_label(value):
+    return {
+        None: "Unflagged",
+        "": "Unflagged",
+        "none": "Unflagged",
+        "flagged": "Picked",
+        "rejected": "Rejected",
+    }.get(value, str(value))
+
+
+def _sync_preview_presentation(
+    change, metadata, *, assigned_location=None, write_locations=False,
+):
+    """Translate one internal pending row into user-facing XMP before/after data."""
+    change_type = change["change_type"]
+    value = change["value"]
+
+    if change_type in {"keyword_add", "keyword_remove", "keyword_remove_flat"}:
+        existing = next(
+            (
+                keyword for keyword in metadata.get("keywords", set())
+                if keyword_match_key(keyword) == keyword_match_key(value)
+            ),
+            None,
+        )
+        xmp_value = existing or _sync_preview_absent_xmp_value(
+            metadata, "Not in XMP",
+        )
+        if change_type == "keyword_add":
+            return {
+                "field": "Keyword",
+                "action": "added",
+                "before": xmp_value,
+                "after": value,
+            }
+        return {
+            "field": "Keyword",
+            "action": "removed",
+            "before": xmp_value,
+            "after": "Not in XMP",
+        }
+
+    if change_type == "rating":
+        before = _sync_preview_rating_label(metadata.get("rating"))
+        if metadata.get("status") != "ok":
+            before = _sync_preview_absent_xmp_value(metadata, before)
+        return {
+            "field": "Rating",
+            "action": "updated",
+            "before": before,
+            "after": _sync_preview_rating_label(value),
+        }
+
+    if change_type == "flag":
+        before = _sync_preview_flag_label(metadata.get("flag"))
+        if metadata.get("status") != "ok":
+            before = _sync_preview_absent_xmp_value(metadata, before)
+        return {
+            "field": "Flag",
+            "action": "updated",
+            "before": before,
+            "after": _sync_preview_flag_label(value),
+        }
+
+    if change_type == "location":
+        current_coordinates = _sync_preview_coordinate_text(
+            metadata.get("location")
+        )
+        before = current_coordinates or _sync_preview_absent_xmp_value(
+            metadata, "No GPS in XMP",
+        )
+        location_coordinates = _sync_preview_coordinate_text(assigned_location)
+        location_name = _sync_preview_location_name(assigned_location)
+
+        if write_locations and location_coordinates:
+            return {
+                "field": "Location",
+                "action": "updated",
+                "before": before,
+                "after": location_name or location_coordinates,
+                "after_detail": (
+                    f"{location_coordinates} · from a location keyword"
+                ),
+            }
+
+        if metadata.get("location_source"):
+            restored_coordinates = _sync_preview_coordinate_text(
+                metadata.get("previous_location")
+            )
+            return {
+                "field": "Location",
+                "action": "cleared",
+                "before": before,
+                "after": restored_coordinates or "No GPS in XMP",
+                "after_detail": (
+                    "Restores the GPS that existed before Vireo"
+                    if restored_coordinates
+                    else "Removes Vireo-assigned GPS"
+                ),
+            }
+
+        return {
+            "field": "XMP location",
+            "action": "unchanged",
+            "before": before,
+            "after": before,
+            "after_detail": (
+                f"{location_name} stays in Vireo; writing its GPS to XMP is turned off"
+                if assigned_location and location_coordinates and not write_locations
+                else (
+                    f"{location_name or 'This location keyword'} has no GPS coordinates to write"
+                    if assigned_location and not location_coordinates
+                    else "No Vireo-assigned GPS needs to be removed"
+                )
+            ),
+        }
+
+    if change_type == "edit_recipe":
+        before = (
+            "Existing Vireo edits"
+            if metadata.get("edit_recipe")
+            else _sync_preview_absent_xmp_value(metadata, "No Vireo edits")
+        )
+        return {
+            "field": "Photo edits",
+            "action": "updated" if value else "cleared",
+            "before": before,
+            "after": "Updated Vireo edits" if value else "No Vireo edits",
+        }
+
+    field = change_type.replace("_", " ").strip().title() or "Metadata"
+    return {
+        "field": field,
+        "action": "updated",
+        "before": "Current XMP value",
+        "after": value or "Cleared",
+    }
 
 
 def _rank01(value, values):
@@ -9723,7 +9921,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/sync/preview")
     def api_sync_preview():
-        """Preview all pending changes grouped by photo."""
+        """Preview pending changes with the XMP values they will replace."""
         db = _get_db()
         changes = db.get_pending_changes()
         if not changes:
@@ -9750,9 +9948,38 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "value": c["value"],
             })
 
+        import config as cfg
+
+        write_locations = bool(
+            db.get_effective_config(cfg.load()).get(
+                "write_assigned_location_to_xmp", False,
+            )
+        )
+        changes_by_id = {change["id"]: change for change in changes}
+        for photo in by_photo.values():
+            xmp_path = os.path.join(
+                photo["folder"],
+                os.path.splitext(photo["filename"])[0] + ".xmp",
+            )
+            metadata = read_sync_preview_metadata(xmp_path)
+            assigned_location = None
+            if any(change["type"] == "location" for change in photo["changes"]):
+                assigned_location = _serialize_photo_location(
+                    db, photo["photo_id"],
+                )
+            for change in photo["changes"]:
+                pending = changes_by_id[change["id"]]
+                change["presentation"] = _sync_preview_presentation(
+                    pending,
+                    metadata,
+                    assigned_location=assigned_location,
+                    write_locations=write_locations,
+                )
+
         result = {
             "photos": list(by_photo.values()),
             "total_changes": len(changes),
+            "location_sync_enabled": write_locations,
         }
         _attach_nested_edit_recipes(db, result)
         return jsonify(result)
