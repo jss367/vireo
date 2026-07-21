@@ -227,8 +227,23 @@ body {
   box-sizing: border-box;
 }
 .location-review-candidate.selected .location-review-radio { border: 4px solid var(--accent); }
+.location-review-candidate-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
 .location-review-candidate-name { font-size: 12px; font-weight: 600; line-height: 1.3; }
-.location-review-candidate-meta { color: var(--text-dim); font-size: 10px; margin-top: 3px; line-height: 1.35; }
+.location-review-candidate-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-primary));
+  border-radius: 999px;
+  padding: 1px 5px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--text-secondary);
+  font-size: 8px;
+  font-weight: 650;
+  line-height: 1.4;
+  letter-spacing: .025em;
+  text-transform: uppercase;
+}
+.location-review-candidate-meta { display: block; color: var(--text-dim); font-size: 10px; margin-top: 3px; line-height: 1.35; }
 .location-review-search-row { display: flex; gap: 7px; }
 .location-review-search {
   flex: 1;
@@ -615,7 +630,6 @@ body {
   function candidateMeta(choice) {
     var parts = [];
     if (choice.kind === 'keyword') {
-      parts.push('Saved location');
       parts.push(formatNumber(choice.photo_count) + (choice.photo_count === 1 ? ' photo' : ' photos'));
     } else if (choice.kind === 'custom') {
       parts.push('Custom friendly name');
@@ -635,9 +649,19 @@ body {
   function allCandidates() {
     var seen = {};
     var values = [];
-    state.savedCandidates.concat(
-      state.searchedCandidate ? [state.searchedCandidate] : [],
-      state.googleCandidates,
+    var nearby = state.savedCandidates.concat(state.googleCandidates);
+    nearby.sort(function(a, b) {
+      var aDistance = Number(a.distance_m);
+      var bDistance = Number(b.distance_m);
+      var aHasDistance = Number.isFinite(aDistance);
+      var bHasDistance = Number.isFinite(bDistance);
+      if (aHasDistance && bHasDistance && aDistance !== bDistance) return aDistance - bDistance;
+      if (aHasDistance !== bHasDistance) return aHasDistance ? -1 : 1;
+      if (a.kind !== b.kind) return a.kind === 'keyword' ? -1 : 1;
+      return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+    (state.searchedCandidate ? [state.searchedCandidate] : []).concat(
+      nearby,
       state.regionCandidates
     ).forEach(function(choice) {
       var key = candidateKey(choice);
@@ -697,9 +721,12 @@ body {
     }
     container.innerHTML = candidates.map(function(choice, index) {
       var selected = candidateKey(choice) === candidateKey(state.selectedChoice) ? ' selected' : '';
+      var badge = choice.kind === 'keyword'
+        ? '<span class="location-review-candidate-badge">Previously used</span>' : '';
       return '<button class="location-review-candidate' + selected + '" type="button" data-candidate-index="' + index + '">' +
         '<span class="location-review-radio"></span><span>' +
-        '<span class="location-review-candidate-name">' + escapeHtml(choice.name) + '</span>' +
+        '<span class="location-review-candidate-heading">' +
+        '<span class="location-review-candidate-name">' + escapeHtml(choice.name) + '</span>' + badge + '</span>' +
         '<span class="location-review-candidate-meta">' + escapeHtml(candidateMeta(choice)) + '</span>' +
         '</span></button>';
     }).join('');

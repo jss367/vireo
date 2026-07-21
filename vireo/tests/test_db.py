@@ -1568,6 +1568,85 @@ def test_mark_species_keywords_preserves_explicit_location_homonym(tmp_path):
     assert dict(leaf) == {"type": "location", "parent_id": location_id}
 
 
+def test_repair_misclassified_location_ancestors_restores_legacy_homonym(
+    tmp_path,
+):
+    """Repair a California row already corrupted before type preservation."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="taxonomy",
+    )
+    db.add_keyword(
+        "San Diego County", parent_id=state_id, kw_type="location",
+    )
+
+    repaired = db.repair_misclassified_location_ancestors()
+
+    assert repaired == 1
+    row = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (state_id,),
+    ).fetchone()
+    assert dict(row) == {
+        "type": "location",
+        "is_species": 0,
+        "taxon_id": None,
+    }
+    assert db.repair_misclassified_location_ancestors() == 0
+
+
+def test_place_upsert_repairs_misclassified_location_ancestor_on_demand(
+    tmp_path,
+):
+    """A stale California taxonomy node must not block map assignment."""
+    from db import Database
+
+    db = Database(str(tmp_path / "test.db"))
+    country_id = db.add_keyword("United States", kw_type="location")
+    state_id = db.add_keyword(
+        "California", parent_id=country_id, kw_type="taxonomy",
+    )
+    county_id = db.add_keyword(
+        "San Diego County", parent_id=state_id, kw_type="location",
+    )
+
+    leaf_id = db.upsert_place_chain({
+        "place_id": "nearby-park",
+        "name": "Nearby Park",
+        "types": ["park"],
+        "lat": 32.75,
+        "lng": -117.0,
+        "address_components": [
+            {"name": "United States", "types": ["country"]},
+            {
+                "name": "California",
+                "types": ["administrative_area_level_1"],
+            },
+            {
+                "name": "San Diego County",
+                "types": ["administrative_area_level_2"],
+            },
+        ],
+    })
+
+    state = db.conn.execute(
+        "SELECT type, is_species, taxon_id FROM keywords WHERE id = ?",
+        (state_id,),
+    ).fetchone()
+    leaf = db.conn.execute(
+        "SELECT type, parent_id FROM keywords WHERE id = ?", (leaf_id,),
+    ).fetchone()
+    assert dict(state) == {
+        "type": "location",
+        "is_species": 0,
+        "taxon_id": None,
+    }
+    assert dict(leaf) == {"type": "location", "parent_id": county_id}
+
+
 def test_mark_species_keywords_links_local_taxon_id(tmp_path):
     """mark_species_keywords links keywords.taxon_id when taxa table has a match."""
     from db import Database

@@ -10278,10 +10278,73 @@ class Database:
                 # Defensive: our narrow SELECT missed it (shouldn't happen,
                 # but reusing it is safe and idempotent).
                 return clash["id"]
+            if self._restore_misclassified_location_ancestor(clash["id"]):
+                # Older taxonomy marking could retype an administrative
+                # location node such as United States -> California even
+                # though location children still hung below it. Reuse the
+                # repaired node instead of making every later Google-place
+                # assignment fail on the stale type.
+                return clash["id"]
             raise RuntimeError(
                 f"keyword '{name}' (parent_id={parent_id}) exists with "
                 f"type={clash['type']!r}, can't reuse for location chain"
             ) from integrity_err
+
+    def _restore_misclassified_location_ancestor(self, keyword_id):
+        """Restore one legacy taxonomy row that is structurally a location.
+
+        Before explicit keyword types were protected during taxonomy marking,
+        geographic homonyms such as ``California`` could be changed from a
+        location into taxonomy. A row between a location parent and a location
+        child is an unambiguous administrative location-tree node, not a
+        taxonomy keyword. Clear the stale taxonomy metadata and restore its
+        original type.
+        """
+        row = self.conn.execute(
+            "SELECT k.id FROM keywords k "
+            "JOIN keywords parent ON parent.id = k.parent_id "
+            "WHERE k.id = ? AND k.type = 'taxonomy' "
+            "  AND k.place_id IS NULL AND parent.type = 'location' "
+            "  AND EXISTS ("
+            "    SELECT 1 FROM keywords child "
+            "    WHERE child.parent_id = k.id AND child.type = 'location'"
+            "  )",
+            (keyword_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        self.conn.execute(
+            "UPDATE keywords SET type = 'location', is_species = 0, "
+            "taxon_id = NULL WHERE id = ?",
+            (keyword_id,),
+        )
+        return True
+
+    def repair_misclassified_location_ancestors(self):
+        """Restore every location-tree node damaged by legacy taxonomy marking.
+
+        This is intentionally idempotent and narrowly structural: only a
+        coordless taxonomy row whose parent and child are both locations is
+        changed. Genuine taxonomy keywords and cross-type name collisions keep
+        the existing conflict protection.
+        """
+        rows = self.conn.execute(
+            "SELECT k.id FROM keywords k "
+            "JOIN keywords parent ON parent.id = k.parent_id "
+            "WHERE k.type = 'taxonomy' AND k.place_id IS NULL "
+            "  AND parent.type = 'location' "
+            "  AND EXISTS ("
+            "    SELECT 1 FROM keywords child "
+            "    WHERE child.parent_id = k.id AND child.type = 'location'"
+            "  )"
+        ).fetchall()
+        repaired = 0
+        for row in rows:
+            if self._restore_misclassified_location_ancestor(row["id"]):
+                repaired += 1
+        if repaired:
+            self.conn.commit()
+        return repaired
 
     @staticmethod
     def _location_component_rank(component):
