@@ -533,8 +533,17 @@ markers.on('clustermouseover', showClusterPreview);
 markers.on('clustermouseout', hideClusterPreview);
 markers.on('clusterclick', hideClusterPreview);
 
+/* Bumped by every loadPhotos() invocation; responses whose epoch is no
+ * longer current are dropped. Fast rule edits or a slow visual query
+ * followed by another filter change can otherwise let an earlier
+ * ``/api/photos/geo`` resolve after a newer one and overwrite the
+ * markers/sidebar/total with stale data while the filter chips show the
+ * current rules. */
+var _loadPhotosEpoch = 0;
+
 /* ── Load photos ── */
 async function loadPhotos() {
+  var myEpoch = ++_loadPhotosEpoch;
   var focusPhotoId = requestedPhotoId;
   requestedPhotoId = null;
   var params = new URLSearchParams();
@@ -557,6 +566,7 @@ async function loadPhotos() {
 
   try {
     var data = await safeFetch(url);
+    if (myEpoch !== _loadPhotosEpoch) return;  // superseded — drop
     if (window.VireoFilter && VireoFilter.setResultTotal) {
       VireoFilter.setResultTotal(data.total_filtered);
     }
@@ -656,6 +666,7 @@ async function loadPhotos() {
       statusEl.innerHTML = parts.join(' &mdash; ');
     }
   } catch (e) {
+    if (myEpoch !== _loadPhotosEpoch) return;  // superseded — drop
     document.getElementById('mapStatus').textContent = 'Failed to load photos.';
   }
 }

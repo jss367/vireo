@@ -15218,6 +15218,8 @@ class Database:
         "prediction_confidence",
         "prediction_status",
         "classifier_model",
+        "taxonomy_kingdom",
+        "taxonomy_phylum",
         "taxonomy_class",
         "taxonomy_order",
         "taxonomy_family",
@@ -15376,6 +15378,8 @@ class Database:
             if field == "classifier_model":
                 return _text_match(row["classifier_model"], op, value)
             if field in (
+                "taxonomy_kingdom",
+                "taxonomy_phylum",
                 "taxonomy_class",
                 "taxonomy_order",
                 "taxonomy_family",
