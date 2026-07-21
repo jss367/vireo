@@ -1385,7 +1385,17 @@ async function togglePendingDetail() {
       p.changes.forEach(function(c) {
         var color = c.type === 'keyword_add' ? 'var(--accent)' : c.type === 'keyword_remove' ? 'var(--danger)' : 'var(--text-secondary)';
         var label = c.type === 'keyword_add' ? '+ ' : c.type === 'keyword_remove' ? '- ' : '';
-        html += '<div style="font-size:12px;color:' + color + ';padding:2px 0;">' + label + escapeHtml(c.value) + ' <span style="color:var(--text-ghost);">(' + c.type.replace('_', ' ') + ')</span></div>';
+        var presentation = c.presentation || {
+          field: c.type.replace(/_/g, ' '),
+          before: 'Current XMP value',
+          after: c.value || 'Cleared'
+        };
+        html += '<div style="font-size:12px;color:' + color + ';padding:2px 0;">' +
+          label + '<span style="font-weight:600;">' + escapeHtml(presentation.field) + ':</span> ' +
+          '<span style="color:var(--text-dim);">' + escapeHtml(presentation.before) + '</span> \u2192 ' +
+          escapeHtml(presentation.after) +
+          (presentation.after_detail ? '<div style="color:var(--text-ghost);font-size:11px;margin-left:14px;">' + escapeHtml(presentation.after_detail) + '</div>' : '') +
+          '</div>';
       });
       html += '</div>';
     });

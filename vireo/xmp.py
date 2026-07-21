@@ -155,6 +155,139 @@ def read_hierarchical_keywords(xmp_path):
     return results
 
 
+def _parse_gps_coordinate(value):
+    """Parse a common XMP GPS coordinate into decimal degrees.
+
+    XMP commonly stores coordinates as ``degrees,minutesN`` but files from
+    other tools may use decimal degrees or a three-part DMS value.  Preview
+    callers need a friendly value without rejecting an otherwise readable
+    sidecar just because its coordinate spelling is unfamiliar.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    hemisphere = text[-1:].upper()
+    if hemisphere in {"N", "S", "E", "W"}:
+        text = text[:-1].strip()
+    else:
+        hemisphere = None
+
+    try:
+        parts = [float(part.strip()) for part in text.split(",")]
+        if len(parts) == 1:
+            decimal = parts[0]
+        elif len(parts) == 2:
+            decimal = abs(parts[0]) + parts[1] / 60.0
+            if parts[0] < 0:
+                decimal *= -1
+        elif len(parts) == 3:
+            decimal = abs(parts[0]) + parts[1] / 60.0 + parts[2] / 3600.0
+            if parts[0] < 0:
+                decimal *= -1
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    if hemisphere in {"S", "W"}:
+        decimal = -abs(decimal)
+    elif hemisphere in {"N", "E"}:
+        decimal = abs(decimal)
+    return decimal
+
+
+def _sync_preview_gps_pair(desc, namespace=NS_EXIF, prefix=""):
+    """Read one current or backed-up GPS pair for sync-review display."""
+    lat_attr = f"{{{namespace}}}{prefix}GPSLatitude"
+    lon_attr = f"{{{namespace}}}{prefix}GPSLongitude"
+    raw_latitude = desc.get(lat_attr)
+    raw_longitude = desc.get(lon_attr)
+    if raw_latitude is None and raw_longitude is None:
+        return None
+    return {
+        "latitude": _parse_gps_coordinate(raw_latitude),
+        "longitude": _parse_gps_coordinate(raw_longitude),
+        "raw_latitude": raw_latitude,
+        "raw_longitude": raw_longitude,
+    }
+
+
+def read_sync_preview_metadata(xmp_path):
+    """Read the sidecar fields shown by the pending-changes review.
+
+    This intentionally parses a sidecar once per photo so a review containing
+    several change types does not repeatedly touch the filesystem.  Missing
+    and malformed sidecars are distinguished: that difference matters in a
+    screen whose purpose is to explain exactly what will be written.
+    """
+    path = Path(xmp_path)
+    empty = {
+        "status": "missing",
+        "keywords": set(),
+        "hierarchical_keywords": set(),
+        "rating": None,
+        "rating_writable": False,
+        "flag": None,
+        "location": None,
+        "previous_location": None,
+        "location_source": None,
+        "edit_recipe": None,
+    }
+    try:
+        if not path.exists():
+            return empty
+    except OSError:
+        return {**empty, "status": "unreadable"}
+
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError):
+        return {**empty, "status": "unreadable"}
+
+    keywords = set()
+    for li in root.findall(
+        f".//{{{NS_DC}}}subject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"
+    ):
+        if li.text:
+            keywords.add(li.text)
+
+    hierarchical_keywords = set()
+    for li in root.findall(
+        f".//{{{NS_LR}}}hierarchicalSubject/{{{NS_RDF}}}Bag/{{{NS_RDF}}}li"
+    ):
+        if li.text:
+            hierarchical_keywords.add(li.text)
+
+    desc = root.find(f".//{{{NS_RDF}}}Description")
+    if desc is None:
+        return {
+            **empty,
+            "status": "ok",
+            "keywords": keywords,
+            "hierarchical_keywords": hierarchical_keywords,
+        }
+
+    pick_to_flag = {"1": "flagged", "0": "none", "-1": "rejected"}
+    raw_pick = desc.get(f"{{{NS_XMPDM}}}pick")
+    return {
+        "status": "ok",
+        "keywords": keywords,
+        "hierarchical_keywords": hierarchical_keywords,
+        "rating": desc.get(f"{{{NS_XMP}}}Rating"),
+        "rating_writable": True,
+        "flag": pick_to_flag.get(raw_pick, raw_pick),
+        "location": _sync_preview_gps_pair(desc),
+        "previous_location": _sync_preview_gps_pair(
+            desc, namespace=NS_VIREO, prefix="previous",
+        ),
+        "location_source": desc.get(f"{{{NS_VIREO}}}gpsSource"),
+        "edit_recipe": desc.get(f"{{{NS_VIREO}}}editRecipe"),
+    }
+
+
 def write_sidecar(xmp_path, flat_keywords, hierarchical_keywords):
     """Write or merge keywords into an XMP sidecar file.
 

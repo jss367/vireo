@@ -114,6 +114,7 @@ from web.photo_review import create_photo_review_blueprint
 from web.system import system_blueprint
 from web.workspaces import create_workspace_blueprint
 from werkzeug.exceptions import BadRequest
+from xmp import read_sync_preview_metadata
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -203,6 +204,409 @@ class _QuietRequestFilter(logging.Filter):
 
 
 logging.getLogger("werkzeug").addFilter(_QuietRequestFilter())
+
+
+def _sync_preview_coordinate_text(location):
+    """Return a compact, truthful coordinate label for sync review."""
+    if not location:
+        return None
+    latitude = location.get("latitude")
+    longitude = location.get("longitude")
+    if latitude is not None and longitude is not None:
+        return f"{latitude:.5f}, {longitude:.5f}"
+    raw_latitude = location.get("raw_latitude")
+    raw_longitude = location.get("raw_longitude")
+    if raw_latitude is None and raw_longitude is None:
+        return None
+    return ", ".join(
+        str(value) for value in (raw_latitude, raw_longitude)
+        if value is not None
+    )
+
+
+def _sync_preview_location_name(location):
+    """Format a location keyword leaf and its parents from specific to broad."""
+    if not location:
+        return None
+    names = [location.get("name")]
+    names.extend(
+        parent.get("name")
+        for parent in reversed(location.get("parent_chain") or [])
+    )
+    result = []
+    seen = set()
+    for name in names:
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(name)
+    return ", ".join(result) or None
+
+
+def _sync_preview_absent_xmp_value(metadata, empty_value):
+    if metadata.get("status") == "missing":
+        return "No XMP sidecar"
+    if metadata.get("status") == "unreadable":
+        return "Unreadable XMP sidecar"
+    return empty_value
+
+
+_SYNC_PREVIEW_FIELD_LABELS = {
+    "keyword_add": "Keyword",
+    "keyword_remove": "Keyword",
+    "keyword_remove_flat": "Keyword",
+    "rating": "Rating",
+    "flag": "Flag",
+    "location": "Location",
+    "edit_recipe": "Photo edits",
+}
+
+
+def _sync_preview_folder_offline_presentation(change_type):
+    """Presentation for a change whose photo folder isn't accessible.
+
+    ``sync_to_xmp`` calls ``os.path.isdir(os.path.dirname(xmp_path))`` before
+    every write; when it returns False the photo is recorded as
+    ``folder not accessible`` and none of the writers run. Mirror that no-op
+    in the review so a NAS-offline or unmounted-folder photo does not appear
+    to promise XMP changes that will never happen.
+    """
+    field = _SYNC_PREVIEW_FIELD_LABELS.get(
+        change_type,
+        change_type.replace("_", " ").strip().title() or "Metadata",
+    )
+    placeholder = "Folder not accessible"
+    return {
+        "field": field,
+        "action": "unchanged",
+        "before": placeholder,
+        "after": placeholder,
+        "after_detail": (
+            "Sync will skip this photo because its folder is offline; "
+            "no XMP will be written"
+        ),
+    }
+
+
+def _sync_preview_rating_label(value):
+    if value in (None, "", "0", 0):
+        return "Unrated"
+    try:
+        rating = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{rating} star" if rating == 1 else f"{rating} stars"
+
+
+def _sync_preview_flag_label(value):
+    return {
+        None: "Unflagged",
+        "": "Unflagged",
+        "none": "Unflagged",
+        "flagged": "Picked",
+        "rejected": "Rejected",
+    }.get(value, str(value))
+
+
+def _sync_preview_presentation(
+    change, metadata, *, assigned_location=None, write_locations=False,
+    sidecar_will_exist=False, sync_flags=False, paired_keyword_rename=False,
+    paired_add_value=None, folder_offline=False,
+):
+    """Translate one internal pending row into user-facing XMP before/after data."""
+    change_type = change["change_type"]
+    value = change["value"]
+
+    if folder_offline:
+        return _sync_preview_folder_offline_presentation(change_type)
+
+    if change_type in {"keyword_add", "keyword_remove", "keyword_remove_flat"}:
+        existing = next(
+            (
+                keyword for keyword in metadata.get("keywords", set())
+                if keyword_match_key(keyword) == keyword_match_key(value)
+            ),
+            None,
+        )
+        # Solo keyword_remove routes through remove_keywords() with
+        # hierarchical=True in sync.py, which drops every
+        # lr:hierarchicalSubject whose segments match this key in addition
+        # to the flat dc:subject entry. Collect every hierarchy sync would
+        # touch so the review reflects the full deletion.
+        matching_hierarchies = []
+        if change_type == "keyword_remove":
+            matching_hierarchies = sorted(
+                keyword
+                for keyword in metadata.get("hierarchical_keywords", set())
+                if any(
+                    keyword_match_key(segment) == keyword_match_key(value)
+                    for segment in keyword.split("|")
+                )
+            )
+        hierarchy_display = [
+            keyword.replace("|", " › ") for keyword in matching_hierarchies
+        ]
+        if (
+            change_type == "keyword_remove"
+            and paired_keyword_rename
+            and hierarchy_display
+        ):
+            hierarchy_text = "; ".join(hierarchy_display)
+            return {
+                "field": "Keyword hierarchy",
+                "action": "unchanged",
+                "before": hierarchy_text,
+                "after": hierarchy_text,
+                "after_detail": (
+                    "The matching keyword addition replaces only the "
+                    "flat spelling; this hierarchy stays in XMP"
+                ),
+            }
+        # A paired flat-only rename (e.g. remove `‘apapane` + add `apapane`)
+        # is dispatched through the flat-only remove path in sync.py, and
+        # the paired write_sidecar then adds the clean spelling. Reporting
+        # the removal as `Not in XMP` hides that the keyword survives with
+        # a canonicalized flat spelling; show it as an unchanged keyword
+        # whose flat entry is being rewritten by the paired addition.
+        if (
+            change_type == "keyword_remove"
+            and paired_keyword_rename
+            and existing
+            and paired_add_value
+            and not hierarchy_display
+        ):
+            return {
+                "field": "Keyword",
+                "action": "unchanged",
+                "before": existing,
+                "after": paired_add_value,
+                "after_detail": (
+                    "The matching keyword addition rewrites this flat "
+                    "spelling; the keyword itself stays in XMP"
+                ),
+            }
+        xmp_value = existing or _sync_preview_absent_xmp_value(
+            metadata, "Not in XMP",
+        )
+        if change_type == "keyword_add":
+            return {
+                "field": "Keyword",
+                "action": "added",
+                "before": xmp_value,
+                "after": value,
+            }
+        if change_type == "keyword_remove" and not paired_keyword_rename:
+            removed_entries = []
+            if existing:
+                removed_entries.append(existing)
+            removed_entries.extend(hierarchy_display)
+            if removed_entries:
+                return {
+                    "field": "Keyword",
+                    "action": "removed",
+                    "before": "; ".join(removed_entries),
+                    "after": "Not in XMP",
+                }
+        if existing is None:
+            if metadata.get("status") == "unreadable":
+                detail = (
+                    f"{value} cannot be removed because the XMP sidecar "
+                    "is unreadable"
+                )
+            elif metadata.get("status") == "missing":
+                detail = f"No XMP sidecar contains {value} to remove"
+            else:
+                detail = f"{value} is not present in XMP"
+            return {
+                "field": "XMP keyword",
+                "action": "unchanged",
+                "before": xmp_value,
+                "after": xmp_value,
+                "after_detail": detail,
+            }
+        return {
+            "field": "Keyword",
+            "action": "removed",
+            "before": xmp_value,
+            "after": "Not in XMP",
+        }
+
+    if change_type == "rating":
+        before = _sync_preview_rating_label(metadata.get("rating"))
+        if not metadata.get("rating_writable") and not sidecar_will_exist:
+            before = _sync_preview_absent_xmp_value(metadata, before)
+            return {
+                "field": "XMP rating",
+                "action": "unchanged",
+                "before": before,
+                "after": before,
+                "after_detail": (
+                    f"{_sync_preview_rating_label(value)} stays in Vireo; "
+                    "rating sync only updates an existing, readable XMP sidecar"
+                ),
+            }
+        if not metadata.get("rating_writable"):
+            before = _sync_preview_absent_xmp_value(metadata, before)
+            return {
+                "field": "Rating",
+                "action": "updated",
+                "before": before,
+                "after": _sync_preview_rating_label(value),
+                "after_detail": (
+                    "Another selected change creates the XMP sidecar first"
+                ),
+            }
+        return {
+            "field": "Rating",
+            "action": "updated",
+            "before": before,
+            "after": _sync_preview_rating_label(value),
+        }
+
+    if change_type == "flag":
+        before = _sync_preview_flag_label(metadata.get("flag"))
+        if metadata.get("status") != "ok":
+            before = _sync_preview_absent_xmp_value(metadata, before)
+        if not sync_flags:
+            return {
+                "field": "XMP flag",
+                "action": "unchanged",
+                "before": before,
+                "after": before,
+                "after_detail": (
+                    f"{_sync_preview_flag_label(value)} stays in Vireo; "
+                    "flag sync to XMP is turned off"
+                ),
+            }
+        return {
+            "field": "Flag",
+            "action": "updated",
+            "before": before,
+            "after": _sync_preview_flag_label(value),
+        }
+
+    if change_type == "location":
+        current_coordinates = _sync_preview_coordinate_text(
+            metadata.get("location")
+        )
+        before = current_coordinates or _sync_preview_absent_xmp_value(
+            metadata, "No GPS in XMP",
+        )
+        location_coordinates = _sync_preview_coordinate_text(assigned_location)
+        location_name = _sync_preview_location_name(assigned_location)
+
+        if write_locations and location_coordinates:
+            return {
+                "field": "Location",
+                "action": "updated",
+                "before": before,
+                "after": location_name or location_coordinates,
+                "after_detail": (
+                    f"{location_coordinates} · from a location keyword"
+                ),
+            }
+
+        if metadata.get("location_source"):
+            restored_coordinates = _sync_preview_coordinate_text(
+                metadata.get("previous_location")
+            )
+            return {
+                "field": "Location",
+                "action": "cleared",
+                "before": before,
+                "after": restored_coordinates or "No GPS in XMP",
+                "after_detail": (
+                    "Restores the GPS that existed before Vireo"
+                    if restored_coordinates
+                    else "Removes Vireo-assigned GPS"
+                ),
+            }
+
+        return {
+            "field": "XMP location",
+            "action": "unchanged",
+            "before": before,
+            "after": before,
+            "after_detail": (
+                f"{location_name} stays in Vireo; writing its GPS to XMP is turned off"
+                if assigned_location and location_coordinates and not write_locations
+                else (
+                    f"{location_name or 'This location keyword'} has no GPS coordinates to write"
+                    if assigned_location and not location_coordinates
+                    else "No Vireo-assigned GPS needs to be removed"
+                )
+            ),
+        }
+
+    if change_type == "edit_recipe":
+        before = (
+            "Existing Vireo edits"
+            if metadata.get("edit_recipe")
+            else _sync_preview_absent_xmp_value(metadata, "No Vireo edits")
+        )
+        if not value and not metadata.get("edit_recipe"):
+            if metadata.get("status") == "unreadable":
+                detail = (
+                    "The Vireo edit marker cannot be cleared because the "
+                    "XMP sidecar is unreadable"
+                )
+            elif metadata.get("status") == "missing":
+                detail = "No XMP sidecar contains Vireo edits to clear"
+            else:
+                detail = "No Vireo edit marker exists in XMP to clear"
+            return {
+                "field": "XMP photo edits",
+                "action": "unchanged",
+                "before": before,
+                "after": before,
+                "after_detail": detail,
+            }
+        return {
+            "field": "Photo edits",
+            "action": "updated" if value else "cleared",
+            "before": before,
+            "after": "Updated Vireo edits" if value else "No Vireo edits",
+        }
+
+    field = change_type.replace("_", " ").strip().title() or "Metadata"
+    return {
+        "field": field,
+        "action": "updated",
+        "before": "Current XMP value",
+        "after": value or "Cleared",
+    }
+
+
+def _sync_preview_change_creates_sidecar(
+    change, *, sync_flags=False, write_locations=False, assigned_location=None,
+):
+    """Mirror sync operations that create a missing XMP sidecar before rating.
+
+    Matches the write order in ``sync.py``: ``write_sidecar`` (keyword_add),
+    ``write_pick_flag`` when flag sync is enabled, ``write_gps_location``
+    when location sync is enabled and the linked location has valid
+    coordinates, and ``write_edit_recipe`` with a non-empty payload all
+    create a missing sidecar via ``_load_or_create_xmp``. ``write_rating``
+    and the ``remove_*`` paths do not, so they are excluded.
+    """
+    change_type = change["change_type"]
+    if change_type == "keyword_add":
+        return True
+    if change_type == "flag":
+        return sync_flags
+    if change_type == "location":
+        if not write_locations or not assigned_location:
+            return False
+        return (
+            assigned_location.get("latitude") is not None
+            and assigned_location.get("longitude") is not None
+        )
+    if change_type == "edit_recipe":
+        return bool(change["value"])
+    return False
 
 
 def _rank01(value, values):
@@ -9733,7 +10137,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
     @app.route("/api/sync/preview")
     def api_sync_preview():
-        """Preview all pending changes grouped by photo."""
+        """Preview pending changes with the XMP values they will replace."""
         db = _get_db()
         changes = db.get_pending_changes()
         if not changes:
@@ -9760,9 +10164,160 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                 "value": c["value"],
             })
 
+        import config as cfg
+
+        effective_config = db.get_effective_config(cfg.load())
+        write_locations = bool(
+            effective_config.get("write_assigned_location_to_xmp", False)
+        )
+        sync_flags = bool(effective_config.get("sync_flags_to_xmp", False))
+        changes_by_id = {change["id"]: change for change in changes}
+        for photo in by_photo.values():
+            xmp_path = os.path.join(
+                photo["folder"],
+                os.path.splitext(photo["filename"])[0] + ".xmp",
+            )
+            # Mirror the folder-accessibility guard in ``sync_to_xmp``: if
+            # the photo's folder is offline (a common NAS case), sync
+            # records the photo as ``folder not accessible`` and never
+            # runs any writer, so the review must not present writes
+            # against it either.
+            folder_offline = bool(photo["folder"]) and not os.path.isdir(
+                photo["folder"]
+            )
+            photo["folder_offline"] = folder_offline
+            if folder_offline:
+                # Skip filesystem access entirely — an unreachable XMP path
+                # would just re-derive the same "no sidecar" fallback.
+                metadata = {
+                    "status": "folder_offline",
+                    "keywords": set(),
+                    "hierarchical_keywords": set(),
+                    "rating": None,
+                    "rating_writable": False,
+                    "flag": None,
+                    "location": None,
+                    "previous_location": None,
+                    "location_source": None,
+                    "edit_recipe": None,
+                }
+            else:
+                metadata = read_sync_preview_metadata(xmp_path)
+            assigned_location = None
+            if (
+                not folder_offline
+                and any(change["type"] == "location" for change in photo["changes"])
+            ):
+                assigned_location = _serialize_photo_location(
+                    db, photo["photo_id"],
+                )
+            # Map normalized-key -> original add value so a paired
+            # keyword_remove can display the clean spelling the paired
+            # ``write_sidecar`` will end up writing.
+            keyword_add_values_by_key = {}
+            for change in photo["changes"]:
+                if change["type"] == "keyword_add" and change["value"]:
+                    key = keyword_match_key(change["value"])
+                    if key:
+                        keyword_add_values_by_key.setdefault(
+                            key, change["value"],
+                        )
+            keyword_add_keys = set(keyword_add_values_by_key.keys())
+            for change in photo["changes"]:
+                pending = changes_by_id[change["id"]]
+                auto_includes_keyword_add = bool(
+                    change["type"] in {"keyword_remove", "keyword_remove_flat"}
+                    and keyword_match_key(change["value"]) in keyword_add_keys
+                )
+                change["auto_includes_keyword_add"] = (
+                    auto_includes_keyword_add
+                )
+                change["paired_keyword_rename"] = bool(
+                    change["type"] == "keyword_remove"
+                    and auto_includes_keyword_add
+                )
+                # An offline folder never runs any writer, so nothing
+                # creates a sidecar during that sync.
+                change["creates_xmp_sidecar"] = (
+                    not folder_offline
+                    and (
+                        auto_includes_keyword_add
+                        or _sync_preview_change_creates_sidecar(
+                            pending,
+                            sync_flags=sync_flags,
+                            write_locations=write_locations,
+                            assigned_location=assigned_location,
+                        )
+                    )
+                )
+
+            sidecar_will_exist = any(
+                change["creates_xmp_sidecar"] for change in photo["changes"]
+            )
+            for change in photo["changes"]:
+                pending = changes_by_id[change["id"]]
+                paired_add_value = None
+                if change["type"] == "keyword_remove" and change[
+                    "paired_keyword_rename"
+                ]:
+                    paired_add_value = keyword_add_values_by_key.get(
+                        keyword_match_key(change["value"])
+                    )
+                if (
+                    pending["change_type"] == "rating"
+                    and not folder_offline
+                    and not metadata.get("rating_writable")
+                ):
+                    change["rating_requires_sidecar"] = True
+                    change["presentation_without_sidecar"] = (
+                        _sync_preview_presentation(
+                            pending,
+                            metadata,
+                            assigned_location=assigned_location,
+                            write_locations=write_locations,
+                            sidecar_will_exist=False,
+                            sync_flags=sync_flags,
+                            paired_keyword_rename=change[
+                                "paired_keyword_rename"
+                            ],
+                            paired_add_value=paired_add_value,
+                        )
+                    )
+                    change["presentation_with_sidecar"] = (
+                        _sync_preview_presentation(
+                            pending,
+                            metadata,
+                            assigned_location=assigned_location,
+                            write_locations=write_locations,
+                            sidecar_will_exist=True,
+                            sync_flags=sync_flags,
+                            paired_keyword_rename=change[
+                                "paired_keyword_rename"
+                            ],
+                            paired_add_value=paired_add_value,
+                        )
+                    )
+                    change["presentation"] = change[
+                        "presentation_with_sidecar"
+                        if sidecar_will_exist
+                        else "presentation_without_sidecar"
+                    ]
+                    continue
+                change["presentation"] = _sync_preview_presentation(
+                    pending,
+                    metadata,
+                    assigned_location=assigned_location,
+                    write_locations=write_locations,
+                    sync_flags=sync_flags,
+                    paired_keyword_rename=change["paired_keyword_rename"],
+                    paired_add_value=paired_add_value,
+                    folder_offline=folder_offline,
+                )
+
         result = {
             "photos": list(by_photo.values()),
             "total_changes": len(changes),
+            "location_sync_enabled": write_locations,
         }
         _attach_nested_edit_recipes(db, result)
         return jsonify(result)
