@@ -3249,13 +3249,18 @@ function renderKeywordTree(keywords) {
 }
 
 function filterByKeyword(name) {
+  // Bump the scope generation BEFORE the readiness guard so an in-flight
+  // queued filterByCollection (awaiting browseFilterInitPromise) sees the
+  // newer intent and bails out on resume. Without this, the collection
+  // could resume after fields load and clobber the user's later click
+  // (Codex review r3624549744).
+  browseScopeGen++;
   // The sidebar tree is rendered from the /photos init payload, so a
   // slow /api/filters/fields (or workspace) round-trip leaves clickable
   // keywords in the DOM before VireoFilter.init resolves. Without this
   // guard, addRule -> makeRule dereferences state.fields (still null)
   // and throws, leaving activeKeyword toggled but no rule/reload applied.
   if (!VireoFilter.isReady()) return;
-  browseScopeGen++;
   if (activeKeyword === name) {
     activeKeyword = null;
   } else {
