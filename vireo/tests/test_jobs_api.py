@@ -5744,17 +5744,22 @@ def test_import_in_place_snapshot_admits_only_frozen_files(
     assert root_id in roots_before
 
     # Replaying the same frozen snapshot is idempotent and reports the
-    # already-admitted cohort honestly.
+    # already-admitted cohort honestly without creating another collection
+    # or enqueueing Process for photos this import did not admit.
+    quick_look_id = _process_id(db, "Quick look")
     with app.test_client() as client:
         replay = client.post("/api/jobs/import-in-place", json={
             "source_snapshot_id": snap_id,
-            "after_import": None,
+            "after_import": quick_look_id,
         })
         replay_job = wait_for_job_via_client(
             client, replay.get_json()["job_id"],
         )
     assert replay_job["result"]["imported"] == 0
     assert replay_job["result"]["already_cataloged"] == 1
+    assert replay_job["result"]["after_import_skipped"] == "no new photos"
+    assert "collection_id" not in replay_job["result"]
+    assert "process_job_id" not in replay_job["result"]
 
 
 def test_import_in_place_snapshot_reports_missing_without_processing(

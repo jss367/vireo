@@ -21802,6 +21802,22 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
 
         def _chain_after_import(job, result):
             photo_ids = result.get("photo_ids") or []
+
+            # A frozen snapshot can still yield existing IDs through the
+            # scanner callback when it is replayed. Those IDs make tagging
+            # idempotent, but they must not create another import collection
+            # or enqueue an expensive Process run: this Import admitted
+            # nothing new.
+            if (
+                result.get("ok")
+                and result.get("source_snapshot_id") is not None
+                and result.get("imported") == 0
+            ):
+                result["after_import_skipped"] = (
+                    "import-only" if after_import is None else "no new photos"
+                )
+                return
+
             thread_db, col_id = _record_import_collection(result, active_ws)
 
             if after_import is None:
