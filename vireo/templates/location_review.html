@@ -616,9 +616,7 @@ body {
       return;
     }
     refreshGroupMetadata(group);
-    renderGroupFacts(group);
-    renderPhotoMarkers(group);
-    updateProgress();
+    renderCurrentGroup();
   });
 
   function renderPhotoMarkers(group) {

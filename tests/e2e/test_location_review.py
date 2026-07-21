@@ -1,4 +1,5 @@
 import json
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from playwright.sync_api import expect
@@ -186,14 +187,20 @@ def test_location_review_photo_marker_opens_the_photo_preview(live_server, page)
         "Also delete 1 companion file"
     )
 
-    page.evaluate(
-        """() => {
-          var callback = _deleteCallback;
-          hideDeleteModal();
-          callback({deleted: 1});
-          closeLightbox();
-        }"""
-    )
+    with page.expect_request(
+        "**/api/location-review/saved-suggestions?*"
+    ) as suggestion_request:
+        page.evaluate(
+            """() => {
+              var callback = _deleteCallback;
+              hideDeleteModal();
+              callback({deleted: 1});
+              closeLightbox();
+            }"""
+        )
+    suggestion_params = parse_qs(urlparse(suggestion_request.value.url).query)
+    assert float(suggestion_params["lat"][0]) == pytest.approx(33.2554)
+    assert float(suggestion_params["lng"][0]) == pytest.approx(-116.4053)
     expect(page.locator("#locationReviewGroupTitle")).to_have_text("1 photo")
     expect(page.locator(".location-review-thumb")).to_have_count(1)
 
