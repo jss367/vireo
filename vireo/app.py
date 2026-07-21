@@ -3469,6 +3469,11 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
     # over large network volumes. Values are per-spawn dicts; a new walk
     # replaces the key wholesale, so readers never see torn state.
     app._new_images_walk_progress = {}
+    # Import workers run on separate threads. Serialize execution of the same
+    # frozen snapshot so the second worker observes the first worker's catalog
+    # admissions and reports an idempotent replay instead of claiming them too.
+    app._new_images_snapshot_import_locks = {}
+    app._new_images_snapshot_import_locks_guard = threading.Lock()
     app._missing_originals_lock = threading.Lock()
     app._missing_originals_cache = {}
     app._missing_originals_inflight = {}
@@ -21807,6 +21812,15 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
         runner = app._job_runner
         thumb_cache_dir = app.config["THUMB_CACHE_DIR"]
         vireo_dir = os.path.dirname(thumb_cache_dir)
+        snapshot_import_lock = None
+        if source_snapshot_id is not None:
+            snapshot_lock_key = (active_ws, source_snapshot_id)
+            with app._new_images_snapshot_import_locks_guard:
+                snapshot_import_lock = (
+                    app._new_images_snapshot_import_locks.setdefault(
+                        snapshot_lock_key, threading.Lock(),
+                    )
+                )
 
         def _chain_after_import(job, result):
             photo_ids = result.get("photo_ids") or []
@@ -21865,7 +21879,7 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
                     f"failed to enqueue processing: {e}"
                 )
 
-        def work(job):
+        def _run_import_in_place(job):
             import config as cfg
             from scanner import ScanCancelled
             from scanner import scan as do_scan
@@ -22211,6 +22225,12 @@ def create_app(db_path, thumb_cache_dir=None, api_token=None):
             )
             _chain_after_import(job, result)
             return result
+
+        def work(job):
+            if snapshot_import_lock is None:
+                return _run_import_in_place(job)
+            with snapshot_import_lock:
+                return _run_import_in_place(job)
 
         job_config = {
             "sources": sources,

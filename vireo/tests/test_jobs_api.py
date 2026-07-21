@@ -5903,6 +5903,74 @@ def test_import_in_place_snapshot_preserves_registered_root_spelling(
     assert job["result"]["unindexed"] == 0
 
 
+def test_concurrent_snapshot_imports_serialize_and_report_one_replay(
+    app_and_db, tmp_path, monkeypatch,
+):
+    import scanner
+
+    app, db = app_and_db
+    root = tmp_path / "registered"
+    root.mkdir()
+    captured = root / "captured.jpg"
+    Image.new("RGB", (16, 16), "red").save(captured)
+    db.add_folder(str(root), name="registered")
+    snap_id = db.create_new_images_snapshot([str(captured)])
+    quick_look_id = _process_id(db, "Quick look")
+
+    original_scan = scanner.scan
+    first_scan_entered = threading.Event()
+    second_scan_entered = threading.Event()
+    release_first_scan = threading.Event()
+    calls_lock = threading.Lock()
+    call_count = 0
+
+    def controlled_scan(*args, **kwargs):
+        nonlocal call_count
+        with calls_lock:
+            call_count += 1
+            call_number = call_count
+        if call_number == 1:
+            first_scan_entered.set()
+            # Without per-snapshot serialization, the second worker enters
+            # and releases this wait while both captured pre-scan membership.
+            release_first_scan.wait(timeout=1.0)
+        else:
+            second_scan_entered.set()
+            release_first_scan.set()
+        return original_scan(*args, **kwargs)
+
+    monkeypatch.setattr(scanner, "scan", controlled_scan)
+
+    with app.test_client() as client:
+        first = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": None,
+        })
+        assert first.status_code == 200, first.get_json()
+        assert first_scan_entered.wait(timeout=2.0)
+
+        second = client.post("/api/jobs/import-in-place", json={
+            "source_snapshot_id": snap_id,
+            "after_import": quick_look_id,
+        })
+        assert second.status_code == 200, second.get_json()
+
+        first_job = wait_for_job_via_client(
+            client, first.get_json()["job_id"], timeout=5.0,
+        )
+        second_job = wait_for_job_via_client(
+            client, second.get_json()["job_id"], timeout=5.0,
+        )
+
+    assert second_scan_entered.is_set()
+    assert first_job["result"]["imported"] == 1
+    assert second_job["result"]["imported"] == 0
+    assert second_job["result"]["already_cataloged"] == 1
+    assert second_job["result"]["after_import_skipped"] == "no new photos"
+    assert "collection_id" not in second_job["result"]
+    assert "process_job_id" not in second_job["result"]
+
+
 @pytest.mark.parametrize("body", [
     {"source_snapshot_id": "1"},
     {"source_snapshot_id": True},
